@@ -17,7 +17,7 @@ cp .env.example .env                                                     # first
 echo "TIMBERDOODLE_JWT_SECRET=$(openssl rand -hex 32)" >> .env           # first time only
 echo "TIMBERDOODLE_GATEWAY_SECRET=$(openssl rand -hex 32)" >> .env       # first time only
 echo "MQTT_PASSWORD=$(openssl rand -hex 16)" >> .env                     # first time only
-docker compose up -d --wait   # waits for the 5 HTTP APIs' healthchecks, not just "container started"
+docker compose up -d --wait   # waits for the 7 HTTP APIs' healthchecks, not just "container started"
 ```
 
 `docker compose up -d` refuses to start the gateway without both JWT/
@@ -34,11 +34,11 @@ else).
 
 That's everything — 5 infra containers (mosquitto, oxigraph, postgres,
 jaeger, grafana), all 8 processes below, and an nginx gateway in front of
-the 5 HTTP APIs, all with one shared lifecycle now. Each process is still
+the 7 HTTP APIs, all with one shared lifecycle now. Each process is still
 its own container/image build target if you need to restart or update one
 independently (`docker compose up -d --build ingest_api`), but nothing
 requires manual per-process startup anymore. The gateway won't start
-until all 5 HTTP APIs report healthy (`GET /openapi.yaml` on each), so
+until all 7 HTTP APIs report healthy (`GET /openapi.yaml` on each), so
 `docker compose up -d --wait` (or plain `up -d` followed by `docker
 compose ps`) leaves you with a stack that's actually ready for the curl
 examples below, not just "containers exist."
@@ -65,10 +65,12 @@ CI/dev loop. `docker compose restart gateway` always fixes it.
 | `derivation_engine` | Evaluates derivations on a sweep and, for cur-mode ones, on matching MQTT messages; writes results back into Oxigraph + Postgres. | — |
 | `validate_api` | `POST /validate` — checks the live entity graph against Brick's own SHACL shapes (`pip install -e ".[validate]"`). | 8005 |
 | `auth_api` | Identity: `POST /login`, API-key issuance/revocation, org/site directory CRUD. See "Gateway auth" below. | 8006 |
+| `haystack_api` | The Project Haystack HTTP API at `/api/{project}/{op}`, so SkySpark, Haxall, nhaystack and pyhaystack clients can point here unchanged. It handles HELLO/SCRAM login with your normal email and password. See [`docs-site/pages/haystack-api.mdx`](docs-site/pages/haystack-api.mdx). | 8008 |
 
-None of the 5 HTTP APIs are exposed on the host directly — go through
+None of the 7 HTTP APIs are exposed on the host directly — go through
 the gateway at `localhost:8080` instead, prefixed by API name
-(`/ingest/*`, `/fault/*`, `/derivation/*`, `/validate/*`, `/auth/*`). The
+(`/ingest/*`, `/fault/*`, `/derivation/*`, `/validate/*`, `/auth/*`,
+`/ops/*`, and `/api/*` for Haystack). The
 demo browser UI (`ui/`) is served straight off the gateway at
 [`localhost:8080/ui/`](http://localhost:8080/ui/) — no separate
 `ui_server.py` needed for this path.

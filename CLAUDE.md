@@ -8,6 +8,12 @@ integrations). This file is gotchas only — don't duplicate those.
   (`pip install -e .`; `pip install -e ".[dev,llm]"` for tests + autotag;
   add `,validate` for SHACL validation — `tests/test_shacl_validate.py`
   needs `pyshacl` installed or it errors at import).
+- **`haystack_api.py` needs `openhay`** (`pip install -e ".[haystack]"`),
+  which builds from git with maturin and so needs a Rust toolchain
+  (`cargo`). Without it `tests/test_haystack_api.py` *skips* rather than
+  failing. CI's unit job installs it; the Dockerfile builds it in a Rust
+  stage. The openhay git ref is pinned in two places, `pyproject.toml` and
+  the Dockerfile's `OPENHAY_REF`, so bump both together.
 - **No Makefile/justfile.** Every command is literally
   `python -m timberdoodle.<module>` or `docker compose ...` — check
   `docker-compose.yml`'s `command:` fields or a module's

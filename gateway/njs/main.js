@@ -11,12 +11,7 @@ import policy from "./policy.js";
 import ratelimit from "./ratelimit.js";
 
 function bearerToken(r) {
-    const header = r.headersIn.Authorization;
-    if (!header) {
-        return null;
-    }
-    const m = header.match(/^Bearer (\S+)$/);
-    return m ? m[1] : null;
+    return policy.bearerFromHeader(r.headersIn.Authorization);
 }
 
 async function authorize(r) {
@@ -37,6 +32,12 @@ async function authorize(r) {
     if (route.minRole === null) {
         // Public route (e.g. GET /*/openapi.yaml, GET /*/docs) - no
         // token required, no rate limit applied.
+        return;
+    }
+
+    if (policy.isHaystackHandshake(r.uri, r.headersIn.Authorization)) {
+        // HELLO/SCRAM login step - no token exists yet; haystack_api runs
+        // the handshake itself and is rate-limited by nginx (zone=login).
         return;
     }
 
