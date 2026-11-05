@@ -57,7 +57,7 @@ const config: ZudokuConfig = {
       type: "category",
       label: "Documentation",
       icon: "book",
-      items: ["/introduction", "/architecture", "/multi-site", "/gateway-auth", "/his-query", "/fault-detection", "/derivation", "/webhooks", "/validate", "/haxall-drop-in", "/haystack-puller", "/adding-a-data-source", "/weather-stations", "/backups", "/nash-srv-deploy", "/fbf", "/fbf-adding-a-new-source", "/fbf-periodic-discovery"],
+      items: ["/introduction", "/architecture", "/multi-site", "/gateway-auth", "/his-query", "/fault-detection", "/derivation", "/webhooks", "/validate", "/haxall-drop-in", "/haystack-api", "/haystack-puller", "/adding-a-data-source", "/weather-stations", "/backups", "/nash-srv-deploy", "/fbf", "/fbf-adding-a-new-source", "/fbf-periodic-discovery"],
     },
     {
       type: "category",

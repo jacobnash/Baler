@@ -77,9 +77,44 @@ const ROUTES = [
   // the first admin user in the same call (see auth.create_org).
   ["POST",   /^\/auth\/orgs$/,                       null, null],
 
+  // haystack_api - the Project Haystack HTTP API, at SkySpark's
+  // /api/{project}/{op} layout (and Haxall's flat /api/{op}). Ops take GET
+  // (zinc query params) or POST (a grid body) interchangeably per the spec.
+  // Read-type ops are viewer; anything that writes data is operator.
+  ["GET",    /^\/api\/(?:[^/]+\/)?(about|ops|formats|read|nav|hisRead|watchSub|watchUnsub|watchPoll|close)$/, "haystack", "viewer"],
+  ["POST",   /^\/api\/(?:[^/]+\/)?(about|ops|formats|read|nav|hisRead|watchSub|watchUnsub|watchPoll|close)$/, "haystack", "viewer"],
+  ["POST",   /^\/api\/(?:[^/]+\/)?(hisWrite|pointWrite|invokeAction)$/,                                         "haystack", "operator"],
+
   // public on every service - no token required
   ["GET",    /^\/[a-z]+\/(openapi\.yaml|docs)$/,     null, null],
 ];
+
+/*
+ * The token from an Authorization header, in either form a client sends:
+ * OAuth/RFC 6750 style `Bearer <token>`, or Project Haystack's
+ * `BEARER authToken=<token>` (what SkySpark/Haxall/nhaystack clients send
+ * after SCRAM login - haystack_api hands them the same session JWT).
+ * Case-insensitive scheme, per RFC 7235.
+ */
+function bearerFromHeader(header) {
+    if (!header) {
+        return null;
+    }
+    const m = header.match(/^bearer\s+(?:authToken=)?([^\s,]+)\s*$/i);
+    return m ? m[1] : null;
+}
+
+/*
+ * A Haystack HELLO/SCRAM login step on a Haystack route: carries no token
+ * yet by definition, so it's passed through to haystack_api (which runs
+ * the handshake against the users table) instead of being 401'd here.
+ * Only ever on /api/ - every other service still needs a JWT up front.
+ */
+function isHaystackHandshake(uri, header) {
+    return typeof header === "string"
+        && /^\/api\//.test(uri)
+        && /^(hello|scram)\s/i.test(header);
+}
 
 /*
  * Returns the first matching ROUTES row as {resource, minRole}, or null
@@ -108,4 +143,4 @@ function roleSatisfies(role, minRole) {
     return typeof have === "number" && typeof need === "number" && have >= need;
 }
 
-export default { ROLE_RANK, ROUTES, resolveRoute, roleSatisfies };
+export default { ROLE_RANK, ROUTES, resolveRoute, roleSatisfies, bearerFromHeader, isHaystackHandshake };

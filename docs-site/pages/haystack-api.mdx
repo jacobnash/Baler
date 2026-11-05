@@ -1,0 +1,85 @@
+---
+title: Haystack API
+---
+
+Timberdoodle serves the standard [Project Haystack HTTP API](https://project-haystack.org/doc/docHaystack/HttpApi),
+so tools that already speak Haystack can use it without changes. SkySpark, Haxall's haystack
+connector, nhaystack's client side, pyhaystack, phable and openhay's `hay` all work this way:
+point the tool at Timberdoodle instead of a SkySpark host.
+
+```
+https://<your-host>/api/<project>/<op>     # SkySpark layout
+https://<your-host>/api/<op>               # Haxall layout, same thing
+```
+
+`<project>` is accepted so SkySpark-shaped URLs work, but it doesn't scope anything yet.
+
+## Logging in
+
+Use your normal Timberdoodle email and password. Haystack clients run the standard HELLO →
+SCRAM-SHA-256 handshake. Your password is never sent: it's checked against the same password hash
+`POST /auth/login` uses, so there's nothing to reset and no second password to manage. The
+handshake ends with a normal session JWT as the Haystack `authToken`.
+
+You can also skip SCRAM and send any token the gateway accepts (a session JWT or an API key from
+`POST /auth/api-keys`) as either:
+
+```
+Authorization: Bearer <token>                 # OAuth / modern API style
+Authorization: BEARER authToken=<token>       # Haystack style
+```
+
+Read-type ops (`about`, `read`, `nav`, `hisRead`, `watch*`) need the `viewer` role.
+`hisWrite` needs `operator`. Login attempts are rate-limited per IP at the gateway.
+
+## Try it
+
+With [openhay](https://github.com/jacobnash/openhay)'s `hay` CLI:
+
+```bash
+hay read http://localhost:8080/api/demo "point and temp" --user admin@acme.example --password change-me
+hay his  http://localhost:8080/api/demo @urn:point:fbf~2Fmock-ahu-1~2FanalogValue~2C1 yesterday --to csv
+```
+
+From Python (`pip install -e ".[haystack]"` installs openhay):
+
+```python
+import openhay as oh
+
+c = oh.Client("http://localhost:8080/api/demo", user="admin@acme.example", password="change-me")
+for rec in c.read("ahu"):
+    print(rec["id"], rec.get("dis"))
+his = c.his_read(c.read("temp and sensor", limit=1)[0]["id"], "yesterday")
+```
+
+## What a record looks like
+
+Records come from the same entity graph everything else reads:
+
+| Haystack tag | where it comes from |
+|---|---|
+| `id` | the entity URI. Characters Haystack ids don't allow are escaped as `~XX`, e.g. `@urn:point:fbf~2Fahu-1~2FanalogInput~2C1` |
+| markers (`temp`, `sensor`, …) | `haystack:hasTag` facts, as written by ingest and the Haystack puller |
+| other tags (`dis`, `kind`, …) | `haystack:<tag>` values |
+| `point` / `equip` | the kind of URI |
+| `equipRef` | `brick:isPointOf` in the graph, not the original source's ref, so it always resolves here |
+| `brickClass` | the Brick class mapping assigned |
+| `curVal`, `unit`, `his`, `mod` | the newest sample in the historian |
+
+Filters work exactly like the [Query page](/his-query): a name matches as a Haystack marker,
+a Brick class (`Air_Handling_Unit`) or a Brick tag word. So `read ahu` also finds AHUs that
+never had a Haystack `ahu` tag.
+
+## Formats
+
+Requests can be `GET` with Zinc-encoded query params, or `POST` with a grid in Zinc, JSON (Haystack 3
+or Haystack 4/Hayson) or Trio. Responses follow `Accept`: Zinc by default, plus `application/json`,
+`text/trio` and `text/csv`. A JSON request gets JSON back in the same flavor, so older Haystack 3
+clients keep working.
+
+## Not yet
+
+- `pointWrite` and `invokeAction` return an error grid until FBF can write BACnet.
+- `->` tag paths in filters (`equipRef->siteRef`), the same limit as the Query page.
+- `hisRead` with two datetimes. Dates, date ranges and `today`/`yesterday`/`thisWeek`/… all work.
+- Scoping reads to the token's sites, and the Haystack 4 `defs`/`libs` ops.

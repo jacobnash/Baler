@@ -218,6 +218,20 @@ services:
       <<: *http-api-healthcheck
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8007/openapi.yaml')"]
 
+  # Project Haystack HTTP API at /api/{project}/{op} - what SkySpark,
+  # Haxall, nhaystack and pyhaystack clients point at. Also issues session
+  # JWTs via Haystack SCRAM login, so it reads TIMBERDOODLE_JWT_SECRET.
+  haystack_api:
+    build: .
+    command: python -m timberdoodle.haystack_api
+    environment: *daemon-env
+    volumes:
+      - .:/app
+    depends_on: *daemon-depends-on
+    healthcheck:
+      <<: *http-api-healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8008/openapi.yaml')"]
+
   haystack_puller:
     build: .
     command: python -m timberdoodle.haystack_puller
@@ -316,6 +330,8 @@ services:
       auth_api:
         condition: service_healthy
       ops_api:
+        condition: service_healthy
+      haystack_api:
         condition: service_healthy
 
 volumes:

@@ -15,6 +15,8 @@ check("every row in ROUTES resolves against its own path", () => {
         // anchors/groups for the common `[^/]+` id-placeholder case.
         const sampleUri = re.source
             .replace(/^\^/, "")
+            .replace("(?:[^/]+\\/)?", "demo/")
+            .replace(/\(([A-Za-z]+)\|[A-Za-z|]+\)\$$/, "$1$")
             .replace(/\$$/, "")
             .replace(/\\\//g, "/")
             .replace(/\[\^\/\]\+/g, "abc123")
@@ -70,6 +72,37 @@ check("no two rows share an identical (method, source) pair", () => {
         assert.ok(!seen.has(key), `duplicate route: ${key}`);
         seen.add(key);
     }
+});
+
+check("haystack routes: both URL layouts, reads are viewer, writes are operator", () => {
+    for (const uri of ["/api/demo/read", "/api/read", "/api/site-1/hisRead"]) {
+        assert.equal(policy.resolveRoute("GET", uri).minRole, "viewer", uri);
+        assert.equal(policy.resolveRoute("POST", uri).minRole, "viewer", uri);
+    }
+    assert.equal(policy.resolveRoute("POST", "/api/demo/hisWrite").minRole, "operator");
+    assert.equal(policy.resolveRoute("POST", "/api/pointWrite").minRole, "operator");
+    assert.equal(policy.resolveRoute("GET", "/api/demo/hisWrite"), null); // writes are POST-only
+    assert.equal(policy.resolveRoute("GET", "/api/demo/evalAll"), null);  // unknown op: deny
+    assert.equal(policy.resolveRoute("GET", "/api/a/b/read"), null);      // too deep
+    assert.equal(policy.resolveRoute("GET", "/api/openapi.yaml").minRole, null);
+});
+
+check("bearerFromHeader accepts OAuth and Haystack forms only", () => {
+    assert.equal(policy.bearerFromHeader("Bearer abc.def.ghi"), "abc.def.ghi");
+    assert.equal(policy.bearerFromHeader("bearer abc.def.ghi"), "abc.def.ghi");
+    assert.equal(policy.bearerFromHeader("BEARER authToken=abc.def.ghi"), "abc.def.ghi");
+    assert.equal(policy.bearerFromHeader("Bearer abc def"), null);
+    assert.equal(policy.bearerFromHeader("Basic dXNlcjpwYXNz"), null);
+    assert.equal(policy.bearerFromHeader("SCRAM handshakeToken=x, data=y"), null);
+    assert.equal(policy.bearerFromHeader(undefined), null);
+});
+
+check("isHaystackHandshake only on /api/ and only for HELLO/SCRAM", () => {
+    assert.ok(policy.isHaystackHandshake("/api/demo/about", "HELLO username=YWRtaW4"));
+    assert.ok(policy.isHaystackHandshake("/api/about", "SCRAM handshakeToken=x, data=y"));
+    assert.ok(!policy.isHaystackHandshake("/ingest/ingest", "HELLO username=YWRtaW4"));
+    assert.ok(!policy.isHaystackHandshake("/api/demo/read", "Bearer x"));
+    assert.ok(!policy.isHaystackHandshake("/api/demo/read", undefined));
 });
 
 console.log(`\n${passed} passed`);

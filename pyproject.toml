@@ -21,6 +21,9 @@ dependencies = [
 dev = ["pytest>=8.0.0", "openapi-spec-validator>=0.7.0", "jsonschema>=4.0.0", "ruff>=0.16.0", "mypy>=2.0.0", "radon>=6.0.0", "pytest-cov>=7.0.0"]
 llm = ["anthropic>=0.69.0", "pydantic>=2.0.0"]
 validate = ["pyshacl>=0.30.0"]
+# haystack_api.py (Project Haystack HTTP API). Built from source with
+# maturin until openhay ships wheels to PyPI - needs a Rust toolchain.
+haystack = ["openhay @ git+https://github.com/jacobnash/openhay@claude/gracious-lamport-2xeam9#subdirectory=crates/openhay-py"]
 
 [build-system]
 requires = ["setuptools>=68"]
