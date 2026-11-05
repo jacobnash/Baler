@@ -43,30 +43,25 @@ decision than this page covers and hasn't come up yet.
 
 ## Why not a mesh network
 
-This came out of pulling apart `arcbeam.pod`, a commercial (non-AFL)
-binary SkyFoundry ships inside the otherwise open-source Haxall release.
-It's a WebSocket-based mesh: every `Node` gets a keypair identity, `Hub`
-tracks `Chan`s, `NodeType` spans SkySpark hosts, SkySpark projects,
-Niagara, Haxall, and edge node types (NanoEdge, SteelBeam, XetoBase) that
-can apparently all talk to each other, not just up to one central point.
-`ConnChan` exposes a full remote-RPC surface (`readAll`, `pointWrite`,
-`watch`, `eval`, `hisRead`) across that mesh.
+Some building platforms connect sites as a peer-to-peer mesh: every node
+has its own identity, and any node can route requests (reads, writes,
+history, watches) to any other. That's the right shape when sites need to
+talk to each other.
 
 Baler's topology is a star, not a mesh: N sites report up to one
 gateway/broker/store, and sites never need to talk to each other. A star
-doesn't need peer identity, routing, or an RPC surface between leaves —
+doesn't need peer identity, routing, or an RPC surface between leaves;
 a plain broker's client/hub model already covers everything a star
-topology requires. Building mesh machinery (keypairs, signed frames, a
-node-type registry) for a topology that's provably a star is solving a
-problem this system doesn't have.
+topology requires. Building mesh machinery (node keypairs, signed frames,
+a node-type registry) for a topology that's provably a star would be
+solving a problem this system doesn't have.
 
-The one property worth taking from arcbeam is that it's WebSocket
-(outbound-initiated, so it doesn't fight building-network firewalls) —
-and MQTT already has that property. Once an MQTT client opens its session
-to the broker, either side can send over it; the broker never needs a
-route back into the site's network. That's the same trick, using
-infrastructure already in this stack, for the one topology this system
-actually has.
+The property that does matter is that the site opens the connection
+outbound, so it doesn't fight building-network firewalls. MQTT already
+has that property. Once an MQTT client opens its session to the broker,
+either side can send over it, and the broker never needs a route back
+into the site's network. Infrastructure already in this stack covers the
+one topology this system actually has.
 
 ## Reaching back into a site: commands, not just ingest
 
