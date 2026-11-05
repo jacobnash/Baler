@@ -1033,7 +1033,7 @@ def describe_points(store, point_uris: list[str]) -> dict[str, dict]:
     return out
 
 
-def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limit: int = DEFAULT_LIMIT) -> dict:
+def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limit: int = DEFAULT_LIMIT, scope=None) -> dict:
     """The whole read(...).hisRead(...).hisRollup(...) pipeline against
     live stores. Raises HisQueryError for a `read` (singular) that matches
     nothing - Axon's read() throws UnknownRecErr for the same case; a
@@ -1045,6 +1045,8 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
         graph = graph_vocab(store)
     with tracer.start_as_current_span("hisquery.match_entities") as sp:
         matched = match_entities(store, query.filter, graph)
+        if scope is not None:  # baler.scope.Scope: the caller's sites only
+            matched = scope.filter(matched)
         sp.set_attribute("matched", len(matched))
     if query.mode == "read":
         if not matched:
@@ -1053,6 +1055,8 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
 
     with tracer.start_as_current_span("hisquery.expand_to_points") as sp:
         point_uris = expand_to_points(store, matched)
+        if scope is not None:
+            point_uris = scope.filter(point_uris)
         sp.set_attribute("points", len(point_uris))
     with tracer.start_as_current_span("hisquery.describe_points"):
         meta = describe_points(store, point_uris)

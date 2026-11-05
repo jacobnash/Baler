@@ -17,6 +17,7 @@ public gateway at all, so the header is meaningless there).
 
 import argparse
 import os
+import re
 from http.server import ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -34,7 +35,7 @@ OPENAPI_SPEC_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "auth-ap
 def make_handler(ts_pool):
     class AuthHandler(BaseAPIHandler):
         TRACER = tracer
-        ALLOWED_METHODS = "GET, POST, DELETE, OPTIONS"
+        ALLOWED_METHODS = "GET, POST, PUT, DELETE, OPTIONS"
         ALLOWED_HEADERS = "Content-Type, Authorization"
 
         def _require_gateway(self) -> bool:
@@ -107,6 +108,18 @@ def make_handler(ts_pool):
                 return
             if path == "/me":
                 self.handle_traced("auth_api.get_me", self._get_me)
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_PUT(self):
+            if not self._require_gateway():
+                return
+            path = urlparse(self.path).path
+            m = re.fullmatch(r"/sites/([^/]+)/topic-prefixes", path)
+            if m:
+                site_id = m.group(1)
+                self.handle_traced("auth_api.put_site_prefixes", lambda span: self._set_site_prefixes(site_id, span))
                 return
             self.send_response(404)
             self.end_headers()
@@ -207,9 +220,24 @@ def make_handler(ts_pool):
                 return
             body = self.read_json_body()
             with ts_pool.connection() as conn:
-                site = auth.create_site(conn, caller["org_id"], body["name"])
+                site = auth.create_site(conn, caller["org_id"], body["name"], body.get("topic_prefixes"))
             span.set_attribute("site_id", site["id"])
             _respond_json(self, 201, site)
+
+        def _set_site_prefixes(self, site_id: str, span) -> None:
+            caller = self._require_caller(span)
+            if not caller:
+                return
+            prefixes = self.read_json_body()["topic_prefixes"]
+            if not isinstance(prefixes, list) or not all(isinstance(p, str) for p in prefixes):
+                raise TypeError("topic_prefixes must be a list of strings")
+            with ts_pool.connection() as conn:
+                site = auth.set_site_prefixes(conn, caller["org_id"], site_id, prefixes)
+            if site is None:
+                _respond_error(self, 404, "no such site in your org")
+                return
+            span.set_attribute("site_id", site_id)
+            _respond_json(self, 200, site)
 
         def _create_user(self, span) -> None:
             caller = self._require_caller(span)

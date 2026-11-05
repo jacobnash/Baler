@@ -28,8 +28,12 @@ BSD-3). This file is only the mapping onto Baler's storage:
     every later request (`BEARER authToken=<jwt>` or plain `Bearer <jwt>`,
     so OAuth-style API-key clients work too).
 
-Not here yet: pointWrite/invokeAction (needs Windrow BACnet write), site scoping
-of reads by the token's site_ids, Haystack 4 defs/libs ops.
+Site scoping (scope.py): once any site owns a topic prefix, every read,
+history, nav and watch op only sees points/equipment under the caller's
+sites' prefixes; anything else reads as missing.
+
+Not here yet: pointWrite/invokeAction (needs Windrow BACnet write),
+Haystack 4 defs/libs ops.
 """
 
 from __future__ import annotations
@@ -46,6 +50,7 @@ import openhay as oh
 
 from baler import auth, gateway_auth, hisquery, timeseries, tracing
 from baler.http_handler_base import BaseAPIHandler
+from baler.scope import EVERYTHING, Scope, claims_from_header, scope_for
 from baler.timeseries import connect_pool
 
 tracer = tracing.get_tracer(__name__)
@@ -79,6 +84,8 @@ OPS = [
     ("close", "Close the current session"),
 ]
 WRITE_OPS = {"hisWrite", "pointWrite", "invokeAction"}
+# Ops that return no point/equip data, so need no site scope lookup.
+_DATA_FREE_OPS = {"about", "ops", "formats", "close", "watchUnsub"}
 
 
 class OpError(Exception):
@@ -249,33 +256,34 @@ class Backend:
     def _conn(self):
         return self.ts_pool.connection()
 
-    def read_filter(self, text: str, limit: int | None) -> list[dict]:
+    def read_filter(self, text: str, limit: int | None, scope: Scope = EVERYTHING) -> list[dict]:
         try:
             q = hisquery.parse_query(text)
         except hisquery.HisQueryError as exc:
             raise OpError(f"filter: {exc}") from exc
         if q.span_text is not None or q.rollup is not None or q.mode != "readAll":
             raise OpError("read takes a plain Haystack filter, not a hisRead/hisRollup expression")
-        uris = hisquery.match_entities(self.store, q.filter)
+        uris = scope.filter(hisquery.match_entities(self.store, q.filter))
         if limit is not None:
             uris = uris[:limit]
         with self._conn() as conn:
             recs = build_records(self.store, conn, uris)
         return [recs[u] for u in uris if u in recs]
 
-    def read_ids(self, refs: list[oh.Ref]) -> list[dict | None]:
+    def read_ids(self, refs: list[oh.Ref], scope: Scope = EVERYTHING) -> list[dict | None]:
         uris = [ref_to_uri(r.id) for r in refs]
+        visible = scope.filter(uris)
         with self._conn() as conn:
-            recs = build_records(self.store, conn, uris)
-        return [recs.get(u) for u in uris]
+            recs = build_records(self.store, conn, visible)
+        return [recs.get(u) for u in uris]  # out-of-scope ids read as missing, never as "forbidden"
 
-    def nav(self, nav_id: str | None) -> list[dict]:
+    def nav(self, nav_id: str | None, scope: Scope = EVERYTHING) -> list[dict]:
         """equip -> point. (Sites aren't modelled as graph entities yet.)"""
         if nav_id is None:
             rows = self.store.query(
                 "SELECT DISTINCT ?s WHERE { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), \"urn:equip:\")) }"
             )
-            uris = sorted({str(r.s) for r in rows})
+            uris = scope.filter(sorted({str(r.s) for r in rows}))
         else:
             equip = ref_to_uri(nav_id)
             rows = self.store.query(
@@ -283,7 +291,7 @@ class Backend:
                 + f"SELECT DISTINCT ?p WHERE {{ {{ <{hisquery._uri(equip)}> brick:hasPoint ?p }}"
                 f" UNION {{ ?p brick:isPointOf <{hisquery._uri(equip)}> }} }}"
             )
-            uris = sorted({str(r.p) for r in rows})
+            uris = scope.filter(sorted({str(r.p) for r in rows}))
         with self._conn() as conn:
             recs = build_records(self.store, conn, uris)
         out = []
@@ -296,8 +304,10 @@ class Backend:
             out.append(rec)
         return out
 
-    def his_read(self, ref: oh.Ref, range_text: str) -> oh.Grid:
+    def his_read(self, ref: oh.Ref, range_text: str, scope: Scope = EVERYTHING) -> oh.Grid:
         uri = ref_to_uri(ref.id)
+        if not scope.allows(uri):
+            raise OpError(f"unknown rec: @{ref.id}")
         with self._conn() as conn:
             rec = build_records(self.store, conn, [uri]).get(uri)
             if rec is None:
@@ -322,8 +332,10 @@ class Backend:
             meta["hisLimit"] = oh.Number(HIS_LIMIT)
         return oh.Grid.from_rows(out, meta=meta, cols=["ts", "val"])
 
-    def his_write(self, ref: oh.Ref, rows: list[dict]) -> None:
+    def his_write(self, ref: oh.Ref, rows: list[dict], scope: Scope = EVERYTHING) -> None:
         uri = ref_to_uri(ref.id)
+        if not scope.allows(uri):
+            raise OpError(f"unknown rec: @{ref.id}")
         if _kind_of(uri) != "point":
             raise OpError(f"hisWrite target is not a point: @{ref.id}")
         with self._conn() as conn:
@@ -449,7 +461,7 @@ def _lease_secs(v) -> float | None:
     return max(1.0, v.val * mult)
 
 
-def dispatch(backend: Backend, op: str, req: oh.Grid) -> oh.Grid:
+def dispatch(backend: Backend, op: str, req: oh.Grid, scope: Scope = EVERYTHING) -> oh.Grid:
     row = req.rows[0] if req.rows else {}
     if op == "about":
         now = datetime.now(timezone.utc)
@@ -472,35 +484,35 @@ def dispatch(backend: Backend, op: str, req: oh.Grid) -> oh.Grid:
         if "filter" in row:
             limit = row.get("limit")
             limit = int(limit.val) if isinstance(limit, oh.Number) else None
-            return _rows_grid(backend.read_filter(str(row["filter"]), limit))
+            return _rows_grid(backend.read_filter(str(row["filter"]), limit, scope))
         refs = [_ref(r["id"]) for r in req.rows if "id" in r]
         if not refs:
             raise OpError("read requires filter or id")
-        return _ids_grid(backend.read_ids(refs))
+        return _ids_grid(backend.read_ids(refs, scope))
     if op == "nav":
         nav_id = row.get("navId")
-        return _rows_grid(backend.nav(str(nav_id) if nav_id else None))
+        return _rows_grid(backend.nav(str(nav_id) if nav_id else None, scope))
     if op == "hisRead":
         rng = row.get("range")
         if rng is None:
             raise OpError("missing range")
-        return backend.his_read(_ref(row.get("id")), rng if isinstance(rng, str) else oh.to_zinc(rng))
+        return backend.his_read(_ref(row.get("id")), rng if isinstance(rng, str) else oh.to_zinc(rng), scope)
     if op == "hisWrite":
-        backend.his_write(_ref(req.meta.get("id")), req.rows)
+        backend.his_write(_ref(req.meta.get("id")), req.rows, scope)
         return oh.Grid()
     if op == "watchSub":
         refs = [_ref(r["id"]) for r in req.rows if "id" in r]
         wid, lease = backend.watches.subscribe(
             str(req.meta["watchId"]) if "watchId" in req.meta else None,
             str(req.meta.get("watchDis") or "watch"), _lease_secs(req.meta.get("lease")), refs)
-        rows = backend.watches.diff(wid, [r for r in backend.read_ids(refs) if r], refresh=True)
+        rows = backend.watches.diff(wid, [r for r in backend.read_ids(refs, scope) if r], refresh=True)
         g = _rows_grid(rows)
         g.meta = {"watchId": wid, "lease": oh.Number(lease, "s")}
         return g
     if op == "watchPoll":
         wid = str(req.meta.get("watchId") or "")
         refs = backend.watches.ids(wid)
-        rows = backend.watches.diff(wid, [r for r in backend.read_ids(refs) if r], "refresh" in req.meta)
+        rows = backend.watches.diff(wid, [r for r in backend.read_ids(refs, scope) if r], "refresh" in req.meta)
         g = _rows_grid(rows)
         g.meta = {"watchId": wid}
         return g
@@ -688,7 +700,12 @@ def make_handler(backend: Backend, login: ScramLogin | None):
                             except ValueError:
                                 row[k] = v
                         req = oh.Grid.from_rows([row]) if row else oh.Grid()
-                    grid = dispatch(backend, op, req)
+                    if op in _DATA_FREE_OPS:
+                        caller_scope = EVERYTHING
+                    else:
+                        with backend.ts_pool.connection() as conn:
+                            caller_scope = scope_for(conn, claims_from_header(self.headers.get("Authorization")))
+                    grid = dispatch(backend, op, req, caller_scope)
                 except OpError as exc:
                     span.set_attribute("error", str(exc))
                     grid = err_grid(str(exc))

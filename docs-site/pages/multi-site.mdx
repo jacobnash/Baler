@@ -12,10 +12,8 @@ reasoning so none of it gets re-litigated (or re-guessed) later.
 
 ## Site as data, not as infrastructure
 
-Nothing in the data plane knows about "sites" today. `auth_api.py` has an
-org → sites model (`POST /sites`, users/API keys carry `site_ids`), but
-that's an authorization scope only — `site_id` appears nowhere else in the
-codebase. `point_history` has no site column, and point identity is a flat
+Sites own data by **topic prefix** (see "Who sees which data" below).
+`point_history` has no site column, and point identity is a flat
 `urn:point:{topic}` namespace (`ingest.py`).
 
 That flat namespace is actually the reason a campus rollup doesn't need new
@@ -40,6 +38,30 @@ full stack, with the central campus stack pulling from it — the same
 pull shape `haystack_puller`/`sql_puller` already implement, just pointed
 at a peer Baler instead of a third-party source. That's a bigger
 decision than this page covers and hasn't come up yet.
+
+## Who sees which data
+
+Each site can own one or more topic prefixes (`POST /auth/sites` with
+`topic_prefixes`, or `PUT /auth/sites/{id}/topic-prefixes`). A site owning
+`fbf/hospital-a` owns every point `urn:point:fbf/hospital-a/...` and every
+equip `urn:equip:fbf/hospital-a/...`.
+
+- **No site anywhere owns a prefix:** everyone sees everything. This is a
+  single-tenant install, and it's how every install behaved before scoping existed.
+- **Any site owns a prefix:** reads are scoped. A caller sees only the
+  prefixes of their sites: their token's `site_ids`, or all of their org's
+  sites if the token carries none. Out-of-scope points read as missing, never
+  as "forbidden", so their existence isn't revealed. This applies to the
+  Haystack API (`/api`: read, nav, hisRead, hisWrite, watches) and to
+  `/ingest/his` and `/ingest/history`.
+- **Prefixes never overlap across orgs.** Claiming `fbf` while another
+  org owns `fbf/hospital-a` (or the reverse) is rejected, otherwise the
+  broader claim would expose the other org's data.
+- **First claim wins.** In a shared instance, an org can claim a prefix
+  no one owns yet, including one another tenant's devices already publish
+  under. Provision each site's prefixes when you create the site.
+
+Not scoped yet: fault, derivation and validate APIs. Those are a follow-up.
 
 ## Why not a mesh network
 

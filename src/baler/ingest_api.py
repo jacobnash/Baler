@@ -28,6 +28,7 @@ from baler.ingest import (
 )
 from baler.mapping import reclassify
 from baler.remote_store import RemoteStore
+from baler.scope import claims_from_header, scope_for
 from baler.timeseries import connect_pool, delete_point_value, read_range
 
 tracer = tracing.get_tracer(__name__)
@@ -224,7 +225,10 @@ def make_handler(store, ts_pool):
                 try:
                     parsed = hisquery.parse_query(expr)
                     with ts_pool.connection() as conn:
-                        result = hisquery.run_query(store, conn, parsed, now=datetime.now(timezone.utc), tz=tz, limit=limit)
+                        caller_scope = scope_for(conn, claims_from_header(self.headers.get("Authorization")))
+                        result = hisquery.run_query(
+                            store, conn, parsed, now=datetime.now(timezone.utc), tz=tz, limit=limit, scope=caller_scope
+                        )
                 except hisquery.NoMatchError as exc:
                     span.set_attribute("error", str(exc))
                     _respond_error(self, 404, str(exc))
@@ -264,6 +268,11 @@ def make_handler(store, ts_pool):
                 span.set_attribute("point_uri", point_uri)
 
                 with ts_pool.connection() as conn:
+                    if not scope_for(conn, claims_from_header(self.headers.get("Authorization"))).allows(point_uri):
+                        # Same answer as a point with no history: never
+                        # reveal that an out-of-scope point exists.
+                        _respond_json(self, 200, [])
+                        return
                     rows = read_range(conn, point_uri, start, end)
                 span.set_attribute("count", len(rows))
                 _respond_json(self, 200, [{"ts": ts.timestamp(), "value": value} for ts, value in rows])

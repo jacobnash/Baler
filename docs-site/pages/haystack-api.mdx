@@ -70,6 +70,11 @@ Filters work exactly like the [Query page](/his-query): a name matches as a Hays
 a Brick class (`Air_Handling_Unit`) or a Brick tag word. So `read ahu` also finds AHUs that
 never had a Haystack `ahu` tag.
 
+## Who sees what
+
+Reads are scoped to the caller's sites once sites own data. See
+[Multi-Site](/multi-site#who-sees-which-data). Anything out of scope reads as if it didn't exist.
+
 ## Formats
 
 Requests can be `GET` with Zinc-encoded query params, or `POST` with a grid in Zinc, JSON (Haystack 3
@@ -82,4 +87,4 @@ clients keep working.
 - `pointWrite` and `invokeAction` return an error grid until Windrow can write BACnet.
 - `->` tag paths in filters (`equipRef->siteRef`), the same limit as the Query page.
 - `hisRead` with two datetimes. Dates, date ranges and `today`/`yesterday`/`thisWeek`/… all work.
-- Scoping reads to the token's sites, and the Haystack 4 `defs`/`libs` ops.
+- The Haystack 4 `defs`/`libs` ops.

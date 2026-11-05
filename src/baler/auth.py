@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 import jwt as pyjwt
 import psycopg
 
-from baler import json_store
+from baler import json_store, scope
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS orgs (
@@ -73,6 +73,7 @@ _PBKDF2_ITERATIONS = 600_000
 
 def ensure_schema(conn: psycopg.Connection) -> None:
     conn.execute(SCHEMA)
+    scope.ensure_schema(conn)
 
 
 # --- passwords ---
@@ -165,14 +166,47 @@ def create_org(conn: psycopg.Connection, name: str, admin_email: str, admin_pass
     return {"id": org_id, "name": name, "admin_user_id": user["id"]}
 
 
-def create_site(conn: psycopg.Connection, org_id: str, name: str) -> dict:
+class PrefixConflict(ValueError):
+    """A topic prefix overlaps one another org already owns."""
+
+
+def _check_prefixes(conn: psycopg.Connection, org_id: str, prefixes: list[str]) -> list[str]:
+    """Normalize, and refuse any prefix that equals, contains or is
+    contained by another org's - otherwise claiming `fbf` would expose every
+    other tenant's `fbf/...` data (see scope.py)."""
+    normalized = sorted({scope.normalize_prefix(p) for p in prefixes})
+    others = conn.execute(
+        "SELECT org_id, unnest(topic_prefixes) FROM sites WHERE org_id <> %s", (org_id,)
+    ).fetchall()
+    for p in normalized:
+        for _, theirs in others:
+            t = scope.normalize_prefix(theirs)
+            if p == t or p.startswith(t + "/") or t.startswith(p + "/"):
+                raise PrefixConflict(f"topic prefix {p!r} overlaps {t!r}, owned by another org")
+    return normalized
+
+
+def create_site(conn: psycopg.Connection, org_id: str, name: str, topic_prefixes: list[str] | None = None) -> dict:
+    prefixes = _check_prefixes(conn, org_id, topic_prefixes or [])
     site_id = json_store.new_id()
     now = datetime.now(timezone.utc)
     conn.execute(
-        "INSERT INTO sites (id, org_id, name, created_at) VALUES (%s, %s, %s, %s)",
-        (site_id, org_id, name, now),
+        "INSERT INTO sites (id, org_id, name, created_at, topic_prefixes) VALUES (%s, %s, %s, %s, %s)",
+        (site_id, org_id, name, now, prefixes),
     )
-    return {"id": site_id, "org_id": org_id, "name": name}
+    return {"id": site_id, "org_id": org_id, "name": name, "topic_prefixes": prefixes}
+
+
+def set_site_prefixes(conn: psycopg.Connection, org_id: str, site_id: str, topic_prefixes: list[str]) -> dict | None:
+    """Replace a site's prefixes. None if the site isn't in `org_id`."""
+    prefixes = _check_prefixes(conn, org_id, topic_prefixes)
+    row = conn.execute(
+        "UPDATE sites SET topic_prefixes = %s WHERE id = %s AND org_id = %s RETURNING id, org_id, name",
+        (prefixes, site_id, org_id),
+    ).fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "org_id": row[1], "name": row[2], "topic_prefixes": prefixes}
 
 
 # --- users ---

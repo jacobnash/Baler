@@ -69,6 +69,7 @@ const ROUTES = [
   ["GET",    /^\/auth\/api-keys$/,                   "auth", "admin"],
   ["DELETE", /^\/auth\/api-keys\/[^/]+$/,              "auth", "admin"],
   ["POST",   /^\/auth\/sites$/,                      "auth", "admin"],
+  ["PUT",    /^\/auth\/sites\/[^/]+\/topic-prefixes$/,   "auth", "admin"],
   ["POST",   /^\/auth\/users$/,                      "auth", "admin"],
   // Public like /auth/login (not exempted via its own nginx location,
   // since unlike login it still needs js_access to run so the public

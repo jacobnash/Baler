@@ -210,19 +210,60 @@ paths:
               required: [name]
               properties:
                 name: { type: string }
+                topic_prefixes:
+                  type: array
+                  items: { type: string }
+                  description: >-
+                    Topic prefixes this site owns (e.g. `fbf/hospital-a`): its points
+                    and equipment are the ones under them. Once any site has a prefix,
+                    reads are scoped to the caller's sites. Must not overlap another
+                    org's prefixes.
       responses:
         "201":
           description: Created.
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  id: { type: string }
-                  org_id: { type: string }
-                  name: { type: string }
+                $ref: "#/components/schemas/Site"
+        "400":
+          description: A topic prefix overlaps one owned by another org, or the body is malformed.
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /sites/{site_id}/topic-prefixes:
+    put:
+      operationId: setSiteTopicPrefixes
+      tags: [Directory]
+      summary: Replace the topic prefixes a site owns
+      description: admin-only, for a site in the caller's own org. Prefixes must not overlap another org's.
+      parameters:
+        - name: site_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [topic_prefixes]
+              properties:
+                topic_prefixes:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Site"
+        "400":
+          description: A topic prefix overlaps one owned by another org, or the body is malformed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No such site in the caller's org.
   /users:
     post:
       operationId: createUser
@@ -271,6 +312,15 @@ paths:
                 type: string
 components:
   schemas:
+    Site:
+      type: object
+      properties:
+        id: { type: string }
+        org_id: { type: string }
+        name: { type: string }
+        topic_prefixes:
+          type: array
+          items: { type: string }
     Principal:
       type: object
       required: [sub, org_id, role]

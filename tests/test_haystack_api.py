@@ -58,6 +58,17 @@ class FakeTS:
 
     def __init__(self):
         self.rows = {DAT: [(T0, 55.0), (T0 + timedelta(minutes=5), 55.5)], FAN: [(T0, True)]}
+        self.sites: list[tuple] = []  # (id, org_id, topic_prefixes) - empty = scoping off
+
+    def execute(self, sql, params=None):
+        assert "FROM sites" in sql, sql  # the only query scope.scope_for runs
+        rows = self.sites
+
+        class _Cur:
+            def fetchall(self):
+                return rows
+
+        return _Cur()
 
     @contextmanager
     def connection(self):
@@ -270,3 +281,28 @@ def test_scram_login_issues_session_jwt(monkeypatch):
 
     assert run("admin@acme.example", "wrong")[0] == 403
     assert run("nobody@acme.example", "pencil")[0] == 403
+
+
+# --- site scoping ---------------------------------------------------------
+
+from baler.scope import Scope
+
+
+def test_scope_hides_other_sites_everywhere(backend):
+    other = Scope(("fbf/somewhere-else",))
+    mine = Scope(("fbf/ahu-1",))
+    assert backend.read_filter("point or fan or ahu", None, other) == []
+    assert len(backend.read_filter("point or fan or ahu", None, mine)) == 3
+    assert backend.read_ids([oh.Ref(ha.uri_to_ref(DAT))], other) == [None]
+    assert backend.nav(None, other) == [] and len(backend.nav(None, mine)) == 1
+    with pytest.raises(ha.OpError, match="unknown rec"):
+        backend.his_read(oh.Ref(ha.uri_to_ref(DAT)), "2026-09-08", other)
+    with pytest.raises(ha.OpError, match="unknown rec"):
+        backend.his_write(oh.Ref(ha.uri_to_ref(DAT)), [{"ts": T0, "val": 1.0}], other)
+
+
+def test_scope_applies_through_dispatch_and_watches(backend):
+    other = Scope(("nope",))
+    req = oh.Grid.from_rows([{"id": oh.Ref(ha.uri_to_ref(DAT))}], meta={"watchDis": "t"})
+    assert ha.dispatch(backend, "watchSub", req, other).rows == []
+    assert ha.dispatch(backend, "read", oh.Grid.from_rows([{"filter": "temp"}]), other).rows == []

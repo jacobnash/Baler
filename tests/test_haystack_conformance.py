@@ -16,11 +16,9 @@ import datetime as dt
 import time
 import uuid
 
+import phable  # a dev dependency: a plain import, so a missing phable fails, never silently skips
 import pytest
 import requests
-
-phable = pytest.importorskip("phable")
-
 from test_gateway_auth import BASE, _post_with_retry
 
 pytestmark = pytest.mark.integration
