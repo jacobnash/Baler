@@ -1,0 +1,25 @@
+//
+// windrow - a real Haxall connector for Windrow's BACnet/Modbus-to-MQTT bridge.
+// Subscribes to Windrow's already-running bridge output directly (the same
+// wire envelope {point, value, ts} mqtt_listener.py/ingest_api.py
+// consume), updates point curVal via the real connector framework, and
+// lets Haxall's own hisCollectCov historize changes - through "his"
+// (BalerHisExt), into Baler. This pod does not write to
+// Baler itself; it only makes real BACnet-sourced data available
+// as normal Haxall points, exactly like any other real connector would.
+//
+
+pragma: Lib <
+  doc: "Windrow BACnet/Modbus-via-MQTT connector"
+  version: "1.0.0"
+  depends: {
+    { lib: "sys",      versions: BuildVar "ph.depend" }
+    { lib: "axon",     versions: BuildVar "hx.depend" }
+    { lib: "hx",       versions: BuildVar "hx.depend" }
+    { lib: "hx.conn",  versions: "x.x.x" }
+  }
+  libExt: WindrowExt
+>
+
+// Windrow bridge connector
+WindrowExt: ConnExt <connFeatures:{pollMode:"manual"}>

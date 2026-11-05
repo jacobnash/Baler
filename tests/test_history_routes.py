@@ -1,5 +1,5 @@
 """
-GET/DELETE /history - the Timberdoodle side of Haxall's IHisExt read/write
+GET/DELETE /history - the Baler side of Haxall's IHisExt read/write
 contract. Same live_server-against-real-spec pattern as test_openapi.py:
 a route is only "documented" if a real request/response round trip
 actually matches what the spec claims.
@@ -16,9 +16,9 @@ import yaml
 from referencing import Registry, Resource
 from referencing.jsonschema import DRAFT202012
 
-from timberdoodle.ingest_api import OPENAPI_SPEC_PATH, make_handler
-from timberdoodle.remote_store import RemoteStore
-from timberdoodle.timeseries import connect_pool
+from baler.ingest_api import OPENAPI_SPEC_PATH, make_handler
+from baler.remote_store import RemoteStore
+from baler.timeseries import connect_pool
 
 
 @pytest.fixture(scope="module")
@@ -32,7 +32,7 @@ GATEWAY_SECRET = "test-gateway-secret"
 
 @pytest.fixture
 def live_server(monkeypatch):
-    monkeypatch.setenv("TIMBERDOODLE_GATEWAY_SECRET", GATEWAY_SECRET)
+    monkeypatch.setenv("BALER_GATEWAY_SECRET", GATEWAY_SECRET)
     store = RemoteStore()
     ts_pool = connect_pool()
     server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(store, ts_pool))

@@ -1,7 +1,7 @@
 import os
 import tempfile
 
-from timberdoodle.json_store import load, new_id, save
+from baler.json_store import load, new_id, save
 
 
 def test_load_missing_file_returns_empty_list():

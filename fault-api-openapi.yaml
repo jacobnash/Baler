@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: Timberdoodle Fault API
+  title: Baler Fault API
   version: "1.0.0"
   description: |
     CRUD for fault-detection rules and webhook subscriptions, plus a read
@@ -23,7 +23,7 @@ servers:
   - url: http://localhost:8002
     description: >-
       Direct - only reachable if you're running this process bare-metal
-      (`python -m timberdoodle.fault_api --help`) or from inside the
+      (`python -m baler.fault_api --help`) or from inside the
       Docker network. docker-compose.yml does not publish this port to
       the host, so this URL will refuse connections in the normal
       containerized setup.
@@ -123,7 +123,7 @@ paths:
               $ref: "#/components/schemas/CreateWebhookRequest"
             examples:
               default:
-                value: { "url": "https://example.com/hooks/timberdoodle", "secret": "a-shared-secret", "filter": { "rule_id": "e38a2a2a84404bb4ae50f1fa88535eda" } }
+                value: { "url": "https://example.com/hooks/baler", "secret": "a-shared-secret", "filter": { "rule_id": "e38a2a2a84404bb4ae50f1fa88535eda" } }
       responses:
         "201":
           description: Created. The `secret` is returned here once - every later GET redacts it.
@@ -374,10 +374,10 @@ components:
       properties:
         url:
           type: string
-          example: "https://example.com/hooks/timberdoodle"
+          example: "https://example.com/hooks/baler"
         secret:
           type: ["string", "null"]
-          description: "Used to HMAC-SHA256 sign every delivered payload (X-Timberdoodle-Signature header, sha256=... format). Send a real string when creating a webhook; always null when read back via GET /webhooks (shown as a real string exactly once, in the POST /webhooks response)."
+          description: "Used to HMAC-SHA256 sign every delivered payload (X-Baler-Signature header, sha256=... format). Send a real string when creating a webhook; always null when read back via GET /webhooks (shown as a real string exactly once, in the POST /webhooks response)."
         filter:
           type: ["object", "null"]
           description: Omit or null to receive every fault. Currently supports scoping to one rule_id.

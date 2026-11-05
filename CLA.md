@@ -1,6 +1,6 @@
-# Timberdoodle Individual Contributor License Agreement
+# Baler Individual Contributor License Agreement
 
-Thank you for your interest in contributing to Timberdoodle ("the
+Thank you for your interest in contributing to Baler ("the
 Project"), maintained by Jacob Nash ("the Maintainer"). This is a
 license agreement between you ("Contributor") and the Maintainer for
 your present and future contributions.
@@ -37,6 +37,6 @@ submission intended for inclusion in the Project), you agree:
 - **Alternative**: email a signed copy of this document (name, GitHub
   username, date) per the instructions in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Everyone stays free to fork and self-host Timberdoodle under AGPLv3
+Everyone stays free to fork and self-host Baler under AGPLv3
 without signing anything — this agreement only covers contributions
 merged back into this repository.

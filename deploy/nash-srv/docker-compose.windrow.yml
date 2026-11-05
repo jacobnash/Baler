@@ -1,0 +1,65 @@
+# Demo-data pipeline: a simulated BACnet device (windrow.mock_device) plus
+# Windrow's own discovery/API service (windrow.api), so the public demo has real
+# equipment/points/history to show instead of an empty app. Not part of
+# baler's own core stack - a separate concern, kept in its own file.
+#
+# windrow.api discovers/polls windrow_mock_device over real BACnet/IP, which needs
+# a fixed, known local address on both sides (bacpypes3 requires a literal
+# IP, not a hostname) - a custom network with static IPs, rather than the
+# default bridge's dynamic ones, gives it that. Confirmed working locally:
+# BACnet unicast (not broadcast) crosses a normal Docker bridge network
+# fine, no network_mode: host needed.
+#
+# windrow_api also joins the default network (no `networks:` override there)
+# so it can reach `mosquitto` by service name, same as every other daemon.
+#
+# One-time provisioning (`python -m windrow.mock_hospital provision ...`,
+# `baler.autotag`, `scripts/seed_derivations_and_faults.py`) is
+# deliberately NOT run automatically on every deploy - see
+# deploy/nash-srv/seed-demo-data.sh, run once by hand.
+networks:
+  bacnet-mock:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+services:
+  windrow_mock_device:
+    build:
+      context: windrow
+      dockerfile: ../deploy/nash-srv/windrow.Dockerfile
+    command: python -m windrow.mock_device --address 172.30.0.10/24:47808 --instance 3456 --site-spec /app/hospital_site_spec.json
+    networks:
+      bacnet-mock:
+        ipv4_address: 172.30.0.10
+    restart: unless-stopped
+
+  windrow_api:
+    build:
+      context: windrow
+      dockerfile: ../deploy/nash-srv/windrow.Dockerfile
+    command: >
+      python -m windrow.api
+      --address 172.30.0.11/24:47820 --host 0.0.0.0 --port 8001
+      --mqtt-host mosquitto --mqtt-port 1883
+      --mqtt-username baler --mqtt-password ${MQTT_PASSWORD:?set in nash-srv.env}
+      --state-file /app/state/windrow-connections.json
+      --devices-state-file /app/state/windrow-devices.json
+      --modbus-state-file /app/state/windrow-modbus-connections.json
+    networks:
+      bacnet-mock:
+        ipv4_address: 172.30.0.11
+      default:
+    volumes:
+      - windrow-state:/app/state
+    restart: unless-stopped
+    depends_on:
+      - windrow_mock_device
+
+# Pinned name, like the core volumes in docker-compose.yml. A box set up
+# before the rename keeps its provisioned connections with
+# BALER_VOLUME_PREFIX=timberdoodle and WINDROW_STATE_VOLUME=fbf-state; Windrow
+# itself then moves the old fbf-*.json files to their windrow-* names.
+volumes:
+  windrow-state:
+    name: ${BALER_VOLUME_PREFIX:-baler}_${WINDROW_STATE_VOLUME:-windrow-state}

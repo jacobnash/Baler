@@ -13,12 +13,12 @@ from datetime import datetime, timezone
 
 import pytest
 
-from timberdoodle.haystack_pull_state import ensure_schema, get_checkpoint
-from timberdoodle.haystack_puller import pull_equip, pull_once, pull_points
-from timberdoodle.ingest import topic_to_point_uri
-from timberdoodle.mapping import load_rules
-from timberdoodle.store import BRICK, Store
-from timberdoodle.timeseries import connect, read_latest
+from baler.haystack_pull_state import ensure_schema, get_checkpoint
+from baler.haystack_puller import pull_equip, pull_once, pull_points
+from baler.ingest import topic_to_point_uri
+from baler.mapping import load_rules
+from baler.store import BRICK, Store
+from baler.timeseries import connect, read_latest
 
 SOURCE_ID = "test-haxall"
 
@@ -160,7 +160,7 @@ def test_pull_points_and_pull_equip_tally_classification_outcomes(ts_conn):
 
 
 def test_equip_with_matching_tags_classifies_into_a_real_brick_equip_class():
-    from timberdoodle.mapping import load_rules as load_mapping_rules
+    from baler.mapping import load_rules as load_mapping_rules
 
     equip_rules = load_mapping_rules("rules/haystack_equip_to_brick.yaml")
     rule = equip_rules[0]
@@ -187,7 +187,7 @@ HAXALL_SU_PASSWORD = os.environ.get("HAXALL_SU_PASSWORD", "")
     "HAXALL_OSS_URL if not localhost:8280) to the same env vars e2e-haxall/ and test_haystack_client.py use to run this",
 )
 def test_pull_once_against_a_real_running_haxall_instance(ts_conn):
-    from timberdoodle.haystack_client import HaystackClient
+    from baler.haystack_client import HaystackClient
 
     store = Store()
     client = HaystackClient(HAXALL_OSS_URL, HAXALL_SU_USERNAME, HAXALL_SU_PASSWORD)

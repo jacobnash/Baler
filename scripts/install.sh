@@ -31,8 +31,8 @@ ensure_secret() {
   fi
 }
 
-ensure_secret TIMBERDOODLE_JWT_SECRET
-ensure_secret TIMBERDOODLE_GATEWAY_SECRET
+ensure_secret BALER_JWT_SECRET
+ensure_secret BALER_GATEWAY_SECRET
 
 if grep -q '^MQTT_PASSWORD=$' .env || ! grep -q '^MQTT_PASSWORD=' .env; then
   mqtt_val="$(openssl rand -hex 16)"
@@ -44,7 +44,7 @@ if grep -q '^MQTT_PASSWORD=$' .env || ! grep -q '^MQTT_PASSWORD=' .env; then
   echo "Generated MQTT_PASSWORD"
 fi
 
-echo "Starting Timberdoodle (this can take a minute on first build)…"
+echo "Starting Baler (this can take a minute on first build)…"
 docker compose up -d --build --wait
 
 OPS_URL="http://localhost:8080/ui/ops.html"

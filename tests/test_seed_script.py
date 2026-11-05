@@ -10,7 +10,7 @@ derivation (zone-temp-deviation) actually evaluates to a real computed
 value when real matching graph/point_history data is present.
 
 --skip-structure is passed deliberately: seed_site_structure() only acts
-on urn:equip:fbf/ahu-*/vav-*/meter-* equipment that a real fbf ingest run
+on urn:equip:fbf/ahu-*/vav-*/meter-* equipment that a real windrow ingest run
 would have created, which this stack doesn't have running. Without
 --skip-structure it degrades to a harmless no-op (prints "skipping..."),
 so passing it just keeps this test from depending on unrelated ingest
@@ -32,9 +32,9 @@ import pytest
 import requests
 from rdflib import URIRef
 
-from timberdoodle.remote_store import RemoteStore
-from timberdoodle.store import BRICK
-from timberdoodle.timeseries import connect, write_point_value
+from baler.remote_store import RemoteStore
+from baler.store import BRICK
+from baler.timeseries import connect, write_point_value
 
 BASE = "http://localhost:8080"
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -136,7 +136,7 @@ def zone_temp_point_data():
 
 
 def _run_seed_script(email: str, password: str) -> subprocess.CompletedProcess:
-    env = {**os.environ, "TIMBERDOODLE_ADMIN_EMAIL": email, "TIMBERDOODLE_ADMIN_PASSWORD": password}
+    env = {**os.environ, "BALER_ADMIN_EMAIL": email, "BALER_ADMIN_PASSWORD": password}
     return subprocess.run(
         [sys.executable, str(SCRIPT_PATH), "--skip-structure"],
         cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=60, check=False,

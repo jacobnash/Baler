@@ -7,8 +7,8 @@ match. Requires `docker-compose up -d` (oxigraph on localhost:7878).
 import pytest
 from rdflib import Namespace
 
-from timberdoodle.remote_store import RemoteStore
-from timberdoodle.store import BRICK
+from baler.remote_store import RemoteStore
+from baler.store import BRICK
 
 BLDG = Namespace("urn:test-remote-store#")
 

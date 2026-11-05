@@ -8,14 +8,14 @@ poll loop; it doesn't need to know the envelope's double-JSON-encoding.
 Not a daemon - a library of three functions plus a `--demo` CLI that
 publishes one made-up station so you can see the shape end-to-end without
 real hardware. Your real integration imports these functions and replaces
-the demo's fake sensor reads with real ones; MQTT_HOST is Timberdoodle's
+the demo's fake sensor reads with real ones; MQTT_HOST is Baler's
 own local broker (docker-compose.yml's `mosquitto` service), so once your
 device is on the same network this never touches the WWW.
 
 Topic prefix defaults to `fbf/weather/<station-id>` - `mqtt_listener.py`
 only subscribes to `fbf/#` by default (docker-compose.yml's mqtt_listener
 service passes no --topic-pattern override), so publishing under any other
-top-level prefix silently goes nowhere. Not actually FBF-specific data;
+top-level prefix silently goes nowhere. Not actually Windrow-specific data;
 just reusing the one topic filter the listener is already watching.
 
 See docs-site/pages/weather-stations.mdx for the tag vocabulary

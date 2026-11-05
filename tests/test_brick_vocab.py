@@ -10,7 +10,7 @@ import os
 
 import pytest
 
-from timberdoodle import brick_vocab
+from baler import brick_vocab
 
 pytestmark = pytest.mark.skipif(not os.path.exists(brick_vocab.DEFAULT_ONTOLOGY_PATH), reason="vendored Brick not present")
 

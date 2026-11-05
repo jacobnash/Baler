@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from timberdoodle.faults import (
+from baler.faults import (
     ack_fault,
     close_fault,
     enable_webhook,
@@ -20,7 +20,7 @@ from timberdoodle.faults import (
     record_webhook_success,
     snooze_fault,
 )
-from timberdoodle.timeseries import connect
+from baler.timeseries import connect
 
 
 @pytest.fixture

@@ -5,13 +5,13 @@ small already-tagged building (one AHU, one VAV, a handful of points,
 plus one deliberately-untaggable point) instead of test fixtures, and run
 as a long-lived process instead of inside a test. Same SCRAM-over-HTTP
 implementation `tests/test_haystack_client.py` verifies against a real
-client - see `timberdoodle.fake_haystack_server`.
+client - see `baler.fake_haystack_server`.
 
     python -m scripts.mock_haystack_server
 
 Then, in another terminal, against the printed URL/user/password:
 
-    python -m timberdoodle.haystack_puller \\
+    python -m baler.haystack_puller \\
       --haystack-url http://127.0.0.1:<port> \\
       --haystack-user tduser --haystack-password tdpass \\
       --once
@@ -19,7 +19,7 @@ Then, in another terminal, against the printed URL/user/password:
 
 import time
 
-from timberdoodle.fake_haystack_server import TEST_PASSWORD, TEST_USER, make_fake_haxall_server
+from baler.fake_haystack_server import TEST_PASSWORD, TEST_USER, make_fake_haxall_server
 
 EQUIP_ROWS = [
     {"id": "r:ahu-1 AHU-1", "dis": "AHU-1", "ahu": "m:"},

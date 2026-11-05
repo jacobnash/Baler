@@ -9,14 +9,14 @@ classify_point together.
 import pytest
 from rdflib import RDF, Graph
 
-from timberdoodle.ingest import (
+from baler.ingest import (
     ingest_equip_tags,
     ingest_tags,
     link_point_to_equip,
     topic_prefix_to_equip_uri,
 )
-from timberdoodle.mapping import classify_point, load_rules
-from timberdoodle.store import BRICK, Store
+from baler.mapping import classify_point, load_rules
+from baler.store import BRICK, Store
 
 EQUIP_RULES_PATH = "rules/haystack_equip_to_brick.yaml"
 EQUIP_RULES = load_rules(EQUIP_RULES_PATH)

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# One-shot bootstrap for the timberdoodle deploy on nash-srv. Run this
+# One-shot bootstrap for the baler deploy on nash-srv. Run this
 # ON nash-srv, as jacob (it sudos itself where needed - don't run the
 # whole thing as root):
 #
-#   git clone git@github.com:jacobnash/timberdoodle.git   # skip if already cloned
-#   cd timberdoodle
+#   git clone git@github.com:jacobnash/baler.git   # skip if already cloned
+#   cd baler
 #   bash deploy/nash-srv/bootstrap.sh <RUNNER_REGISTRATION_TOKEN>
 #
 # Get <RUNNER_REGISTRATION_TOKEN> from:
-#   https://github.com/jacobnash/timberdoodle/settings/actions/runners/new
+#   https://github.com/jacobnash/baler/settings/actions/runners/new
 # (valid ~1 hour, single use - grab it right before running this).
 #
 # What this does, in order:
@@ -17,7 +17,7 @@
 #      the deploy wrapper's --env-file path is guaranteed to match -
 #      skipped if that file already exists, installs the root-owned deploy
 #      wrapper + scoped sudoers rule, registers and starts the runner).
-#   2. Appends timberdoodle's Caddy block to /etc/caddy/Caddyfile (skipped
+#   2. Appends baler's Caddy block to /etc/caddy/Caddyfile (skipped
 #      if already present) and reloads Caddy.
 #
 # Does NOT touch DNS - add the two CNAMEs from
@@ -38,7 +38,7 @@ if sudo grep -q "timberdoodle.nash.engineering" "$CADDYFILE" 2>/dev/null; then
 else
   sudo tee -a "$CADDYFILE" > /dev/null <<'EOF'
 
-# Timberdoodle
+# Baler
 timberdoodle.nash.engineering {
     reverse_proxy 127.0.0.1:8080
 }
@@ -54,7 +54,7 @@ docs.timberdoodle.nash.engineering {
     # JS, same pattern as the main app's / -> /ui/ redirect in nginx.conf.
     redir / /introduction 301
     # Zudoku's static export writes page.html files, but every internal
-    # link is extension-less (/introduction, /api/fbf, etc.) - a plain
+    # link is extension-less (/introduction, /api/windrow, etc.) - a plain
     # file_server 404s on any of those unless something tries the .html
     # suffix first. Confirmed live: every page except the literal root
     # 404'd on a direct load/refresh/shared link before this was added.

@@ -3,7 +3,7 @@ Full Haystack/Xeto -> Brick -> validate -> fault -> webhook journey - the
 gap test_e2e_journey.py leaves open (that file covers MQTT-ingest -> tag ->
 derivation -> fault -> webhook, but never haystack_puller, ontology loading
 into the live Oxigraph, or SHACL validation). Real containers throughout: a
-fake Haystack server (timberdoodle.fake_haystack_server, the same one
+fake Haystack server (baler.fake_haystack_server, the same one
 scripts/mock_haystack_server.py exposes standalone) stands in for a real
 Haxall/SkySpark deployment, real gateway/Bearer auth, real fault_detector
 daemon container.
@@ -23,7 +23,7 @@ sweep after the pull opens a fault.
 
 Needs `docker compose up -d` (gateway, auth_api, fault_api, fault_detector,
 validate_api, postgres, oxigraph, mosquitto all healthy) with
-TIMBERDOODLE_ALLOW_PRIVATE_WEBHOOKS=1 set for fault_api/fault_detector -
+BALER_ALLOW_PRIVATE_WEBHOOKS=1 set for fault_api/fault_detector -
 see CLAUDE.md.
 """
 
@@ -36,17 +36,17 @@ from threading import Thread
 import pytest
 import requests
 
-from timberdoodle.fake_haystack_server import (
+from baler.fake_haystack_server import (
     TEST_PASSWORD,
     TEST_USER,
     make_fake_haxall_server,
 )
-from timberdoodle.haystack_client import HaystackClient
-from timberdoodle.haystack_pull_state import ensure_schema
-from timberdoodle.haystack_puller import pull_once
-from timberdoodle.ingest import topic_to_point_uri
-from timberdoodle.remote_store import RemoteStore
-from timberdoodle.timeseries import connect, read_latest
+from baler.haystack_client import HaystackClient
+from baler.haystack_pull_state import ensure_schema
+from baler.haystack_puller import pull_once
+from baler.ingest import topic_to_point_uri
+from baler.remote_store import RemoteStore
+from baler.timeseries import connect, read_latest
 
 BASE = "http://localhost:8080"
 BRICK_TTL = os.path.join(os.path.dirname(__file__), "..", "ontology", "Brick-only.ttl")

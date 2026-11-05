@@ -17,10 +17,10 @@ import requests
 from conftest import assert_matches_schema, load_spec
 from rdflib import URIRef
 
-from timberdoodle.ingest import ingest_equip_tags, ingest_tags, link_point_to_equip
-from timberdoodle.ingest_api import OPENAPI_SPEC_PATH, make_handler
-from timberdoodle.remote_store import RemoteStore
-from timberdoodle.timeseries import connect, connect_pool
+from baler.ingest import ingest_equip_tags, ingest_tags, link_point_to_equip
+from baler.ingest_api import OPENAPI_SPEC_PATH, make_handler
+from baler.remote_store import RemoteStore
+from baler.timeseries import connect, connect_pool
 
 GATEWAY_SECRET = "test-gateway-secret"
 
@@ -32,7 +32,7 @@ def spec() -> dict:
 
 @pytest.fixture
 def live_server(monkeypatch):
-    monkeypatch.setenv("TIMBERDOODLE_GATEWAY_SECRET", GATEWAY_SECRET)
+    monkeypatch.setenv("BALER_GATEWAY_SECRET", GATEWAY_SECRET)
     store = RemoteStore()
     ts_pool = connect_pool()
     server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(store, ts_pool))
@@ -207,7 +207,7 @@ def test_computed_points_take_unit_and_label_from_their_history_rows(live_server
     graph tags (see _write_and_attach) - a computed point attached to this
     AHU must still come back with a real display name and unit."""
     base_url, store = live_server
-    from timberdoodle import timeseries
+    from baler import timeseries
 
     computed = f"urn:point:computed/{ahu['run']}/ahu"
     link_point_to_equip(store, URIRef(computed), URIRef(ahu["equip"]))
@@ -232,9 +232,9 @@ def test_brick_only_entities_are_found_by_brick_words_classes_and_aliases(live_s
     the run's own equipment so the assertion is scoped, but the point is
     typed brick:RTU (Brick's alias for Rooftop_Unit, a subclass of
     Air_Handling_Unit) and never tagged."""
-    from timberdoodle import timeseries
-    from timberdoodle.store import BRICK
-    from timberdoodle.timeseries import connect
+    from baler import timeseries
+    from baler.store import BRICK
+    from baler.timeseries import connect
 
     base_url, store = live_server
     rtu = URIRef(f"urn:equip:brick/{ahu['run']}/rtu")

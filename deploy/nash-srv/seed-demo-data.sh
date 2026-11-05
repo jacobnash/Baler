@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 # One-time (not per-deploy) population of the public demo with real
 # equipment/points/history data, instead of an empty app past the login
-# screen. Run once, on nash-srv, after docker-compose.fbf.yml's services
+# screen. Run once, on nash-srv, after docker-compose.windrow.yml's services
 # are up (i.e. after a deploy that includes them):
 #
-#   cd ~/timberdoodle-deploy/deploy/nash-srv && bash seed-demo-data.sh
+#   cd ~/baler-deploy/deploy/nash-srv && bash seed-demo-data.sh
 #
 # (or from the actual runner workspace - anywhere docker compose can see
 # the same project). Safe-ish to re-run: provisioning/autotag are meant to
 # be re-run as new equipment/points show up, but seed_derivations_and_faults.py
 # POSTs new derivation/rule definitions every time - re-running it creates
-# duplicates, so this script only runs it if TIMBERDOODLE_ADMIN_EMAIL has
+# duplicates, so this script only runs it if BALER_ADMIN_EMAIL has
 # no derivations yet.
 #
 # What this does:
-#   1. Tells fbf.api to start polling the mock BACnet device and publish
+#   1. Tells windrow.api to start polling the mock BACnet device and publish
 #      its ~500 points to MQTT (fbf/mock_hospital's site spec, baked into
-#      the fbf image at build time).
-#   2. Waits for timberdoodle's mqtt_listener (already running) to have
+#      the windrow image at build time).
+#   2. Waits for baler's mqtt_listener (already running) to have
 #      actually ingested some of that.
 #   3. Runs autotag (rule engine only, --no-llm - no ANTHROPIC_API_KEY
 #      needed) so points get classified into Brick equipment/point
@@ -29,26 +29,25 @@
 
 set -euo pipefail
 
-DC="docker compose -f docker-compose.yml -f deploy/nash-srv/docker-compose.override.yml -f deploy/nash-srv/docker-compose.fbf.yml"
+DC="docker compose -f docker-compose.yml -f deploy/nash-srv/docker-compose.override.yml -f deploy/nash-srv/docker-compose.windrow.yml"
 cd "$(dirname "$0")/../.."   # repo root, wherever this script actually lives
 
 DEMO_ADMIN_EMAIL="${DEMO_ADMIN_EMAIL:?set DEMO_ADMIN_EMAIL in your shell before running (same value as the GitHub secret)}"
 DEMO_ADMIN_PASSWORD="${DEMO_ADMIN_PASSWORD:?set DEMO_ADMIN_PASSWORD in your shell before running (same value as the GitHub secret)}"
 
-echo "==> 1. Provisioning fbf.api against the mock device (idempotent - re-provisioning an already-known device/point is a no-op)"
-$DC exec -T fbf_api python -m fbf.mock_hospital provision \
+echo "==> 1. Provisioning windrow.api against the mock device (idempotent - re-provisioning an already-known device/point is a no-op)"
+$DC exec -T windrow_api python -m windrow.mock_hospital provision \
   --device-address 172.30.0.10:47808 --device-instance 3456
 
 echo "==> 2. Waiting for mqtt_listener to have ingested something"
 for i in $(seq 1 30); do
-  count=$($DC exec -T postgres psql -U timberdoodle -d timberdoodle -tAc \
-    "select count(*) from point_history" 2>/dev/null || echo 0)
+  count=$($DC exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "select count(*) from point_history"' 2>/dev/null || echo 0)
   [ "${count:-0}" -gt 0 ] 2>/dev/null && { echo "    ${count} points ingested"; break; }
   sleep 2
 done
 
 echo "==> 3. Autotag (rule engine only, no LLM)"
-$DC exec -T ingest_api python -m timberdoodle.autotag --no-llm
+$DC exec -T ingest_api python -m baler.autotag --no-llm
 
 echo "==> 4. Derivations + fault rules"
 existing=$($DC exec -T ingest_api python -c "
@@ -64,7 +63,7 @@ print(len(json.load(urllib.request.urlopen(req))))
 if [ "${existing:-0}" -gt 0 ]; then
   echo "    ${existing} derivations already exist - skipping (safe to delete them first and re-run if you actually want fresh ones)"
 else
-  $DC exec -T -e TIMBERDOODLE_ADMIN_EMAIL="$DEMO_ADMIN_EMAIL" -e TIMBERDOODLE_ADMIN_PASSWORD="$DEMO_ADMIN_PASSWORD" \
+  $DC exec -T -e BALER_ADMIN_EMAIL="$DEMO_ADMIN_EMAIL" -e BALER_ADMIN_PASSWORD="$DEMO_ADMIN_PASSWORD" \
     ingest_api python scripts/seed_derivations_and_faults.py \
     --auth-api http://gateway/auth --derivation-api http://gateway/derivation --fault-api http://gateway/fault
 fi

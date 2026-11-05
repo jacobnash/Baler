@@ -12,8 +12,8 @@ from zoneinfo import ZoneInfo
 import pytest
 from rdflib import OWL, RDF, RDFS, Literal, Namespace, URIRef
 
-from timberdoodle import hisquery as h
-from timberdoodle.store import BRICK, HAYSTACK, TD, Store
+from baler import hisquery as h
+from baler.store import BRICK, HAYSTACK, TD, Store
 
 UTC = ZoneInfo("UTC")
 NOW = datetime(2026, 9, 8, 2, 30, tzinfo=UTC)  # a Tuesday
@@ -208,7 +208,7 @@ HX_ZT = URIRef("urn:point:hx/VAV-9/zt")
 B_RTU = URIRef("urn:equip:brick/rtu-7")
 B_ZT = URIRef("urn:point:brick/rtu-7/zt")
 B_FAN = URIRef("urn:point:brick/rtu-7/fan")
-PROJ = Namespace("urn:timberdoodle:proj#")
+PROJ = Namespace("urn:baler:proj#")
 TAG = Namespace("https://brickschema.org/schema/BrickTag#")
 # A Brick extension in its own namespace, written the way Brick's extension
 # guidance says to (docs.brickschema.org/extra/extending.html) - the reason

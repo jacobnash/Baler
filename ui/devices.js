@@ -1,15 +1,15 @@
 // No build step, no framework - same spirit as app.js. Talks directly to
-// fbf.api (a separate process/repo, not part of timberdoodle's own
+// windrow.api (a separate process/repo, not part of baler's own
 // backend - see api.py's CORS end_headers() override, added specifically
 // so this page can call it cross-origin).
 const params = new URLSearchParams(location.search);
-const FBF_API_URL = params.get("fbf") || "http://localhost:8001";
+const WINDROW_API_URL = params.get("windrow") || "http://localhost:8001";
 
 const statusEl = document.getElementById("status");
 const REFRESH_INTERVAL_MS = 5000;
 
-async function fbf(method, path, body) {
-  const res = await fetch(`${FBF_API_URL}${path}`, {
+async function windrow(method, path, body) {
+  const res = await fetch(`${WINDROW_API_URL}${path}`, {
     method,
     headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -42,7 +42,7 @@ function defaultFlagCell(device) {
   const badge = el("span", { className: "badge default-cred-flag", textContent: `${flag.username}/${flag.password || "(blank)"} works` });
   const recheckBtn = el("button", { type: "button", textContent: "Recheck" });
   recheckBtn.addEventListener("click", async () => {
-    await fbf("POST", `/devices/${device.id}/recheck-credentials`);
+    await windrow("POST", `/devices/${device.id}/recheck-credentials`);
     await loadAll();
   });
   return el("td", {}, [badge, document.createElement("br"), recheckBtn]);
@@ -63,7 +63,7 @@ function renderDevices(devices) {
     if (device.status !== "ignored") {
       const ignoreBtn = el("button", { type: "button", textContent: "Ignore" });
       ignoreBtn.addEventListener("click", async () => {
-        await fbf("PATCH", `/devices/${device.id}`, { status: "ignored" });
+        await windrow("PATCH", `/devices/${device.id}`, { status: "ignored" });
         await loadAll();
       });
       actions.appendChild(ignoreBtn);
@@ -76,7 +76,7 @@ function renderDevices(devices) {
     if (device.status === "ignored") {
       const restoreBtn = el("button", { type: "button", textContent: "Unignore" });
       restoreBtn.addEventListener("click", async () => {
-        await fbf("PATCH", `/devices/${device.id}`, { status: "pending" });
+        await windrow("PATCH", `/devices/${device.id}`, { status: "pending" });
         await loadAll();
       });
       actions.appendChild(restoreBtn);
@@ -106,7 +106,7 @@ function renderConnections(connections) {
   for (const conn of connections) {
     const deleteBtn = el("button", { type: "button", textContent: "Delete" });
     deleteBtn.addEventListener("click", async () => {
-      await fbf("DELETE", `/connections/${conn.id}`);
+      await windrow("DELETE", `/connections/${conn.id}`);
       await loadAll();
     });
     tbody.appendChild(
@@ -128,7 +128,7 @@ function renderModbusConnections(connections) {
   for (const conn of connections) {
     const deleteBtn = el("button", { type: "button", textContent: "Delete" });
     deleteBtn.addEventListener("click", async () => {
-      await fbf("DELETE", `/modbus/connections/${conn.id}`);
+      await windrow("DELETE", `/modbus/connections/${conn.id}`);
       await loadAll();
     });
     tbody.appendChild(
@@ -169,7 +169,7 @@ credentialForm.addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const username = document.getElementById("credential-username").value;
   const password = document.getElementById("credential-password").value;
-  await fbf("PATCH", credentialPath(credentialTarget), { username, password });
+  await windrow("PATCH", credentialPath(credentialTarget), { username, password });
   credentialDialog.close();
   await loadAll();
 });
@@ -193,7 +193,7 @@ function openProvisionDialog(device) {
     const learnList = el("ul", { className: "learn-list" });
     learnBtn.addEventListener("click", async () => {
       learnList.innerHTML = "<li class=\"hint\">loading…</li>";
-      const points = await fbf("POST", "/learn", { device_address: device.address, device_instance: device.device_instance });
+      const points = await windrow("POST", "/learn", { device_address: device.address, device_instance: device.device_instance });
       learnList.innerHTML = "";
       for (const point of points) {
         const checkbox = el("input", { type: "checkbox", value: JSON.stringify({ object_identifier: point.object_identifier, label: point.label }) });
@@ -224,7 +224,7 @@ provisionForm.addEventListener("submit", async (ev) => {
 
   if (provisionForm.dataset.mode === "bacnet") {
     const points = [...provisionFields.querySelectorAll('input[type="checkbox"]:checked')].map((cb) => JSON.parse(cb.value));
-    await fbf("POST", "/connections", {
+    await windrow("POST", "/connections", {
       device_address: provisionForm.dataset.deviceAddress,
       device_instance: Number(provisionForm.dataset.deviceInstance),
       topic_prefix: topicPrefix,
@@ -232,7 +232,7 @@ provisionForm.addEventListener("submit", async (ev) => {
     });
   } else {
     const points = JSON.parse(document.getElementById("provision-points").value || "{}");
-    await fbf("POST", "/modbus/connections", {
+    await windrow("POST", "/modbus/connections", {
       host: provisionForm.dataset.host,
       port: Number(provisionForm.dataset.port),
       topic_prefix: topicPrefix,
@@ -250,21 +250,21 @@ async function loadAll() {
   if (credentialDialog.open || provisionDialog.open) return; // don't clobber a form the human is mid-editing
   try {
     const [devices, connections, modbusConnections] = await Promise.all([
-      fbf("GET", "/devices"),
-      fbf("GET", "/connections"),
-      fbf("GET", "/modbus/connections"),
+      windrow("GET", "/devices"),
+      windrow("GET", "/connections"),
+      windrow("GET", "/modbus/connections"),
     ]);
     renderDevices(devices);
     renderConnections(connections);
     renderModbusConnections(modbusConnections);
     statusEl.textContent = `${devices.length} known devices, ${connections.length + modbusConnections.length} connections`;
   } catch (err) {
-    // The default FBF_API_URL (localhost:8001) is only ever reachable if
-    // *you* have FBF running on the machine viewing this page - it's a
+    // The default WINDROW_API_URL (localhost:8001) is only ever reachable if
+    // *you* have Windrow running on the machine viewing this page - it's a
     // separate BACnet/Modbus bridge project, not something this deploy
     // stands up. Spell that out instead of a bare fetch error, since on a
     // public deployment every visitor hits this by default.
-    statusEl.textContent = `Can't reach fbf.api at ${FBF_API_URL} (${err.message}). This page only works against your own local FBF instance - run FBF, or add ?fbf=<url> pointing at one you have access to.`;
+    statusEl.textContent = `Can't reach windrow.api at ${WINDROW_API_URL} (${err.message}). This page only works against your own local Windrow instance - run Windrow, or add ?windrow=<url> pointing at one you have access to.`;
   }
 }
 

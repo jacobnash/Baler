@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: Timberdoodle Ingest API
+  title: Baler Ingest API
   version: "1.0.0"
   description: |
     Push-style ingestion front door for building-data sources that would
@@ -21,17 +21,17 @@ servers:
   - url: http://localhost:8000
     description: >-
       Direct - only reachable if you're running this process bare-metal
-      (`python -m timberdoodle.ingest_api --help`) or from inside the
+      (`python -m baler.ingest_api --help`) or from inside the
       Docker network. docker-compose.yml does not publish this port to
       the host, so this URL will refuse connections in the normal
       containerized setup.
 tags:
   - name: Ingest
-    description: Push point readings into Timberdoodle over HTTP.
+    description: Push point readings into Baler over HTTP.
   - name: History
     description: >-
       Read and correct a point's stored history. Exists primarily so
-      Timberdoodle can act as a drop-in history-storage backend for
+      Baler can act as a drop-in history-storage backend for
       Haxall/SkySpark's `IHisExt` extension point (span-based read,
       point-scoped read/write/delete) - see the "Haxall drop-in" doc page.
 paths:
@@ -226,7 +226,7 @@ paths:
       tags: [History]
       summary: Delete one point's history item at an exact timestamp
       description: >-
-        The Timberdoodle side of Haxall's `IHisExt.write` delete
+        The Baler side of Haxall's `IHisExt.write` delete
         convention (a written value equal to `xeto::None.val` means
         "remove this item", not "store null"). Deletes at most one row -
         the one at exactly this timestamp.
@@ -259,7 +259,7 @@ paths:
       tags: [History]
       summary: Axon-style `readAll(filter).hisRead(span)` - many points' history in one call
       description: |
-        The SkySpark "what is this AHU doing?" query, against Timberdoodle's
+        The SkySpark "what is this AHU doing?" query, against Baler's
         own graph + history: a Haystack filter picks entities, `hisRead`
         picks the span, an optional `hisRollup` folds the raw samples into
         fixed buckets. Points that match are read directly; **equipment**
@@ -317,7 +317,7 @@ paths:
               value: read(id==@urn:equip:fbf/mock-ahu-1).hisRead(2026-09-01..2026-09-07)
         - name: tz
           in: query
-          description: IANA zone the span is resolved in. Defaults to `TIMBERDOODLE_TZ`, else UTC.
+          description: IANA zone the span is resolved in. Defaults to `BALER_TZ`, else UTC.
           schema:
             type: string
           example: America/New_York

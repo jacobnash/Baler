@@ -1,11 +1,11 @@
 //
-// his - Timberdoodle history provider for Haxall. Named "his" (not a
+// his - Baler history provider for Haxall. Named "his" (not a
 // namespaced "td.his") so it wins RuntimeExts.getByType's alphabetical
 // tie-break against the boot lib "hx.hxd.his" - see build.fan's comment.
 //
 
 pragma: Lib <
-  doc: "Timberdoodle history provider"
+  doc: "Baler history provider"
   version: BuildVar "hx.version"
   depends: {
     { lib: "sys", versions: BuildVar "ph.depend" }
@@ -21,8 +21,8 @@ pragma: Lib <
     type: BuildVar "hx.vcs.type"
     uri:  BuildVar "hx.vcs.uri"
   }
-  libExt: TimberdoodleHisExt
+  libExt: BalerHisExt
 >
 
-// Timberdoodle history provider - see TimberdoodleHisExt.fan
-TimberdoodleHisExt: Ext
+// Baler history provider - see BalerHisExt.fan
+BalerHisExt: Ext

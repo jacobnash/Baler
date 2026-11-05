@@ -1,10 +1,10 @@
-# Timberdoodle — agent notes
+# Baler — agent notes
 
 Full docs: [README.md](README.md) (setup, ports, tests) and
 [docs-site/](docs-site) (architecture, fault detection, webhooks, Haxall
 integrations). This file is gotchas only — don't duplicate those.
 
-- **Src layout**: package is `src/timberdoodle/`, installed editable
+- **Src layout**: package is `src/baler/`, installed editable
   (`pip install -e .`; `pip install -e ".[dev,llm]"` for tests + autotag;
   add `,validate` for SHACL validation — `tests/test_shacl_validate.py`
   needs `pyshacl` installed or it errors at import).
@@ -14,8 +14,17 @@ integrations). This file is gotchas only — don't duplicate those.
   failing. CI's unit job installs it; the Dockerfile builds it in a Rust
   stage. The openhay git ref is pinned in two places, `pyproject.toml` and
   the Dockerfile's `OPENHAY_REF`, so bump both together.
+- **Renamed from Timberdoodle (FBF -> Windrow).** The legacy shims are
+  load-bearing for the live nash-srv install, not leftovers: compose's
+  `${BALER_X:-${TIMBERDOODLE_X}}` fallbacks, the `BALER_PG_USER`/`BALER_PG_DB`/
+  `BALER_VOLUME_PREFIX` variables, and the `migrate` service
+  (`baler.migrate`, rewrites `urn:timberdoodle:` IRIs). The `fbf/` MQTT
+  topic prefix and `urn:point:fbf/...` ids are deliberately unchanged
+  (point identity). See `deploy/MIGRATING-TO-BALER.md` before touching any
+  of these. A blanket `TIMBERDOODLE`->`BALER` find/replace will silently
+  break the fallbacks (it did once).
 - **No Makefile/justfile.** Every command is literally
-  `python -m timberdoodle.<module>` or `docker compose ...` — check
+  `python -m baler.<module>` or `docker compose ...` — check
   `docker-compose.yml`'s `command:` fields or a module's
   `if __name__ == "__main__"` block for the real invocation, don't assume
   a wrapper script exists. There is CI (`.github/workflows/ci.yml`, two
@@ -25,7 +34,7 @@ integrations). This file is gotchas only — don't duplicate those.
 - **Env vars**: `.env.example` at the repo root is the single source of
   truth for every var any process reads — check there before grepping
   source.
-- **Gateway auth requires `TIMBERDOODLE_JWT_SECRET`/`TIMBERDOODLE_GATEWAY_SECRET`
+- **Gateway auth requires `BALER_JWT_SECRET`/`BALER_GATEWAY_SECRET`
   in `.env` — `docker compose up` refuses to start the `gateway` service
   without both (see README quick start).** No more htpasswd files — every
   route on every API is JWT-verified in nginx itself (`gateway/njs/`,
@@ -54,7 +63,7 @@ integrations). This file is gotchas only — don't duplicate those.
   `fault_api.py`'s `POST /webhooks` and `fault_detector.py`'s delivery
   both reject loopback/private/reserved targets (SSRF protection,
   `webhooks.validate_url`). Testing against a local receiver (e.g.
-  `http://127.0.0.1:<port>/`) needs `TIMBERDOODLE_ALLOW_PRIVATE_WEBHOOKS=1`
+  `http://127.0.0.1:<port>/`) needs `BALER_ALLOW_PRIVATE_WEBHOOKS=1`
   set for whichever process is doing the registering/delivering — it's a
   deployment-level env var, not a per-webhook field, so it can't be set
   through the API itself.

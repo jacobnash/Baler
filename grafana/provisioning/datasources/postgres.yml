@@ -1,13 +1,13 @@
 apiVersion: 1
 
 datasources:
-  - name: Timberdoodle Postgres
-    uid: timberdoodle-postgres
+  - name: Baler Postgres
+    uid: baler-postgres
     type: postgres
     access: proxy
     url: postgres:5432
-    database: timberdoodle
-    user: timberdoodle
+    database: ${BALER_PG_DB}
+    user: ${BALER_PG_USER}
     isDefault: true
     editable: true
     secureJsonData:

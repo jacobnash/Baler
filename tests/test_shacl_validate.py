@@ -5,10 +5,10 @@ this runs in the fast default suite (no @pytest.mark.integration).
 
 from rdflib import RDF, Graph, Namespace
 
-from timberdoodle.ingest import ingest_tags
-from timberdoodle.mapping import classify_point, load_rules
-from timberdoodle.shacl_validate import load_shapes, validate_graph
-from timberdoodle.store import Store
+from baler.ingest import ingest_tags
+from baler.mapping import classify_point, load_rules
+from baler.shacl_validate import load_shapes, validate_graph
+from baler.store import Store
 
 EX = Namespace("urn:test-shacl#")
 

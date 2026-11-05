@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from timberdoodle.webhooks import deliver, matches_filter, sign, validate_url
+from baler.webhooks import deliver, matches_filter, sign, validate_url
 
 
 def test_sign_produces_a_known_hmac_sha256_hex_digest():
@@ -44,7 +44,7 @@ def _make_receiver():
         def do_POST(self):
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
-            received.append({"body": body, "signature": self.headers.get("X-Timberdoodle-Signature")})
+            received.append({"body": body, "signature": self.headers.get("X-Baler-Signature")})
             self.send_response(200)
             self.end_headers()
 

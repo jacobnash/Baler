@@ -1,0 +1,10 @@
+//
+// windrow - real Haxall connector for Windrow's BACnet/Modbus-to-MQTT bridge.
+//
+
+--------------------------------------------------------------------------
+def: ^lib:windrow
+depends: [^lib:ph, ^lib:axon, ^lib:hx, ^lib:conn]
+typeName: "windrowConn::WindrowExt"
+doc: "Windrow bridge connector"
+--------------------------------------------------------------------------

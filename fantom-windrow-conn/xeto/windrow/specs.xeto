@@ -1,0 +1,12 @@
+// Windrow bridge connector rec
+WindrowConn: Conn {
+  windrowConn
+}
+
+// Point synchronized via the Windrow MQTT bridge - windrowCur holds the exact
+// MQTT topic Windrow's bridge publishes readings on (e.g.
+// "fbf/mock-ahu-1/analogValue,1").
+WindrowPoint: ConnPoint {
+  windrowConnRef: Ref? <of:WindrowConn>
+  windrowCur: Str?
+}

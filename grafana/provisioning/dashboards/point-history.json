@@ -1,6 +1,6 @@
 {
-  "title": "Timberdoodle: Point History",
-  "uid": "timberdoodle-point-history",
+  "title": "Baler: Point History",
+  "uid": "baler-point-history",
   "schemaVersion": 39,
   "version": 1,
   "editable": true,
@@ -11,7 +11,7 @@
       {
         "name": "point_uri",
         "type": "query",
-        "datasource": { "type": "postgres", "uid": "timberdoodle-postgres" },
+        "datasource": { "type": "postgres", "uid": "baler-postgres" },
         "query": "SELECT DISTINCT point_uri FROM point_history ORDER BY point_uri LIMIT 200",
         "refresh": 2,
         "includeAll": false
@@ -23,7 +23,7 @@
       "id": 1,
       "title": "Point value over time",
       "type": "timeseries",
-      "datasource": { "type": "postgres", "uid": "timberdoodle-postgres" },
+      "datasource": { "type": "postgres", "uid": "baler-postgres" },
       "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
       "targets": [
         {
@@ -37,7 +37,7 @@
       "id": 2,
       "title": "Distinct points ingested",
       "type": "stat",
-      "datasource": { "type": "postgres", "uid": "timberdoodle-postgres" },
+      "datasource": { "type": "postgres", "uid": "baler-postgres" },
       "gridPos": { "h": 6, "w": 8, "x": 0, "y": 10 },
       "targets": [
         {
@@ -51,7 +51,7 @@
       "id": 3,
       "title": "Open faults",
       "type": "table",
-      "datasource": { "type": "postgres", "uid": "timberdoodle-postgres" },
+      "datasource": { "type": "postgres", "uid": "baler-postgres" },
       "gridPos": { "h": 8, "w": 16, "x": 8, "y": 10 },
       "targets": [
         {

@@ -1,6 +1,6 @@
 # Contributing
 
-Timberdoodle is AGPLv3 (see [LICENSE](LICENSE)): you're always free to
+Baler is AGPLv3 (see [LICENSE](LICENSE)): you're always free to
 fork it and self-host, no agreement needed. Contributing changes back
 upstream is a separate thing and requires signing the
 [CLA](CLA.md) first — it lets the project (Jacob Nash, its maintainer)
@@ -15,7 +15,7 @@ project into a separate "open" and "paid" fork.
 2. `pip install -e ".[dev,validate]"`
 3. `python -m pytest -m "not integration"` — see [README.md](README.md#tests)
    for the full test commands, including the integration suite.
-4. `ruff check src/ tests/` and `mypy src/timberdoodle` — both block CI
+4. `ruff check src/ tests/` and `mypy src/baler` — both block CI
    (`.github/workflows/ci.yml`), zero findings, no loosening the gate. Scoped
    `# noqa` with a reason is fine; blanket suppression isn't.
 5. Touching `gateway/njs/`? Run `node gateway/njs/test_jwt.mjs && node

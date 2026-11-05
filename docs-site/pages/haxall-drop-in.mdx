@@ -2,26 +2,26 @@
 title: Haxall Drop-In
 ---
 
-Timberdoodle can be the actual point-history backend behind a real Haxall
+Baler can be the actual point-history backend behind a real Haxall
 project — not a mirror, not a comparison, the real thing. Haxall's UI,
 Axon, and rules keep working completely unchanged; `hisWrite`/`hisRead`
-just land in Timberdoodle's Postgres/Timescale store instead of Folio.
+just land in Baler's Postgres/Timescale store instead of Folio.
 
 This works because Haxall exposes a real, intentional extension point for
 exactly this: `hx::IHisExt`. A small Fantom library
-(`~/timberdoodle/fantom-his-ext/`) implements it and forwards reads/writes
+(`~/baler/fantom-his-ext/`) implements it and forwards reads/writes
 to this API's [`/history` endpoints](/api/ingest) over plain HTTP.
 
 Live-verified against a real Haxall 4.0.6 instance, through the current
 gateway/Bearer-token config (not just against source, and not just the
 old hardcoded-URL version): `hisWrite` called through Axon lands in
-Timberdoodle's Postgres, checked independently via this API's own `GET
+Baler's Postgres, checked independently via this API's own `GET
 /history`; then Haxall's own `hisRead` op reads the same value back at
 the same timestamp. See [Re-verified live](#configuring-it) below for
 the exact steps that were run.
 
 This is push-mode: something is installed into Haxall so it calls out to
-Timberdoodle. For the opposite direction — Timberdoodle pulling from a
+Baler. For the opposite direction — Baler pulling from a
 remote Haystack/Haxall/SkySpark server with nothing installed on the
 other side — see [Haystack Puller](/haystack-puller).
 
@@ -35,7 +35,7 @@ const mixin IHisExt : Ext {
 }
 ```
 
-`TimberdoodleHisExt` implements this exactly like Haxall's own default
+`BalerHisExt` implements this exactly like Haxall's own default
 (`hxd::HxdHisExt`, which just wraps `rt.db.his`) — same two methods, HTTP
 calls to `/ingest` and `/history` instead.
 
@@ -63,9 +63,9 @@ That's it — no `libRemove` needed or possible for the boot lib; adding
 
 ## Configuring it
 
-The extension needs a Timberdoodle base URL and, since every route now
+The extension needs a Baler base URL and, since every route now
 goes through the JWT-enforced [gateway](/architecture#the-gateway), a
-Bearer token. Both are real settings (`TimberdoodleHisSettings.fan`, the
+Bearer token. Both are real settings (`BalerHisSettings.fan`, the
 same `@Setting`/`Ext.settings()` mechanism Haxall's own `hxHttp` lib
 uses), not hardcoded — get an operator-role token first (see
 [Gateway Auth](/gateway-auth) for `POST /auth/orgs`/`POST /auth/login`),
@@ -96,7 +96,7 @@ a real Haxall 4.0.6 install, `libAdd(["his"])`'d it, ran
 through a live curVal→`hisCollectCov` transition (`hisStatus: "ok"`), and
 confirmed it independently via this API's own `GET /history` — then read
 it back through Haxall's own `hisRead` op (which calls
-`TimberdoodleHisExt.read()` under the hood) and got the same value at the
+`BalerHisExt.read()` under the hood) and got the same value at the
 same timestamp. Both directions of the settings-based config work
 end-to-end through the gateway with a real Bearer token, not just
 cross-checked against source.

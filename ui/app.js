@@ -10,8 +10,8 @@ const OXIGRAPH_URL = params.get("oxigraph") || "http://localhost:7878/query";
 const INGEST_API_URL = params.get("ingest") || "/ingest";
 
 const BRICK = "https://brickschema.org/schema/Brick#";
-const TD = "urn:timberdoodle:td#";
-const HAYSTACK = "urn:timberdoodle:haystack#";
+const TD = "urn:baler:td#";
+const HAYSTACK = "urn:baler:haystack#";
 
 const statusEl = document.getElementById("status");
 const treeEl = document.getElementById("tree");
@@ -166,7 +166,7 @@ function renderTree(byType) {
     details.appendChild(summary);
 
     for (const equipUri of equipUris.sort()) {
-      details.appendChild(buildEquipNode(equipUri, localName(equipUri).replace(/^fbf\//, "")));
+      details.appendChild(buildEquipNode(equipUri, localName(equipUri).replace(/^windrow\//, "")));
     }
     treeEl.appendChild(details);
   }
@@ -263,7 +263,7 @@ async function renderLocationSection() {
           buildingList.appendChild(floorLi);
         } else {
           const li = document.createElement("li");
-          const label = `${localName(bChild.uri).replace(/^fbf\//, "")}${bChild.types.size ? ` (${[...bChild.types].join(", ")})` : ""}`;
+          const label = `${localName(bChild.uri).replace(/^windrow\//, "")}${bChild.types.size ? ` (${[...bChild.types].join(", ")})` : ""}`;
           li.appendChild(buildEquipNode(bChild.uri, label));
           buildingList.appendChild(li);
         }

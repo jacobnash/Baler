@@ -25,7 +25,7 @@ jobs:
     # the self-hosted runner. workflow_dispatch is inherently safe - GitHub
     # only lets collaborators with write access trigger it.
     if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository)
-    runs-on: [self-hosted, nash-srv, timberdoodle]
+    runs-on: [self-hosted, nash-srv, baler]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,7 +34,7 @@ jobs:
           # back to the dispatch event's own sha when triggered manually
           # (workflow_run.head_sha doesn't exist on that event).
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
-          # fbf/ is a public submodule now - checkout can clone it directly,
+          # windrow/ is a public submodule now - checkout can clone it directly,
           # no separate step or deploy key needed.
           submodules: true
 
@@ -42,7 +42,7 @@ jobs:
         # The only command this runner user can run as root - see
         # deploy/nash-srv/setup-runner.sh. Rebuilds/recreates containers and
         # restarts gateway; postgres-data/oxigraph-data volumes are untouched.
-        run: sudo /usr/local/sbin/timberdoodle-deploy.sh
+        run: sudo /usr/local/sbin/baler-deploy.sh
 
       - name: Seed demo account if needed
         # Deploy stack (above) already blocks until gateway responds again

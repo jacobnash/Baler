@@ -20,9 +20,9 @@ oh = pytest.importorskip("openhay")
 
 from rdflib import RDF, Literal, URIRef
 
-from timberdoodle import auth
-from timberdoodle import haystack_api as ha
-from timberdoodle.store import BRICK, HAYSTACK, Store
+from baler import auth
+from baler import haystack_api as ha
+from baler.store import BRICK, HAYSTACK, Store
 
 AHU = "urn:equip:fbf/ahu-1"
 DAT = "urn:point:fbf/ahu-1/analogInput,1"
@@ -187,7 +187,7 @@ SECRET = "test-gateway-secret"
 
 @pytest.fixture
 def http(backend, monkeypatch):
-    monkeypatch.setenv("TIMBERDOODLE_GATEWAY_SECRET", SECRET)
+    monkeypatch.setenv("BALER_GATEWAY_SECRET", SECRET)
     srv = ThreadingHTTPServer(("127.0.0.1", 0), ha.make_handler(backend, None))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_port}"
@@ -229,7 +229,7 @@ def test_http_requires_gateway(http):
 # --- SCRAM against the existing password hash -----------------------------
 
 
-def test_scram_credentials_from_timberdoodle_hash_match_direct_derivation():
+def test_scram_credentials_from_baler_hash_match_direct_derivation():
     stored = auth.hash_password("pencil")
     salt_hex, _ = stored.split("$")
     creds = ha.ScramLogin.credentials_from_hash(stored)
@@ -238,7 +238,7 @@ def test_scram_credentials_from_timberdoodle_hash_match_direct_derivation():
 
 
 def test_scram_login_issues_session_jwt(monkeypatch):
-    monkeypatch.setenv("TIMBERDOODLE_JWT_SECRET", "x" * 32)
+    monkeypatch.setenv("BALER_JWT_SECRET", "x" * 32)
     monkeypatch.setattr(auth, "_PBKDF2_ITERATIONS", 4096)  # keep the test fast; same math
     user = {"id": "u1", "org_id": "o1", "email": "admin@acme.example",
             "password_hash": auth.hash_password("pencil"), "role": "admin"}

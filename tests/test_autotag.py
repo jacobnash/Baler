@@ -20,12 +20,12 @@ import pytest
 import requests
 from rdflib import Namespace, URIRef
 
-from timberdoodle import autotag, llm_classifier, mapping
-from timberdoodle.autotag import find_unclassified, run
-from timberdoodle.ingest import ingest_tags
-from timberdoodle.mapping import classify_point_with_fallback
-from timberdoodle.remote_store import RemoteStore
-from timberdoodle.store import BRICK
+from baler import autotag, llm_classifier, mapping
+from baler.autotag import find_unclassified, run
+from baler.ingest import ingest_tags
+from baler.mapping import classify_point_with_fallback
+from baler.remote_store import RemoteStore
+from baler.store import BRICK
 
 BLDG = Namespace("urn:test-autotag#")
 

@@ -7,13 +7,13 @@ title: Haystack Puller
 SkySpark, or any other Haystack-compliant server — and ingests it through
 the exact same pipeline every other source uses (`ingest.py`, `mapping.py`).
 Point it at a read-only API user on an existing Haxall/SkySpark deployment
-and Timberdoodle classifies the same already-tagged points/equipment
+and Baler classifies the same already-tagged points/equipment
 through its own Brick mapping, for comparison, with no change to the
 target system.
 
 This is the opposite direction from [Haxall Drop-In](/haxall-drop-in):
 that page installs a Fantom extension *into* Haxall so it pushes history
-to Timberdoodle. This is pull-mode — Timberdoodle reaches out to a remote
+to Baler. This is pull-mode — Baler reaches out to a remote
 Haystack server on its own poll loop, nothing is installed on the other
 side.
 
@@ -34,7 +34,7 @@ check only fires when the variable is completely absent — which it never
 is under `docker compose`. Leave them unset and the container starts
 clean, then fails every pull cycle against an empty URL and retries
 silently forever, with no startup error to tell you why. Only running the
-module directly (`python -m timberdoodle.haystack_puller`, no env var set
+module directly (`python -m baler.haystack_puller`, no env var set
 at all and no `--haystack-url` flag) actually hits the "required"
 argparse error. See the repo's `.env.example` or the table below.
 
@@ -73,7 +73,7 @@ python -m scripts.mock_haystack_server
 Then, against the printed port:
 
 ```bash
-python -m timberdoodle.haystack_puller \
+python -m baler.haystack_puller \
   --haystack-url http://127.0.0.1:<port> \
   --haystack-user tduser --haystack-password tdpass \
   --once
@@ -97,12 +97,12 @@ python -m timberdoodle.haystack_puller \
 straight to the remote server's `read` op. `--backfill-days` is how far
 back history is pulled the first time a point is seen; after that, the
 watermark table takes over. `--tick-seconds` is deliberately coarse — it
-polls a remote server, not Timberdoodle's own MQTT broker.
+polls a remote server, not Baler's own MQTT broker.
 
 To run it standalone, outside compose:
 
 ```bash
-python -m timberdoodle.haystack_puller \
+python -m baler.haystack_puller \
   --haystack-url https://your-haxall-host \
   --haystack-user readonly
 ```
@@ -115,7 +115,7 @@ pull-everything pass — every currently-tagged equip and point on the
 source — and exits instead of polling forever:
 
 ```bash
-python -m timberdoodle.haystack_puller \
+python -m baler.haystack_puller \
   --haystack-url https://your-haxall-host \
   --haystack-user readonly \
   --once
@@ -123,7 +123,7 @@ python -m timberdoodle.haystack_puller \
 
 It prints a classification summary (`direct`/`fallback`/`miss`/`llm` counts
 for equip and points separately). Follow up with
-`python -m timberdoodle.autotag` to LLM-sweep anything the rule engine
+`python -m baler.autotag` to LLM-sweep anything the rule engine
 alone couldn't place, proposing new `rules/haystack_to_brick.yaml` entries
 for a human to review — see [Adding a Data Source](/adding-a-data-source)
 and the README's autotag section.

@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from timberdoodle.auth import (
+from baler.auth import (
     create_api_key,
     create_org,
     create_site,
@@ -26,7 +26,7 @@ from timberdoodle.auth import (
     user_site_ids,
     verify_password,
 )
-from timberdoodle.timeseries import connect
+from baler.timeseries import connect
 
 
 @pytest.fixture
@@ -58,7 +58,7 @@ def conn():
 def jwt_secret(monkeypatch):
     # Real HMAC secrets have no sane default (unlike e.g. a localhost DB
     # DSN) - every test needs one set explicitly.
-    monkeypatch.setenv("TIMBERDOODLE_JWT_SECRET", "test-secret-do-not-use-in-prod-need-32-bytes-min")
+    monkeypatch.setenv("BALER_JWT_SECRET", "test-secret-do-not-use-in-prod-need-32-bytes-min")
 
 
 def test_hash_password_roundtrip():

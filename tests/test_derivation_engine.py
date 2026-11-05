@@ -13,31 +13,31 @@ from datetime import datetime, timezone
 import pytest
 from rdflib import URIRef
 
-from timberdoodle.derivation_engine import (
+from baler.derivation_engine import (
     _output_uri,
     _topological_order,
     evaluate_derivations,
 )
-from timberdoodle.derivation_health import (
+from baler.derivation_health import (
     enable_target,
     is_target_disabled,
     record_target_failure,
 )
-from timberdoodle.derivation_health import ensure_schema as ensure_health_schema
-from timberdoodle.faults import ensure_schema as ensure_fault_schema
-from timberdoodle.faults import open_fault
-from timberdoodle.ingest import (
+from baler.derivation_health import ensure_schema as ensure_health_schema
+from baler.faults import ensure_schema as ensure_fault_schema
+from baler.faults import open_fault
+from baler.ingest import (
     link_part_of,
     link_point_to_equip,
     topic_prefix_to_equip_uri,
     topic_to_point_uri,
 )
-from timberdoodle.mapping import classify_point
-from timberdoodle.mqtt_listener import make_on_message
-from timberdoodle.mqtt_util import make_client
-from timberdoodle.remote_store import RemoteStore
-from timberdoodle.store import BRICK, PROV, Store
-from timberdoodle.timeseries import connect, read_latest, write_point_value
+from baler.mapping import classify_point
+from baler.mqtt_listener import make_on_message
+from baler.mqtt_util import make_client
+from baler.remote_store import RemoteStore
+from baler.store import BRICK, PROV, Store
+from baler.timeseries import connect, read_latest, write_point_value
 
 AVG_FN_SOURCE = "def run(inputs, row):\n    vals = [v for s in inputs.values() for _, v in s[-1:]]\n    return sum(vals) / len(vals) if vals else None"
 
@@ -330,10 +330,10 @@ def test_e2e_derivation_averages_bacnet_and_modbus_sourced_sensors_over_real_bro
     """Full pipeline end to end, not synthetic in-test graph state: two
     sensors from different source connections - simulating one BACnet-
     sourced point and one Modbus-sourced point, which from ingest.py's
-    point of view are indistinguishable (it only ever sees FBF's one
+    point of view are indistinguishable (it only ever sees Windrow's one
     shared wire envelope; "BACnet" vs "Modbus" is purely which
     connection/topic_prefix a reading arrives under, exactly like two
-    real FBF connections would differ) - ingested over a real MQTT broker
+    real Windrow connections would differ) - ingested over a real MQTT broker
     via the real mqtt_listener.make_on_message, linked to a shared zone
     entity (a point can belong to more than one parent - its own device
     equip and a physical zone - with no conflict, same as any RDF graph),
@@ -351,7 +351,7 @@ def test_e2e_derivation_averages_bacnet_and_modbus_sourced_sensors_over_real_bro
     for real equipment. classify_point is called explicitly, not
     expected to happen automatically: the MQTT ingest path never
     classifies on its own (only ingest_api.py's HTTP POST /tags path
-    does, via reclassify) - that's what timberdoodle.autotag exists to
+    does, via reclassify) - that's what baler.autotag exists to
     do as a separate sweep, and this test mirrors that division rather
     than papering over it."""
     store = RemoteStore()
@@ -387,7 +387,7 @@ def test_e2e_derivation_averages_bacnet_and_modbus_sourced_sensors_over_real_bro
         # ASK support, see ingest.link_equip_ref's own note on this) - a
         # SELECT ... LIMIT 1 existence check does the same job.
         tagged = store.query(f"""
-            PREFIX haystack: <urn:timberdoodle:haystack#>
+            PREFIX haystack: <urn:baler:haystack#>
             SELECT ?tag WHERE {{ <{point_uri}> haystack:hasTag ?tag }} LIMIT 1
         """)
         return len(list(tagged)) > 0
@@ -416,7 +416,7 @@ def test_e2e_derivation_averages_bacnet_and_modbus_sourced_sensors_over_real_bro
 
     # MQTT ingest never classifies on its own - see the module docstring
     # note above. Call it explicitly, the same "sweep after ingest" shape
-    # timberdoodle.autotag uses for real data.
+    # baler.autotag uses for real data.
     assert classify_point(store, bacnet_point) == ("direct", "Zone_Air_Temperature_Sensor")
     assert classify_point(store, modbus_point) == ("direct", "Zone_Air_Temperature_Sensor")
 

@@ -1,7 +1,7 @@
 # SHACL validation against Brick's own shapes
 
 **Status: implemented (2026-08-25)**, per the design below — `ontology/Brick-only.ttl`,
-`src/timberdoodle/shacl_validate.py`, `src/timberdoodle/validate_api.py` (port 8005),
+`src/baler/shacl_validate.py`, `src/baler/validate_api.py` (port 8005),
 `tests/test_shacl_validate.py`, `tests/test_validate_openapi.py`. Kept as the design record;
 not deleted post-implementation. Originally saved here instead of relying on Claude's
 per-conversation plan-file slot (`~/.claude/plans/*.md`), which gets overwritten on the next
@@ -10,7 +10,7 @@ unrelated planning session — this was meant to survive that, and did.
 ## Context
 
 A survey of github.com/BrickSchema (prompted by noticing "a lot of good things" in that org)
-found one concrete, well-scoped capability gap worth closing: timberdoodle has no structural
+found one concrete, well-scoped capability gap worth closing: baler has no structural
 validation of its RDF graph today. Brick itself moved to a SHACL-based ontology definition (its
 release `.ttl` files embed `sh:NodeShape`/`sh:PropertyShape` declarations alongside the class
 hierarchy), so `pyshacl` can validate any graph typed with Brick classes directly against Brick's
@@ -41,7 +41,7 @@ need.
 2. **New optional dependency group** in `pyproject.toml`: `validate = ["pyshacl>=0.30.0"]` —
    matching the existing `[project.optional-dependencies]` pattern (`dev`, `llm`) rather than a
    core dependency, since not every process needs validation capability.
-3. **New library module `src/timberdoodle/shacl_validate.py`** (no CLI of its own — the service
+3. **New library module `src/baler/shacl_validate.py`** (no CLI of its own — the service
    below is the "run this" surface):
    - `load_shapes(path=DEFAULT_SHAPES_PATH) -> Graph` — parses the vendored
      `ontology/Brick-only.ttl` once.
@@ -55,7 +55,7 @@ need.
      `pyshacl.validate(data_graph, shacl_graph=shapes_graph or load_shapes())`, returns
      `{"conforms": bool, "violations": [{"focus_node": ..., "message": ..., "severity": ...}, ...]}`
      parsed from pyshacl's results graph, not pyshacl's raw text report.
-4. **New service `src/timberdoodle/validate_api.py`** — its own standalone process/port, matching
+4. **New service `src/baler/validate_api.py`** — its own standalone process/port, matching
    `ingest_api.py`/`fault_api.py`/`derivation_api.py`'s exact shape (stdlib `http.server`,
    `ThreadingHTTPServer`, OTel span per request, spec served straight off disk, `docs_ui.serve`
    for `/docs`). Decided to be a real service, not just a CLI tool — it's the remotely-triggerable
@@ -116,8 +116,8 @@ talk to all of them. Building that unified UI is a separate, bigger effort — n
   `LICENSE` file, and why `Brick-only.ttl` specifically was chosen over the other three release
   variants).
 - `pyproject.toml` (modified) — add the `validate` optional-dependency group.
-- `src/timberdoodle/shacl_validate.py` (new).
-- `src/timberdoodle/validate_api.py` (new).
+- `src/baler/shacl_validate.py` (new).
+- `src/baler/validate_api.py` (new).
 - `validate-api-openapi.yaml` (new, repo root, matching `fault-api-openapi.yaml`/
   `derivation-api-openapi.yaml`'s placement).
 - `tests/test_shacl_validate.py` (new).

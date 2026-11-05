@@ -2,7 +2,7 @@
 title: Architecture
 ---
 
-Timberdoodle is fourteen containers under one `docker-compose.yml`: five
+Baler is fourteen containers under one `docker-compose.yml`: five
 infrastructure services, eight daemons (one shared Docker image, a
 different `command:` each), and an nginx gateway in front of the five
 HTTP APIs (ingest, fault, derivation, validate, auth). `docker compose up
@@ -20,7 +20,7 @@ shared write path into both stores:
 
 <Mermaid chart={`graph LR
     subgraph Sources
-        FBF["FBF (BACnet/Modbus)"]
+        Windrow["Windrow (BACnet/Modbus)"]
         PUSH["push-style sources"]
     end
 
@@ -39,7 +39,7 @@ shared write path into both stores:
         PG[(postgres/timescale)]
     end
 
-    FBF -->|"MQTT fbf/#"| MQ
+    Windrow -->|"MQTT fbf/#"| MQ
     PUSH -->|"POST /ingest/ingest"| GW
     MQ -->|"subscribes fbf/#"| ML
     GW --> IA
@@ -137,7 +137,7 @@ Postgres is deliberately remapped to host port 5433 rather than the
 default 5432, to avoid colliding with a locally-running Postgres
 instance — easy to miss if you're connecting a client by hand. Its
 password comes from `POSTGRES_PASSWORD` in `.env` (falls back to
-`timberdoodle` if unset) rather than being hardcoded in
+`baler` if unset) rather than being hardcoded in
 `docker-compose.yml`.
 
 ## Why two stores, not one
@@ -188,7 +188,7 @@ its own OpenAPI spec keep resolving the same way they do outside Docker)
 and run as `docker-compose.yml` services, each with the same image and a
 different `command:`. They reach the infra containers above by
 Docker-network service name rather than `localhost`, via three env vars
-(`TIMBERDOODLE_PG_DSN`, `OXIGRAPH_URL`, `MQTT_HOST` — see the
+(`BALER_PG_DSN`, `OXIGRAPH_URL`, `MQTT_HOST` — see the
 `x-daemon-env` anchor in `docker-compose.yml`), each read with a
 `localhost`-pointing fallback in the code
 (`timeseries.DEFAULT_DSN`, `RemoteStore.__init__`, and the `--mqtt-host`/
@@ -220,7 +220,7 @@ Plus two one-shot tools that aren't daemons at all: `autotag.py` (rule
 engine + LLM-fallback sweep that proposes new mapping rules, never edits
 the live rule set) and the static `ui/` — served both by the gateway at
 `/ui/` (no separate process) and, standalone, by
-`python -m timberdoodle.ui_server` on `:8004` for anyone not going
+`python -m baler.ui_server` on `:8004` for anyone not going
 through Docker. Either way it talks to `derivation_api.py`/`fault_api.py`
 over HTTP from the browser; through the gateway that's same-origin
 (`/ingest`, `/fault`, `/derivation`). Two of `ui/`'s pages are thin

@@ -1,7 +1,7 @@
 # Shared HTTP-handler boilerplate for the 5 stdlib API services
 
 **Status: implemented (2026-09-05)**, per the design below —
-`src/timberdoodle/http_handler_base.py`, all 5 of `auth_api.py`/`derivation_api.py`/
+`src/baler/http_handler_base.py`, all 5 of `auth_api.py`/`derivation_api.py`/
 `fault_api.py`/`ingest_api.py`/`validate_api.py`, `tests/test_http_handler_base.py`. Kept as the
 design record per this project's own convention (see `shacl-validation-and-service.md`'s note on
 why `todo/*.md` survives past implementation instead of a per-conversation plan file).
@@ -24,7 +24,7 @@ way adopting Flask/FastAPI as a shared dependency and server bootstrap would.
 
 ## Design
 
-`src/timberdoodle/http_handler_base.py`: a `BaseAPIHandler(BaseHTTPRequestHandler)` mixin plus
+`src/baler/http_handler_base.py`: a `BaseAPIHandler(BaseHTTPRequestHandler)` mixin plus
 two free functions (`respond_json`, `respond_error`). Each service's own `make_handler()` still
 builds its own handler class and its own `ThreadingHTTPServer` — nothing about server bootstrap,
 port binding, or process lifecycle changed.
@@ -69,10 +69,10 @@ pieces (`respond_json`/`respond_error` imports, the `openapi.yaml`-serving block
 
 ## Files created/modified
 
-- `src/timberdoodle/http_handler_base.py` (new) + `tests/test_http_handler_base.py` (new, 13
+- `src/baler/http_handler_base.py` (new) + `tests/test_http_handler_base.py` (new, 13
   unit tests, no live services — `BaseHTTPRequestHandler` instances built via `__new__` to bypass
   its request-dispatching `__init__`).
-- `src/timberdoodle/{validate_api,ingest_api,auth_api,fault_api,derivation_api}.py` (modified,
+- `src/baler/{validate_api,ingest_api,auth_api,fault_api,derivation_api}.py` (modified,
   one commit each, smallest service first).
 
 ## Verification (already done, kept for anyone touching this area later)

@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
-# Provisions the timberdoodle self-hosted GitHub Actions runner on nash-srv.
+# Provisions the baler self-hosted GitHub Actions runner on nash-srv.
 # Run as: sudo bash setup-runner.sh <RUNNER_REGISTRATION_TOKEN>
-# (token from https://github.com/jacobnash/timberdoodle/settings/actions/runners/new,
+# (token from https://github.com/jacobnash/baler/settings/actions/runners/new,
 # valid for ~1 hour, single use)
 #
 # Mirrors nash-srv's existing setup-lagom-runner.sh pattern exactly:
 #   1. Reuses the shared `github-runner` OS user (already exists on this box
 #      for lagom) - NOT in the `docker` group, since docker-group membership
 #      is root-equivalent host access and this box runs unrelated projects.
-#   2. Installs a root-owned wrapper at /usr/local/sbin/timberdoodle-deploy.sh
+#   2. Installs a root-owned wrapper at /usr/local/sbin/baler-deploy.sh
 #      that is the *only* thing github-runner can run as root (via a
 #      narrowly-scoped NOPASSWD sudoers rule) - it takes no arguments and
-#      only touches timberdoodle's own compose files.
-#   3. Real secrets live in ~/.config/timberdoodle/nash-srv.env, OUTSIDE the
+#      only touches baler's own compose files.
+#   3. Real secrets live in ~/.config/baler/nash-srv.env, OUTSIDE the
 #      runner's git checkout - actions/checkout runs `git clean -ffdx`,
 #      which would delete them if they lived inside the workspace. This
 #      script does not fill that file in - copy deploy/nash-srv/.env.example
 #      there and edit it by hand.
 #   4. Downloads, configures, and installs a second GitHub Actions runner
 #      instance (own directory, own systemd service) under github-runner,
-#      registered against jacobnash/timberdoodle with label `timberdoodle`.
+#      registered against jacobnash/baler with label `baler`.
 #
 # Idempotent-ish: safe to re-run steps 1-5. Step 6 skips itself if this
 # runner is already configured.
@@ -29,15 +29,15 @@ set -euo pipefail
 TOKEN="${1:?Usage: sudo bash setup-runner.sh <RUNNER_REGISTRATION_TOKEN>}"
 RUNNER_USER="github-runner"
 RUNNER_HOME="/home/${RUNNER_USER}"
-RUNNER_DIR="${RUNNER_HOME}/actions-runner-timberdoodle"
-WRAPPER="/usr/local/sbin/timberdoodle-deploy.sh"
-SUDOERS_FILE="/etc/sudoers.d/github-runner-timberdoodle"
-ENV_DIR="${RUNNER_HOME}/.config/timberdoodle"
+RUNNER_DIR="${RUNNER_HOME}/actions-runner-baler"
+WRAPPER="/usr/local/sbin/baler-deploy.sh"
+SUDOERS_FILE="/etc/sudoers.d/github-runner-baler"
+ENV_DIR="${RUNNER_HOME}/.config/baler"
 ENV_FILE="${ENV_DIR}/nash-srv.env"
-WORKDIR="${RUNNER_DIR}/_work/timberdoodle/timberdoodle"
+WORKDIR="${RUNNER_DIR}/_work/baler/baler"
 COMPOSE_BASE="${WORKDIR}/docker-compose.yml"
 COMPOSE_OVERRIDE="${WORKDIR}/deploy/nash-srv/docker-compose.override.yml"
-COMPOSE_FBF="${WORKDIR}/deploy/nash-srv/docker-compose.fbf.yml"
+COMPOSE_WINDROW="${WORKDIR}/deploy/nash-srv/docker-compose.windrow.yml"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "must run as root (sudo)" >&2
@@ -62,8 +62,8 @@ else
   # own home (not whoever's $HOME happened to be running this script) -
   # this is exactly the path the deploy wrapper below reads from.
   cat > "$ENV_FILE" <<SECRETS
-TIMBERDOODLE_JWT_SECRET=$(openssl rand -hex 32)
-TIMBERDOODLE_GATEWAY_SECRET=$(openssl rand -hex 32)
+BALER_JWT_SECRET=$(openssl rand -hex 32)
+BALER_GATEWAY_SECRET=$(openssl rand -hex 32)
 MQTT_PASSWORD=$(openssl rand -hex 16)
 POSTGRES_PASSWORD=$(openssl rand -hex 16)
 SECRETS
@@ -77,8 +77,8 @@ cat > "$WRAPPER" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd "${WORKDIR}"
-docker compose -f "${COMPOSE_BASE}" -f "${COMPOSE_OVERRIDE}" -f "${COMPOSE_FBF}" --env-file "${ENV_FILE}" pull --ignore-pull-failures
-docker compose -f "${COMPOSE_BASE}" -f "${COMPOSE_OVERRIDE}" -f "${COMPOSE_FBF}" --env-file "${ENV_FILE}" up -d --build
+docker compose -f "${COMPOSE_BASE}" -f "${COMPOSE_OVERRIDE}" -f "${COMPOSE_WINDROW}" --env-file "${ENV_FILE}" pull --ignore-pull-failures
+docker compose -f "${COMPOSE_BASE}" -f "${COMPOSE_OVERRIDE}" -f "${COMPOSE_WINDROW}" --env-file "${ENV_FILE}" up -d --build
 # The app containers bind-mount this checkout (.:/app) and run as root, so
 # anything they write into it (e.g. __pycache__/*.pyc) ends up root-owned -
 # the *next* actions/checkout runs as github-runner and can't git-clean
@@ -88,7 +88,7 @@ chown -R "${RUNNER_USER}:${RUNNER_USER}" "${WORKDIR}"
 # Gateway caches upstream addresses at its own startup - if a backend got
 # recreated above without gateway also restarting, its routes 404/502 even
 # though the backend is healthy (see CLAUDE.md's gateway restart gotcha).
-docker compose -f "${COMPOSE_BASE}" -f "${COMPOSE_OVERRIDE}" -f "${COMPOSE_FBF}" --env-file "${ENV_FILE}" restart gateway
+docker compose -f "${COMPOSE_BASE}" -f "${COMPOSE_OVERRIDE}" -f "${COMPOSE_WINDROW}" --env-file "${ENV_FILE}" restart gateway
 # Block here instead of handing control back to the caller (the deploy
 # workflow) while gateway is mid-restart - otherwise its very next step
 # can race a connection reset. Any HTTP response (even a 4xx from a
@@ -145,9 +145,9 @@ else
       'https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${ASSET_NAME}'
     echo '${RUNNER_SHA256}  runner.tar.gz' | sha256sum -c -
     tar xzf runner.tar.gz && rm runner.tar.gz
-    ./config.sh --url https://github.com/jacobnash/timberdoodle \
-      --token '${TOKEN}' --name nash-srv-timberdoodle \
-      --labels nash-srv,timberdoodle --work _work --unattended --replace
+    ./config.sh --url https://github.com/jacobnash/baler \
+      --token '${TOKEN}' --name nash-srv-baler \
+      --labels nash-srv,baler --work _work --unattended --replace
   "
   (cd "$RUNNER_DIR" && ./svc.sh install "$RUNNER_USER" && ./svc.sh start)
 fi

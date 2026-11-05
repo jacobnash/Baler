@@ -7,9 +7,9 @@
 This document answers four questions in order:
 
 1. What does SkySpark's first-run feel like to a building engineer?
-2. What is Timberdoodle's actual container topology and health surface
+2. What is Baler's actual container topology and health surface
    today?
-3. What control-plane UX should Timberdoodle put in front of that stack?
+3. What control-plane UX should Baler put in front of that stack?
 4. What replaces SkySpark's saved-Axon-script model without letting the
    server rot?
 
@@ -102,8 +102,8 @@ Sessions**.
 | **Cluster / Replicas / Crypto / Mounts** | Multi-node, DB replication, trust store, filesystem mounts — power-user / IT territory, but present in the same app. |
 
 **First useful action on a fresh host:** Host → Projects → **New** (or
-**Demogen**). That is clearer than Timberdoodle's current "curl an org,
-then figure out FBF."
+**Demogen**). That is clearer than Baler's current "curl an org,
+then figure out Windrow."
 
 #### Settings — what is enabled and how it listens
 
@@ -152,7 +152,7 @@ Support**.
    the product.
 5. **Support bundle** — one click for when you escalate.
 
-Timberdoodle's Ops page should be *this shape* — host apps mapped onto
+Baler's Ops page should be *this shape* — host apps mapped onto
 a multi-container reality — not a Docker Desktop clone.
 
 ### 1.5 Where it is still clunky (for this audience)
@@ -187,7 +187,7 @@ a blank REPL, no unit tests, no packaged analysis library beyond what
 ships in `funcs()`, and no guardrail against saving a slow recursive
 query that will run forever on a shared host.
 
-**Takeaways for Timberdoodle:**
+**Takeaways for Baler:**
 
 - From **SkySpark Host apps**: ship one in-product control plane
   (projects/sites, enable/disable capabilities, diagnostics, logs,
@@ -199,7 +199,7 @@ query that will run forever on a shared host.
 
 ---
 
-## 2. Timberdoodle container topology
+## 2. Baler container topology
 
 ### 2.1 Counts
 
@@ -305,7 +305,7 @@ the repo. "Healthy" in Compose means "OpenAPI YAML returned 200."
 
 ### 2.5 Status signals that already exist (and are unused by any UI)
 
-Timberdoodle already has pieces of a control plane, just not assembled:
+Baler already has pieces of a control plane, just not assembled:
 
 - Compose healthchecks on postgres + 5 APIs
 - `derivation_target_health` (consecutive failures → auto-disable)
@@ -324,7 +324,7 @@ opening five tabs and a terminal.
 
 Not a Kubernetes dashboard. A **building control room for the software
 that watches the building** — SkySpark's Host / Settings / Debug shape,
-translated across Timberdoodle's multi-container reality, with the
+translated across Baler's multi-container reality, with the
 restart button SkySpark forgot.
 
 ### 3.1 Product framing
@@ -336,7 +336,7 @@ comes up.
 
 Steal SkySpark's five-app split, rename for the audience:
 
-| SkySpark host app | Timberdoodle Ops analogue | Notes |
+| SkySpark host app | Baler Ops analogue | Notes |
 |---|---|---|
 | **Host → Projects** (+ Demogen) | **Sites / data** + "Load demo" | Org/site already exists in `auth_api`; surface create + demo as the empty-state CTA |
 | **Settings → SysMods** | **Jobs & sources** enable/disable | Map to compose services + profiles with plain names and Ok/Quiet/Down (SysMods `libStatus` without the jargon) |
@@ -364,7 +364,7 @@ containers only when diagnosing.
 
 ```text
 1. Install Docker (vendor script / Docker Desktop)
-2. Run install-timberdoodle.sh
+2. Run install-baler.sh
       - clones or unpacks release
       - generates JWT/gateway/MQTT secrets into .env
       - docker compose up -d --wait
@@ -379,7 +379,7 @@ Mirror SkySpark's Host → Projects empty state, but label the intent
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Timberdoodle                          System: All green    │
+│  Baler                          System: All green    │
 │  Equipment · Query · Alarms · Derivations · Devices · Ops   │
 ├─────────────────────────────────────────────────────────────┤
 │  Overview · Jobs · Platform · Health · Logs                 │
@@ -390,7 +390,7 @@ Mirror SkySpark's Host → Projects empty state, but label the intent
 │  First useful action                                        │
 │  ┌──────────────────┐  ┌──────────────────┐                 │
 │  │ Connect a source │  │ Load demo site   │  ← like Demogen │
-│  │  MQTT / FBF      │  │  (mock hospital) │                 │
+│  │  MQTT / Windrow      │  │  (mock hospital) │                 │
 │  └──────────────────┘  └──────────────────┘                 │
 │                                                             │
 │  Platform                                                   │
@@ -415,7 +415,7 @@ Copy rules:
 
 Priority order for an empty install:
 
-1. **Connect live data (FBF / MQTT)** — the real job.
+1. **Connect live data (Windrow / MQTT)** — the real job.
 2. **Load demo site** — SkySpark's Demogen equivalent; sample equipment +
    histories so Query / Alarms / Derivations are immediately meaningful.
 3. **Pull from existing Haystack/SkySpark** — profile-gated
@@ -585,7 +585,7 @@ Sources to aggregate (already mostly exist):
   site reinvents a worse version.
 - Permissions are coarse; a bad `hisRead` can load the box.
 
-### 4.3 What Timberdoodle already has (steal this, don't restart)
+### 4.3 What Baler already has (steal this, don't restart)
 
 Derivations are already closer to the right model than Axon-on-a-server:
 
@@ -754,7 +754,7 @@ A building engineer, after the install script:
    without SSH or Axon.
 5. Cannot save unattended code with zero tests.
 
-If those five hold, Timberdoodle keeps Docker's install advantage *and*
+If those five hold, Baler keeps Docker's install advantage *and*
 matches the part of SkySpark that actually mattered — a single place to
 run the building — without inheriting the scripting rot.
 

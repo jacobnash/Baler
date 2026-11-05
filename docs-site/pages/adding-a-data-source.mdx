@@ -6,18 +6,18 @@ There are two genuinely different shapes of "new data source" here, and
 they live in two different repos. Picking the right one first matters —
 they don't share a recipe.
 
-## Push, protocol-native: goes in FBF
+## Push, protocol-native: goes in Windrow
 
 If the source speaks a real building-automation protocol with a live
 connection (BACnet, Modbus, a native MQTT device) — that's
-[FBF](../fbf)'s job, not Timberdoodle's. FBF already has a documented,
-repeatable recipe for this: [Adding a New Source](/fbf-adding-a-new-source).
+[Windrow](../windrow)'s job, not Baler's. Windrow already has a documented,
+repeatable recipe for this: [Adding a New Source](/windrow-adding-a-new-source).
 The short version — find a mature client library for the protocol, write a
-`<protocol>_bridge.py` that publishes readings through FBF's frozen MQTT
-envelope (`fbf.mqtt_sink.publish_reading()`), and Timberdoodle's
+`<protocol>_bridge.py` that publishes readings through Windrow's frozen MQTT
+envelope (`windrow.mqtt_sink.publish_reading()`), and Baler's
 `mqtt_listener.py` picks it up unchanged. No code on this side.
 
-## Pull, periodic-API: goes in Timberdoodle
+## Pull, periodic-API: goes in Baler
 
 If the source is a REST/HTTP API you poll on an interval — a Haystack
 server, an energy-benchmarking service like ENERGY STAR Portfolio
@@ -33,9 +33,9 @@ called out explicitly as the one part you have to write yourself.
 
 | File | Role |
 |---|---|
-| `src/timberdoodle/<source>_client.py` | Talks to the remote API. Auth, HTTP, response parsing. The only fully custom file. |
-| `src/timberdoodle/<source>_pull_state.py` | A Postgres watermark table, one row per point/entity. Copy the template below verbatim, rename. |
-| `src/timberdoodle/<source>_puller.py` | The daemon: poll loop, calls the client, calls Timberdoodle's shared ingest functions, updates the checkpoint. Copy the template below, fill in the marked gaps. |
+| `src/baler/<source>_client.py` | Talks to the remote API. Auth, HTTP, response parsing. The only fully custom file. |
+| `src/baler/<source>_pull_state.py` | A Postgres watermark table, one row per point/entity. Copy the template below verbatim, rename. |
+| `src/baler/<source>_puller.py` | The daemon: poll loop, calls the client, calls Baler's shared ingest functions, updates the checkpoint. Copy the template below, fill in the marked gaps. |
 
 ### 1. `<source>_client.py` — write this yourself
 
@@ -117,7 +117,7 @@ This is the actual daemon. The two `# TODO` blocks are mostly already
 written — they're marked because they're the two places that call into
 your `<source>_client.py`, so double-check the method names
 (`list_equipment`, `list_points`, `read_history`) match what you wrote
-in step 1. Everything else calls real, existing Timberdoodle functions
+in step 1. Everything else calls real, existing Baler functions
 with their real signatures — nothing here is invented or simplified for
 the example.
 
@@ -132,18 +132,18 @@ import os
 import time
 from datetime import datetime, timezone
 
-from timberdoodle import mapping, tracing
-from timberdoodle.<source>_client import <Source>Client   # you write this
-from timberdoodle.<source>_pull_state import ensure_schema, get_checkpoint, set_checkpoint
-from timberdoodle.ingest import (
+from baler import mapping, tracing
+from baler.<source>_client import <Source>Client   # you write this
+from baler.<source>_pull_state import ensure_schema, get_checkpoint, set_checkpoint
+from baler.ingest import (
     ingest_haystack_equip_tags,
     ingest_reading,
     ingest_tags,
     link_equip_ref,
     topic_to_point_uri,
 )
-from timberdoodle.remote_store import RemoteStore
-from timberdoodle.timeseries import connect
+from baler.remote_store import RemoteStore
+from baler.timeseries import connect
 
 tracer = tracing.get_tracer(__name__)
 
@@ -223,7 +223,7 @@ def main() -> None:
     parser.add_argument("--backfill-days", type=float, default=7.0)
     args = parser.parse_args()
 
-    tracing.init_tracing("timberdoodle-<source>-puller")
+    tracing.init_tracing("baler-<source>-puller")
 
     store = RemoteStore()
     ts_conn = connect()
@@ -248,16 +248,16 @@ if __name__ == "__main__":
 poll loop shape, the `try/except` around each cycle, the checkpoint
 calls, `ingest_tags`/`link_equip_ref`/`ingest_reading`/
 `mapping.classify_point_with_fallback`, the tracer spans, the
-`argparse`/env-var pairing — is real, load-bearing Timberdoodle code you
-can rely on as documented. The functions imported from `timberdoodle.ingest`
-and `timberdoodle.mapping` here are the actual shared write path every
+`argparse`/env-var pairing — is real, load-bearing Baler code you
+can rely on as documented. The functions imported from `baler.ingest`
+and `baler.mapping` here are the actual shared write path every
 source (MQTT, HTTP push, Haystack pull) goes through — nothing about
 Oxigraph or Postgres needs writing from scratch.
 
 ### The shared functions, exact signatures
 
 ```python
-# timberdoodle.ingest
+# baler.ingest
 def ingest_reading(store, ts_conn, topic: str, value, ts: float | None = None) -> URIRef
     # Writes value to Postgres (point_history), asserts point identity in
     # Oxigraph once. Point identity = urn:point:{topic}.
@@ -287,7 +287,7 @@ def link_point_to_equip(store, point_uri, equip_uri) -> None
     # when you already have both URIs in hand and don't need tag-based
     # resolution.
 
-# timberdoodle.mapping
+# baler.mapping
 def classify_point(store, point_uri, rules: list[dict] | None = None) -> tuple[str, str | None]
     # Rule-based Brick classification (rules/haystack_to_brick.yaml by
     # default) over whatever HAYSTACK:hasTag triples are on this URI.
@@ -297,18 +297,18 @@ def classify_point_with_fallback(store, point_uri, rules=None, llm_classify=None
     # classify_point, plus an LLM fallback when llm_classify is supplied
     # (autotag.py's job, not a puller's - leave llm_classify=None here).
 
-# timberdoodle.remote_store
+# baler.remote_store
 class RemoteStore:
     def __init__(self, base_url: str = None)
         # Reads OXIGRAPH_URL env var if base_url isn't passed, falls
         # back to http://localhost:7878.
 
-# timberdoodle.timeseries
+# baler.timeseries
 def connect(dsn: str = DEFAULT_DSN) -> psycopg.Connection
-    # DEFAULT_DSN reads TIMBERDOODLE_PG_DSN env var, falls back to
-    # postgresql://timberdoodle:timberdoodle@localhost:5433/timberdoodle.
+    # DEFAULT_DSN reads BALER_PG_DSN env var, falls back to
+    # postgresql://baler:baler@localhost:5433/baler.
 
-# timberdoodle.tracing
+# baler.tracing
 def init_tracing(service_name: str) -> None
 def get_tracer(name: str)
 ```
@@ -331,7 +331,7 @@ def get_tracer(name: str)
 ```yaml
   <source>_puller:
     build: .
-    command: python -m timberdoodle.<source>_puller
+    command: python -m baler.<source>_puller
     profiles: ["<source>-pull"]
     environment:
       <<: *daemon-env

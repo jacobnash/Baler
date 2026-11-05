@@ -1,11 +1,11 @@
 import pytest
 
-from timberdoodle.haystack_pull_state import (
+from baler.haystack_pull_state import (
     ensure_schema,
     get_checkpoint,
     set_checkpoint,
 )
-from timberdoodle.timeseries import connect
+from baler.timeseries import connect
 
 POINT_URI = "urn:point:test-haystack-pull-state:p1"
 

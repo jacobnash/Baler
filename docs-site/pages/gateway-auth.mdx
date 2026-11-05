@@ -13,7 +13,7 @@ endpoint list.
 
 ## Org / site / user / role model
 
-Four Postgres tables (`auth.SCHEMA` in `src/timberdoodle/auth.py`, created
+Four Postgres tables (`auth.SCHEMA` in `src/baler/auth.py`, created
 on `auth_api.py` startup via `auth.ensure_schema`):
 
 - **`orgs`** — the top-level tenant. Everything else hangs off an
@@ -75,7 +75,7 @@ POST /auth/login
 → 200 { "token": "<JWT>", "user": { "id": "...", "org_id": "...", "role": "admin", "site_ids": [] } }
 ```
 
-`auth_api.py`'s `_login` handler (`src/timberdoodle/auth_api.py`) checks
+`auth_api.py`'s `_login` handler (`src/baler/auth_api.py`) checks
 the password with `auth.verify_password`, looks up the user's
 `site_ids` via `auth.user_site_ids`, and signs a JWT with
 `auth.issue_session_token`. A session token's claims:
@@ -89,7 +89,7 @@ the password with `auth.verify_password`, looks up the user's
 
 Every route after login expects that token as `Authorization: Bearer
 <token>`. There's no cookie, no server-side session store on the gateway
-side — the JWT itself, signed with `TIMBERDOODLE_JWT_SECRET`, is the
+side — the JWT itself, signed with `BALER_JWT_SECRET`, is the
 whole session. `POST /auth/api-keys` (admin-only) issues the
 non-interactive equivalent — same claims shape, but `kind: "api_key"`,
 no `exp` unless `expires_in_seconds` was given, and revocable (see
@@ -136,7 +136,7 @@ a hard failure, not silently-permitted traffic.
 2. `minRole === null` (public route) → allow, no token check, no rate
    limit.
 3. No `Authorization: Bearer <token>` → `401`.
-4. Token doesn't verify against `TIMBERDOODLE_JWT_SECRET`
+4. Token doesn't verify against `BALER_JWT_SECRET`
    (`gateway/njs/jwt.js`) → `401`.
 5. `claims.role` doesn't rank ≥ the route's `minRole`
    (`policy.roleSatisfies`) → `403`.
@@ -158,7 +158,7 @@ It's easy to conflate these because both live in `.env` and both get
 checked on (almost) every request, but they protect against different
 things:
 
-- **`TIMBERDOODLE_JWT_SECRET`** — signs and verifies the user-facing
+- **`BALER_JWT_SECRET`** — signs and verifies the user-facing
   session/API-key tokens (`Authorization: Bearer <token>`). This is the
   one end users and API-key holders present. Verified in the gateway
   (`gateway/njs/jwt.js`) and independently re-verified inside
@@ -166,12 +166,12 @@ things:
   to know who's calling — that's not "trust the gateway already checked
   this," since `auth_api.py` *is* the identity service, not just another
   backend behind it.
-- **`TIMBERDOODLE_GATEWAY_SECRET`** — a shared secret the gateway
+- **`BALER_GATEWAY_SECRET`** — a shared secret the gateway
   attaches as `X-Gateway-Secret` on every request it forwards
   (`r.variables.gateway_secret` in `main.js`, set unconditionally on
   every invocation). Each backend checks it with
   `gateway_auth.request_came_through_gateway()`
-  (`src/timberdoodle/gateway_auth.py`) — a single `hmac.compare_digest`
+  (`src/baler/gateway_auth.py`) — a single `hmac.compare_digest`
   against the expected value, fail-closed if the env var isn't set at
   all. This is **not** a second authorization layer re-deciding who can
   do what; it only answers "did this request actually come through the
@@ -188,8 +188,8 @@ though the JWT would have been fine. A request through the gateway with
 an invalid or missing JWT never gets that far — it's rejected by
 `authorize()` before `X-Gateway-Secret` is even relevant. Both `docker
 compose up` refuses to start the `gateway` service without **both**
-secrets set (`docker-compose.yml`'s `${TIMBERDOODLE_JWT_SECRET:?...}` /
-`${TIMBERDOODLE_GATEWAY_SECRET:?...}`) — an unset JWT secret means the
+secrets set (`docker-compose.yml`'s `${BALER_JWT_SECRET:?...}` /
+`${BALER_GATEWAY_SECRET:?...}`) — an unset JWT secret means the
 gateway can't verify anything, and an unset gateway secret would mean
 every backend's `request_came_through_gateway()` fails closed on every
 single request.

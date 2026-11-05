@@ -32,10 +32,10 @@ from datetime import datetime, timezone
 
 import requests
 
-from timberdoodle import mapping, tracing
-from timberdoodle.ingest import ingest_haystack_equip_tags, ingest_reading, ingest_tags, link_point_to_equip
-from timberdoodle.remote_store import RemoteStore
-from timberdoodle.timeseries import connect
+from baler import mapping, tracing
+from baler.ingest import ingest_haystack_equip_tags, ingest_reading, ingest_tags, link_point_to_equip
+from baler.remote_store import RemoteStore
+from baler.timeseries import connect
 
 METADATA_URL = "https://media.githubusercontent.com/media/buds-lab/building-data-genome-project-2/master/data/metadata/metadata.csv"
 ELECTRICITY_URL = "https://media.githubusercontent.com/media/buds-lab/building-data-genome-project-2/master/data/meters/raw/electricity.csv"
@@ -84,13 +84,13 @@ def load_building(store, ts_conn, point_rules, equip_rules, building_id: str, me
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Load a real slice of BDG2 electricity data into Timberdoodle")
+    parser = argparse.ArgumentParser(description="Load a real slice of BDG2 electricity data into Baler")
     parser.add_argument("--site", default="Panther", help="BDG2 site_id to pull buildings from (see metadata.csv)")
     parser.add_argument("--limit", type=int, default=5, help="number of buildings to load")
     parser.add_argument("--byte-limit", type=int, default=5_000_000, help="bytes of electricity.csv to fetch (~2 weeks across all buildings at the default)")
     args = parser.parse_args()
 
-    tracing.init_tracing("timberdoodle-bdg2-loader")
+    tracing.init_tracing("baler-bdg2-loader")
     store = RemoteStore()
     ts_conn = connect()
     point_rules = mapping.load_rules()

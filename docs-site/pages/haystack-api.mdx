@@ -2,10 +2,10 @@
 title: Haystack API
 ---
 
-Timberdoodle serves the standard [Project Haystack HTTP API](https://project-haystack.org/doc/docHaystack/HttpApi),
+Baler serves the standard [Project Haystack HTTP API](https://project-haystack.org/doc/docHaystack/HttpApi),
 so tools that already speak Haystack can use it without changes. SkySpark, Haxall's haystack
 connector, nhaystack's client side, pyhaystack, phable and openhay's `hay` all work this way:
-point the tool at Timberdoodle instead of a SkySpark host.
+point the tool at Baler instead of a SkySpark host.
 
 ```
 https://<your-host>/api/<project>/<op>     # SkySpark layout
@@ -16,7 +16,7 @@ https://<your-host>/api/<op>               # Haxall layout, same thing
 
 ## Logging in
 
-Use your normal Timberdoodle email and password. Haystack clients run the standard HELLO →
+Use your normal Baler email and password. Haystack clients run the standard HELLO →
 SCRAM-SHA-256 handshake. Your password is never sent: it's checked against the same password hash
 `POST /auth/login` uses, so there's nothing to reset and no second password to manage. The
 handshake ends with a normal session JWT as the Haystack `authToken`.
@@ -38,7 +38,7 @@ With [openhay](https://github.com/jacobnash/openhay)'s `hay` CLI:
 
 ```bash
 hay read http://localhost:8080/api/demo "point and temp" --user admin@acme.example --password change-me
-hay his  http://localhost:8080/api/demo @urn:point:fbf~2Fmock-ahu-1~2FanalogValue~2C1 yesterday --to csv
+hay his  http://localhost:8080/api/demo @urn:point:windrow~2Fmock-ahu-1~2FanalogValue~2C1 yesterday --to csv
 ```
 
 From Python (`pip install -e ".[haystack]"` installs openhay):
@@ -58,7 +58,7 @@ Records come from the same entity graph everything else reads:
 
 | Haystack tag | where it comes from |
 |---|---|
-| `id` | the entity URI. Characters Haystack ids don't allow are escaped as `~XX`, e.g. `@urn:point:fbf~2Fahu-1~2FanalogInput~2C1` |
+| `id` | the entity URI. Characters Haystack ids don't allow are escaped as `~XX`, e.g. `@urn:point:windrow~2Fahu-1~2FanalogInput~2C1` |
 | markers (`temp`, `sensor`, …) | `haystack:hasTag` facts, as written by ingest and the Haystack puller |
 | other tags (`dis`, `kind`, …) | `haystack:<tag>` values |
 | `point` / `equip` | the kind of URI |
@@ -79,7 +79,7 @@ clients keep working.
 
 ## Not yet
 
-- `pointWrite` and `invokeAction` return an error grid until FBF can write BACnet.
+- `pointWrite` and `invokeAction` return an error grid until Windrow can write BACnet.
 - `->` tag paths in filters (`equipRef->siteRef`), the same limit as the Query page.
 - `hisRead` with two datetimes. Dates, date ranges and `today`/`yesterday`/`thisWeek`/… all work.
 - Scoping reads to the token's sites, and the Haystack 4 `defs`/`libs` ops.

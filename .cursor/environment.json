@@ -1,12 +1,12 @@
 {
-  "name": "Timberdoodle",
+  "name": "Baler",
   "install": "bash .cursor/install.sh",
   "start": "bash .cursor/start.sh",
   "terminals": [
     {
       "name": "compose logs",
       "command": "cd \"$(git rev-parse --show-toplevel)\" && sudo docker compose logs -f --tail=50",
-      "description": "Live logs from the whole Timberdoodle docker compose stack (all APIs, daemons, and infra)."
+      "description": "Live logs from the whole Baler docker compose stack (all APIs, daemons, and infra)."
     }
   ],
   "ports": [

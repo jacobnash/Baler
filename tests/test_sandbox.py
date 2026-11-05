@@ -7,7 +7,7 @@ Postgres/Oxigraph needed - pure in-process logic.
 
 import pytest
 
-from timberdoodle.sandbox import (
+from baler.sandbox import (
     SandboxError,
     compile_fn,
     run_test_cases,

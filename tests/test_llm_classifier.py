@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from timberdoodle import llm_classifier
+from baler import llm_classifier
 
 
 @dataclass

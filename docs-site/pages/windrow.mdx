@@ -1,0 +1,43 @@
+---
+title: Windrow
+---
+
+Windrow ("Windrow") is a separate sibling repo, not code that lives
+in this one — it bridges BACnet (and Modbus) devices to MQTT so
+Baler never has to speak a building-automation protocol directly.
+
+## Why it exists
+
+Haxall (SkyFoundry's open-source BIoT framework) ships open connectors for
+Modbus, MQTT, SQL, oBIX, and more, but not BACnet. Windrow fills that gap: it
+speaks BACnet directly (via
+[BACpypes3](https://github.com/JoelBender/BACpypes3), BSD-licensed) and
+publishes readings to plain MQTT — no Fantom code required.
+
+## How it reaches Baler
+
+Windrow and Baler share nothing but an MQTT broker and a frozen wire
+contract ([Adding a New Source](/windrow-adding-a-new-source)):
+
+- **Topic**: `f"{topic_prefix}/{point}"`, e.g. `fbf/mock-ahu-1/analogValue,1`.
+- **Payload**: JSON `{"point": <str>, "value": <int|float|str|bool|null>, "ts": <unix epoch float>}`,
+  published retained via `windrow.mqtt_sink.publish_reading()`.
+- **Tags** (Haystack markers, equipment refs, units) ride the same helper
+  under a `<point>/tags` topic, published once at startup rather than per
+  reading. Baler's `mqtt_listener.py` strips the `/tags` suffix to
+  recover the point's real topic and routes to `ingest_tags()` instead of
+  `ingest_reading()` — same `point_uri` either way.
+
+Baler's side of this needs no Windrow-specific code at all:
+`mqtt_listener.py` already subscribes to `fbf/#` and treats every message
+identically regardless of which protocol produced it. See [Adding a Data
+Source](/adding-a-data-source) for the push-vs-pull decision this all
+comes from — Windrow is the answer for anything push/protocol-native
+(BACnet, Modbus, a native MQTT device); a periodic REST/HTTP source (like
+[Haystack Puller](/haystack-puller)) belongs in this repo instead.
+
+## Status
+
+Early scaffold, per Windrow's own README — a mock BACnet device/site generator
+and discovery API exist and are exercised in Windrow's own test suite, but
+treat it as young, evolving code, not a hardened production bridge.

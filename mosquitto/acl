@@ -1,7 +1,7 @@
 # Global entries below apply to every authenticated client (mosquitto
 # evaluates them in addition to any matching "user" block).
 #
-# Every FBF site publishes telemetry to fbf/#, and per multi-site.mdx's
+# Every Windrow site publishes telemetry to fbf/#, and per multi-site.mdx's
 # "Reaching back into a site" design, a site's command channel is scoped
 # to its own username via %u - a site can only read/write cmd/<its own
 # username>/#, never another site's. This is the actual security boundary
@@ -13,5 +13,5 @@ pattern readwrite cmd/%u/#
 # The trusted central stack (mqtt_listener, fault_detector,
 # derivation_engine, and integration tests standing in for them) - same
 # Docker network as today's anonymous access, just now authenticated.
-user timberdoodle
+user baler
 topic readwrite #

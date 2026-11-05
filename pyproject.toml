@@ -1,5 +1,5 @@
 [project]
-name = "timberdoodle"
+name = "baler"
 version = "0.1.0"
 description = "Ontology-agnostic building data platform: API-first, load-time-pluggable (Brick/Haystack/DBO), headless by design"
 license = "AGPL-3.0-or-later"

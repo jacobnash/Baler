@@ -1,4 +1,4 @@
-# Timberdoodle — Remediation Plan
+# Baler — Remediation Plan
 
 Companion to `AUDIT.md` — read that first for evidence and rationale. This plan turns its findings into staged, incremental work. No stage requires the build to go red at any point; every item ships independently.
 
@@ -21,7 +21,7 @@ Nothing in Stage 1+ touches code without this in place first, per the audit's ow
 
 ### 0.2 — Wire `ruff` + `mypy` + `pytest-cov` into CI, non-blocking
 - **Rationale:** Theme (implicit) — zero tooling today means every future PR is unguarded. `.github/workflows/ci.yml`'s `unit` job already runs `pytest -m "not integration"`; add lint/type/coverage steps alongside it.
-- **What:** add `ruff.toml` (or `[tool.ruff]` in `pyproject.toml`) pinned to the **default rule set only** for now (63 findings, not the 3,716-finding `ALL` set — ratchet later, see Guardrails); add `[tool.mypy]` with `ignore_missing_imports = true` as a starting baseline; add `--cov=timberdoodle --cov-report=term-missing` to the existing `pytest` CI step. Every new check reports but does not fail the build (`|| true` or a soft-fail annotation) until Stage 1 cleans up the existing findings.
+- **What:** add `ruff.toml` (or `[tool.ruff]` in `pyproject.toml`) pinned to the **default rule set only** for now (63 findings, not the 3,716-finding `ALL` set — ratchet later, see Guardrails); add `[tool.mypy]` with `ignore_missing_imports = true` as a starting baseline; add `--cov=baler --cov-report=term-missing` to the existing `pytest` CI step. Every new check reports but does not fail the build (`|| true` or a soft-fail annotation) until Stage 1 cleans up the existing findings.
 - **Files:** `.github/workflows/ci.yml`, new `ruff.toml`/`pyproject.toml` `[tool.ruff]`/`[tool.mypy]` sections, `pyproject.toml` `dev` extra (add `ruff`, `mypy`, `radon`, `coverage` — no new runtime deps).
 - **Acceptance criteria:** CI runs all three tools and prints results; build stays green even with today's 63 ruff findings / 19 mypy errors present.
 - **Test strategy:** push to a branch, confirm CI output shows the new steps without failing the job.
@@ -37,7 +37,7 @@ Nothing in Stage 1+ touches code without this in place first, per the audit's ow
 ### 1.1 — Fix the `llm_classifier.py` unhandled-`None` bug (Theme D)
 - **Rationale:** `AUDIT.md` Theme D — real, unhandled `AttributeError` if the Anthropic SDK's structured-output parsing ever returns `None` for `response.parsed_output`.
 - **What:** add a `None` check after `parsed = response.parsed_output` (around line 75) that raises a clear, caught-upstream exception or returns a "classification failed" sentinel the caller (`autotag.py:run`) already knows how to skip past (it already has a `result is None: continue` path for the retry-exhaustion case — reuse that shape).
-- **Files:** `src/timberdoodle/llm_classifier.py` (~line 75), `src/timberdoodle/autotag.py` (only if the sentinel/exception shape needs a matching `except`/`continue`).
+- **Files:** `src/baler/llm_classifier.py` (~line 75), `src/baler/autotag.py` (only if the sentinel/exception shape needs a matching `except`/`continue`).
 - **Acceptance criteria:** a test (added alongside, in `tests/test_llm_classifier.py`) that mocks `response.parsed_output = None` and asserts the function fails gracefully instead of raising `AttributeError`.
 - **Size:** S. **Dependencies:** none. **Risk:** low.
 
@@ -56,21 +56,21 @@ Nothing in Stage 1+ touches code without this in place first, per the audit's ow
 ### 1.4 — Turn on the highest-value narrow `ruff` rules beyond the default set
 - **Rationale:** `AUDIT.md` §4.1 — `BLE001` (blind except) and `RUF013` (implicit Optional) are both real, narrowly-scoped, and already have a small enough hit count (9 and 3) to fix immediately rather than defer to the "eventually ratchet toward `ALL`" guardrail.
 - **What:** add `BLE001` and `RUF013` to the `ruff.toml` select list from 0.2; either fix each of the 9+3 hits (narrow the except clause or add a comment explaining why broad-catch is intentional per `AUDIT.md`'s "explicitly-fine" note on the pollers; make the `Optional` explicit) or add a scoped `# noqa: BLE001` with a one-line reason where the broad catch is the audit-confirmed-correct pattern (the 4 pollers + `sandbox.py`).
-- **Files:** `src/timberdoodle/{derivation_engine,energystar_puller,haystack_puller,openmeteo_puller,sandbox,sql_puller}.py` (BLE001), `src/timberdoodle/{haystack_client,remote_store}.py` (RUF013).
+- **Files:** `src/baler/{derivation_engine,energystar_puller,haystack_puller,openmeteo_puller,sandbox,sql_puller}.py` (BLE001), `src/baler/{haystack_client,remote_store}.py` (RUF013).
 - **Size:** S. **Dependencies:** 0.2 (ruff config must exist first). **Risk:** low.
 
 ## Stage 2 — Structural
 
 ### 2.1 — Extract shared HTTP-handler boilerplate (Theme A)
 - **Current state:** `auth_api.py`, `derivation_api.py`, `fault_api.py`, `ingest_api.py`, `validate_api.py` each independently define a `BaseHTTPRequestHandler` subclass with its own `_handle(span_name, fn)`-shaped tracer-wrapping, JSON-response helper, and `log_message` override (`AUDIT.md` Theme A, `jscpd`-confirmed).
-- **Target state:** a new `src/timberdoodle/http_handler_base.py` providing the shared pieces (a `traced_handler(span_name, fn)` decorator/wrapper, a `respond_json(handler, status, body)` helper, a `QuietRequestHandler` mixin with the shared `log_message` override) that each of the 5 API modules imports and composes into their own handler class — **no framework, no shared server bootstrap, no change to the one-container-per-service model.**
+- **Target state:** a new `src/baler/http_handler_base.py` providing the shared pieces (a `traced_handler(span_name, fn)` decorator/wrapper, a `respond_json(handler, status, body)` helper, a `QuietRequestHandler` mixin with the shared `log_message` override) that each of the 5 API modules imports and composes into their own handler class — **no framework, no shared server bootstrap, no change to the one-container-per-service model.**
 - **Migration steps (build stays green throughout):**
   1. Write `http_handler_base.py` + its own unit tests, with no other file importing it yet.
   2. Migrate **one** API (`validate_api.py` — smallest, 110 lines) to use it; run its existing tests + the relevant `test_validate_openapi.py`/integration tests; commit.
   3. Repeat one at a time for `ingest_api.py`, `auth_api.py`, `fault_api.py`, `derivation_api.py` — each is an independent commit, each keeps that service's existing test suite as the safety net, no cross-service coordination needed since they don't call each other.
   4. Re-run `jscpd` after all 5 are migrated; confirm the Python duplication % (baseline 6.06%, §0.1) has measurably dropped.
 - **Rollback plan:** each migration is a single-file, single-commit change; revert the one commit for the affected service if its tests or the integration suite regress — no other service is touched by any one step.
-- **Files touched:** new `src/timberdoodle/http_handler_base.py` + `tests/test_http_handler_base.py`; then one at a time, `validate_api.py`, `ingest_api.py`, `auth_api.py`, `fault_api.py`, `derivation_api.py`.
+- **Files touched:** new `src/baler/http_handler_base.py` + `tests/test_http_handler_base.py`; then one at a time, `validate_api.py`, `ingest_api.py`, `auth_api.py`, `fault_api.py`, `derivation_api.py`.
 - **Acceptance criteria:** full test suite green after each step; `jscpd` Python duplication % drops from the 6.06% baseline; no behavior change (existing tests are the proof).
 - **Size:** M (spread across 6 small commits). **Dependencies:** Stage 0 (needs the coverage baseline to confirm no regression), Stage 1.3 done first is not required but is complementary. **Risk:** medium-low — mechanical extraction with a real regression test (the existing suite) at every step; the risk is entirely in "did I preserve exact behavior," which the existing per-service tests plus the gateway integration tests directly check.
 

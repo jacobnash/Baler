@@ -1,4 +1,8 @@
-# Timberdoodle
+# Baler
+
+> Formerly **Timberdoodle** (and its BACnet/Modbus bridge, formerly **FBF**, is now
+> [Windrow](https://github.com/jacobnash/windrow)). Existing installs keep their data and
+> `.env` - see [deploy/MIGRATING-TO-BALER.md](deploy/MIGRATING-TO-BALER.md).
 
 Ontology-agnostic building data platform: API-first, load-time-pluggable
 (Brick/Haystack/DBO), headless by design. Time-series lives in
@@ -7,15 +11,15 @@ it natively — no plugin required); entity/relationship data lives in
 Oxigraph as RDF, queryable over SPARQL. Every API is documented with
 OpenAPI and served live off the process that implements it.
 
-Feeds from [FBF](../fbf) (BACnet/Modbus → MQTT) over the same wire
+Feeds from [Windrow](../windrow) (BACnet/Modbus → MQTT) over the same wire
 envelope `mqtt_listener.py` and `POST /ingest` both consume.
 
 ## Quick start
 
 ```bash
 cp .env.example .env                                                     # first time only, see below
-echo "TIMBERDOODLE_JWT_SECRET=$(openssl rand -hex 32)" >> .env           # first time only
-echo "TIMBERDOODLE_GATEWAY_SECRET=$(openssl rand -hex 32)" >> .env       # first time only
+echo "BALER_JWT_SECRET=$(openssl rand -hex 32)" >> .env           # first time only
+echo "BALER_GATEWAY_SECRET=$(openssl rand -hex 32)" >> .env       # first time only
 echo "MQTT_PASSWORD=$(openssl rand -hex 16)" >> .env                     # first time only
 docker compose up -d --wait   # waits for the 7 HTTP APIs' healthchecks, not just "container started"
 ```
@@ -29,7 +33,7 @@ working default the way there is for everything else in `.env.example`, which
 lists every other environment variable any part of this repo reads,
 each annotated with its default and which process needs it. Postgres's
 password specifically comes from `POSTGRES_PASSWORD` in `.env` (defaults
-to `timberdoodle` if unset — fine for local dev, change it for anything
+to `baler` if unset — fine for local dev, change it for anything
 else).
 
 That's everything — 5 infra containers (mosquitto, oxigraph, postgres,
@@ -122,43 +126,43 @@ optional extra on top of that base install (`.[dev]`, `.[llm]`,
 ### Mock hospital demo: auto-tagging, derivations/faults, UI
 
 This demo needs live BACnet-over-MQTT readings, which come from
-[FBF](../fbf) — a separate sibling repo (`../fbf`, not part of this
+[Windrow](../windrow) — a separate sibling repo (`../windrow`, not part of this
 checkout). Clone/set it up first, then generate and provision its mock
 hospital site (~500 points, ~90 pieces of equipment):
 
 ```bash
-# in ../fbf, after `pip install -e ".[dev]"` there:
-python -m fbf.mock_hospital generate --out hospital_site_spec.json   # one-shot: writes the site spec
+# in ../windrow, after `pip install -e ".[dev]"` there:
+python -m windrow.mock_hospital generate --out hospital_site_spec.json   # one-shot: writes the site spec
 
 # each in its own long-running terminal:
-python -m fbf.mock_device --address <your-iface>/24:47808 --instance 3456 --site-spec hospital_site_spec.json   # simulated BACnet device
-MQTT_USERNAME=timberdoodle MQTT_PASSWORD=<your .env's MQTT_PASSWORD> \
-  python -m fbf.api --address <your-iface>/24:47820 --mqtt-host localhost   # discovery/connections API, publishes to MQTT
+python -m windrow.mock_device --address <your-iface>/24:47808 --instance 3456 --site-spec hospital_site_spec.json   # simulated BACnet device
+MQTT_USERNAME=baler MQTT_PASSWORD=<your .env's MQTT_PASSWORD> \
+  python -m windrow.api --address <your-iface>/24:47820 --mqtt-host localhost   # discovery/connections API, publishes to MQTT
 
 # one-shot, once both of the above are up:
-python -m fbf.mock_hospital provision --device-address <your-iface>:47808 --device-instance 3456   # provisions one connection per equipment
+python -m windrow.mock_hospital provision --device-address <your-iface>:47808 --device-instance 3456   # provisions one connection per equipment
 ```
 
 `<your-iface>` is your host's own network interface address (bacpypes3's
-local-BACnet-address arg — see FBF's `docs/bacnet-discovery-api.md`).
-Once provisioned, Timberdoodle's `mqtt_listener.py` picks up the
-readings/tags unchanged — no FBF-specific code on this side. See
-`../fbf/README.md` for anything not covered here (it's a separate,
+local-BACnet-address arg — see Windrow's `docs/bacnet-discovery-api.md`).
+Once provisioned, Baler's `mqtt_listener.py` picks up the
+readings/tags unchanged — no Windrow-specific code on this side. See
+`../windrow/README.md` for anything not covered here (it's a separate,
 independently-versioned project).
 
 With `mqtt_listener.py` ingesting:
 
 ```bash
 pip install -e ".[llm]"                    # anthropic + pydantic, only needed for autotag
-ANTHROPIC_API_KEY=... python -m timberdoodle.autotag   # rule engine + LLM fallback for what it can't place
-TIMBERDOODLE_ADMIN_EMAIL=<admin-email> TIMBERDOODLE_ADMIN_PASSWORD=<admin-password> \
+ANTHROPIC_API_KEY=... python -m baler.autotag   # rule engine + LLM fallback for what it can't place
+BALER_ADMIN_EMAIL=<admin-email> BALER_ADMIN_PASSWORD=<admin-password> \
   python scripts/seed_derivations_and_faults.py         # Brick derivations + fault rules, writes through the gateway
-python -m timberdoodle.ui_server                         # browse equipment/points/charts at localhost:8004 (no-store, so edits show up on refresh)
+python -m baler.ui_server                         # browse equipment/points/charts at localhost:8004 (no-store, so edits show up on refresh)
 ```
 
 `seed_derivations_and_faults.py` logs in through the gateway itself
 (`POST /auth/login`) to get a Bearer token, so
-`TIMBERDOODLE_ADMIN_EMAIL`/`TIMBERDOODLE_ADMIN_PASSWORD` must match an
+`BALER_ADMIN_EMAIL`/`BALER_ADMIN_PASSWORD` must match an
 existing admin account — create one first with `POST /auth/orgs` (see
 "Gateway auth" above) if you don't have one yet.
 
@@ -190,19 +194,19 @@ curl -s -H "Authorization: Bearer $TOKEN" --get localhost:8080/ingest/his \
   --data-urlencode 'tz=America/Chicago'
 ```
 
-Set `TIMBERDOODLE_TZ` in `.env` so `today` means the building's today for
+Set `BALER_TZ` in `.env` so `today` means the building's today for
 clients that don't pass `tz`. Full grammar, span table, and what is
 deliberately *not* supported (tag paths, arithmetic, other Axon
 functions):
 [`docs-site/pages/his-query.mdx`](docs-site/pages/his-query.mdx).
 
 `ui_server.py` also serves `ui/devices.html` (localhost:8004/devices.html)
-- a dashboard for FBF's periodic BACnet/Modbus device discovery: review
+- a dashboard for Windrow's periodic BACnet/Modbus device discovery: review
 discovered devices, set per-device credentials, and provision connections,
-all via direct browser calls to `fbf.api` (see
-[`docs-site/pages/fbf-periodic-discovery.mdx`](docs-site/pages/fbf-periodic-discovery.mdx)).
-Pass `?fbf=<url>` if
-`fbf.api` isn't on the default `localhost:8001`.
+all via direct browser calls to `windrow.api` (see
+[`docs-site/pages/windrow-periodic-discovery.mdx`](docs-site/pages/windrow-periodic-discovery.mdx)).
+Pass `?windrow=<url>` if
+`windrow.api` isn't on the default `localhost:8001`.
 
 `autotag.py` sweeps every point/equip with tags but no direct Brick match,
 runs `mapping.classify_point_with_fallback` on each (rule engine first,
@@ -219,7 +223,7 @@ human to review and promote - it never edits the live rule set itself.
 | oxigraph | 7878 | RDF/SPARQL graph store |
 | postgres | 5433 (→5432 in-container) | Timescale hypertable, `point_history` |
 | jaeger | 16686 (UI), 4318 (OTLP HTTP) | Traces — every process exports here |
-| grafana | 3033 (→3000 in-container) | Dashboards over Postgres — a "Timberdoodle Postgres" datasource and a starter "Timberdoodle: Point History" dashboard are auto-provisioned (`grafana/provisioning/`). Login is the image default `admin`/`admin` unless `GRAFANA_ANON_ENABLED=true` in `.env` (off by default — see `.env.example`; changing it needs `docker compose up -d grafana` to recreate the container, since compose only reads `.env` at container start, not while it's already running) |
+| grafana | 3033 (→3000 in-container) | Dashboards over Postgres — a "Baler Postgres" datasource and a starter "Baler: Point History" dashboard are auto-provisioned (`grafana/provisioning/`). Login is the image default `admin`/`admin` unless `GRAFANA_ANON_ENABLED=true` in `.env` (off by default — see `.env.example`; changing it needs `docker compose up -d grafana` to recreate the container, since compose only reads `.env` at container start, not while it's already running) |
 | gateway | 8080 | JWT-auth-gated (nginx + njs) reverse proxy in front of every API — see "Gateway auth" above |
 
 Postgres is remapped to host port 5433, not the default 5432, to avoid
@@ -269,8 +273,8 @@ are 19 real sites; check `metadata.csv`'s `site_id` column for names).
 ## Backup and restore
 
 `scripts/backup.py` dumps the two volumes that hold real state —
-`postgres-data` (via `docker compose exec postgres pg_dump -U timberdoodle
-timberdoodle` — that Postgres user/database name is fixed, not
+`postgres-data` (via `docker compose exec postgres pg_dump -U baler
+baler` — that Postgres user/database name is fixed, not
 configurable, same as `POSTGRES_USER`/`POSTGRES_DB` in docker-compose.yml)
 and `oxigraph-data` (via the same bulk graph-store GET the SHACL
 validator uses) — into timestamped, gzip'd files under `backups/`
@@ -298,14 +302,14 @@ Nothing runs `backup.py` on its own — pick one:
 
 ```bash
 # systemd (recommended on a Linux host)
-sudo cp scripts/systemd/timberdoodle-backup.{service,timer} /etc/systemd/system/
-sudo $EDITOR /etc/systemd/system/timberdoodle-backup.service   # set WorkingDirectory=
-sudo systemctl enable --now timberdoodle-backup.timer
+sudo cp scripts/systemd/baler-backup.{service,timer} /etc/systemd/system/
+sudo $EDITOR /etc/systemd/system/baler-backup.service   # set WorkingDirectory=
+sudo systemctl enable --now baler-backup.timer
 ```
 
 ```bash
 # cron (non-systemd hosts)
-0 3 * * * cd /path/to/timberdoodle && python3 scripts/backup.py >> backups/backup.log 2>&1
+0 3 * * * cd /path/to/baler && python3 scripts/backup.py >> backups/backup.log 2>&1
 ```
 
 Both just call the same `backup.py` shown above on a schedule (default:

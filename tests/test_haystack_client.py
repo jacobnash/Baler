@@ -17,14 +17,14 @@ import os
 
 import pytest
 
-from timberdoodle.fake_haystack_server import (
+from baler.fake_haystack_server import (
     TEST_PASSWORD,
     TEST_USER,
 )
-from timberdoodle.fake_haystack_server import (
+from baler.fake_haystack_server import (
     make_fake_haxall_server as _make_fake_haxall_server,
 )
-from timberdoodle.haystack_client import (
+from baler.haystack_client import (
     HaystackAuthError,
     HaystackClient,
     _decode_haystack_scalar,

@@ -23,11 +23,11 @@ jobs:
       # BASELINE.md. Fix or scoped-noqa-with-reason new findings; don't
       # loosen the gate.
       - run: ruff check src/ tests/
-      - run: mypy src/timberdoodle
+      - run: mypy src/baler
       # Clone-detection is reporting-only (PLAN.md Guardrails) - alerts on
       # new duplication without blocking; baseline is ~3.7% Python
       # (BASELINE.md). Node is preinstalled on GitHub Actions runners.
-      - run: npx --yes jscpd@4 src/timberdoodle tests ui gateway/njs --min-lines 5 --min-tokens 40 --ignore "**/__pycache__/**"
+      - run: npx --yes jscpd@4 src/baler tests ui gateway/njs --min-lines 5 --min-tokens 40 --ignore "**/__pycache__/**"
         continue-on-error: true
       # gateway/njs/ has no pytest equivalent - plain node runs the same
       # WebCrypto-based logic njs runs inside nginx (GitHub Actions
@@ -41,19 +41,19 @@ jobs:
     # start at all (auth_api/gateway refuse to start without the two secrets;
     # mosquitto and every MQTT daemon refuse to start without MQTT_PASSWORD)
     # and tests/test_gateway_auth.py has a real gateway to test against - never
-    # real secrets, never committed. TIMBERDOODLE_ALLOW_PRIVATE_WEBHOOKS lets
+    # real secrets, never committed. BALER_ALLOW_PRIVATE_WEBHOOKS lets
     # the webhook e2e tests register/deliver to their on-host receiver.
     env:
-      TIMBERDOODLE_JWT_SECRET: ci-only-jwt-secret-needs-32-bytes-minimum
-      TIMBERDOODLE_GATEWAY_SECRET: ci-only-gateway-secret-value
+      BALER_JWT_SECRET: ci-only-jwt-secret-needs-32-bytes-minimum
+      BALER_GATEWAY_SECRET: ci-only-gateway-secret-value
       # Bare-metal test clients authenticate to mosquitto as this user (the
       # daemon containers get it from docker-compose's daemon-env). Without
       # MQTT_USERNAME set, mqtt_util.make_client() connects anonymously and
       # the broker (auth now required) rejects it, so the real-broker tests
       # publish into the void and their reads come back empty.
-      MQTT_USERNAME: timberdoodle
+      MQTT_USERNAME: baler
       MQTT_PASSWORD: ci-only-mqtt-password
-      TIMBERDOODLE_ALLOW_PRIVATE_WEBHOOKS: "1"
+      BALER_ALLOW_PRIVATE_WEBHOOKS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -74,6 +74,6 @@ jobs:
       # Coverage is reporting-only for now (PLAN.md Stage 0.2/Guardrails) -
       # baseline is 81% (BASELINE.md). No --cov-fail-under yet: the floor
       # should ratchet up from a real baseline, not block on day one.
-      - run: pytest -m "integration or not integration" --cov=timberdoodle --cov-report=term-missing
+      - run: pytest -m "integration or not integration" --cov=baler --cov-report=term-missing
       - if: always()
         run: docker compose logs

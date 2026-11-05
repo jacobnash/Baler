@@ -2,16 +2,16 @@ import type { ZudokuConfig } from "zudoku";
 
 const config: ZudokuConfig = {
   metadata: {
-    title: "%s | Timberdoodle",
-    defaultTitle: "Timberdoodle",
+    title: "%s | Baler",
+    defaultTitle: "Baler",
     description: "Ontology-agnostic building data platform: API-first, load-time-pluggable, headless by design.",
     favicon: "/favicon.png",
   },
   site: {
-    title: "Timberdoodle",
+    title: "Baler",
     logo: {
       src: { light: "/logo-light.png", dark: "/logo-dark.png" },
-      alt: "Timberdoodle",
+      alt: "Baler",
       width: "306px",
     },
   },
@@ -57,7 +57,7 @@ const config: ZudokuConfig = {
       type: "category",
       label: "Documentation",
       icon: "book",
-      items: ["/introduction", "/architecture", "/multi-site", "/gateway-auth", "/his-query", "/fault-detection", "/derivation", "/webhooks", "/validate", "/haxall-drop-in", "/haystack-api", "/haystack-puller", "/adding-a-data-source", "/weather-stations", "/backups", "/nash-srv-deploy", "/fbf", "/fbf-adding-a-new-source", "/fbf-periodic-discovery"],
+      items: ["/introduction", "/architecture", "/multi-site", "/gateway-auth", "/his-query", "/fault-detection", "/derivation", "/webhooks", "/validate", "/haxall-drop-in", "/haystack-api", "/haystack-puller", "/adding-a-data-source", "/weather-stations", "/backups", "/nash-srv-deploy", "/windrow", "/windrow-adding-a-new-source", "/windrow-periodic-discovery"],
     },
     {
       type: "category",
@@ -70,7 +70,7 @@ const config: ZudokuConfig = {
         { type: "link", label: "Derivation API", to: "/api/derivation" },
         { type: "link", label: "Validate API", to: "/api/validate" },
         { type: "link", label: "Auth API", to: "/api/auth" },
-        { type: "link", label: "FBF API (BACnet/Modbus)", to: "/api/fbf" },
+        { type: "link", label: "Windrow API (BACnet/Modbus)", to: "/api/windrow" },
       ],
     },
   ],
@@ -84,41 +84,41 @@ const config: ZudokuConfig = {
       type: "file",
       input: "../openapi.yaml",
       path: "/api/ingest",
-      categories: [{ label: "Timberdoodle APIs", tags: ["Ingest API"] }],
+      categories: [{ label: "Baler APIs", tags: ["Ingest API"] }],
     },
     {
       type: "file",
       input: "../fault-api-openapi.yaml",
       path: "/api/fault",
-      categories: [{ label: "Timberdoodle APIs", tags: ["Fault API"] }],
+      categories: [{ label: "Baler APIs", tags: ["Fault API"] }],
     },
     {
       type: "file",
       input: "../derivation-api-openapi.yaml",
       path: "/api/derivation",
-      categories: [{ label: "Timberdoodle APIs", tags: ["Derivation API"] }],
+      categories: [{ label: "Baler APIs", tags: ["Derivation API"] }],
     },
     {
       type: "file",
       input: "../validate-api-openapi.yaml",
       path: "/api/validate",
-      categories: [{ label: "Timberdoodle APIs", tags: ["Validate API"] }],
+      categories: [{ label: "Baler APIs", tags: ["Validate API"] }],
     },
     {
       type: "file",
       input: "../auth-api-openapi.yaml",
       path: "/api/auth",
-      categories: [{ label: "Timberdoodle APIs", tags: ["Auth API"] }],
+      categories: [{ label: "Baler APIs", tags: ["Auth API"] }],
     },
     {
-      // FBF is a separate, independently-versioned project, vendored as a
-      // git submodule at fbf/ (still its own repo/history - see
-      // .gitmodules) - own category, not lumped into "Timberdoodle APIs",
+      // Windrow is a separate, independently-versioned project, vendored as a
+      // git submodule at windrow/ (still its own repo/history - see
+      // .gitmodules) - own category, not lumped into "Baler APIs",
       // so that separation stays visible here too.
       type: "file",
-      input: "../fbf/openapi.yaml",
-      path: "/api/fbf",
-      categories: [{ label: "FBF APIs", tags: ["Discovery, Connections & Devices"] }],
+      input: "../windrow/openapi.yaml",
+      path: "/api/windrow",
+      categories: [{ label: "Windrow APIs", tags: ["Discovery, Connections & Devices"] }],
     },
   ],
   // Zudoku already prerenders every page to static HTML with real content

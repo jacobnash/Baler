@@ -1,11 +1,11 @@
 openapi: 3.1.0
 info:
-  title: Timberdoodle Haystack API
+  title: Baler Haystack API
   version: 0.1.0
-  summary: The Project Haystack HTTP API over Timberdoodle's entity graph and historian.
+  summary: The Project Haystack HTTP API over Baler's entity graph and historian.
   description: |
     Standard Project Haystack ops, so SkySpark, Haxall, nhaystack, pyhaystack,
-    phable and openhay clients can point at Timberdoodle by changing only the
+    phable and openhay clients can point at Baler by changing only the
     host. Both URL layouts are served: `/api/{project}/{op}` (SkySpark) and
     `/api/{op}` (Haxall). `{project}` is accepted but not yet used for scoping.
 
@@ -21,14 +21,14 @@ info:
     sent as `Authorization: Bearer <token>` (OAuth style) or
     `Authorization: BEARER authToken=<token>` (Haystack style). Haystack
     clients obtain one with the standard HELLO / SCRAM-SHA-256 handshake
-    against any op (normally `about`), using their Timberdoodle email and
+    against any op (normally `about`), using their Baler email and
     password; the final 200 carries `Authentication-Info: authToken=<jwt>`.
     Read-type ops need role `viewer`; `hisWrite`/`pointWrite`/`invokeAction`
     need `operator`.
 
     **Ids.** Record ids are entity URIs with every character outside
     Haystack's ref alphabet escaped as `~XX`, e.g.
-    `@urn:point:fbf~2Fahu-1~2FanalogInput~2C1`.
+    `@urn:point:windrow~2Fahu-1~2FanalogInput~2C1`.
 
     **Not yet supported:** `pointWrite`, `invokeAction` (error grid),
     `->` tag paths in filters, datetime `hisRead` ranges (dates and

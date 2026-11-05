@@ -2,8 +2,8 @@
 title: Public demo deploy (nash-srv)
 ---
 
-Push to `main` and, once [CI](https://github.com/jacobnash/timberdoodle/actions/workflows/ci.yml)
-passes, [`.github/workflows/deploy.yml`](https://github.com/jacobnash/timberdoodle/blob/main/.github/workflows/deploy.yml)
+Push to `main` and, once [CI](https://github.com/jacobnash/baler/actions/workflows/ci.yml)
+passes, [`.github/workflows/deploy.yml`](https://github.com/jacobnash/baler/blob/main/.github/workflows/deploy.yml)
 deploys the whole stack to `nash-srv` - a shared box that also runs a few
 other projects behind one Caddy instance. `https://timberdoodle.nash.engineering`
 is the app, `https://docs.timberdoodle.nash.engineering` is this site
@@ -14,16 +14,16 @@ GitHub-hosted runner SSHing in - no deploy key ever leaves nash-srv. The
 runner runs as a dedicated `github-runner` OS user that is **not** in the
 `docker` group (docker-group membership is root-equivalent host access, and
 this box runs unrelated projects for other people) - it can only touch
-timberdoodle at all via one root-owned, no-argument wrapper script it's
+baler at all via one root-owned, no-argument wrapper script it's
 allowed to `sudo` through a sudoers rule scoped to exactly that script:
 
 ```
-github-runner ALL=(root) NOPASSWD: /usr/local/sbin/timberdoodle-deploy.sh
+github-runner ALL=(root) NOPASSWD: /usr/local/sbin/baler-deploy.sh
 ```
 
 That wrapper does `docker compose -f docker-compose.yml -f
 deploy/nash-srv/docker-compose.override.yml --env-file
-~/.config/timberdoodle/nash-srv.env {pull,up -d --build,restart gateway}` -
+~/.config/baler/nash-srv.env {pull,up -d --build,restart gateway}` -
 the override file rebinds every port the base compose file publishes
 (`postgres`, `oxigraph`, `mosquitto`, `jaeger`, `grafana`, `gateway`) to
 `127.0.0.1`, matching how every other project on this box is bound. Caddy is
@@ -46,19 +46,19 @@ friends generate survives every redeploy.
    This is the only step that isn't scripted - it needs your DNS provider's
    own UI/credentials.
 2. **Everything else on nash-srv** - one script does the rest: generates
-   real prod secrets (`~/.config/timberdoodle/nash-srv.env`, outside the git
+   real prod secrets (`~/.config/baler/nash-srv.env`, outside the git
    checkout so `actions/checkout`'s `git clean -ffdx` can't touch it),
    installs the runner/wrapper/sudoers rule via `setup-runner.sh`, and
    appends+reloads the Caddy block. All three sub-steps are safe to re-run
    (each skips itself if already done).
    ```bash
-   git clone git@github.com:jacobnash/timberdoodle.git   # skip if already cloned
-   cd timberdoodle
+   git clone git@github.com:jacobnash/baler.git   # skip if already cloned
+   cd baler
    bash deploy/nash-srv/bootstrap.sh <REGISTRATION_TOKEN>
    ```
    Get `<REGISTRATION_TOKEN>` from the repo's Settings → Actions → Runners →
    New self-hosted runner (valid ~1 hour, single use - grab it right before
-   running). `TIMBERDOODLE_ALLOW_PRIVATE_WEBHOOKS` is deliberately left
+   running). `BALER_ALLOW_PRIVATE_WEBHOOKS` is deliberately left
    unset in the generated env file - this box is public, so the webhook
    SSRF guard (`webhooks.validate_url`) needs to stay on, unlike local dev
    or CI.
@@ -74,28 +74,28 @@ friends generate survives every redeploy.
 
 ## Demo data (mock hospital)
 
-Without this, the demo is just an empty app past login. `deploy/nash-srv/docker-compose.fbf.yml`
-runs a simulated BACnet device (`fbf.mock_device`) and FBF's own discovery/
-API service (`fbf.api`) as two more services in the regular deploy - built
-from `deploy/nash-srv/fbf.Dockerfile` against the `fbf/` submodule, joined
+Without this, the demo is just an empty app past login. `deploy/nash-srv/docker-compose.windrow.yml`
+runs a simulated BACnet device (`windrow.mock_device`) and Windrow's own discovery/
+API service (`windrow.api`) as two more services in the regular deploy - built
+from `deploy/nash-srv/windrow.Dockerfile` against the `fbf/` submodule, joined
 to a small fixed-IP `bacnet-mock` network (`172.30.0.0/24`) since BACnet/IP
 needs a literal address on both sides, not a hostname. Confirmed working
 over a normal Docker bridge network - BACnet unicast (not broadcast, which
-doesn't cross bridge networks) is all this needs. `fbf_api` also joins the
+doesn't cross bridge networks) is all this needs. `windrow_api` also joins the
 default network to reach `mosquitto` by service name, same as every other
-daemon. Its connection state persists in a named volume (`fbf-state`, like
+daemon. Its connection state persists in a named volume (`windrow-state`, like
 `postgres-data`/`oxigraph-data`) so redeploys don't wipe provisioning.
 
 One-time (not per-deploy - `scripts/seed_derivations_and_faults.py` isn't
 safe to re-run, it'd create duplicate derivations):
 
 ```bash
-cd ~/timberdoodle-deploy   # or wherever the checkout actually is
+cd ~/baler-deploy   # or wherever the checkout actually is
 DEMO_ADMIN_EMAIL=<same as the GitHub secret> DEMO_ADMIN_PASSWORD=<same> \
   bash deploy/nash-srv/seed-demo-data.sh
 ```
 
-Provisions fbf.api against the mock device (~500 points across ~90
+Provisions windrow.api against the mock device (~500 points across ~90
 equipment), waits for `mqtt_listener` to ingest some of it, runs `autotag
 --no-llm` (rule engine only - no `ANTHROPIC_API_KEY` needed, some points
 stay unclassified without the LLM fallback but the rule engine covers the
@@ -104,15 +104,15 @@ gateway using the same demo account. Run as `jacob` (already in the
 `docker` group on this box) - not through the runner's sudoers wrapper,
 this needs `docker compose exec`, not just `up`.
 
-## FBF submodule
+## Windrow submodule
 
-`fbf/` is a separate, independently-versioned public repo (`jacobnash/fbf`),
+`fbf/` is a separate, independently-versioned public repo (`jacobnash/windrow`),
 vendored here as a git submodule rather than merged in - this repo's docs
 (`docs-site/pages/...`, the API catalog) reference `fbf/openapi.yaml`
 directly. `actions/checkout`'s `submodules: true` (set in `deploy.yml`)
 clones it directly - no separate step or deploy key needed now that it's
 public. (It used to be private, requiring a read-only SSH deploy key at
-`/home/github-runner/.ssh/fbf_deploy_key` on the runner - if that key/config
+`/home/github-runner/.ssh/windrow_deploy_key` on the runner - if that key/config
 is still on nash-srv from before, it's dead weight and safe to remove.)
 
 ## Reaching the parts that aren't public

@@ -14,17 +14,17 @@ from threading import Thread
 
 import pytest
 
-from timberdoodle.fault_detector import (
+from baler.fault_detector import (
     RuleCache,
     evaluate_his_rules,
     evaluate_range_rule,
     handle_cur_reading,
 )
-from timberdoodle.faults import ensure_schema, list_faults
-from timberdoodle.ingest import ingest_tags
-from timberdoodle.mapping import classify_point
-from timberdoodle.store import Store
-from timberdoodle.timeseries import connect, write_point_value
+from baler.faults import ensure_schema, list_faults
+from baler.ingest import ingest_tags
+from baler.mapping import classify_point
+from baler.store import Store
+from baler.timeseries import connect, write_point_value
 
 
 @pytest.fixture
@@ -41,7 +41,7 @@ def receiver(monkeypatch):
     # targets by default (see webhooks.validate_url) - this is the
     # deployment-level escape hatch, exercised here because the receiver
     # this fixture spins up is deliberately a loopback address.
-    monkeypatch.setenv("TIMBERDOODLE_ALLOW_PRIVATE_WEBHOOKS", "1")
+    monkeypatch.setenv("BALER_ALLOW_PRIVATE_WEBHOOKS", "1")
     received = []
 
     class Receiver(BaseHTTPRequestHandler):
@@ -210,9 +210,9 @@ def test_cur_brick_class_rule_opens_fault_without_a_topic_glob(fault_conn, tmp_p
     not a topic string, and still opens a fault - proving the point's topic
     (whatever building/naming scheme it came from) never has to appear in
     the rule itself."""
-    from timberdoodle.ingest import ingest_tags
-    from timberdoodle.mapping import classify_point
-    from timberdoodle.remote_store import RemoteStore
+    from baler.ingest import ingest_tags
+    from baler.mapping import classify_point
+    from baler.remote_store import RemoteStore
 
     store = RemoteStore()
     topic = "test-fd:brick-cur-point"

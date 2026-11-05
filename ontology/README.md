@@ -15,6 +15,6 @@ Pinned, not auto-fetched on install — same "hand-vendor, verify, commit"
 pattern as `tests/fixtures/brick_subset.ttl`. Update manually if/when the
 project bumps its Brick version.
 
-Loaded by `src/timberdoodle/shacl_validate.py` (`load_shapes`) to
+Loaded by `src/baler/shacl_validate.py` (`load_shapes`) to
 structurally validate the live entity graph against Brick's own SHACL
 shapes — see `validate_api.py` (`POST /validate`).

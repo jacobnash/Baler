@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from timberdoodle.timeseries import (
+from baler.timeseries import (
     connect,
     delete_point_value,
     read_latest,
@@ -59,7 +59,7 @@ def test_conflict_on_same_point_and_ts_overwrites(conn):
 
 @pytest.mark.integration
 def test_delete_point_value_removes_exactly_that_row(conn):
-    """The Timberdoodle side of Haxall's IHisExt val==None.val delete
+    """The Baler side of Haxall's IHisExt val==None.val delete
     convention - a specific timestamp is removed outright."""
     t1 = datetime(2026, 1, 1, tzinfo=timezone.utc)
     t2 = datetime(2026, 1, 2, tzinfo=timezone.utc)

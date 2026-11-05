@@ -15,15 +15,15 @@ import yaml
 from conftest import assert_matches_schema, load_spec
 from openapi_spec_validator import validate
 
-from timberdoodle import derivation_health
-from timberdoodle.derivation_api import OPENAPI_SPEC_PATH, make_handler
-from timberdoodle.ingest import (
+from baler import derivation_health
+from baler.derivation_api import OPENAPI_SPEC_PATH, make_handler
+from baler.ingest import (
     link_point_to_equip,
     topic_prefix_to_equip_uri,
     topic_to_point_uri,
 )
-from timberdoodle.remote_store import RemoteStore
-from timberdoodle.timeseries import connect_pool, read_latest, write_point_value
+from baler.remote_store import RemoteStore
+from baler.timeseries import connect_pool, read_latest, write_point_value
 
 AVG_FN_SOURCE = "def run(inputs, row):\n    vals = [v for s in inputs.values() for _, v in s[-1:]]\n    return sum(vals) / len(vals) if vals else None"
 GATEWAY_SECRET = "test-gateway-secret"
@@ -52,7 +52,7 @@ def ts_pool():
 
 @pytest.fixture
 def live_server(tmp_path, store, ts_pool, monkeypatch):
-    monkeypatch.setenv("TIMBERDOODLE_GATEWAY_SECRET", GATEWAY_SECRET)
+    monkeypatch.setenv("BALER_GATEWAY_SECRET", GATEWAY_SECRET)
     with ts_pool.connection() as conn:
         derivation_health.ensure_schema(conn)
     derivations_path = str(tmp_path / "derivations.json")
@@ -80,7 +80,7 @@ def test_get_openapi_yaml_serves_the_real_spec_file(live_server):
     assert resp.status_code == 200
     assert resp.headers["Content-Type"] == "application/yaml"
     served = yaml.safe_load(resp.text)
-    assert served["info"]["title"] == "Timberdoodle Derivation API"
+    assert served["info"]["title"] == "Baler Derivation API"
 
 
 @pytest.mark.integration

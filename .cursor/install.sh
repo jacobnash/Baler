@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Idempotent repository bootstrap for the Timberdoodle Cloud Agent environment.
+# Idempotent repository bootstrap for the Baler Cloud Agent environment.
 # Installs Docker (the whole dev experience is `docker compose up`), the Python
 # toolchain for bare-metal tests/scripts, seeds a local .env with generated
 # HMAC secrets, and pre-builds the compose images so `start` is fast.
@@ -58,10 +58,10 @@ pip install --upgrade pip
 # llm-classifier tests), validate = pyshacl (SHACL validate_api tests).
 pip install -e ".[dev,llm,validate]"
 
-# Sibling FBF repo (mock-hospital BACnet feed) is optional - install it too
+# Sibling Windrow repo (mock-hospital BACnet feed) is optional - install it too
 # when it's checked out next to this repo, so the mock-hospital demo works.
-if [ -f ../fbf/pyproject.toml ]; then
-  pip install -e "../fbf[dev]" || true
+if [ -f ../windrow/pyproject.toml ]; then
+  pip install -e "../windrow[dev]" || true
 fi
 
 # --- 3. Local .env with generated secrets (gitignored) ----------------------
@@ -69,7 +69,7 @@ fi
 # (re)generates .env per boot via the same helper, since builds skip install.
 # shellcheck source=.cursor/gen-env.sh
 . "$REPO_DIR/.cursor/gen-env.sh"
-ensure_timberdoodle_env "$REPO_DIR"
+ensure_baler_env "$REPO_DIR"
 
 # --- 4. Pre-build compose images so `start` only has to boot them -----------
 # dockerd doesn't survive into a later boot, so start it just for the build;
@@ -84,4 +84,4 @@ if ! sudo docker info >/dev/null 2>&1; then
 fi
 sudo docker compose build
 
-echo "Timberdoodle install complete."
+echo "Baler install complete."

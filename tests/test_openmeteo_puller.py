@@ -7,9 +7,9 @@ Needs live Postgres, hence integration.
 import pytest
 from rdflib import RDF, URIRef
 
-from timberdoodle.openmeteo_puller import DEFAULT_VARIABLE_TAGS, pull_once
-from timberdoodle.store import BRICK, Store
-from timberdoodle.timeseries import connect, read_latest
+from baler.openmeteo_puller import DEFAULT_VARIABLE_TAGS, pull_once
+from baler.store import BRICK, Store
+from baler.timeseries import connect, read_latest
 
 STATION_ID = "test-station"
 

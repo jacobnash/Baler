@@ -136,9 +136,9 @@ stays open. See [Webhooks](/webhooks) for delivery semantics.
 
 Fault detection evaluates whatever readings actually arrive — it has no
 say over *how often* a point reports or *which* changes get published in
-the first place. That's configured upstream, in FBF's connection layer
+the first place. That's configured upstream, in Windrow's connection layer
 (`his_collect_cov`, `his_collect_interval`, matching real Haystack/Haxall
-semantics). See FBF's own `bacnet-discovery-api.md` (section 3b) for the
+semantics). See Windrow's own `bacnet-discovery-api.md` (section 3b) for the
 full writeup, including the one real gap worth knowing before you lean on
 it: there's no default rate-limit tiering, so an unthrottled noisy point
 with only `his_collect_cov` set will publish (and therefore get

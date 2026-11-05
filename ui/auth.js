@@ -3,7 +3,7 @@
 // gateway (index.html, derivations.html, alarms.html), and also by
 // devices.html purely to require sign-in before the page renders at all -
 // devices.js itself still talks straight to a separate, unauthenticated
-// API (fbf.api) and never calls authHeaders()/handleUnauthorized().
+// API (windrow.api) and never calls authHeaders()/handleUnauthorized().
 // Plain global functions, no module system - same "no build step" spirit
 // as every other file in ui/. Expects a page to declare the login-gate
 // markup with these exact ids (see index.html) before loading this script.

@@ -8,7 +8,7 @@ behavior on malformed input."""
 
 import pytest
 
-from timberdoodle.axon_convert import AxonSyntaxError, convert
+from baler.axon_convert import AxonSyntaxError, convert
 
 
 def _run(source: str, *args):

@@ -3,14 +3,14 @@ from dataclasses import dataclass
 import pytest
 from rdflib import RDF, RDFS, SKOS, Graph, Literal, Namespace
 
-from timberdoodle.ingest import ingest_tags
-from timberdoodle.mapping import (
+from baler.ingest import ingest_tags
+from baler.mapping import (
     classify_point,
     classify_point_with_fallback,
     load_rules,
     reclassify,
 )
-from timberdoodle.store import BRICK, PROJ, TD, Store
+from baler.store import BRICK, PROJ, TD, Store
 
 BLDG = Namespace("urn:test-mapping#")
 

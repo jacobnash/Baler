@@ -14,8 +14,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from timberdoodle import http_handler_base
-from timberdoodle.http_handler_base import BaseAPIHandler, respond_error, respond_json
+from baler import http_handler_base
+from baler.http_handler_base import BaseAPIHandler, respond_error, respond_json
 
 
 def _make_handler(headers: dict | None = None, body: bytes = b"") -> BaseAPIHandler:

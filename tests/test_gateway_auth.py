@@ -10,7 +10,7 @@ test_faults.py assumes Postgres is already up rather than starting it.
 
 Needs the `gateway` and `auth_api` services (and whichever backend a
 given test targets) actually running with real
-TIMBERDOODLE_JWT_SECRET/TIMBERDOODLE_GATEWAY_SECRET set - `docker
+BALER_JWT_SECRET/BALER_GATEWAY_SECRET set - `docker
 compose up -d` now refuses to start the gateway at all without both
 (see .env.example), so there's no more "blank secret" case to worry
 about.
@@ -46,7 +46,7 @@ def _cleanup_test_orgs():
     but via direct Postgres access (not the HTTP API, which has no
     delete-org route) - this file's own org names use a distinct prefix
     so it doesn't collide with those other files' cleanup."""
-    from timberdoodle.timeseries import connect
+    from baler.timeseries import connect
 
     conn = connect()
     conn.execute("""

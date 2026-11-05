@@ -22,7 +22,7 @@ _td_set_env() {
   fi
 }
 
-ensure_timberdoodle_env() {
+ensure_baler_env() {
   local dir="$1"
   ( cd "$dir" || return 1
     if [ ! -f .env ]; then
@@ -30,17 +30,17 @@ ensure_timberdoodle_env() {
     fi
     # The gateway refuses to start without these two HMAC secrets; mosquitto
     # (and every MQTT-connected daemon) refuses to start without MQTT_PASSWORD.
-    _td_set_env TIMBERDOODLE_JWT_SECRET "$(openssl rand -hex 32)"
-    _td_set_env TIMBERDOODLE_GATEWAY_SECRET "$(openssl rand -hex 32)"
+    _td_set_env BALER_JWT_SECRET "$(openssl rand -hex 32)"
+    _td_set_env BALER_GATEWAY_SECRET "$(openssl rand -hex 32)"
     _td_set_env MQTT_PASSWORD "$(openssl rand -hex 16)"
     # Allow webhook registration/delivery to local receivers (dev/test only) -
     # see CLAUDE.md; the integration suite's webhook tests need this. Force to
     # 1 (the example line carries an inline comment, so match the whole line).
-    if ! grep -qE '^TIMBERDOODLE_ALLOW_PRIVATE_WEBHOOKS=1$' .env; then
-      if grep -qE '^TIMBERDOODLE_ALLOW_PRIVATE_WEBHOOKS=' .env; then
-        sed -i 's|^TIMBERDOODLE_ALLOW_PRIVATE_WEBHOOKS=.*|TIMBERDOODLE_ALLOW_PRIVATE_WEBHOOKS=1|' .env
+    if ! grep -qE '^BALER_ALLOW_PRIVATE_WEBHOOKS=1$' .env; then
+      if grep -qE '^BALER_ALLOW_PRIVATE_WEBHOOKS=' .env; then
+        sed -i 's|^BALER_ALLOW_PRIVATE_WEBHOOKS=.*|BALER_ALLOW_PRIVATE_WEBHOOKS=1|' .env
       else
-        printf 'TIMBERDOODLE_ALLOW_PRIVATE_WEBHOOKS=1\n' >> .env
+        printf 'BALER_ALLOW_PRIVATE_WEBHOOKS=1\n' >> .env
       fi
     fi
   )

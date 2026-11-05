@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Timberdoodle — Devices</title>
+  <title>Baler — Devices</title>
   <link rel="stylesheet" href="style.css" />
   <link rel="stylesheet" href="devices.css" />
 </head>
@@ -19,9 +19,9 @@
     </nav>
   </header>
   <!-- auth.js decides which of these two is shown - devices.js itself
-       still talks straight to fbf.api (see auth.js's comment on why: a
+       still talks straight to windrow.api (see auth.js's comment on why: a
        separate, unauthenticated service), but the page shell requires a
-       timberdoodle login before it renders at all, same as every other
+       baler login before it renders at all, same as every other
        page here. -->
   <div id="login-gate" class="login-gate">
     <form id="login-form">
@@ -34,7 +34,7 @@
   </div>
   <main id="main" style="display: none">
     <section>
-      <h2>Discovered devices <span class="hint">(from FBF's periodic BACnet Who-Is scan and, if configured, Modbus subnet sweeps)</span></h2>
+      <h2>Discovered devices <span class="hint">(from Windrow's periodic BACnet Who-Is scan and, if configured, Modbus subnet sweeps)</span></h2>
       <table id="devices-table">
         <thead>
           <tr>

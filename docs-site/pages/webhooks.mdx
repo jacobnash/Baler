@@ -13,7 +13,7 @@ behind it.
 ```bash
 curl -X POST localhost:8080/fault/webhooks \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"url": "https://example.com/hooks/timberdoodle", "secret": "a-shared-secret", "filter": {"rule_id": "e38a2a2a84404bb4ae50f1fa88535eda"}}'
+  -d '{"url": "https://example.com/hooks/baler", "secret": "a-shared-secret", "filter": {"rule_id": "e38a2a2a84404bb4ae50f1fa88535eda"}}'
 ```
 
 `filter.rule_id` is the `id` `POST /fault/rules` returned when you created
@@ -30,7 +30,7 @@ telling you why. Copy the actual `id` from the rule-creation response.
 
 ## Signing
 
-Every delivery carries an `X-Timberdoodle-Signature` header:
+Every delivery carries an `X-Baler-Signature` header:
 `sha256={hmac-sha256 hex digest}`, keyed by the `secret` you supplied at
 registration. The critical detail if you're writing a receiver: **the
 signature is computed over the exact bytes sent on the wire**, not a
@@ -95,7 +95,7 @@ This is enforced regardless of who's calling — the
 not what makes this safe. Any caller who can reach `POST /fault/webhooks`
 gets the same validation.
 
-**Local testing**: set `TIMBERDOODLE_ALLOW_PRIVATE_WEBHOOKS=1` in `.env`
+**Local testing**: set `BALER_ALLOW_PRIVATE_WEBHOOKS=1` in `.env`
 for `fault_api`/`fault_detector` to disable this check entirely — both the
 loopback/private-address rejection *and* the `https://`-only requirement
 above (a plain `http://` URL is accepted once this is set). It's a

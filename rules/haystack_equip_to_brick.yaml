@@ -5,7 +5,7 @@
 # entity it's classifying, only that hasTag triples exist for the URI.
 #
 # `ahu` is a real Haystack v4 marker (phIoT/lib/ahu.trio), already in live
-# use in this codebase's own fbf/src/fbf/provision_haxall.py
+# use in this codebase's own windrow/src/windrow/provision_haxall.py
 # (`ensure_equip(session, "AHU-1", site_ref, markers=["ahu"])`). `vav` is
 # the standard analogous marker (phIoT/lib/vav.trio).
 #

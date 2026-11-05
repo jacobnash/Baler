@@ -24,7 +24,7 @@ def restore_postgres(path: str, compose_project_dir: str) -> None:
     # keeps going and exits 0, so a restore onto tables that already exist
     # (the documented failure case) would look like it succeeded.
     subprocess.run(
-        ["docker", "compose", "exec", "-T", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-U", "timberdoodle", "timberdoodle"],
+        ["docker", "compose", "exec", "-T", "postgres", "sh", "-c", 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB"'],
         cwd=compose_project_dir,
         input=sql,
         check=True,

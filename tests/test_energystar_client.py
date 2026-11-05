@@ -9,7 +9,7 @@ module docstring) - this only proves the parsing side.
 
 from unittest.mock import Mock, patch
 
-from timberdoodle.energystar_client import EnergyStarClient
+from baler.energystar_client import EnergyStarClient
 
 ACCOUNT_XML = b"""<account><id>12345</id><username>bob</username></account>"""
 

@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-from timberdoodle import ops_status
+from baler import ops_status
 
 
 def test_rank_summary_prefers_down_over_degraded():
@@ -33,8 +33,8 @@ def test_infer_derivations_degraded_when_targets_disabled():
     assert "2" in detail
 
 
-@patch("timberdoodle.ops_status._building_signals")
-@patch("timberdoodle.ops_status._probe_one")
+@patch("baler.ops_status._building_signals")
+@patch("baler.ops_status._probe_one")
 def test_collect_status_shape(mock_probe, mock_building):
     mock_building.return_value = {
         "last_ingest_at": None,

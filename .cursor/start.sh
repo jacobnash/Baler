@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Per-boot startup for the Timberdoodle Cloud Agent environment.
+# Per-boot startup for the Baler Cloud Agent environment.
 # Starts the Docker daemon (no systemd in the VM) with the nested-container
 # networking fix in place, then brings the whole compose stack up healthy.
 set -euxo pipefail
@@ -13,7 +13,7 @@ cd "$REPO_DIR"
 # `docker compose up` would refuse to start the gateway.
 # shellcheck source=.cursor/gen-env.sh
 . "$REPO_DIR/.cursor/gen-env.sh"
-ensure_timberdoodle_env "$REPO_DIR"
+ensure_baler_env "$REPO_DIR"
 
 # Container-to-container traffic on a compose bridge is dropped in this nested
 # VM when bridged packets traverse the iptables FORWARD chain. Turning off
@@ -45,4 +45,4 @@ sudo docker compose up -d --wait
 # clean first boot where everything came up together.
 sudo docker compose restart gateway
 
-echo "Timberdoodle stack is up (gateway on http://localhost:8080)."
+echo "Baler stack is up (gateway on http://localhost:8080)."

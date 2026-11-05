@@ -1,15 +1,15 @@
 """
 Seeds real Brick derivation and fault-rule definitions against a running
 derivation_api.py (port 8003) and fault_api.py (port 8002), scoped to
-exactly the equipment mix fbf.mock_hospital generates (AHUs, VAVs,
+exactly the equipment mix windrow.mock_hospital generates (AHUs, VAVs,
 electric meters). No new engine code - every derivation/rule here is data
 POSTed through the existing APIs, same shape as
 derivation-api-openapi.yaml's/fault-api-openapi.yaml's own examples.
 
 Run after ingest has flowed (mqtt_listener.py) and after
-timberdoodle.autotag has run - a fault rule or derivation keyed on a Brick
+baler.autotag has run - a fault rule or derivation keyed on a Brick
 class only fires against points the tagging pipeline has actually
-classified into that class. This script lives inside the timberdoodle
+classified into that class. This script lives inside the baler
 repo/venv, so its structural setup talks to RemoteStore/ingest.py
 directly rather than hand-rolling SPARQL over urllib - only the two
 sibling APIs (derivation_api, fault_api) are reached over HTTP, since
@@ -18,7 +18,7 @@ that's their only interface.
 Structural setup, seed_site_structure():
   - assigns each VAV equip a brick:hasPart parent AHU (round-robin over
     whichever AHU/VAV equip URIs already exist in the graph, queried
-    live rather than hardcoded against fbf.mock_hospital's equipment
+    live rather than hardcoded against windrow.mock_hospital's equipment
     counts) - nothing else in this dataset establishes VAV-to-AHU
     physical membership.
   - creates one Building entity and links every meter equip under it via
@@ -60,9 +60,9 @@ import urllib.request
 
 from rdflib import URIRef
 
-from timberdoodle.ingest import ingest_equip_tags, link_part_of
-from timberdoodle.remote_store import RemoteStore
-from timberdoodle.store import BRICK as BRICK_NS
+from baler.ingest import ingest_equip_tags, link_part_of
+from baler.remote_store import RemoteStore
+from baler.store import BRICK as BRICK_NS
 
 BRICK = str(BRICK_NS)
 BUILDING_URI = URIRef("urn:equip:site/building-1")
@@ -79,11 +79,11 @@ def _login(auth_api_url: str) -> str:
     global _bearer_token
     if _bearer_token is not None:
         return _bearer_token
-    email = os.environ.get("TIMBERDOODLE_ADMIN_EMAIL")
-    password = os.environ.get("TIMBERDOODLE_ADMIN_PASSWORD")
+    email = os.environ.get("BALER_ADMIN_EMAIL")
+    password = os.environ.get("BALER_ADMIN_PASSWORD")
     if not email or not password:
         raise SystemExit(
-            "TIMBERDOODLE_ADMIN_EMAIL/TIMBERDOODLE_ADMIN_PASSWORD must be set - "
+            "BALER_ADMIN_EMAIL/BALER_ADMIN_PASSWORD must be set - "
             "an existing admin account this script logs in as (see POST /auth/orgs "
             "in the README to create one if you don't have one yet)."
         )
@@ -418,7 +418,7 @@ def main() -> None:
     parser.add_argument(
         "--structure-only",
         action="store_true",
-        help="only tag/link equipment, skip posting derivations/rules - run timberdoodle.autotag in between this and a second pass with --skip-structure, since equip tagging must land before autotag's classification sweep",
+        help="only tag/link equipment, skip posting derivations/rules - run baler.autotag in between this and a second pass with --skip-structure, since equip tagging must land before autotag's classification sweep",
     )
     args = parser.parse_args()
 

@@ -10,7 +10,7 @@ a query, get charts, flip to a grid, download CSV.
 
 The syntax is Axon-shaped (familiar if you've used SkySpark) but this is *not* Axon. It is the
 two calls people actually reach for in a hurry — a Folio-style tag filter and
-`hisRead`/`hisRollup` — implemented over Timberdoodle's own two stores (the RDF entity graph in
+`hisRead`/`hisRollup` — implemented over Baler's own two stores (the RDF entity graph in
 Oxigraph for the filter, `point_history` in Postgres/TimescaleDB for the history). Everything
 else Axon can do in that shell is deliberately out of scope; see "What is and isn't supported"
 below.
@@ -51,7 +51,7 @@ translation.
 
 #### Querying Brick without knowing Brick
 
-Timberdoodle's entities are Brick-typed, and Brick is hard to query by hand: the class names
+Baler's entities are Brick-typed, and Brick is hard to query by hand: the class names
 are long (`Zone_Air_Temperature_Sensor`), the hierarchy matters (a `Temperature_Sensor` query
 that misses every subclass is useless), there are aliases (`AHU` is `Air_Handling_Unit`,
 `Discharge_Air_Temperature_Sensor` is `Supply_Air_Temperature_Sensor`), and a plain word like
@@ -150,7 +150,7 @@ either) is found by `AHU`, `Air_Handling_Unit`, `Equipment`, `ahu`, `equip`, and
 same way. Two things to know:
 
 - **Load it into a graph of its own.** `RemoteStore.load_ontology` `PUT`s into a single named
-  graph (`urn:timberdoodle:ontology`) and replaces it, so it can't hold Brick and your
+  graph (`urn:baler:ontology`) and replaces it, so it can't hold Brick and your
   extension at once. Oxigraph's graph-store endpoint takes any graph name:
 
   ```sh
@@ -233,7 +233,7 @@ fan-status or occupancy point over a day.
 | Param | Meaning |
 | --- | --- |
 | `expr` | the query, required |
-| `tz` | IANA timezone for span resolution and calendar bucketing; defaults to `TIMBERDOODLE_TZ`, then `UTC` |
+| `tz` | IANA timezone for span resolution and calendar bucketing; defaults to `BALER_TZ`, then `UTC` |
 | `limit` | per-point raw-row cap; defaults to 10,000, max 200,000 (rollups aren't capped — they're already bucketed) |
 
 The response is one object with the resolved `span` (`start`/`end` epoch seconds, the
@@ -296,7 +296,7 @@ opens `readAll(id==@<that equip>).hisRead(today)`, and the point detail panel ha
 
 ## Timezones
 
-`TIMBERDOODLE_TZ` (in `.env`; see `.env.example`) sets the default `tz` for `GET /his`, so `today`
+`BALER_TZ` (in `.env`; see `.env.example`) sets the default `tz` for `GET /his`, so `today`
 means the building's today, not the server's UTC today. Any request can override it with
 `?tz=...`. The UI sends the browser's own IANA zone, so it always sees local days; the env var is
 for API clients and scripts that don't say. Set it to the zone the *building* is in — a
@@ -326,18 +326,18 @@ to close — see `todo/skyspark-haxall-migration-gaps.md` in the repo.
 
 ## Where the code is
 
-- `src/timberdoodle/hisquery.py` — tokenizer, parser, filter→SPARQL compiler, span resolution,
+- `src/baler/hisquery.py` — tokenizer, parser, filter→SPARQL compiler, span resolution,
   and `run_query()`, which strings them together. Each stage is a pure function so
   `tests/test_hisquery.py` runs the parser, compiler (against an in-memory `rdflib` graph), and
   span math with no services.
-- `src/timberdoodle/brick_vocab.py` — Brick's class hierarchy, aliases, and per-class tag words,
+- `src/baler/brick_vocab.py` — Brick's class hierarchy, aliases, and per-class tag words,
   parsed from the vendored `ontology/Brick-only.ttl` once per process; `tests/test_brick_vocab.py`
   pins the facts the compiler relies on against the real file, so a Brick version bump that
   changes the file's shape fails loudly.
-- `src/timberdoodle/timeseries.py` — `read_range_many()` (raw, multi-point, per-point limit),
+- `src/baler/timeseries.py` — `read_range_many()` (raw, multi-point, per-point limit),
   `read_rollup()` (`date_bin`/`date_trunc` aggregation), `read_point_labels()` (unit/label
   fallback from history rows, for derivation-engine points that carry no graph tags).
-- `src/timberdoodle/ingest_api.py` — the `GET /his` route. `tests/test_his_route.py` covers it
+- `src/baler/ingest_api.py` — the `GET /his` route. `tests/test_his_route.py` covers it
   end-to-end against live Oxigraph and Postgres (`pytest -m integration`).
 - `gateway/njs/policy.js` — the `GET /ingest/his` → `viewer` row.
 - `ui/his.html`, `ui/his.js`, `ui/his.css` — the page; `ui/app.js` for the tree/detail deep links.

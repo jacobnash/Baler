@@ -1,7 +1,7 @@
 """
 Unit tests for the core ingest_reading logic (fast - in-memory graph store,
 real Postgres), plus one true end-to-end integration test proving the wire
-contract round-trips over a real broker without coupling to FBF's package
+contract round-trips over a real broker without coupling to Windrow's package
 directly (per the plan's "wire contract, not a class hierarchy" principle).
 """
 
@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 from rdflib import OWL
 
-from timberdoodle.ingest import (
+from baler.ingest import (
     haystack_ref_to_equip_uri,
     ingest_equip_tags,
     ingest_haystack_equip_tags,
@@ -26,10 +26,10 @@ from timberdoodle.ingest import (
     topic_prefix_to_equip_uri,
     topic_to_point_uri,
 )
-from timberdoodle.mqtt_listener import make_on_message
-from timberdoodle.mqtt_util import make_client
-from timberdoodle.store import BRICK, TD, Store
-from timberdoodle.timeseries import connect, read_latest
+from baler.mqtt_listener import make_on_message
+from baler.mqtt_util import make_client
+from baler.store import BRICK, TD, Store
+from baler.timeseries import connect, read_latest
 
 
 @pytest.fixture
@@ -47,7 +47,7 @@ def test_ingest_reading_writes_graph_and_timeseries(ts_conn):
 
     assert point_uri == topic_to_point_uri(topic)
     rows = list(store.query(f"""
-        PREFIX td: <urn:timberdoodle:td#>
+        PREFIX td: <urn:baler:td#>
         SELECT ?topic WHERE {{ <{point_uri}> td:sourceTopic ?topic }}
     """))
     assert str(rows[0].topic) == topic
@@ -91,13 +91,13 @@ def test_ingest_tags_writes_marker_and_valued_triples():
 
     assert point_uri == topic_to_point_uri(topic)
     marker_rows = list(store.query(f"""
-        PREFIX haystack: <urn:timberdoodle:haystack#>
+        PREFIX haystack: <urn:baler:haystack#>
         SELECT ?tag WHERE {{ <{point_uri}> haystack:hasTag ?tag }}
     """))
     assert {str(r.tag) for r in marker_rows} == {"zone", "air"}
 
     equip_rows = list(store.query(f"""
-        PREFIX haystack: <urn:timberdoodle:haystack#>
+        PREFIX haystack: <urn:baler:haystack#>
         SELECT ?ref WHERE {{ <{point_uri}> haystack:equipRef ?ref }}
     """))
     assert str(equip_rows[0].ref) == "AHU-1"
@@ -109,7 +109,7 @@ def test_ingest_tags_serializes_nested_dict_and_list_values_as_json():
     point_uri = ingest_tags(store, topic, {"geoCoord": {"lat": 37.5, "lng": -122.3}, "enum": ["a", "b"]})
 
     rows = list(store.query(f"""
-        PREFIX haystack: <urn:timberdoodle:haystack#>
+        PREFIX haystack: <urn:baler:haystack#>
         SELECT ?v WHERE {{ <{point_uri}> haystack:geoCoord ?v }}
     """))
     assert json.loads(str(rows[0].v)) == {"lat": 37.5, "lng": -122.3}
@@ -128,7 +128,7 @@ def test_listener_routes_tags_suffix_without_touching_timeseries(ts_conn):
     on_message(None, None, tags_msg)
 
     rows = list(store.query(f"""
-        PREFIX haystack: <urn:timberdoodle:haystack#>
+        PREFIX haystack: <urn:baler:haystack#>
         SELECT ?tag WHERE {{ <{topic_to_point_uri(topic)}> haystack:hasTag ?tag }}
     """))
     assert {str(r.tag) for r in rows} == {"fan"}
@@ -152,7 +152,7 @@ def test_listener_routes_bacnet_equip_tags_suffix_to_hasPoint_and_equip_tags():
 
     equip_uri = topic_prefix_to_equip_uri(topic_prefix)
     tag_rows = list(store.query(f"""
-        PREFIX haystack: <urn:timberdoodle:haystack#>
+        PREFIX haystack: <urn:baler:haystack#>
         SELECT ?tag WHERE {{ <{equip_uri}> haystack:hasTag ?tag }}
     """))
     assert {str(r.tag) for r in tag_rows} == {"ahu"}
@@ -180,7 +180,7 @@ def test_listener_routes_haystack_equip_ref_tags_suffix():
 
     equip_uri = haystack_ref_to_equip_uri(ref)
     tag_rows = list(store.query(f"""
-        PREFIX haystack: <urn:timberdoodle:haystack#>
+        PREFIX haystack: <urn:baler:haystack#>
         SELECT ?tag WHERE {{ <{equip_uri}> haystack:hasTag ?tag }}
     """))
     assert {str(r.tag) for r in tag_rows} == {"ahu"}
@@ -227,7 +227,7 @@ def test_ingest_equip_tags_uses_equip_identity_not_point_identity():
     assert equip_uri == topic_prefix_to_equip_uri("fbf/ahu-3")
     assert equip_uri != topic_to_point_uri("fbf/ahu-3")
     rows = list(store.query(f"""
-        PREFIX haystack: <urn:timberdoodle:haystack#>
+        PREFIX haystack: <urn:baler:haystack#>
         SELECT ?tag WHERE {{ <{equip_uri}> haystack:hasTag ?tag }}
     """))
     assert {str(r.tag) for r in rows} == {"ahu"}
@@ -316,10 +316,10 @@ def test_link_part_of_writes_both_directions():
 
 @pytest.mark.integration
 def test_full_round_trip_over_real_broker(ts_conn):
-    """Publishes the exact envelope FBF's bridges use, over the real
+    """Publishes the exact envelope Windrow's bridges use, over the real
     compose-managed broker, and confirms a short-lived listener loop
     ingests it - proves the wire contract, not just the function calls."""
-    from timberdoodle.remote_store import RemoteStore
+    from baler.remote_store import RemoteStore
 
     topic = f"test-ingest:roundtrip:{int(time.time())}"
     store = RemoteStore()

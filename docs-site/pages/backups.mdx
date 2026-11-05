@@ -36,15 +36,15 @@ scheduled job that reuses `backup.py` completely unchanged.
 ### systemd (recommended on a Linux host)
 
 ```bash
-sudo cp scripts/systemd/timberdoodle-backup.{service,timer} /etc/systemd/system/
-sudo $EDITOR /etc/systemd/system/timberdoodle-backup.service   # set WorkingDirectory=
-sudo systemctl enable --now timberdoodle-backup.timer
+sudo cp scripts/systemd/baler-backup.{service,timer} /etc/systemd/system/
+sudo $EDITOR /etc/systemd/system/baler-backup.service   # set WorkingDirectory=
+sudo systemctl enable --now baler-backup.timer
 ```
 
-`timberdoodle-backup.timer` runs daily by default (`OnCalendar=daily`,
+`baler-backup.timer` runs daily by default (`OnCalendar=daily`,
 edit that line directly to change the schedule — see `man systemd.time`)
 with `Persistent=true`, so a run missed while the host was off fires on
-next boot instead of silently skipping. `timberdoodle-backup.service` sets
+next boot instead of silently skipping. `baler-backup.service` sets
 `Environment=PATH=...` explicitly — systemd services don't inherit a
 login shell's `PATH`, so without it `docker` isn't found and the job fails
 every run with no output unless you go looking in `journalctl`.
@@ -52,7 +52,7 @@ every run with no output unless you go looking in `journalctl`.
 ### cron (non-systemd hosts)
 
 ```
-0 3 * * * cd /path/to/timberdoodle && python3 scripts/backup.py >> backups/backup.log 2>&1
+0 3 * * * cd /path/to/baler && python3 scripts/backup.py >> backups/backup.log 2>&1
 ```
 
 ### Either way

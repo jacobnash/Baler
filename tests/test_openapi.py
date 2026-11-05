@@ -16,9 +16,9 @@ import yaml
 from conftest import assert_matches_schema, load_spec
 from openapi_spec_validator import validate
 
-from timberdoodle.ingest_api import OPENAPI_SPEC_PATH, make_handler
-from timberdoodle.remote_store import RemoteStore
-from timberdoodle.timeseries import connect_pool
+from baler.ingest_api import OPENAPI_SPEC_PATH, make_handler
+from baler.remote_store import RemoteStore
+from baler.timeseries import connect_pool
 
 
 @pytest.fixture(scope="module")
@@ -35,7 +35,7 @@ GATEWAY_SECRET = "test-gateway-secret"
 
 @pytest.fixture
 def live_server(monkeypatch):
-    monkeypatch.setenv("TIMBERDOODLE_GATEWAY_SECRET", GATEWAY_SECRET)
+    monkeypatch.setenv("BALER_GATEWAY_SECRET", GATEWAY_SECRET)
     store = RemoteStore()
     ts_pool = connect_pool()
     server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(store, ts_pool))
@@ -69,7 +69,7 @@ def test_get_openapi_yaml_serves_the_real_spec_file(live_server):
     assert resp.status_code == 200
     assert resp.headers["Content-Type"] == "application/yaml"
     served = yaml.safe_load(resp.text)
-    assert served["info"]["title"] == "Timberdoodle Ingest API"
+    assert served["info"]["title"] == "Baler Ingest API"
 
 
 @pytest.mark.integration

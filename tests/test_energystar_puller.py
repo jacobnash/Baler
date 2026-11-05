@@ -7,9 +7,9 @@ history. Needs live Postgres, hence integration.
 
 import pytest
 
-from timberdoodle.energystar_puller import _latest_complete_period, pull_once
-from timberdoodle.store import Store
-from timberdoodle.timeseries import connect, read_latest
+from baler.energystar_puller import _latest_complete_period, pull_once
+from baler.store import Store
+from baler.timeseries import connect, read_latest
 
 ACCOUNT_ID = "test-account"
 

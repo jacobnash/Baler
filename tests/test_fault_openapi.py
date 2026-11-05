@@ -13,9 +13,9 @@ import yaml
 from conftest import assert_matches_schema, load_spec
 from openapi_spec_validator import validate
 
-from timberdoodle.fault_api import OPENAPI_SPEC_PATH, make_handler
-from timberdoodle.faults import ensure_schema
-from timberdoodle.timeseries import connect_pool
+from baler.fault_api import OPENAPI_SPEC_PATH, make_handler
+from baler.faults import ensure_schema
+from baler.timeseries import connect_pool
 
 
 @pytest.fixture(scope="module")
@@ -48,7 +48,7 @@ GATEWAY_SECRET = "test-gateway-secret"
 
 @pytest.fixture
 def live_server(tmp_path, monkeypatch):
-    monkeypatch.setenv("TIMBERDOODLE_GATEWAY_SECRET", GATEWAY_SECRET)
+    monkeypatch.setenv("BALER_GATEWAY_SECRET", GATEWAY_SECRET)
     ts_pool = connect_pool()
     with ts_pool.connection() as conn:
         ensure_schema(conn)
@@ -80,7 +80,7 @@ def test_get_openapi_yaml_serves_the_real_spec_file(live_server):
     assert resp.status_code == 200
     assert resp.headers["Content-Type"] == "application/yaml"
     served = yaml.safe_load(resp.text)
-    assert served["info"]["title"] == "Timberdoodle Fault API"
+    assert served["info"]["title"] == "Baler Fault API"
 
 
 @pytest.mark.integration
@@ -134,8 +134,8 @@ def test_full_rule_webhook_fault_flow_matches_documented_schemas(gw, live_server
     # this API's, to open faults - so bypass it here).
     from datetime import datetime, timezone
 
-    from timberdoodle.faults import open_fault
-    from timberdoodle.timeseries import connect
+    from baler.faults import open_fault
+    from baler.timeseries import connect
 
     ts_conn = connect()
     fault_id = open_fault(ts_conn, rule["id"], "urn:point:test-openapi-fd/ack-snooze", datetime.now(timezone.utc), severity="critical")

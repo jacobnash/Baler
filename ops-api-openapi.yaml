@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: Timberdoodle Ops API
+  title: Baler Ops API
   version: 0.1.0
   description: >
     Building-engineer control-plane status. Aggregates platform and job

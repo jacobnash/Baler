@@ -22,7 +22,7 @@ for the same site — they get different URIs, no collision.
 
 ## Local device
 
-There's no code here you have to write into Timberdoodle itself — a
+There's no code here you have to write into Baler itself — a
 weather station is a native MQTT device with a live connection, so it
 goes through the exact same envelope `mqtt_listener.py` already handles
 for every other MQTT-sourced device (see
@@ -30,7 +30,7 @@ for every other MQTT-sourced device (see
 case). What follows is the tag vocabulary and topic convention to use,
 plus `scripts/publish_weather_station.py`, a small helper that hides the
 wire format. Your device (or a script running next to it) publishes
-straight to Timberdoodle's own `mosquitto` broker (`docker-compose.yml`'s
+straight to Baler's own `mosquitto` broker (`docker-compose.yml`'s
 `mosquitto` service, already part of the default stack) — no remote
 weather API, no `--profile`-gated puller, no `REMOTE_*_URL` to configure.
 
@@ -39,7 +39,7 @@ weather API, no `--profile`-gated puller, no `REMOTE_*_URL` to configure.
 `mqtt_listener.py` only subscribes to `fbf/#` by default — nothing in
 `docker-compose.yml` overrides `--topic-pattern`. Publish under
 `fbf/weather/<station-id>/...`, not just `weather/...`, or the listener
-never sees it (this isn't FBF-specific data, it's just the one topic
+never sees it (this isn't Windrow-specific data, it's just the one topic
 filter the listener is already watching).
 
 For a station id `backyard`, publish:
@@ -94,7 +94,7 @@ route does that inline. Run the same one-shot sweep any other MQTT source
 needs:
 
 ```bash
-python -m timberdoodle.autotag --no-llm
+python -m baler.autotag --no-llm
 ```
 
 (`--no-llm` skips the `ANTHROPIC_API_KEY` requirement — rule-engine-only,
@@ -154,7 +154,7 @@ on a missing latitude) instead of refusing to start.
 To try it standalone, outside compose, against a real location:
 
 ```bash
-python -m timberdoodle.openmeteo_puller --latitude 37.7749 --longitude -122.4194 --station-id sf --once
+python -m baler.openmeteo_puller --latitude 37.7749 --longitude -122.4194 --station-id sf --once
 ```
 
 `--once` pulls a single round and exits — prints the classification

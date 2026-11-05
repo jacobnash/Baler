@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: Timberdoodle Auth API
+  title: Baler Auth API
   version: "1.0.0"
   description: |
     Identity: login, API-key issuance/revocation, org/site directory CRUD.

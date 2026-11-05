@@ -26,7 +26,7 @@ DEFAULT_OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "backups")
 def backup_postgres(out_dir: str, timestamp: str, compose_project_dir: str) -> str:
     path = os.path.join(out_dir, f"postgres-{timestamp}.sql.gz")
     dump = subprocess.run(
-        ["docker", "compose", "exec", "-T", "postgres", "pg_dump", "-U", "timberdoodle", "timberdoodle"],
+        ["docker", "compose", "exec", "-T", "postgres", "sh", "-c", 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"'],
         cwd=compose_project_dir,
         check=True,
         capture_output=True,

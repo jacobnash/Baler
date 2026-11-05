@@ -1,7 +1,7 @@
 # Closing feature/documentation gaps
 
-**Status:** item 1 (fbf.mdx nav) done (2026-08-27); items 2-6 not started. Backlog from a
-2026-08-27 gap analysis of every feature (src/timberdoodle modules, scripts, compose services)
+**Status:** item 1 (windrow.mdx nav) done (2026-08-27); items 2-6 not started. Backlog from a
+2026-08-27 gap analysis of every feature (src/baler modules, scripts, compose services)
 against every doc surface (docs-site/, README, OpenAPI specs), using the Diátaxis framework
 (tutorial/how-to/reference/explanation) as the lens. Driven by two standing rules from this
 session: every feature needs a how-to or API doc that lives in `docs-site/` (README-only isn't
@@ -14,13 +14,13 @@ code itself is solid. Ranked by how much an evaluator finding nothing would hurt
 
 ## Backlog
 
-### 1. Register `fbf.mdx` in the docs-site nav
+### 1. Register `windrow.mdx` in the docs-site nav
 
 - **Status:** done (2026-08-27)
-- **Why:** `docs-site/pages/fbf.mdx` existed and had a working OpenAPI spec wired at
-  `/api/fbf`, but the page itself was never added to `zudoku.config.tsx`'s `navigation.items`
+- **Why:** `docs-site/pages/windrow.mdx` existed and had a working OpenAPI spec wired at
+  `/api/windrow`, but the page itself was never added to `zudoku.config.tsx`'s `navigation.items`
   array — reachable only by guessing the URL, invisible from the site.
-- **What was done:** added `/fbf` to the nav array alongside the other 12 pages.
+- **What was done:** added `/windrow` to the nav array alongside the other 12 pages.
 - **Files:** `docs-site/zudoku.config.tsx`.
 
 ### 2. Document `sql_puller` and `energystar_puller` — currently zero docs anywhere
@@ -35,9 +35,9 @@ code itself is solid. Ranked by how much an evaluator finding nothing would hurt
   they're similar enough in shape to `haystack-puller.mdx`), covering enable steps, required
   env vars, and *why* each source exists (what gap it closes vs. the Haystack/MQTT/HTTP paths).
 - **Files:** new `docs-site/pages/sql-puller.mdx` and/or `docs-site/pages/energystar-puller.mdx`
-  (register in `zudoku.config.tsx`), `src/timberdoodle/sql_puller.py`,
-  `src/timberdoodle/sql_pull_state.py`, `src/timberdoodle/energystar_puller.py`,
-  `src/timberdoodle/energystar_client.py`.
+  (register in `zudoku.config.tsx`), `src/baler/sql_puller.py`,
+  `src/baler/sql_pull_state.py`, `src/baler/energystar_puller.py`,
+  `src/baler/energystar_client.py`.
 
 ### 3. Document the derivation engine (`derivation_api.py`/`derivation_engine.py`/`sandbox.py`)
 
@@ -50,8 +50,8 @@ code itself is solid. Ranked by how much an evaluator finding nothing would hurt
   control logic). The single biggest pitch this project has is the hardest one to discover.
 - **What:** a `derivation.mdx` how-to (write a rule, dry-run it, deploy it) plus an explanation
   beat on the sandbox's actual guarantees/limits.
-- **Files:** new `docs-site/pages/derivation.mdx`, `src/timberdoodle/derivation_api.py`,
-  `src/timberdoodle/derivation_engine.py`, `src/timberdoodle/sandbox.py`.
+- **Files:** new `docs-site/pages/derivation.mdx`, `src/baler/derivation_api.py`,
+  `src/baler/derivation_engine.py`, `src/baler/sandbox.py`.
 
 ### 4. Document the tag-mapping engine (`mapping.py`/`autotag.py`/`llm_classifier.py`)
 
@@ -63,8 +63,8 @@ code itself is solid. Ranked by how much an evaluator finding nothing would hurt
   explanation of the rules-first/LLM-fallback design exists anywhere.
 - **What:** a `tag-mapping.mdx` explaining the rule engine, the LLM fallback, and how
   `rules/haystack_to_brick.yaml`/`rules/haystack_equip_to_brick.yaml` get extended.
-- **Files:** new `docs-site/pages/tag-mapping.mdx`, `src/timberdoodle/mapping.py`,
-  `src/timberdoodle/autotag.py`, `src/timberdoodle/llm_classifier.py`.
+- **Files:** new `docs-site/pages/tag-mapping.mdx`, `src/baler/mapping.py`,
+  `src/baler/autotag.py`, `src/baler/llm_classifier.py`.
 
 ### 5. Move `load_bdg2_sample.py` off README-only
 
@@ -83,8 +83,8 @@ code itself is solid. Ranked by how much an evaluator finding nothing would hurt
   `architecture.mdx`'s service-topology description. If there's a UI worth demoing to a
   prospective adopter, it currently has no how-to at all.
 - **What:** a how-to covering what the UI does today and how to reach it locally.
-- **Files:** new `docs-site/pages/ui.mdx` (or similar), `src/timberdoodle/docs_ui.py`,
-  `src/timberdoodle/ui_server.py`.
+- **Files:** new `docs-site/pages/ui.mdx` (or similar), `src/baler/docs_ui.py`,
+  `src/baler/ui_server.py`.
 
 ## Cross-cutting, not a numbered item
 

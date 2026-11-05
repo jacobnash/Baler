@@ -1,12 +1,12 @@
 //
-// tdHis - Timberdoodle history-provider lib for Haxall/SkySpark.
-// Implements hx::IHisExt, redirecting hisRead/hisWrite to Timberdoodle's
-// Postgres/Timescale store instead of Folio. See TimberdoodleHisExt.fan.
+// tdHis - Baler history-provider lib for Haxall/SkySpark.
+// Implements hx::IHisExt, redirecting hisRead/hisWrite to Baler's
+// Postgres/Timescale store instead of Folio. See BalerHisExt.fan.
 //
 
 --------------------------------------------------------------------------
 def: ^lib:his
 depends: [^lib:ph, ^lib:axon, ^lib:hx]
-typeName: "tdHis::TimberdoodleHisExt"
-doc: "Timberdoodle history provider"
+typeName: "tdHis::BalerHisExt"
+doc: "Baler history provider"
 --------------------------------------------------------------------------

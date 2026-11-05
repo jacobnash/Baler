@@ -1,6 +1,6 @@
 #! /usr/bin/env fan
 //
-// tdHis - Timberdoodle history-provider lib for Haxall/SkySpark.
+// tdHis - Baler history-provider lib for Haxall/SkySpark.
 //
 
 using build
@@ -13,9 +13,9 @@ class Build : BuildPod
   new make()
   {
     podName = "tdHis"
-    summary = "Timberdoodle history provider"
-    meta    = ["org.name":     "Timberdoodle",
-               "proj.name":    "Timberdoodle",
+    summary = "Baler history provider"
+    meta    = ["org.name":     "Baler",
+               "proj.name":    "Baler",
                "license.name": "Academic Free License 3.0",
                "vcs.name":     "Git"]
     depends  = ["sys @{fan.depend}",

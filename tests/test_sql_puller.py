@@ -1,6 +1,6 @@
 """
 Pull-cycle logic tested against a real Postgres table standing in for an
-"external" SQL source (Timberdoodle's own test DB, a throwaway table - the
+"external" SQL source (Baler's own test DB, a throwaway table - the
 puller only needs psycopg wire compatibility, not a genuinely separate
 server) plus an in-memory Store() (same idiom as test_haystack_puller.py).
 Needs live Postgres, hence integration.
@@ -10,10 +10,10 @@ import time
 
 import pytest
 
-from timberdoodle.sql_pull_state import ensure_schema, get_checkpoint
-from timberdoodle.sql_puller import pull_once
-from timberdoodle.store import Store
-from timberdoodle.timeseries import DEFAULT_DSN, connect, read_latest
+from baler.sql_pull_state import ensure_schema, get_checkpoint
+from baler.sql_puller import pull_once
+from baler.store import Store
+from baler.timeseries import DEFAULT_DSN, connect, read_latest
 
 SOURCE_ID = "test-sql-source"
 QUERY = "SELECT point, value, ts FROM sql_puller_test_source WHERE ts >= %(since)s AND ts < %(until)s"

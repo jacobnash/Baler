@@ -7,11 +7,11 @@ commands to compare after later stages land.
 | Metric | Command | Baseline |
 |---|---|---|
 | `ruff check` (default rule set) | `ruff check src/ tests/` | 63 errors |
-| `mypy` errors | `mypy --ignore-missing-imports src/timberdoodle` | 19 errors in 11 files |
+| `mypy` errors | `mypy --ignore-missing-imports src/baler` | 19 errors in 11 files |
 | Cyclomatic complexity (average) | `radon cc -s -a src/` | A (2.73), 214 blocks, nothing above CC 18 |
 | Maintainability index | `radon mi -s -n B src/` | no file below grade A |
-| Line coverage | `pytest -m "integration or not integration" --cov=timberdoodle` | 81% (2,712 stmts / 524 missed) |
-| Python duplication | `jscpd src/timberdoodle tests ui gateway/njs` | 6.06% (645 duplicated lines, 50 clone pairs) |
+| Line coverage | `pytest -m "integration or not integration" --cov=baler` | 81% (2,712 stmts / 524 missed) |
+| Python duplication | `jscpd src/baler tests ui gateway/njs` | 6.06% (645 duplicated lines, 50 clone pairs) |
 | JS duplication | same `jscpd` run | 3.26% (55 duplicated lines, 5 clone pairs) |
 | `mapping.py` mutation score | `mutmut run` scoped to `mapping.py`+`webhooks.py` | 70.6% (230 killed / 96 survived, all 96 in `mapping.py`) |
 | `webhooks.py` mutation score | same `mutmut run` | 100% (0 survivors) |
@@ -57,5 +57,5 @@ The WIP above has since landed (`axon_convert.py`, the Query feature, the Brick-
 | Metric | Before | After |
 |---|---|---|
 | `ruff check src/ tests/` | 8 | **0** |
-| `mypy src/timberdoodle` | 0 | 0 |
+| `mypy src/baler` | 0 | 0 |
 | CI | ruff `continue-on-error: true` | **ruff blocking** — both lint gates are now hard gates, per `PLAN.md` Guardrails ("flip to blocking once the counts actually hit zero, not because the gate was loosened") |

@@ -25,7 +25,7 @@ jobs:
           PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
         with:
           path-to-signatures: "signatures/version1/cla.json"
-          path-to-document: "https://github.com/jacobnash/timberdoodle/blob/main/CLA.md"
+          path-to-document: "https://github.com/jacobnash/baler/blob/main/CLA.md"
           branch: "main"
           # Sole maintainer, plus commits Claude Code authors for him
           # (committer name "Claude", no linked GitHub account) and bots.

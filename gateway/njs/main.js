@@ -19,7 +19,7 @@ async function authorize(r) {
     // a path that ends in a 401/403 (the request never reaches a
     // backend), and simplest to set once here rather than on every
     // individual "grant" return point.
-    r.variables.gateway_secret = process.env.TIMBERDOODLE_GATEWAY_SECRET;
+    r.variables.gateway_secret = process.env.BALER_GATEWAY_SECRET;
 
     const route = policy.resolveRoute(r.method, r.uri);
     if (!route) {
@@ -47,7 +47,7 @@ async function authorize(r) {
         return;
     }
 
-    const claims = await jwt.verify(token, process.env.TIMBERDOODLE_JWT_SECRET);
+    const claims = await jwt.verify(token, process.env.BALER_JWT_SECRET);
     if (!claims) {
         r.return(401, "invalid or expired token\n");
         return;

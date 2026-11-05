@@ -18,9 +18,9 @@ import yaml
 from conftest import assert_matches_schema, load_spec
 from openapi_spec_validator import validate
 
-from timberdoodle.auth import ensure_schema
-from timberdoodle.auth_api import OPENAPI_SPEC_PATH, make_handler
-from timberdoodle.timeseries import connect_pool
+from baler.auth import ensure_schema
+from baler.auth_api import OPENAPI_SPEC_PATH, make_handler
+from baler.timeseries import connect_pool
 
 GATEWAY_SECRET = "test-gateway-secret"
 GW_HEADERS = {"X-Gateway-Secret": GATEWAY_SECRET}
@@ -44,8 +44,8 @@ def _lookup(spec: dict, ref: str) -> dict:
 
 @pytest.fixture
 def live_server(monkeypatch):
-    monkeypatch.setenv("TIMBERDOODLE_JWT_SECRET", "test-jwt-secret-needs-32-bytes-minimum-for-hs256")
-    monkeypatch.setenv("TIMBERDOODLE_GATEWAY_SECRET", GATEWAY_SECRET)
+    monkeypatch.setenv("BALER_JWT_SECRET", "test-jwt-secret-needs-32-bytes-minimum-for-hs256")
+    monkeypatch.setenv("BALER_GATEWAY_SECRET", GATEWAY_SECRET)
     ts_pool = connect_pool()
     with ts_pool.connection() as conn:
         ensure_schema(conn)
@@ -81,7 +81,7 @@ def test_get_openapi_yaml_serves_the_real_spec_file(live_server):
     assert resp.status_code == 200
     assert resp.headers["Content-Type"] == "application/yaml"
     served = yaml.safe_load(resp.text)
-    assert served["info"]["title"] == "Timberdoodle Auth API"
+    assert served["info"]["title"] == "Baler Auth API"
 
 
 @pytest.mark.integration

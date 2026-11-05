@@ -1,5 +1,5 @@
 /**
- * Targets the `fbf-haxall` container (localhost:8180) - originally
+ * Targets the `windrow-haxall` container (localhost:8180) - originally
  * assumed to be commercial SkySpark (image name `maugustusa/myskyspark`),
  * but its own `about()` Axon call reports `productName='Haxall'`,
  * `moduleName='hxd'`, version 4.0.6 - real, plain open-source Haxall,
@@ -10,15 +10,15 @@
  * verification target.
  *
  * Real, working credentials (already used successfully by
- * ~/fbf/src/fbf/haxall_client.py and ~/benchmark's Haxall driver this
- * session): su / fbf-demo-pass.
+ * ~/windrow/src/windrow/haxall_client.py and ~/benchmark's Haxall driver this
+ * session): su / windrow-demo-pass.
  */
 import { test, expect } from "@playwright/test";
 
 const HAXALL_URL = process.env.HAXALL_SKYSPARK_URL ?? "http://localhost:8180";
 const HAXALL_USER = "su";
-const HAXALL_PASS = "fbf-demo-pass";
-const TIMBERDOODLE_URL = process.env.TIMBERDOODLE_URL ?? "http://localhost:8000";
+const HAXALL_PASS = "windrow-demo-pass";
+const BALER_URL = process.env.BALER_URL ?? "http://localhost:8000";
 
 async function login(page: import("@playwright/test").Page) {
   await page.goto(`${HAXALL_URL}/`);
@@ -27,13 +27,13 @@ async function login(page: import("@playwright/test").Page) {
   await page.click("#loginButton");
 }
 
-test("logs into fbf-haxall with the real benchmark-suite credentials", async ({ page }) => {
+test("logs into windrow-haxall with the real benchmark-suite credentials", async ({ page }) => {
   await login(page);
   await expect(page).not.toHaveURL(/\/user\/login/);
 });
 
 test.fixme(
-  "writing a point's history through the UI lands in Timberdoodle, not Folio",
+  "writing a point's history through the UI lands in Baler, not Folio",
   async ({ page }) => {
     // Same pending status as his-provider-oss.spec.ts - real selectors
     // need a live reconnaissance pass first. This is also the shared

@@ -5,7 +5,7 @@ clean_session) broker session drops the old subscription on every
 reconnect, and there's no other code path that restores it.
 """
 
-from timberdoodle.mqtt_listener import make_on_connect
+from baler.mqtt_listener import make_on_connect
 
 
 class FakeClient:

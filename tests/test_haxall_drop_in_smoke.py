@@ -1,6 +1,6 @@
 """
-Live smoke test for the Haxall drop-in (fantom-his-ext's TimberdoodleHisExt +
-TimberdoodleHisSettings) - the one piece of the SkySpark/Haxall migration
+Live smoke test for the Haxall drop-in (fantom-his-ext's BalerHisExt +
+BalerHisSettings) - the one piece of the SkySpark/Haxall migration
 story with no automated coverage at all before this, see
 todo/skyspark-haxall-migration-gaps.md item 1. Would have caught the dead
 hardcoded-URL regression the gateway's JWT rewrite introduced.
@@ -13,7 +13,7 @@ repo's docker-compose stack. Point it at any real Haxall instance with the
 HAXALL_SU_PASSWORD env vars e2e-haxall/ and test_haystack_puller.py use.
 Also needs the real gateway running (docker compose up -d) - creates its
 own throwaway org/admin account per run for the operator token
-TimberdoodleHisExt needs.
+BalerHisExt needs.
 """
 
 import os
@@ -23,12 +23,12 @@ import uuid
 import pytest
 import requests
 
-from timberdoodle.haystack_client import HaystackClient
+from baler.haystack_client import HaystackClient
 
 HAXALL_OSS_URL = os.environ.get("HAXALL_OSS_URL", "http://localhost:8280")
 HAXALL_SU_USERNAME = os.environ.get("HAXALL_SU_USERNAME")
 HAXALL_SU_PASSWORD = os.environ.get("HAXALL_SU_PASSWORD", "")
-GATEWAY_URL = os.environ.get("TIMBERDOODLE_GATEWAY_URL", "http://localhost:8080")
+GATEWAY_URL = os.environ.get("BALER_GATEWAY_URL", "http://localhost:8080")
 
 
 def _eval_axon(client: HaystackClient, expr: str) -> list[dict]:
@@ -81,11 +81,11 @@ def operator_token():
     "(and HAXALL_SU_PASSWORD, HAXALL_OSS_URL if not localhost:8280), same env vars "
     "test_haystack_puller.py's real-Haxall test and e2e-haxall/ use",
 )
-def test_haxall_his_drop_in_round_trips_through_timberdoodle(haxall, operator_token):
+def test_haxall_his_drop_in_round_trips_through_baler(haxall, operator_token):
     """hisWrite (via a curVal/hisCollectCov transition - the same path a
-    real connector uses, see fantom-fbf-conn/fan/FbfDispatch.fan) lands in
-    Timberdoodle's Postgres, and hisRead reads it back - both through
-    TimberdoodleHisExt, both through the real gateway with a Bearer token."""
+    real connector uses, see fantom-windrow-conn/fan/WindrowDispatch.fan) lands in
+    Baler's Postgres, and hisRead reads it back - both through
+    BalerHisExt, both through the real gateway with a Bearer token."""
     loaded = {row["name"] for row in _eval_axon(haxall, "libs()")}
     for lib in ("his", "hx.point"):
         if lib not in loaded:
@@ -125,9 +125,9 @@ def test_haxall_his_drop_in_round_trips_through_timberdoodle(haxall, operator_to
         if not items:
             time.sleep(1)
 
-    assert items, "value never landed in Timberdoodle's Postgres via the Haxall drop-in"
+    assert items, "value never landed in Baler's Postgres via the Haxall drop-in"
     assert abs(items[-1]["value"] - test_val) < 1e-6
 
     his_items = haxall.his_read(f"@{point_id}", "today")
-    assert his_items, "hisRead returned nothing - TimberdoodleHisExt.read() round-trip failed"
+    assert his_items, "hisRead returned nothing - BalerHisExt.read() round-trip failed"
     assert abs(his_items[-1]["val"] - test_val) < 1e-6

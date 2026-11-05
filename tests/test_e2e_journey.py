@@ -20,7 +20,7 @@ stands up.
 
 Needs `docker compose up -d` (gateway, auth_api, ingest_api, fault_api,
 fault_detector, derivation_api, derivation_engine, postgres, oxigraph,
-mosquitto all healthy) with TIMBERDOODLE_ALLOW_PRIVATE_WEBHOOKS=1 already
+mosquitto all healthy) with BALER_ALLOW_PRIVATE_WEBHOOKS=1 already
 set for fault_api/fault_detector - see CLAUDE.md.
 """
 
@@ -33,18 +33,18 @@ import pytest
 import requests
 from rdflib import URIRef
 
-from timberdoodle.derivation_engine import _output_uri
-from timberdoodle.ingest import (
+from baler.derivation_engine import _output_uri
+from baler.ingest import (
     ingest_equip_tags,
     link_part_of,
     link_point_to_equip,
     topic_prefix_to_equip_uri,
     topic_to_point_uri,
 )
-from timberdoodle.mqtt_util import make_client
-from timberdoodle.remote_store import RemoteStore
-from timberdoodle.store import BRICK
-from timberdoodle.timeseries import connect
+from baler.mqtt_util import make_client
+from baler.remote_store import RemoteStore
+from baler.store import BRICK
+from baler.timeseries import connect
 
 BASE = "http://localhost:8080"
 MQTT_HOST = "localhost"

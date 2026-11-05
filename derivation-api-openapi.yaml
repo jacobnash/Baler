@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
-  title: Timberdoodle Derivation API
+  title: Baler Derivation API
   version: "1.0.0"
   description: |
     CRUD for derivations - definitions of synthetic/computed histories,
-    computed via Timberdoodle's own rule engine. A derivation names a
+    computed via Baler's own rule engine. A derivation names a
     SPARQL query that selects what to run over and a Python function (the
     "lambda") that computes the value; the result is written back as a new
     point in `point_history` and attached to its target entity in the
@@ -44,7 +44,7 @@ servers:
   - url: http://localhost:8003
     description: >-
       Direct - only reachable if you're running this process bare-metal
-      (`python -m timberdoodle.derivation_api --help`) or from inside the
+      (`python -m baler.derivation_api --help`) or from inside the
       Docker network. docker-compose.yml does not publish this port to
       the host, so this URL will refuse connections in the normal
       containerized setup.

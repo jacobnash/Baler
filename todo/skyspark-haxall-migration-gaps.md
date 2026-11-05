@@ -4,7 +4,7 @@
 access, see below); items 3, 6 not started.
 Backlog from a 2026-08-26 critical review
 specifically asking "what would it cost an existing SkySpark/Haxall customer to migrate away to
-Timberdoodle" (as opposed to general feature parity, which was already tracked informally).
+Baler" (as opposed to general feature parity, which was already tracked informally).
 Full comparison detail, evidence, and the "Verdict" this backlog is ranked against live in the
 Field Report Artifact (`https://claude.ai/code/artifact/916878fb-8991-4a79-a1fa-fd4f39ff543d`,
 "Migrating away — the honest version" section) — this file exists so the backlog itself survives
@@ -14,10 +14,10 @@ conversation's plan-file slot.
 
 ## Context
 
-Timberdoodle's technical core (Brick/RDF, a real historian, the Haxall `hx::IHisExt` drop-in) is
+Baler's technical core (Brick/RDF, a real historian, the Haxall `hx::IHisExt` drop-in) is
 solid, but the review found the *migration* story specifically overclaims relative to what's
 actually tested: the one integration that lets a customer migrate gradually
-(`fantom-his-ext`/`fantom-fbf-conn`) has a currently-broken default config, has never been
+(`fantom-his-ext`/`fantom-windrow-conn`) has a currently-broken default config, has never been
 verified against SkySpark itself (only open-source Haxall), and has zero automated test coverage.
 Separately, the things a migrated customer would *lose* on day two (SSO, alarm escalation,
 scheduling, automated backups) aren't tracked anywhere as backlog — this file is that tracking.
@@ -30,40 +30,40 @@ day-two gap.
 ### 1. Fix the Haxall drop-in's dead URL, and add a smoke test
 
 - **Status:** fully done (2026-08-27) — fixed, live-verified, and an automated smoke test exists.
-- **Why:** `TimberdoodleHisExt.fan` hardcoded `http://host.docker.internal:8000/`, a port
+- **Why:** `BalerHisExt.fan` hardcoded `http://host.docker.internal:8000/`, a port
   `ingest_api` stopped publishing once it moved behind the gateway (JWT auth rewrite,
   `6d2a61b`/`0c553c1`). Anyone following `docs-site/pages/haxall-drop-in.mdx` got a dead
   connection — the doc said so ("neither [fix] is done for you yet") but shipped no fix. This
   was the one piece of the migration pitch that was actively false, not just incomplete.
-- **What was done:** new `fantom-his-ext/fan/TimberdoodleHisSettings.fan` (a `Settings` subclass,
+- **What was done:** new `fantom-his-ext/fan/BalerHisSettings.fan` (a `Settings` subclass,
   the same `@Setting`/`Ext.settings()` mechanism confirmed live in `haxall/haxall`'s own
   `hxHttp`/`HttpSettings`) adds real `baseUri`/`authToken` fields, editable via Axon's real
   `extSettingsUpdate("his", {...})` function (confirmed against `haxall/haxall`'s
   `src/xeto/hx/funcs.xeto`). `baseUri` now defaults to the gateway
-  (`http://host.docker.internal:8080/ingest/`); `TimberdoodleHisExt.fan`'s `read`/`write` attach
+  (`http://host.docker.internal:8080/ingest/`); `BalerHisExt.fan`'s `read`/`write` attach
   `Authorization: Bearer <authToken>` when one is configured. `docs-site/pages/haxall-drop-in.mdx`
   updated to match.
 - **Live-verified (2026-08-27):** built `tdHis`/`his.xetolib` against a real Haxall 4.0.6 install
-  (the `fbf-haxall` image's compiled release SDK, run as a throwaway `td-verify` container —
+  (the `windrow-haxall` image's compiled release SDK, run as a throwaway `td-verify` container —
   `~/haxall`'s own source-build path turned out to be separately broken, see note below), ran
   `libAdd(["his"])` and a real `extSettingsUpdate("his", {authToken, baseUri})`, wrote a value
   through a live curVal transition (`hisCollectCov` fired, `hisStatus: "ok"`), confirmed it landed
   via this API's own `GET /ingest/history` through the gateway with a real Bearer token, then read
-  it back via Haxall's `hisRead` op (which calls `TimberdoodleHisExt.read()` directly) and got the
+  it back via Haxall's `hisRead` op (which calls `BalerHisExt.read()` directly) and got the
   same value/timestamp back. Both directions confirmed end-to-end, not just cross-checked against
   source. `docs-site/pages/haxall-drop-in.mdx` updated to state this as proven, not pending.
 - **Automated smoke test added (2026-08-27):** `tests/test_haxall_drop_in_smoke.py`, same opt-in
   convention as `test_haystack_puller.py`'s real-Haxall test (`@pytest.mark.integration` +
   `skipif` unless `HAXALL_SU_USERNAME` is set, so it's silent in the normal/CI suite). Runs the
   exact same enable/configure/write/read sequence used for live verification above, reusing the
-  existing `HaystackClient` (`src/timberdoodle/haystack_client.py`) for auth rather than adding a
+  existing `HaystackClient` (`src/baler/haystack_client.py`) for auth rather than adding a
   new dependency — confirmed passing against a real Haxall instance, and confirmed it skips
   cleanly (doesn't affect `pytest -m "not integration"` or break anything, ran the full suite:
   158 passed). Not wired into GitHub Actions CI — that would mean vendoring the whole Haxall
   build pipeline into CI, a separate, bigger decision than "add a smoke test" for this bug fix;
   this is the developer-runnable, repeatable form.
 - **Side finding, fixed (2026-08-27):** rebuilding `~/haxall`'s own Docker image (the
-  aggregate-source-build path, distinct from the `fbf-haxall` release-SDK path used for the first
+  aggregate-source-build path, distinct from the `windrow-haxall` release-SDK path used for the first
   live-verification pass above) was broken — its Dockerfile did unpinned `git clone -b master` of
   `Project-Haystack/xeto` and `Project-Haystack/haystack-defs` at build time, and current upstream
   `master` no longer parsed cleanly against this pinned Haxall commit's build-var substitution,
@@ -77,8 +77,8 @@ day-two gap.
   `docker compose build && docker compose up -d` in `~/haxall` now boots cleanly again, confirmed
   against both a fresh db and the pre-existing `var` db. Unrelated to tdHis itself, but was
   blocking the most natural way to test it.
-- **Files:** `fantom-his-ext/fan/TimberdoodleHisExt.fan`,
-  `fantom-his-ext/fan/TimberdoodleHisSettings.fan` (new), `tests/test_haxall_drop_in_smoke.py`
+- **Files:** `fantom-his-ext/fan/BalerHisExt.fan`,
+  `fantom-his-ext/fan/BalerHisSettings.fan` (new), `tests/test_haxall_drop_in_smoke.py`
   (new), `docs-site/pages/haxall-drop-in.mdx`.
 
 ### 2. Verify the drop-in against a real SkySpark instance
@@ -94,7 +94,7 @@ day-two gap.
   verified — don't assume it without testing" line already states this honestly and needs no
   change either way.
 - **What it would have taken:** the same live pass (`libAdd(["his"])`, confirm `hisWrite`/
-  `hisRead` round-trip through Timberdoodle's Postgres) against a real SkySpark instance.
+  `hisRead` round-trip through Baler's Postgres) against a real SkySpark instance.
 
 ### 3. Measure real-world Haystack→Brick tag-mapping accuracy
 
@@ -106,19 +106,19 @@ day-two gap.
 - **What:** run `haystack_puller.py --once` + `autotag.py` against a real (or realistically
   messy) Haystack export, not another synthetic fixture, and publish the resulting
   direct/fallback/unmapped breakdown.
-- **Files:** `src/timberdoodle/mapping.py`, `rules/haystack_to_brick.yaml`,
-  `rules/haystack_equip_to_brick.yaml`, `src/timberdoodle/autotag.py`,
-  `src/timberdoodle/llm_classifier.py`.
+- **Files:** `src/baler/mapping.py`, `rules/haystack_to_brick.yaml`,
+  `rules/haystack_equip_to_brick.yaml`, `src/baler/autotag.py`,
+  `src/baler/llm_classifier.py`.
 
 ### 4. Live in-app Python rule-authoring surface
 
 - **Status:** done (2026-08-28) — built together with item 5 (shared UI shell: `auth.js`,
   `console.css`, `top-nav`), verified live in a real browser.
 - **Why:** unchanged from the first (2026-08-24) review pass — still the one piece of daily
-  SkySpark workflow with no Timberdoodle equivalent. Not about Axon vs. Python (Python's the
-  right call, see `feedback_vendor_marketing_claims`/`project_timberdoodle_haxall_context`); it's
+  SkySpark workflow with no Baler equivalent. Not about Axon vs. Python (Python's the
+  right call, see `feedback_vendor_marketing_claims`/`project_baler_haxall_context`); it's
   the live in-browser shell with autocomplete and inline eval against real data that SkySpark has
-  and Timberdoodle doesn't.
+  and Baler doesn't.
 - **What was done:** `ui/derivations.html`/`ui/derivations.js` — no new expression language, purely
   a browser client over `derivation_api.py`'s existing endpoints (`POST /derivations/test`,
   `/dry-run`, `/derivations`, `DELETE /derivations/{id}`). Three panes (config JSON, `fn_source`,
@@ -169,8 +169,8 @@ day-two gap.
   like `.console-main { display: block }` silently defeated `mainEl.hidden = true`, and the login
   form and page content rendered on top of each other simultaneously. Switched to inline
   `style.display` toggling, which is immune to this regardless of what a given page's CSS says.
-- **Files:** `src/timberdoodle/faults.py`, `src/timberdoodle/fault_api.py`,
-  `src/timberdoodle/fault_detector.py`, `fault-api-openapi.yaml`, `gateway/njs/policy.js`,
+- **Files:** `src/baler/faults.py`, `src/baler/fault_api.py`,
+  `src/baler/fault_detector.py`, `fault-api-openapi.yaml`, `gateway/njs/policy.js`,
   `gateway/nginx.conf`, `ui/alarms.html`, `ui/alarms.js` (new), `ui/auth.js`, `ui/console.css`,
   `tests/test_faults.py`, `tests/test_fault_openapi.py`.
 
@@ -189,7 +189,7 @@ day-two gap.
   converter is a bounded task: either shell out to Fantom to parse Axon into that AST (dumped as
   JSON) and write a Python code generator over it, or port the (small) grammar directly. The real
   scope driver is Axon's **builtin-function library** — `hisRead`, `readAll`, Folio filter
-  queries, and the rest of Axon's standard functions have no 1:1 Timberdoodle equivalent (SPARQL
+  queries, and the rest of Axon's standard functions have no 1:1 Baler equivalent (SPARQL
   over RDF vs. Folio's tag-filter query language) and need per-function mapping decisions, one at
   a time. That's real, enumerable work, not an open-ended unknown.
 - **What (v1 scope):** convert the structural/expression subset that maps cleanly (arithmetic,
@@ -197,14 +197,14 @@ day-two gap.
   an unmapped builtin, emit a flagged stub (e.g. a `# AXON: <original call>` comment plus a
   `NotImplementedError`) for manual completion instead of silently guessing. Even partial,
   review-required conversion is a large win over rewriting every rule from a blank file.
-- **What was done:** `src/timberdoodle/axon_convert.py` — a hand-rolled recursive-descent
+- **What was done:** `src/baler/axon_convert.py` — a hand-rolled recursive-descent
   tokenizer/parser for the v1 subset (arithmetic, comparisons, `if/else`, local `def`s via
   `do...end`, lambdas), building a Python `ast.Module` directly and rendering it with stdlib
   `ast.unparse()`. Deliberately **not** the vendored-Fantom-parser path this item originally
   proposed: this repo's CI has no Fantom toolchain to run a parse step in (confirmed —
   `fantom-his-ext/` is built by hand, never in CI), and there's no in-repo or fetchable Axon
   corpus to validate a vendored parser against either way (confirmed — no `.axon` files anywhere,
-  Timberdoodle's own rules are already Python). A native port is the smaller, self-contained bet
+  Baler's own rules are already Python). A native port is the smaller, self-contained bet
   for a v1 whose real cost driver is builtin-function mapping, not the grammar. Any call to a
   builtin outside `MAPPED_BUILTINS` (starts with just `abs`) emits the flagged stub this item
   called for — a `# AXON: <original call>` comment plus a `NotImplementedError` — rather than
@@ -216,7 +216,7 @@ day-two gap.
   exists to validate against; this proves the converter handles the examples it was built
   against, not real migration-target rule bodies.
 - **Known gap, verified live — null semantics don't match:** confirmed against a real Haxall
-  instance (`docker run --entrypoint /haxall/bin/axon fbf-haxall:latest '<expr>'`, axon shell
+  instance (`docker run --entrypoint /haxall/bin/axon windrow-haxall:latest '<expr>'`, axon shell
   v4.0.6) that Axon's null handling is inconsistent by operator family, and this converter
   reproduces none of it. Arithmetic silently propagates null (`1 + null` → `null`, no error);
   ordering treats null as sorting below every number (`null < 1` → true, `1 < null` → false,
@@ -239,14 +239,14 @@ day-two gap.
   `docker compose exec postgres pg_dump`, so running it inside a container would mean mounting
   the Docker socket/CLI into a new image just to keep that working, more attack surface than a
   backup job warrants. Went with a host-level scheduled job instead, reusing `backup.py`
-  completely unchanged: `scripts/systemd/timberdoodle-backup.{service,timer}` (new, daily by
+  completely unchanged: `scripts/systemd/baler-backup.{service,timer}` (new, daily by
   default, `Persistent=true` so a missed run catches up on next boot) plus a cron one-liner
   documented as the non-systemd fallback. README's "Backup and restore" section has a new
   "Automating backups" subsection covering both. `restore.py`'s refuse-on-non-empty-target
   behavior is untouched. Not done: retention/pruning of `backups/` — flagged in the README as a
   known, deliberate gap, not implemented since it wasn't part of this item's scope.
-- **Files:** `scripts/systemd/timberdoodle-backup.service` (new),
-  `scripts/systemd/timberdoodle-backup.timer` (new), `README.md`,
+- **Files:** `scripts/systemd/baler-backup.service` (new),
+  `scripts/systemd/baler-backup.timer` (new), `README.md`,
   `docs-site/pages/backups.mdx` (new), `docs-site/zudoku.config.tsx`.
 
 ### 8. Ad-hoc `readAll(filter).hisRead(span)` — the SkySpark shell reflex
@@ -254,11 +254,11 @@ day-two gap.
 - **Status:** v1 done (2026-09-08)
 - **Why:** the single most-used thing in a SkySpark shell isn't a rule or a view, it's typing
   `readAll(ahu and air).hisRead(thisMonth)` and looking at the charts. Item 6's converter
-  deliberately stubs `hisRead`/`readAll` because there was no Timberdoodle equivalent to map
+  deliberately stubs `hisRead`/`readAll` because there was no Baler equivalent to map
   *to* — the equivalent was "write a SPARQL query, then N `GET /history` calls, then chart it
   yourself," which is exactly the loss a migrating SkySpark user feels first and most often.
   Nothing in the UI let you say "show me this AHU" without already knowing its point URIs.
-- **What was done:** `src/timberdoodle/hisquery.py` — a native parser for the two-call subset
+- **What was done:** `src/baler/hisquery.py` — a native parser for the two-call subset
   (`read`/`readAll` + Haystack filter grammar, `.hisRead(span)`, `.hisRollup(fold, interval)`),
   a filter→SPARQL compiler (marker tags as `haystack:hasTag`, CapitalCase names as Brick/PROJ
   `rdf:type`, `point`/`equip`/`site` structural aliases, `id ==`/`equipRef ==` refs, missing-tag
@@ -270,14 +270,14 @@ day-two gap.
   by `ui/his.html` (canvas charts grouped by unit, per-point, grid + CSV, live refresh, span
   chips/rollup dropdown that rewrite the visible expression so the text is always the whole
   truth), deep-linked from every equipment in the tree and every point detail panel. Default
-  span timezone via `TIMBERDOODLE_TZ`. The one deliberate non-Axon behavior: matched
+  span timezone via `BALER_TZ`. The one deliberate non-Axon behavior: matched
   *equipment* expands to its points (Axon errors on `read(ahu).hisRead(...)`) - that's the
   whole point of the feature.
 - **Brick without the Brick spelling (2026-09-08, same pass):** the first cut matched a Brick
   class only by exact, case-sensitive `rdf:type` and a plain word only as a Haystack marker —
   so a Brick-only entity (loaded model, derivation output) was unreachable unless you knew
   `Zone_Air_Temperature_Sensor` verbatim, and `Temperature_Sensor` found no subclasses. Now
-  `src/timberdoodle/brick_vocab.py` parses the vendored `ontology/Brick-only.ttl` (1,428
+  `src/baler/brick_vocab.py` parses the vendored `ontology/Brick-only.ttl` (1,428
   classes, 531 tag words, ~70 ms, regex over the release's rdflib serialization) and the
   compiler matches every name three ways: as Brick's per-class tag words
   (`brick:hasAssociatedTag` — `zone and air and temperature and sensor`, `ahu`, with Haystack
@@ -323,8 +323,8 @@ day-two gap.
   is an explicit 400 naming what was rejected, never a silent approximation. Item 6's converter
   still stubs `hisRead`/`readAll` — wiring it to emit `hisquery.run_query(...)` calls for the
   subset this now covers is the obvious follow-on, not done here.
-- **Files:** `src/timberdoodle/hisquery.py`, `src/timberdoodle/brick_vocab.py` (new),
-  `src/timberdoodle/timeseries.py`, `src/timberdoodle/ingest_api.py`, `openapi.yaml`,
+- **Files:** `src/baler/hisquery.py`, `src/baler/brick_vocab.py` (new),
+  `src/baler/timeseries.py`, `src/baler/ingest_api.py`, `openapi.yaml`,
   `gateway/njs/policy.js`, `ui/his.html`, `ui/his.js`, `ui/his.css` (new), `ui/app.js`,
   `ui/style.css`, every `ui/*.html` nav, `tests/test_hisquery.py`, `tests/test_brick_vocab.py`,
   `tests/test_his_route.py` (new), `docs-site/pages/his-query.mdx` (new),

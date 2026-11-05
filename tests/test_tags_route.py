@@ -15,7 +15,7 @@ import yaml
 from referencing import Registry, Resource
 from referencing.jsonschema import DRAFT202012
 
-from timberdoodle.ingest import (
+from baler.ingest import (
     haystack_ref_to_equip_uri,
     ingest_haystack_equip_tags,
     link_point_to_equip,
@@ -23,9 +23,9 @@ from timberdoodle.ingest import (
     topic_prefix_to_equip_uri,
     topic_to_point_uri,
 )
-from timberdoodle.ingest_api import OPENAPI_SPEC_PATH, make_handler
-from timberdoodle.remote_store import RemoteStore
-from timberdoodle.timeseries import connect_pool
+from baler.ingest_api import OPENAPI_SPEC_PATH, make_handler
+from baler.remote_store import RemoteStore
+from baler.timeseries import connect_pool
 
 
 @pytest.fixture(scope="module")
@@ -39,7 +39,7 @@ GATEWAY_SECRET = "test-gateway-secret"
 
 @pytest.fixture
 def live_server(monkeypatch):
-    monkeypatch.setenv("TIMBERDOODLE_GATEWAY_SECRET", GATEWAY_SECRET)
+    monkeypatch.setenv("BALER_GATEWAY_SECRET", GATEWAY_SECRET)
     store = RemoteStore()
     ts_pool = connect_pool()
     server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(store, ts_pool))
@@ -127,7 +127,7 @@ def test_tags_reposting_with_completing_tags_reclassifies_not_double_types(gw, l
         PREFIX brick: <https://brickschema.org/schema/Brick#>
         SELECT ?type WHERE {{ <urn:point:{topic}> a ?type }}
     """)
-    ontology_types = {r.type for r in rows if "brickschema.org" in r.type or "timberdoodle:proj" in r.type}
+    ontology_types = {r.type for r in rows if "brickschema.org" in r.type or "baler:proj" in r.type}
     assert ontology_types == {"https://brickschema.org/schema/Brick#Zone_Air_Temperature_Sensor"}
 
 

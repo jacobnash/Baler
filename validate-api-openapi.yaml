@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: Timberdoodle Validate API
+  title: Baler Validate API
   version: "1.0.0"
   description: |
     Structural validation of the live entity graph against Brick's own

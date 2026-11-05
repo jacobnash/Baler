@@ -20,9 +20,9 @@ codebase. `point_history` has no site column, and point identity is a flat
 
 That flat namespace is actually the reason a campus rollup doesn't need new
 infrastructure. Point and equip identity are derived straight from the MQTT
-topic string, and per [FBF](/fbf)'s own wire contract the topic is
-`f"{topic_prefix}/{point}"` — `topic_prefix` already varies per FBF
-instance (e.g. `fbf/mock-ahu-1/...`). Point two FBF instances at two
+topic string, and per [Windrow](/windrow)'s own wire contract the topic is
+`f"{topic_prefix}/{point}"` — `topic_prefix` already varies per Windrow
+instance (e.g. `fbf/mock-ahu-1/...`). Point two Windrow instances at two
 buildings at the same shared `mosquitto`/`mqtt_listener`/Postgres/Oxigraph
 stack, give each a distinct `topic_prefix` (e.g. `fbf/hospital-a/...` vs
 `fbf/hospital-b/...`), and their points/equipment never collide — no
@@ -38,7 +38,7 @@ This only holds if sites can share one Postgres/Oxigraph. If a site must
 stay data-sovereign or run standalone when disconnected, it needs its own
 full stack, with the central campus stack pulling from it — the same
 pull shape `haystack_puller`/`sql_puller` already implement, just pointed
-at a peer Timberdoodle instead of a third-party source. That's a bigger
+at a peer Baler instead of a third-party source. That's a bigger
 decision than this page covers and hasn't come up yet.
 
 ## Why not a mesh network
@@ -52,7 +52,7 @@ can apparently all talk to each other, not just up to one central point.
 `ConnChan` exposes a full remote-RPC surface (`readAll`, `pointWrite`,
 `watch`, `eval`, `hisRead`) across that mesh.
 
-Timberdoodle's topology is a star, not a mesh: N sites report up to one
+Baler's topology is a star, not a mesh: N sites report up to one
 gateway/broker/store, and sites never need to talk to each other. A star
 doesn't need peer identity, routing, or an RPC surface between leaves —
 a plain broker's client/hub model already covers everything a star
@@ -70,32 +70,32 @@ actually has.
 
 ## Reaching back into a site: commands, not just ingest
 
-FBF already has a real REST surface for exactly the kind of thing you'd
+Windrow already has a real REST surface for exactly the kind of thing you'd
 want to trigger remotely — `POST /discover`, `POST /learn`, `POST
-/modbus/discover` (takes a CIDR), device/credential management (see FBF's
+/modbus/discover` (takes a CIDR), device/credential management (see Windrow's
 own `docs/bacnet-discovery-api.md` and
 `docs/periodic-discovery-and-credentials.md`). The gap isn't capability,
 it's reachability: that server binds inside the building, and a central
-Timberdoodle has no inbound path to it, especially on a network that can
+Baler has no inbound path to it, especially on a network that can
 only originate connections outward and never receive them.
 
-**Implemented (2026-09-06):** `fbf.api` subscribes to a command topic —
+**Implemented (2026-09-06):** `windrow.api` subscribes to a command topic —
 `cmd/{site}/{instance}/#` — on the same MQTT connection it already holds
-open to publish readings, once started with `--site-id` (see FBF's own
+open to publish readings, once started with `--site-id` (see Windrow's own
 `docs/command-channel.md`). A command message (e.g.
 `{"action": "modbus_discover", "cidr": "10.2.0.0/24"}`) gets dispatched
 in-process to the same `handle_discover`/`handle_learn`/
 `handle_modbus_discover` functions its own HTTP routes call, and the
 outcome is published to `cmd/{site}/{instance}/result`. No new server, no
 new port, no firewall exception — it rides the identical egress rule that
-already lets FBF publish telemetry today, because it's the same
+already lets Windrow publish telemetry today, because it's the same
 connection.
 
 The two things this needed to be safe once it controls real scans, not
 just telemetry, are both done:
 
-- **Persistent session** (`clean_session=False`, QoS 1) on FBF's client,
-  set once `--site-id` is given (`fbf/src/fbf/mqtt_sink.py`'s `connect()`)
+- **Persistent session** (`clean_session=False`, QoS 1) on Windrow's client,
+  set once `--site-id` is given (`fbf/src/windrow/mqtt_sink.py`'s `connect()`)
   — a command sent while the site is offline is queued by the broker
   instead of dropped.
 - **Per-site broker ACLs** (`mosquitto/acl`). `allow_anonymous` is off;
@@ -111,19 +111,19 @@ just telemetry, are both done:
 This matters more once sites are remote and links aren't as reliable as
 one Docker network. This section used to describe several open gaps; as of
 2026-09-06 all of them are closed. QoS 1 publish and disk spooling on
-FBF's side, and `clean_session=False` on `mqtt_listener.py`, turned out to
+Windrow's side, and `clean_session=False` on `mqtt_listener.py`, turned out to
 already be done by the time this page was checked against the code again
 — the mosquitto queue cap below was the one piece still genuinely open:
 
-- `fbf/src/fbf/mqtt_sink.py`'s `publish_reading()` publishes at QoS 1, and
+- `fbf/src/windrow/mqtt_sink.py`'s `publish_reading()` publishes at QoS 1, and
   spools to a local JSONL file (replayed on reconnect) when the client
   isn't currently connected — a link drop no longer means silently dropped
-  readings on FBF's side.
+  readings on Windrow's side.
 - `mqtt_listener.py`'s client uses a stable `client_id` and
   `clean_session=False`, so mosquitto's queued messages actually have a
   session to be queued against. `fault_detector.py` and
   `derivation_engine.py` authenticate the same way (all three now go
-  through the shared `timberdoodle.mqtt_util.make_client()`) but still use
+  through the shared `baler.mqtt_util.make_client()`) but still use
   ephemeral sessions — they evaluate live telemetry, not a durable log, so
   losing a queued backlog across a restart is an accepted gap, unlike the
   command channel below where a dropped message means a scan silently
@@ -145,7 +145,7 @@ raising the cap indefinitely.
 
 ## When mesh-style networking would actually be justified
 
-If Timberdoodle deployments themselves needed to federate — separate
+If Baler deployments themselves needed to federate — separate
 orgs, data-sovereignty requirements forcing separate stores — *and* those
 deployments needed to query or command each other live, not just roll up
 for viewing, that's closer to what arcbeam actually solves. That's a

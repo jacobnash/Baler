@@ -1,24 +1,28 @@
+# Renamed from Timberdoodle. Every BALER_* setting below falls back to its
+# old TIMBERDOODLE_* name, and the Postgres role/database and volume names
+# are variables, so an install made under the old name keeps its .env and
+# its data unchanged - see deploy/MIGRATING-TO-BALER.md.
 x-daemon-env: &daemon-env
-  TIMBERDOODLE_PG_DSN: postgresql://timberdoodle:${POSTGRES_PASSWORD:-timberdoodle}@postgres:5432/timberdoodle
+  BALER_PG_DSN: postgresql://${BALER_PG_USER:-baler}:${POSTGRES_PASSWORD:-${BALER_PG_USER:-baler}}@postgres:5432/${BALER_PG_DB:-baler}
   OXIGRAPH_URL: http://oxigraph:7878
   MQTT_HOST: mosquitto
-  MQTT_USERNAME: timberdoodle
+  MQTT_USERNAME: baler
   MQTT_PASSWORD: ${MQTT_PASSWORD:?set in .env - see .env.example}
   OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
-  TIMBERDOODLE_ALLOW_PRIVATE_WEBHOOKS: ${TIMBERDOODLE_ALLOW_PRIVATE_WEBHOOKS:-}
+  BALER_ALLOW_PRIVATE_WEBHOOKS: ${BALER_ALLOW_PRIVATE_WEBHOOKS:-${TIMBERDOODLE_ALLOW_PRIVATE_WEBHOOKS:-}}
   # Blank-safe; only ingest_api.py's GET /his reads it (default tz for
   # hisRead spans - see .env.example). Blank means UTC.
-  TIMBERDOODLE_TZ: ${TIMBERDOODLE_TZ:-}
+  BALER_TZ: ${BALER_TZ:-${TIMBERDOODLE_TZ:-}}
   # Blank-safe like the var above, not required (:?) - only auth_api.py
   # and the gateway need this so far (incremental gateway-auth rollout,
   # see the plan doc's Phase 2 migration path); other daemons never
   # check it. Set it in .env once you're actually using auth_api/the new
   # gateway auth - until then the stack runs exactly as before.
-  TIMBERDOODLE_GATEWAY_SECRET: ${TIMBERDOODLE_GATEWAY_SECRET:-}
+  BALER_GATEWAY_SECRET: ${BALER_GATEWAY_SECRET:-${TIMBERDOODLE_GATEWAY_SECRET:-}}
   # Only auth_api.py (issues tokens) actually needs this - blanket-added
   # to the anchor like the var above, harmless for daemons that never
   # read it.
-  TIMBERDOODLE_JWT_SECRET: ${TIMBERDOODLE_JWT_SECRET:-}
+  BALER_JWT_SECRET: ${BALER_JWT_SECRET:-${TIMBERDOODLE_JWT_SECRET:-}}
 
 x-daemon-depends-on: &daemon-depends-on
   postgres:
@@ -27,6 +31,10 @@ x-daemon-depends-on: &daemon-depends-on
     condition: service_started
   mosquitto:
     condition: service_started
+  # One-shot data migration (baler.migrate) - every daemon waits for it to
+  # finish, so a deploy never runs new code against old-named graph data.
+  migrate:
+    condition: service_completed_successfully
 
 # Lets containers resolve the host machine as host.docker.internal (Docker
 # Desktop provides this automatically; plain Linux Docker needs the explicit
@@ -37,16 +45,29 @@ x-host-gateway: &host-gateway
   - "host.docker.internal:host-gateway"
 
 services:
+  # Idempotent: rewrites urn:baler: IRIs to urn:baler: once, then
+  # finds nothing to do on every later `up`. See src/baler/migrate.py.
+  migrate:
+    build: .
+    command: python -m baler.migrate
+    environment: *daemon-env
+    volumes:
+      - .:/app
+    depends_on:
+      oxigraph:
+        condition: service_started
+    restart: "no"
+
   mosquitto:
     image: eclipse-mosquitto:2
     entrypoint: ["/mosquitto/config/entrypoint.sh"]
     environment:
-      # timberdoodle is the trusted backend account (mqtt_listener,
+      # baler is the trusted backend account (mqtt_listener,
       # fault_detector, derivation_engine, integration tests - see
-      # mosquitto/acl). Add "site-id:password" pairs here per FBF site
+      # mosquitto/acl). Add "site-id:password" pairs here per Windrow site
       # once the command channel (multi-site.mdx) is actually in use -
       # each site's username *is* its cmd/<username>/# scope.
-      MOSQUITTO_USERS: timberdoodle:${MQTT_PASSWORD:?set in .env - see .env.example}
+      MOSQUITTO_USERS: baler:${MQTT_PASSWORD:?set in .env - see .env.example}
     volumes:
       - ./mosquitto:/mosquitto/config:ro
       - mosquitto-data:/mosquitto/data
@@ -65,15 +86,15 @@ services:
     image: timescale/timescaledb:latest-pg16
     command: postgres -c log_statement=all
     environment:
-      POSTGRES_USER: timberdoodle
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-timberdoodle}
-      POSTGRES_DB: timberdoodle
+      POSTGRES_USER: ${BALER_PG_USER:-baler}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-${BALER_PG_USER:-baler}}
+      POSTGRES_DB: ${BALER_PG_DB:-baler}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     ports:
       - "5433:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U timberdoodle"]
+      test: ["CMD-SHELL", "pg_isready -U ${BALER_PG_USER:-baler}"]
       interval: 2s
       timeout: 3s
       retries: 20
@@ -95,7 +116,9 @@ services:
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: ${GRAFANA_ANON_ENABLED:-false}
       GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-timberdoodle}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-${BALER_PG_USER:-baler}}
+      BALER_PG_USER: ${BALER_PG_USER:-baler}
+      BALER_PG_DB: ${BALER_PG_DB:-baler}
       # Grafana's newer apiserver-backed provisioning path (feature toggle
       # "provisioning", on by default in recent grafana-oss:latest) throws
       # "Datasource provisioning error: data source not found" against our
@@ -110,7 +133,7 @@ services:
 
   mqtt_listener:
     build: .
-    command: python -m timberdoodle.mqtt_listener
+    command: python -m baler.mqtt_listener
     # Pure daemons connect to Postgres/MQTT eagerly at startup and exit on
     # failure. On a fresh DB volume, postgres' first-boot init briefly passes
     # its healthcheck then restarts, refusing that first connection (a race the
@@ -125,7 +148,7 @@ services:
 
   ingest_api:
     build: .
-    command: python -m timberdoodle.ingest_api
+    command: python -m baler.ingest_api
     environment: *daemon-env
     volumes:
       - .:/app
@@ -138,7 +161,7 @@ services:
 
   fault_api:
     build: .
-    command: python -m timberdoodle.fault_api
+    command: python -m baler.fault_api
     # Unlike the other HTTP APIs, this one calls connect_pool() eagerly in
     # main() before serving - same DB-not-ready-yet startup race as the
     # pure daemons below (see mqtt_listener), just via an HTTP API. Seen
@@ -157,7 +180,7 @@ services:
 
   fault_detector:
     build: .
-    command: python -m timberdoodle.fault_detector
+    command: python -m baler.fault_detector
     restart: unless-stopped  # see mqtt_listener - recover from the DB-not-ready-yet startup race
     environment: *daemon-env
     extra_hosts: *host-gateway
@@ -167,7 +190,7 @@ services:
 
   derivation_api:
     build: .
-    command: python -m timberdoodle.derivation_api
+    command: python -m baler.derivation_api
     environment: *daemon-env
     volumes:
       - .:/app
@@ -178,7 +201,7 @@ services:
 
   derivation_engine:
     build: .
-    command: python -m timberdoodle.derivation_engine
+    command: python -m baler.derivation_engine
     restart: unless-stopped  # see mqtt_listener - recover from the DB-not-ready-yet startup race
     environment: *daemon-env
     volumes:
@@ -187,7 +210,7 @@ services:
 
   validate_api:
     build: .
-    command: python -m timberdoodle.validate_api
+    command: python -m baler.validate_api
     environment: *daemon-env
     volumes:
       - .:/app
@@ -198,7 +221,7 @@ services:
 
   auth_api:
     build: .
-    command: python -m timberdoodle.auth_api
+    command: python -m baler.auth_api
     environment: *daemon-env
     volumes:
       - .:/app
@@ -209,7 +232,7 @@ services:
 
   ops_api:
     build: .
-    command: python -m timberdoodle.ops_api
+    command: python -m baler.ops_api
     environment: *daemon-env
     volumes:
       - .:/app
@@ -220,10 +243,10 @@ services:
 
   # Project Haystack HTTP API at /api/{project}/{op} - what SkySpark,
   # Haxall, nhaystack and pyhaystack clients point at. Also issues session
-  # JWTs via Haystack SCRAM login, so it reads TIMBERDOODLE_JWT_SECRET.
+  # JWTs via Haystack SCRAM login, so it reads BALER_JWT_SECRET.
   haystack_api:
     build: .
-    command: python -m timberdoodle.haystack_api
+    command: python -m baler.haystack_api
     environment: *daemon-env
     volumes:
       - .:/app
@@ -234,7 +257,7 @@ services:
 
   haystack_puller:
     build: .
-    command: python -m timberdoodle.haystack_puller
+    command: python -m baler.haystack_puller
     profiles: ["haystack-pull"]
     environment:
       <<: *daemon-env
@@ -252,7 +275,7 @@ services:
 
   sql_puller:
     build: .
-    command: python -m timberdoodle.sql_puller
+    command: python -m baler.sql_puller
     profiles: ["sql-pull"]
     environment:
       <<: *daemon-env
@@ -269,7 +292,7 @@ services:
 
   energystar_puller:
     build: .
-    command: python -m timberdoodle.energystar_puller
+    command: python -m baler.energystar_puller
     profiles: ["energystar-pull"]
     environment:
       <<: *daemon-env
@@ -287,7 +310,7 @@ services:
 
   openmeteo_puller:
     build: .
-    command: python -m timberdoodle.openmeteo_puller
+    command: python -m baler.openmeteo_puller
     profiles: ["openmeteo-pull"]
     environment:
       <<: *daemon-env
@@ -312,8 +335,8 @@ services:
       # Phase 2 migration path's final step, so an unset secret here
       # means the gateway can't verify anything at all, not just one
       # not-yet-migrated route.
-      TIMBERDOODLE_JWT_SECRET: ${TIMBERDOODLE_JWT_SECRET:?set in .env - see .env.example}
-      TIMBERDOODLE_GATEWAY_SECRET: ${TIMBERDOODLE_GATEWAY_SECRET:?set in .env - see .env.example}
+      BALER_JWT_SECRET: ${BALER_JWT_SECRET:-${TIMBERDOODLE_JWT_SECRET:?set BALER_JWT_SECRET in .env - see .env.example}}
+      BALER_GATEWAY_SECRET: ${BALER_GATEWAY_SECRET:-${TIMBERDOODLE_GATEWAY_SECRET:?set BALER_GATEWAY_SECRET in .env - see .env.example}}
     volumes:
       - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./gateway/njs:/etc/nginx/njs:ro
@@ -334,8 +357,15 @@ services:
       haystack_api:
         condition: service_healthy
 
+# Explicit names so a rename of the checkout directory (= compose project)
+# can't silently swap in fresh empty volumes. An install created as
+# Timberdoodle sets BALER_VOLUME_PREFIX=timberdoodle to keep its data.
 volumes:
   oxigraph-data:
+    name: ${BALER_VOLUME_PREFIX:-baler}_oxigraph-data
   postgres-data:
+    name: ${BALER_VOLUME_PREFIX:-baler}_postgres-data
   grafana-data:
+    name: ${BALER_VOLUME_PREFIX:-baler}_grafana-data
   mosquitto-data:
+    name: ${BALER_VOLUME_PREFIX:-baler}_mosquitto-data

@@ -17,7 +17,7 @@ import sys
 
 from rdflib import Namespace
 
-from timberdoodle.remote_store import RemoteStore
+from baler.remote_store import RemoteStore
 
 BRICK = Namespace("https://brickschema.org/schema/Brick#")
 BLDG = Namespace("urn:mybuilding#")
