@@ -82,9 +82,32 @@ or Haystack 4/Hayson) or Trio. Responses follow `Accept`: Zinc by default, plus 
 `text/trio` and `text/csv`. A JSON request gets JSON back in the same flavor, so older Haystack 3
 clients keep working.
 
+## Commanding points (pointWrite)
+
+`pointWrite` with a `level` (1-16) commands a real BACnet point. A `val` of `null` relinquishes that
+level. It works the way an operator's command at a controller does: a write at 8 overrides the
+controller's own logic until it's released.
+
+- **Writable points:** Windrow tags BACnet setpoints and commands (analog, binary and multi-state
+  *output*/*value* objects, never sensors) as `writable`. Only those accept a write.
+- **Routing:** the write goes to the Windrow instance that owns the point. That instance must run
+  with `--site-id`, which is how it advertises its command channel. The command travels over that
+  site's broker-ACL-protected MQTT channel.
+- **Confirmation:** a successful response means the controller accepted the BACnet WriteProperty.
+  Nothing is merely queued.
+- **Offline sites:** if the site is offline, the call fails after 10 seconds. The command expires
+  30 seconds after it was sent, and the site refuses it after that, so it can never apply a stale
+  setpoint when it reconnects.
+- **Reading the array:** `pointWrite` without a `level` returns the 16-level array of what Baler
+  has commanded, with `who` and the value at each level. The controller's own array can also hold
+  other writers' levels.
+- **Units:** a Number's unit is not converted. Send the value in the point's own unit.
+- **Roles:** writing needs the `operator` role. Haystack clients POST pointWrite for reads too, so
+  reading the array also needs `operator`.
+
 ## Not yet
 
-- `pointWrite` and `invokeAction` return an error grid until Windrow can write BACnet.
+- `invokeAction` returns an error grid.
 - `->` tag paths in filters (`equipRef->siteRef`), the same limit as the Query page.
 - `hisRead` with two datetimes. Dates, date ranges and `today`/`yesterday`/`thisWeek`/… all work.
 - The Haystack 4 `defs`/`libs` ops.

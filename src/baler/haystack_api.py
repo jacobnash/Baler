@@ -49,6 +49,7 @@ from urllib.parse import parse_qsl, urlsplit
 import openhay as oh
 
 from baler import auth, gateway_auth, hisquery, timeseries, tracing
+from baler import point_write as pw
 from baler.http_handler_base import BaseAPIHandler
 from baler.scope import EVERYTHING, Scope, claims_from_header, scope_for
 from baler.timeseries import connect_pool
@@ -247,9 +248,10 @@ def read_latest_many(conn, point_uris: list[str]) -> dict[str, tuple[datetime, o
 class Backend:
     """Haystack ops over (graph store, Postgres pool). No HTTP in here."""
 
-    def __init__(self, store, ts_pool, max_watches: int = 1000, max_watch_ids: int = 10_000):
+    def __init__(self, store, ts_pool, max_watches: int = 1000, max_watch_ids: int = 10_000, commander=None):
         self.store = store
         self.ts_pool = ts_pool
+        self.commander = commander if commander is not None else pw.Commander()
         self.watches = WatchRegistry(max_watches, max_watch_ids)
         self.boot = datetime.now(timezone.utc)
 
@@ -303,6 +305,51 @@ class Backend:
                 rec["navId"] = uri_to_ref(u)
             out.append(rec)
         return out
+
+    def _writable_point(self, ref: oh.Ref, scope: Scope) -> tuple[str, dict]:
+        uri = ref_to_uri(ref.id)
+        rec = self.read_ids([ref], scope)[0]
+        if rec is None or _kind_of(uri) != "point":
+            raise OpError(f"unknown rec: @{ref.id}")
+        return uri, rec
+
+    def point_write(self, ref: oh.Ref, level: int, val, who: str, user_sub: str | None,
+                    scope: Scope = EVERYTHING) -> None:
+        """Command the point through the Windrow instance that owns it (see
+        point_write.py), then record the level. val None relinquishes."""
+        if not 1 <= level <= 16:
+            raise OpError(f"level must be 1-16, got {level}")
+        uri, rec = self._writable_point(ref, scope)
+        if "writable" not in rec:
+            raise OpError(f"@{ref.id} is not writable")
+        equip_ref = rec.get("equipRef")
+        equip_uri = ref_to_uri(equip_ref.id) if isinstance(equip_ref, oh.Ref) else None
+        with self._conn() as conn:
+            equip = build_records(self.store, conn, [equip_uri]).get(equip_uri, {}) if equip_uri else {}
+        site, instance = equip.get("windrowSite"), equip.get("windrowInstance")
+        if not isinstance(site, str) or not isinstance(instance, str):
+            raise OpError(f"no command route for @{ref.id}: its Windrow instance runs without --site-id")
+        value = _command_value(val)
+        try:
+            self.commander.point_write(site, instance, uri[len("urn:point:"):], value, level)
+        except pw.CommandError as exc:
+            raise OpError(str(exc)) from exc
+        with self._conn() as conn:
+            pw.record_level(conn, uri, level, value, who, user_sub)
+
+    def point_write_array(self, ref: oh.Ref, scope: Scope = EVERYTHING) -> oh.Grid:
+        uri, _ = self._writable_point(ref, scope)
+        with self._conn() as conn:
+            stored = pw.levels(conn, uri)
+        rows = []
+        for level in range(1, 17):
+            row = {"level": oh.Number(level), "levelDis": pw.LEVEL_DIS.get(level, str(level))}
+            if level in stored:
+                v = stored[level]["val"]
+                row["val"] = oh.Number(float(v)) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
+                row["who"] = stored[level]["who"]
+            rows.append(row)
+        return oh.Grid.from_rows(rows, cols=["level", "levelDis", "val", "who"])
 
     def his_read(self, ref: oh.Ref, range_text: str, scope: Scope = EVERYTHING) -> oh.Grid:
         uri = ref_to_uri(ref.id)
@@ -461,7 +508,19 @@ def _lease_secs(v) -> float | None:
     return max(1.0, v.val * mult)
 
 
-def dispatch(backend: Backend, op: str, req: oh.Grid, scope: Scope = EVERYTHING) -> oh.Grid:
+def _command_value(val):
+    """Haystack value -> what Windrow's point_write takes. Units are not
+    converted: a Number is sent as its bare value."""
+    if val is None or isinstance(val, (bool, str)):
+        return val
+    if isinstance(val, oh.Number):
+        return float(val.val)
+    if isinstance(val, (int, float)):
+        return float(val)
+    raise OpError(f"can't command a point with a {type(val).__name__}")
+
+
+def dispatch(backend: Backend, op: str, req: oh.Grid, scope: Scope = EVERYTHING, caller: dict | None = None) -> oh.Grid:
     row = req.rows[0] if req.rows else {}
     if op == "about":
         now = datetime.now(timezone.utc)
@@ -522,8 +581,18 @@ def dispatch(backend: Backend, op: str, req: oh.Grid, scope: Scope = EVERYTHING)
         return oh.Grid()
     if op == "close":
         return oh.Grid()
-    if op in ("pointWrite", "invokeAction"):
-        raise OpError(f"{op} is not supported yet (needs Windrow BACnet write)")
+    if op == "pointWrite":
+        ref = _ref(row.get("id"))
+        level = row.get("level")
+        if not isinstance(level, oh.Number):
+            return backend.point_write_array(ref, scope)
+        user_sub = (caller or {}).get("sub")
+        raw_who = row.get("who")
+        who: str = raw_who if isinstance(raw_who, str) else (user_sub or "baler")
+        backend.point_write(ref, int(level.val), row.get("val"), who, user_sub, scope)
+        return oh.Grid()
+    if op == "invokeAction":
+        raise OpError("invokeAction is not supported yet")
     raise OpError(f"unknown op: {op}")
 
 
@@ -700,12 +769,13 @@ def make_handler(backend: Backend, login: ScramLogin | None):
                             except ValueError:
                                 row[k] = v
                         req = oh.Grid.from_rows([row]) if row else oh.Grid()
+                    claims = claims_from_header(self.headers.get("Authorization"))
                     if op in _DATA_FREE_OPS:
                         caller_scope = EVERYTHING
                     else:
                         with backend.ts_pool.connection() as conn:
-                            caller_scope = scope_for(conn, claims_from_header(self.headers.get("Authorization")))
-                    grid = dispatch(backend, op, req, caller_scope)
+                            caller_scope = scope_for(conn, claims)
+                    grid = dispatch(backend, op, req, caller_scope, claims)
                 except OpError as exc:
                     span.set_attribute("error", str(exc))
                     grid = err_grid(str(exc))
@@ -730,6 +800,11 @@ def main() -> None:
 
     tracing.init_tracing("baler-haystack-api")
     ts_pool = connect_pool()
+    with ts_pool.connection() as conn:
+        # Idempotent; also guarantees sites.topic_prefixes exists for
+        # scope_for even if auth_api hasn't started yet.
+        auth.ensure_schema(conn)
+        pw.ensure_schema(conn)
     login = ScramLogin(ts_pool) if os.environ.get("BALER_JWT_SECRET") else None
     backend = Backend(RemoteStore(), ts_pool)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(backend, login))

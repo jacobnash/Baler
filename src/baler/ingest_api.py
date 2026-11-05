@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 from rdflib import URIRef
 
-from baler import docs_ui, gateway_auth, hisquery, tracing
+from baler import auth, docs_ui, gateway_auth, hisquery, tracing
 from baler.http_handler_base import BaseAPIHandler
 from baler.http_handler_base import respond_error as _respond_error
 from baler.http_handler_base import respond_json as _respond_json
@@ -312,6 +312,8 @@ def main() -> None:
 
     store = RemoteStore()
     ts_pool = connect_pool()
+    with ts_pool.connection() as conn:
+        auth.ensure_schema(conn)  # sites.topic_prefixes, read by the /his and /history scope check
 
     server = ThreadingHTTPServer((args.host, args.port), make_handler(store, ts_pool))
     print(f"POST /ingest listening on {args.host}:{args.port}")

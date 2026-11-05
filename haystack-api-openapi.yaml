@@ -30,7 +30,11 @@ info:
     Haystack's ref alphabet escaped as `~XX`, e.g.
     `@urn:point:windrow~2Fahu-1~2FanalogInput~2C1`.
 
-    **Not yet supported:** `pointWrite`, `invokeAction` (error grid),
+    **pointWrite** commands BACnet points through the owning Windrow
+    instance (see docs-site/pages/haystack-api.mdx); without a `level` it
+    returns Baler's 16-level array.
+
+    **Not yet supported:** `invokeAction` (error grid),
     `->` tag paths in filters, datetime `hisRead` ranges (dates and
     `today`/`yesterday`/... work), `defs`/`libs`.
 servers:

@@ -61,8 +61,21 @@ class FakeTS:
         self.sites: list[tuple] = []  # (id, org_id, topic_prefixes) - empty = scoping off
 
     def execute(self, sql, params=None):
-        assert "FROM sites" in sql, sql  # the only query scope.scope_for runs
-        rows = self.sites
+        # Just enough SQL for scope.scope_for and point_write's level table.
+        levels = self.__dict__.setdefault("levels", {})
+        if "FROM sites" in sql:
+            rows = self.sites
+        elif sql.lstrip().startswith("DELETE FROM point_write_levels"):
+            levels.pop((params[0], params[1]), None)
+            rows = []
+        elif "INSERT INTO point_write_levels" in sql:
+            uri, level, value_json, who, _user_sub, ts = params
+            levels[(uri, level)] = (level, value_json, who, ts)
+            rows = []
+        elif "FROM point_write_levels" in sql:
+            rows = [v for (u, _), v in levels.items() if u == params[0]]
+        else:
+            raise AssertionError(sql)
 
         class _Cur:
             def fetchall(self):
@@ -186,9 +199,79 @@ def test_watch_reports_only_changes(backend):
         ha.dispatch(backend, "watchPoll", poll)
 
 
-def test_point_write_is_explicitly_unsupported(backend):
-    with pytest.raises(ha.OpError, match="not supported yet"):
-        ha.dispatch(backend, "pointWrite", oh.Grid.from_rows([{"id": oh.Ref("x")}]))
+class FakeCommander:
+    def __init__(self, fail: str | None = None):
+        self.sent, self.fail = [], fail
+
+    def point_write(self, site, instance, topic, value, priority):
+        if self.fail:
+            raise ha.pw.CommandError(self.fail)
+        self.sent.append((site, instance, topic, value, priority))
+        return {"present_value": value}
+
+
+SP = "urn:point:fbf/ahu-1/analogValue,9"
+
+
+@pytest.fixture
+def writable(store, backend):
+    store.add_many([
+        (URIRef(AHU), HAYSTACK.windrowSite, Literal("site-a")),
+        (URIRef(AHU), HAYSTACK.windrowInstance, Literal("i1")),
+        (URIRef(SP), BRICK.isPointOf, URIRef(AHU)),
+        (URIRef(SP), HAYSTACK.hasTag, Literal("sp")),
+        (URIRef(SP), HAYSTACK.hasTag, Literal("writable")),
+    ])
+    backend.commander = FakeCommander()
+    return backend
+
+
+def _pw(backend, level=None, val=None, who=None, caller=None, scope=ha.EVERYTHING):
+    row = {"id": oh.Ref(ha.uri_to_ref(SP))}
+    if level is not None:
+        row.update(level=oh.Number(level), val=val)
+    if who:
+        row["who"] = who
+    return ha.dispatch(backend, "pointWrite", oh.Grid.from_rows([row]), scope, caller)
+
+
+def test_point_write_routes_to_owning_windrow_and_records_level(writable):
+    _pw(writable, 8, oh.Number(72.5, "°F"), caller={"sub": "user-1"})
+    assert writable.commander.sent == [("site-a", "i1", "fbf/ahu-1/analogValue,9", 72.5, 8)]
+    arr = _pw(writable)
+    assert len(arr.rows) == 16
+    eight = arr.rows[7]
+    assert eight["level"] == oh.Number(8) and eight["val"] == oh.Number(72.5) and eight["who"] == "user-1"
+    assert "val" not in arr.rows[15]
+
+
+def test_relinquish_clears_level(writable):
+    _pw(writable, 8, oh.Number(72.5), who="operator console")
+    assert _pw(writable).rows[7]["who"] == "operator console"
+    _pw(writable, 8, None)
+    assert writable.commander.sent[-1][3] is None
+    assert "val" not in _pw(writable).rows[7]
+
+
+def test_point_write_refusals(writable, store):
+    with pytest.raises(ha.OpError, match="not writable"):
+        ha.dispatch(writable, "pointWrite", oh.Grid.from_rows(
+            [{"id": oh.Ref(ha.uri_to_ref(DAT)), "level": oh.Number(8), "val": oh.Number(1)}]))
+    with pytest.raises(ha.OpError, match="1-16"):
+        _pw(writable, 17, oh.Number(1))
+    with pytest.raises(ha.OpError, match="unknown rec"):
+        _pw(writable, 8, oh.Number(1), scope=ha.Scope(("somewhere-else",)))
+    writable.commander = FakeCommander(fail="site refused the write: not commandable")
+    with pytest.raises(ha.OpError, match="refused"):
+        _pw(writable, 8, oh.Number(1))
+    assert "val" not in _pw(writable).rows[7]  # a refused write is never recorded
+
+
+def test_point_write_without_route_is_explained(writable, store):
+    store.graph.remove((URIRef(AHU), HAYSTACK.windrowSite, None))
+    with pytest.raises(ha.OpError, match="no command route"):
+        _pw(writable, 8, oh.Number(1))
+    assert writable.commander.sent == []
 
 
 # --- HTTP -----------------------------------------------------------------
