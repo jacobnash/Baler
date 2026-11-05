@@ -3,7 +3,7 @@
 # source in a throwaway Rust stage. bookworm here so the wheel's glibc
 # floor is no newer than the runtime image's.
 FROM rust:1-slim-bookworm AS openhay
-ARG OPENHAY_REF=claude/gracious-lamport-2xeam9
+ARG OPENHAY_REF=main
 RUN apt-get update && apt-get install -y --no-install-recommends git python3 python3-pip \
     && pip3 install --break-system-packages --no-cache-dir "maturin>=1.5,<2" \
     && git clone --depth 1 --branch "$OPENHAY_REF" https://github.com/jacobnash/openhay /openhay \

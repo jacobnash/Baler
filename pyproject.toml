@@ -23,7 +23,7 @@ llm = ["anthropic>=0.69.0", "pydantic>=2.0.0"]
 validate = ["pyshacl>=0.30.0"]
 # haystack_api.py (Project Haystack HTTP API). Built from source with
 # maturin until openhay ships wheels to PyPI - needs a Rust toolchain.
-haystack = ["openhay @ git+https://github.com/jacobnash/openhay@claude/gracious-lamport-2xeam9#subdirectory=crates/openhay-py"]
+haystack = ["openhay @ git+https://github.com/jacobnash/openhay@main#subdirectory=crates/openhay-py"]
 
 [build-system]
 requires = ["setuptools>=68"]
