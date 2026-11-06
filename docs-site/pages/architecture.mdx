@@ -127,11 +127,11 @@ external now has to authenticate before it can reach either.
 | Service | Image | Purpose | Port(s) |
 |---|---|---|---|
 | `mosquitto` | `eclipse-mosquitto:2` | MQTT broker every source and every consumer shares. | 1883 |
-| `oxigraph` | `ghcr.io/oxigraph/oxigraph:latest` | RDF/SPARQL graph store — entity identity, tags, relationships. | 7878 |
-| `postgres` | `timescale/timescaledb:latest-pg16` | Timescale hypertable, `point_history` — the actual reading values. | 5433 → 5432 in-container |
-| `jaeger` | `jaegertracing/all-in-one:latest` | Trace collection/UI. Every process below exports here. | 16686 (UI), 4318 (OTLP HTTP) |
-| `grafana` | `grafana/grafana-oss:latest` | Dashboards over Postgres — a datasource and starter dashboard are auto-provisioned. Login is the image default `admin`/`admin`; anonymous admin access is available for local dev via `GRAFANA_ANON_ENABLED=true` but off by default. | 3033 → 3000 in-container |
-| `gateway` | `nginx:alpine` | JWT-auth-gated path router in front of the five HTTP APIs, plus the static UI. | 8080 |
+| `oxigraph` | `ghcr.io/oxigraph/oxigraph:0.5.13` | RDF/SPARQL graph store — entity identity, tags, relationships. | 7878 |
+| `postgres` | `timescale/timescaledb:2.30.0-pg16` | Timescale hypertable, `point_history` — the actual reading values. | 5433 → 5432 in-container |
+| `jaeger` | `jaegertracing/all-in-one:1.76.0` | Trace collection/UI. Every process below exports here. | 16686 (UI), 4318 (OTLP HTTP) |
+| `grafana` | `grafana/grafana-oss:13.0.2` | Dashboards over Postgres — a datasource and starter dashboard are auto-provisioned. Login is the image default `admin`/`admin`; anonymous admin access is available for local dev via `GRAFANA_ANON_ENABLED=true` but off by default. | 3033 → 3000 in-container |
+| `gateway` | `nginx:1.31.8-alpine` | JWT-auth-gated path router in front of the five HTTP APIs, plus the static UI. | 8080 |
 
 Postgres is deliberately remapped to host port 5433 rather than the
 default 5432, to avoid colliding with a locally-running Postgres
