@@ -7,7 +7,7 @@ docs/adding-a-new-source.md in Windrow for the wire contract this assumes.
 import json
 from datetime import datetime, timezone
 
-from rdflib import OWL, RDF, Literal, URIRef
+from rdflib import OWL, RDF, XSD, Literal, URIRef
 
 from baler import timeseries, tracing
 from baler.store import BRICK, HAYSTACK, HUNIT, TD
@@ -101,7 +101,9 @@ def _tag_triples(tag: str, value):
         return [(HAYSTACK[tag], Literal(value.id, datatype=HAYSTACK.Ref))]
     if isinstance(value, list) and value and all(_hay_type(v) == "Ref" for v in value):
         return [(HAYSTACK[tag], Literal(v.id, datatype=HAYSTACK.Ref)) for v in value]
-    if kind is not None:  # Uri, Symbol, XStr, Coord: their text
+    if kind == "Uri":  # typed, so filters can tell a Uri from a Str (`uri == `...``)
+        return [(HAYSTACK[tag], Literal(str(value.val), datatype=XSD.anyURI))]
+    if kind is not None:  # Symbol, XStr, Coord: their text
         return [(HAYSTACK[tag], Literal(str(getattr(value, "val", value))))]
     if isinstance(value, (dict, list)):
         return [(HAYSTACK[tag], Literal(json.dumps(value, default=str)))]

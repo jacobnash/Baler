@@ -173,6 +173,8 @@ def _literal(value, datatype: str | None = None):
     if dt == HAYSTACK_NS + "Ref":
         rid = str(value)
         return oh.Ref(uri_to_ref(rid if rid.startswith("urn:") else f"urn:equip:haystack:{rid}"))
+    if dt == XSD + "anyURI":
+        return oh.Uri(str(value))
     if dt in (XSD + "date", XSD + "time", XSD + "dateTime"):
         if hasattr(value, "toPython"):
             value = value.toPython()

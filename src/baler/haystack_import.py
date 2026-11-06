@@ -73,9 +73,9 @@ def plain(v):
 
 def _typed(v):
     """What ingest stores for a value: Numbers (with unit), Refs and Ref
-    lists, dates and times stay typed (see ingest._tag_triples); the rest
+    lists, Uris, dates and times stay typed (see ingest._tag_triples); the rest
     takes the plain shape the puller uses."""
-    if isinstance(v, (oh.Number, oh.Ref, date, dtime)):  # datetime is a date
+    if isinstance(v, (oh.Number, oh.Ref, oh.Uri, date, dtime)):  # datetime is a date
         return v
     if isinstance(v, list) and v and all(isinstance(x, oh.Ref) for x in v):
         return v

@@ -20,7 +20,7 @@ oh = pytest.importorskip("openhay")
 
 from rdflib import RDF, Literal, URIRef
 
-from baler import auth
+from baler import auth, hisquery
 from baler import haystack_api as ha
 from baler.store import BRICK, HAYSTACK, Store
 
@@ -661,3 +661,25 @@ def test_site_ref_from_brick_containment():
     assert [ha.ref_to_uri(r["navId"]) for r in be.nav(None)] == [str(orphan), str(site)]
     assert [ha.ref_to_uri(r["navId"]) for r in be.nav(ha.uri_to_ref(str(site)))] == [str(ahu)]
     assert [ha.ref_to_uri(r["id"].id) for r in be.nav(ha.uri_to_ref(str(ahu)))] == [str(p)]
+
+
+def test_uri_literals_compare_only_with_uri_values():
+    """`link == `http://x/a`` (Baler#9): a Uri tag is stored typed, compared
+    only against a Uri literal (never a Str with the same text), and comes
+    back out of /api as a Uri."""
+    from baler.haystack_import import _row
+    from baler.ingest import ingest_haystack_equip_tags
+
+    store = Store()
+    for rid, link in [("a", oh.Uri("http://x/a")), ("b", "http://x/a"), ("c", oh.Uri("http://x/c"))]:
+        ingest_haystack_equip_tags(store, rid, _row({"id": oh.Ref(rid), "site": oh.MARKER, "link": link}))
+
+    def ids(flt):
+        return sorted(u.rsplit(":", 1)[1] for u in hisquery.match_entities(store, hisquery.parse_query(flt).filter))
+
+    assert ids("link == `http://x/a`") == ["a"]
+    assert ids('link == "http://x/a"') == ["b"]
+    assert ids("link > `http://x/b`") == ["c"]
+    recs = ha.build_records(store, None, [str(u) for u in hisquery.match_entities(store, hisquery.parse_query("site").filter)])
+    links = {u.rsplit(":", 1)[1]: r["link"] for u, r in recs.items()}
+    assert links["a"] == oh.Uri("http://x/a") and links["b"] == "http://x/a"

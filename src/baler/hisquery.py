@@ -131,6 +131,7 @@ _TOKEN_RE = re.compile(
     | (?P<SYMBOL>\^[A-Za-z_][A-Za-z0-9_:\-]*)
     | (?P<SPEC>[a-z][A-Za-z0-9_]*(?:\.[a-z][A-Za-z0-9_]*)*::[A-Z][A-Za-z0-9_]*)
     | (?P<STRING>"(?:[^"\\]|\\.)*")
+    | (?P<URI>`(?:[^`\\]|\\.)*`)
     | (?P<REF>@[A-Za-z0-9_:~./,\-]+)
     | (?P<RANGE>\.\.)
     | (?P<ARROW>->)
@@ -192,6 +193,13 @@ class Num:
 
     val: float
     unit: str | None = None
+
+
+@dataclass(frozen=True)
+class UriLit:
+    """A Uri literal: `http://example.com/`. Compares only with Uri values."""
+
+    text: str
 
 
 @dataclass(frozen=True)
@@ -429,6 +437,8 @@ class Parser:
         tok = self._advance()
         if tok.kind == "STRING":
             return _unescape_string(tok.value[1:-1])
+        if tok.kind == "URI":
+            return UriLit(re.sub(r"\\(.)", r"\1", tok.value[1:-1]))
         if tok.kind == "NUMBER":
             return Num(float(tok.value), tok.unit)
         if tok.kind == "DATE":
@@ -881,6 +891,9 @@ class _Compiler:
             return self._flag(f"?s haystack:{node.name} ?{v} . FILTER({typed} && STR(?{v}) {op} {_sparql_string(val.text)})")
         if isinstance(val, bool):
             return self._flag(f"?s haystack:{node.name} ?{v} . FILTER(DATATYPE(?{v}) = xsd:boolean && ?{v} {op} {_sparql_literal(val)})")
+        if isinstance(val, UriLit):
+            # only Uri values (stored typed xsd:anyURI), never a Str with the same text
+            return self._flag(f"?s haystack:{node.name} ?{v} . FILTER(DATATYPE(?{v}) = xsd:anyURI && STR(?{v}) {op} {_sparql_string(val.text)})")
         # strings
         return self._flag(f"?s haystack:{node.name} ?{v} . FILTER(DATATYPE(?{v}) = xsd:string && STR(?{v}) {op} {_sparql_literal(val)})")
 
