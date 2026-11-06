@@ -89,12 +89,42 @@ def _output_uri(derivation_id: str, target_uri: str) -> str:
     return f"urn:point:computed/{derivation_id}/{_local_name(target_uri)}"
 
 
-def _read_input_series(ts_conn, fault_conn, point_uri: str, start: datetime, end: datetime) -> list[tuple]:
+# Data-validity rules (fault_detector's stale/stuck rules): the only faults
+# that make an input count as absent. Reloaded when rules.json changes;
+# main() points it at --rules-file.
+VALIDITY_RULE_TYPES = ("stale", "stuck")
+_rules = json_store.RuleCache(json_store.data_file("rules.json"))
+
+
+def _masking_fault(fault_conn, point_uri: str) -> dict | None:
+    """The open fault that masks this input, if any: a stale/stuck fault
+    from a rule that still exists. Not any open fault (Baler#58): a
+    range or comfort fault says the value is out of bounds, not that it's
+    invalid, and a fault from a deleted rule can never resolve, so it
+    would mask the input forever - which silently froze five AHUs' fan
+    duty cycle for two months."""
+    if fault_conn is None:
+        return None
+    validity = {r["id"] for r in _rules.get() if r.get("type") in VALIDITY_RULE_TYPES}
+    if not validity:
+        return None
+    for fault in list_faults(fault_conn, status="open", point_uri=point_uri):
+        if fault["rule_id"] in validity:
+            return fault
+    return None
+
+
+def _read_input_series(ts_conn, fault_conn, point_uri: str, start: datetime, end: datetime,
+                       masked: dict[str, str] | None = None) -> list[tuple]:
     """An open stale/stuck fault on this point means "treat as absent this
     pass" - empty series, not a silently-passed bad value. Reuses
     fault_detector.py's existing signal instead of a second validity
-    concept; see the plan's data-validity section."""
-    if fault_conn is not None and list_faults(fault_conn, status="open", point_uri=point_uri):
+    concept; see the plan's data-validity section. Masked inputs are
+    recorded in `masked` (point -> rule id) for the trace."""
+    fault = _masking_fault(fault_conn, point_uri)
+    if fault is not None:
+        if masked is not None:
+            masked[point_uri] = fault["rule_id"]
         return []
     return timeseries.read_range(ts_conn, point_uri, start, end)
 
@@ -150,11 +180,12 @@ def _record_and_trace_success(
     }
 
 
-def _read_formula_inputs(ts_conn, fault_conn, input_uris: dict[str, str], input_windows: dict, window_seconds: float, now: datetime) -> dict[str, list[tuple]]:
+def _read_formula_inputs(ts_conn, fault_conn, input_uris: dict[str, str], input_windows: dict, window_seconds: float,
+                         now: datetime, masked: dict[str, str] | None = None) -> dict[str, list[tuple]]:
     inputs = {}
     for name, point_uri in input_uris.items():
         window = input_windows.get(name, window_seconds)
-        inputs[name] = _read_input_series(ts_conn, fault_conn, point_uri, now - timedelta(seconds=window), now)
+        inputs[name] = _read_input_series(ts_conn, fault_conn, point_uri, now - timedelta(seconds=window), now, masked)
     return inputs
 
 
@@ -182,18 +213,24 @@ def _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation: Deriv
         with tracer.start_as_current_span("derivation_engine.evaluate_target") as span:
             span.set_attribute("derivation_id", derivation_id)
             span.set_attribute("target", target_uri)
+            masked: dict[str, str] = {}
             try:
-                inputs = _read_formula_inputs(ts_conn, fault_conn, input_uris, input_windows, window_seconds, now)
+                inputs = _read_formula_inputs(ts_conn, fault_conn, input_uris, input_windows, window_seconds, now, masked)
                 row_extra = {name: str(getattr(row, name)) for name in extra_vars}
                 value = sandbox.run_with_timeout(fn, inputs, row_extra)
             except Exception as exc:  # noqa: BLE001 - one target's sandboxed formula failing must not stop evaluation of every other target
                 trace.append(_record_target_failure(health_conn, derivation_id, target_uri, dry_run, exc, span))
                 continue
 
-            trace.append(_record_and_trace_success(
+            entry = _record_and_trace_success(
                 store, ts_conn, health_conn, derivation_id, target_uri, output_cfg,
                 now, dry_run, value, list(input_uris.values()), span,
-            ))
+            )
+            if masked:
+                # Visible, not silent: why a target produced nothing (#58).
+                entry["masked_inputs"] = masked
+                span.set_attribute("masked_inputs", [f"{p} (rule {r})" for p, r in masked.items()])
+            trace.append(entry)
 
     return trace
 
@@ -336,6 +373,8 @@ def main() -> None:
     parser.add_argument("--mqtt-host", default=os.environ.get("MQTT_HOST", "localhost"))
     parser.add_argument("--mqtt-port", type=int, default=1883)
     parser.add_argument("--derivations-file", default=json_store.data_file("derivations.json"))
+    parser.add_argument("--rules-file", default=json_store.data_file("rules.json"),
+                        help="fault rules: open stale/stuck faults from these mask derivation inputs")
     parser.add_argument("--dsn", default=timeseries.DEFAULT_DSN)
     parser.add_argument("--oxigraph-url", default=os.environ.get("OXIGRAPH_URL", "http://localhost:7878"))
     parser.add_argument("--tick-seconds", type=float, default=5.0)
@@ -352,6 +391,8 @@ def main() -> None:
     derivation_health.ensure_schema(health_conn)
 
     cache = json_store.RuleCache(args.derivations_file)
+    global _rules
+    _rules = json_store.RuleCache(args.rules_file)
 
     if args.dry_run:
         derivations = cast(list[Derivation], cache.get())

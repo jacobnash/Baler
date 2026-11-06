@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlparse
 from baler import auth, docs_ui, gateway_auth, json_store, tracing
 from baler.faults import (
     ack_fault,
+    close_rule_faults,
     enable_webhook,
     ensure_schema,
     fault_point_uri,
@@ -123,7 +124,7 @@ def make_handler(rules_path: str, webhooks_path: str, ts_pool):
                 return
             if self.path.startswith("/rules/"):
                 rule_id = self.path[len("/rules/"):]
-                self.handle_traced("api.delete_rule", lambda span: self._delete(rules_path, rule_id, span))
+                self.handle_traced("api.delete_rule", lambda span: self._delete(rules_path, rule_id, span, rule=True))
                 return
             if self.path.startswith("/webhooks/"):
                 webhook_id = self.path[len("/webhooks/"):]
@@ -168,7 +169,7 @@ def make_handler(rules_path: str, webhooks_path: str, ts_pool):
             span.set_attribute("webhook_id", webhook["id"])
             _respond_json(self, 201, webhook)  # secret shown once, at creation - redacted on every later GET
 
-        def _delete(self, path: str, record_id: str, span) -> None:
+        def _delete(self, path: str, record_id: str, span, rule: bool = False) -> None:
             span.set_attribute("id", record_id)
             with _file_lock:
                 records = json_store.load(path)
@@ -176,6 +177,11 @@ def make_handler(rules_path: str, webhooks_path: str, ts_pool):
                 found = len(remaining) != len(records)
                 if found:
                     json_store.save(path, remaining)
+            if found and rule:
+                # A deleted rule's open faults would never resolve (#58).
+                with ts_pool.connection() as conn:
+                    span.set_attribute("faults_resolved",
+                                       close_rule_faults(conn, record_id, datetime.now(timezone.utc)))
             span.set_attribute("found", found)
             self.send_response(204 if found else 404)
             self.end_headers()

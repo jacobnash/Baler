@@ -192,17 +192,50 @@ def test_chained_derivations_downstream_reads_upstream_output_same_pass(ts_conn,
 
 
 @pytest.mark.integration
-def test_open_fault_excludes_input_from_evaluation(ts_conn, fault_conn, health_conn):
+def test_open_fault_excludes_input_from_evaluation(ts_conn, fault_conn, health_conn, tmp_path, monkeypatch):
     store = Store()
     now = datetime.now(timezone.utc)
     _equip, p1, p2 = _seed_two_points(store, ts_conn, "test-de/faulty", 70.0, 74.0, now)
     open_fault(fault_conn, "test-de:stale-rule", str(p1), now)
+    _rules_file(tmp_path, monkeypatch, [{"id": "test-de:stale-rule", "type": "stale"}])
 
     derivation = _avg_derivation("test-de:fault-filtered", p1, p2, fn_source="def run(inputs, row):\n    return None if not inputs['a'] else 1.0")
 
     trace = evaluate_derivations(store, ts_conn, fault_conn, health_conn, [derivation], now=now)
 
     assert trace[0]["computed_value"] is None
+    assert trace[0]["masked_inputs"] == {str(p1): "test-de:stale-rule"}  # says why, not silent (#58)
+
+
+def _rules_file(tmp_path, monkeypatch, rules):
+    import json
+
+    from baler import derivation_engine, json_store
+
+    path = tmp_path / "rules.json"
+    path.write_text(json.dumps(rules))
+    monkeypatch.setattr(derivation_engine, "_rules", json_store.RuleCache(str(path)))
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("rules", [
+    [{"id": "test-de:range-rule", "type": "range"}],  # out of range isn't invalid data
+    [],  # the rule was deleted: its fault can never resolve, so it mustn't mask forever
+], ids=["non-validity-rule", "deleted-rule"])
+def test_only_stale_or_stuck_faults_from_existing_rules_mask_inputs(ts_conn, fault_conn, health_conn, tmp_path, monkeypatch, rules):
+    """Baler#58: any open fault used to mask an input - five AHUs' fan duty
+    cycle stopped for two months behind faults from deleted rules."""
+    store = Store()
+    now = datetime.now(timezone.utc)
+    _equip, p1, p2 = _seed_two_points(store, ts_conn, "test-de/notmasked", 70.0, 74.0, now)
+    open_fault(fault_conn, "test-de:range-rule", str(p1), now)
+    _rules_file(tmp_path, monkeypatch, rules)
+
+    derivation = _avg_derivation("test-de:not-masked", p1, p2, fn_source="def run(inputs, row):\n    return None if not inputs['a'] else 1.0")
+    trace = evaluate_derivations(store, ts_conn, fault_conn, health_conn, [derivation], now=now, dry_run=True)
+
+    assert trace[0]["computed_value"] == 1.0
+    assert "masked_inputs" not in trace[0]
 
 
 @pytest.mark.integration
@@ -471,3 +504,24 @@ def test_e2e_derivation_averages_bacnet_and_modbus_sourced_sensors_over_real_bro
         SELECT ?anc WHERE {{ <{output_uri}> prov:wasDerivedFrom ?anc }}
     """)}
     assert {str(bacnet_point), str(modbus_point)} <= ancestors
+
+
+@pytest.mark.integration
+def test_deleted_and_orphaned_rules_faults_get_resolved(fault_conn):
+    from baler.faults import close_orphaned_faults, close_rule_faults
+
+    now = datetime.now(timezone.utc)
+    open_fault(fault_conn, "test-de-gone", "urn:point:test-de/x", now)
+    open_fault(fault_conn, "test-de-gone", "urn:point:test-de/y", now)
+    open_fault(fault_conn, "test-de-kept", "urn:point:test-de/x", now)
+    open_fault(fault_conn, "test-de:mirrored", "urn:point:test-de/x", now)  # namespaced: not ours to judge
+    open_fault(fault_conn, "test-de-deleted", "urn:point:test-de/z", now)
+
+    assert close_rule_faults(fault_conn, "test-de-deleted", now) == 1
+    # every rule id fault_detector knows, plus the kept one
+    known = {r[0] for r in fault_conn.execute(
+        "SELECT DISTINCT rule_id FROM faults WHERE ended_at IS NULL AND rule_id NOT LIKE 'test-de%'").fetchall()}
+    assert close_orphaned_faults(fault_conn, known | {"test-de-kept"}, now) == 2
+    still_open = {r[0] for r in fault_conn.execute(
+        "SELECT rule_id FROM faults WHERE ended_at IS NULL AND rule_id LIKE 'test-de%'").fetchall()}
+    assert still_open == {"test-de-kept", "test-de:mirrored"}

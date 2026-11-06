@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from baler import his_checks, json_store, mqtt_util, tracing
 from baler.faults import (
     close_fault,
+    close_orphaned_faults,
     ensure_schema,
     is_webhook_disabled,
     open_fault,
@@ -279,6 +280,15 @@ def main() -> None:
     store = RemoteStore()  # same instance backs both Cur-mode roster resolution and the His-mode sweep below
 
     rule_cache = RuleCache(args.rules_file, store=store)
+
+    # Faults whose rule is gone can never resolve (#58: rules lost in
+    # September left 76 open, masking derivation inputs). Only when the
+    # rules file exists - a missing file isn't "every rule was deleted".
+    if os.path.exists(args.rules_file):
+        known = {r["id"] for r in json_store.load(args.rules_file)}
+        closed = close_orphaned_faults(fault_conn_cur, known, datetime.now(timezone.utc))
+        if closed:
+            print(f"fault detector: resolved {closed} open fault(s) whose rule no longer exists")
 
     client = mqtt_util.make_client()
     client.on_message = make_on_message(fault_conn_cur, rule_cache, args.webhooks_file)

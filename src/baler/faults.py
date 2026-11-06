@@ -123,6 +123,28 @@ def close_fault(conn: psycopg.Connection, rule_id: str, point_uri: str, ended_at
     return row[0] if row else None
 
 
+def close_rule_faults(conn: psycopg.Connection, rule_id: str, ended_at: datetime) -> int:
+    """Resolve every open fault a rule raised - for when the rule is
+    deleted: nothing will ever evaluate it again, so they'd stay open
+    forever (and mask derivation inputs, Baler#58). Returns how many."""
+    return conn.execute(
+        "UPDATE faults SET ended_at = %s, status = 'resolved' WHERE rule_id = %s AND ended_at IS NULL",
+        (ended_at, rule_id),
+    ).rowcount
+
+
+def close_orphaned_faults(conn: psycopg.Connection, known_rule_ids: set[str], ended_at: datetime) -> int:
+    """Resolve open faults whose rule no longer exists (deleted before
+    close_rule_faults existed, or lost with rules.json). Namespaced ids
+    (`x:...`, e.g. faults mirrored from another source) aren't
+    fault_detector's to judge and are left alone."""
+    return conn.execute(
+        "UPDATE faults SET ended_at = %s, status = 'resolved' "
+        "WHERE ended_at IS NULL AND position(':' in rule_id) = 0 AND NOT (rule_id = ANY(%s))",
+        (ended_at, list(known_rule_ids)),
+    ).rowcount
+
+
 def list_faults(
     conn: psycopg.Connection,
     status: str | None = None,
