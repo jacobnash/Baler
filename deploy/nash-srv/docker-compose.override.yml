@@ -15,6 +15,12 @@ services:
   mosquitto:
     ports: !override
       - "127.0.0.1:1883:1883"
+      # The one public exception besides Caddy: edge nodes (Raspberry Pis at
+      # sites) publish over MQTT/TLS with per-site accounts (Baler#36). Plain
+      # 1883 stays loopback-only. Caddy can't proxy MQTT, so mosquitto
+      # terminates TLS itself with Caddy's Let's Encrypt cert, copied in by
+      # baler-mqtt-tls-sync (setup-runner.sh step 7).
+      - "8883:8883"
 
   oxigraph:
     ports: !override

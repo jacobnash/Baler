@@ -189,6 +189,45 @@ else
   (cd "$RUNNER_DIR" && ./svc.sh install "$RUNNER_USER" && ./svc.sh start)
 fi
 
+echo "==> 7. MQTT/TLS for edge nodes (Baler#36): Caddy's cert, broker restarted on renewal"
+# mosquitto terminates TLS on 8883 with the cert Caddy already keeps for
+# this host. Its certificate directory is mounted read-only as-is
+# (BALER_MQTT_TLS_DIR); the broker's entrypoint copies the pair in as root,
+# so Caddy's 0600 caddy-owned files need no permission changes. Caddy has no
+# post-renewal hook without a plugin, so a systemd path unit watches the cert
+# and restarts mosquitto (clients reconnect; persistent sessions keep queued
+# messages).
+MQTT_TLS_HOST="${MQTT_TLS_HOST:-timberdoodle.nash.engineering}"
+CADDY_CERT_DIR="/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${MQTT_TLS_HOST}"
+set_env() {  # set_env NAME VALUE - add or replace one line in the env file
+  if grep -q "^$1=" "$ENV_FILE"; then sed -i "s|^$1=.*|$1=$2|" "$ENV_FILE"; else echo "$1=$2" >> "$ENV_FILE"; fi
+}
+if [ -f "${CADDY_CERT_DIR}/${MQTT_TLS_HOST}.crt" ]; then
+  set_env BALER_MQTT_TLS_DIR "$CADDY_CERT_DIR"
+  set_env BALER_MQTT_PUBLIC_HOST "$MQTT_TLS_HOST"
+  set_env BALER_MQTT_PUBLIC_TLS_PORT 8883
+  cat > /etc/systemd/system/baler-mqtt-tls.service <<UNIT
+[Unit]
+Description=Restart Baler's mosquitto to load a renewed TLS certificate
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker compose -f ${COMPOSE_BASE} -f ${COMPOSE_OVERRIDE} -f ${COMPOSE_WINDROW} --env-file ${ENV_FILE} restart mosquitto
+UNIT
+  cat > /etc/systemd/system/baler-mqtt-tls.path <<UNIT
+[Unit]
+Description=Watch Caddy's certificate for ${MQTT_TLS_HOST}
+[Path]
+PathChanged=${CADDY_CERT_DIR}/${MQTT_TLS_HOST}.crt
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now baler-mqtt-tls.path
+  echo "    8883 uses ${CADDY_CERT_DIR}; takes effect on the next deploy (or: systemctl start baler-mqtt-tls)"
+else
+  echo "    no Caddy cert at ${CADDY_CERT_DIR} - skipped (set MQTT_TLS_HOST=<host> to use another)"
+fi
+
 echo "==> Done. Next steps:"
 echo "  1. If you skipped it above: fill in ${ENV_FILE} with real secrets."
 echo "  2. Append the Caddy block from docs-site/pages/nash-srv-deploy.mdx to"

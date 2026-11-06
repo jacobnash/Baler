@@ -172,6 +172,17 @@ account, made in **Ops → Edge nodes** (admin-only; API:
   If the broker is unreachable at that moment the prefixes are still saved
   and the response says so (`broker_error`); the next change retries.
 
+**Use TLS (port 8883) from outside the host.** Set `BALER_MQTT_TLS_DIR`
+to a directory holding the certificate (`cert.pem` + `key.pem`, or a
+Caddy-style `<host>.crt` + `<host>.key`) and mosquitto also listens on
+8883 with TLS, authenticating the same accounts. On nash-srv,
+`setup-runner.sh` step 7 points it at the Let's Encrypt cert Caddy already
+keeps for `timberdoodle.nash.engineering` and installs a systemd path unit
+that restarts mosquitto when Caddy renews it; 8883 is published publicly
+there while plain 1883 stays loopback-only. A node connects with
+`--mqtt-host timberdoodle.nash.engineering --mqtt-port 8883` and TLS on,
+verifying against the system CA store (it's a public Let's Encrypt cert).
+
 How it fits with the existing accounts: `MOSQUITTO_USERS` (the `baler`
 backend account and any hand-added ones) stay in the password/ACL files.
 The plugin's own file, `dynamic-security.json` on the `mosquitto-data`

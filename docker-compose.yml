@@ -29,6 +29,10 @@ x-daemon-env: &daemon-env
   # to the anchor like the var above, harmless for daemons that never
   # read it.
   BALER_JWT_SECRET: ${BALER_JWT_SECRET:-${TIMBERDOODLE_JWT_SECRET:-}}
+  # Where edge nodes connect (auth_api shows it with a new broker password).
+  BALER_MQTT_PUBLIC_HOST: ${BALER_MQTT_PUBLIC_HOST:-}
+  BALER_MQTT_PUBLIC_PORT: ${BALER_MQTT_PUBLIC_PORT:-1883}
+  BALER_MQTT_PUBLIC_TLS_PORT: ${BALER_MQTT_PUBLIC_TLS_PORT:-}
 
 x-daemon-depends-on: &daemon-depends-on
   postgres:
@@ -78,8 +82,21 @@ services:
     volumes:
       - ./mosquitto:/mosquitto/config:ro
       - mosquitto-data:/mosquitto/data
+      # TLS for edge nodes (Baler#36): a dir holding cert.pem + key.pem
+      # (readable by uid 1883) turns on the 8883 listener. The default is
+      # an empty placeholder in the checkout, so nothing gets created.
+      - ${BALER_MQTT_TLS_DIR:-./mosquitto/tls}:/mosquitto/tls:ro
     ports:
       - "1883:1883"
+      - "8883:8883"
+    healthcheck:
+      # No secret needed: a refused login (exit 5, "not authorised") proves
+      # the broker is up and checking credentials; down is exit 1.
+      test: ["CMD-SHELL", "mosquitto_pub -h 127.0.0.1 -p 1883 -t health -m x -u healthcheck -P none -q 0 >/dev/null 2>&1; [ $$? -eq 5 ]"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
 
   oxigraph:
     # pinned (#23): holds the graph - tag and digest of what nash-srv runs

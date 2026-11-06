@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS broker_accounts (
 
 CONTROL_TOPIC = "$CONTROL/dynamic-security/v1"
 # password_file accounts (MOSQUITTO_USERS) and dynsec init's unused admin
-RESERVED_USERNAMES = frozenset({"baler", "admin", "dynsec-admin", "windrow"})
+# (healthcheck: docker-compose.yml's probe relies on that login being refused)
+RESERVED_USERNAMES = frozenset({"baler", "admin", "dynsec-admin", "windrow", "healthcheck"})
 _USERNAME = re.compile(r"[a-z0-9][a-z0-9._-]{2,62}")
 
 
