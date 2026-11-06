@@ -55,6 +55,12 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
+    # Two shards, each with its own stack, split the integration files
+    # (tests/conftest.py, BALER_SHARD) - this job was CI's critical path (#27).
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     # Job-level so every docker-compose step (up, ps, logs) can interpolate
     # them, not just `up`. These are throwaway CI-only values so the stack can
     # start at all (auth_api/gateway refuse to start without the two secrets;
@@ -103,7 +109,9 @@ jobs:
       # should ratchet up from a real baseline, not block on day one.
       # Integration tests only: the unit job runs the rest, and re-running all
       # of them here was most of this job's ~5 min of pytest (#27).
-      - run: pytest -m integration --cov=baler --cov-report=term-missing
+      - run: pytest -m integration --cov=baler --cov-report=term-missing --durations=15
+        env:
+          BALER_SHARD: ${{ matrix.shard }}/2
       # Regression guard for #29: the app containers run as root with the
       # checkout bind-mounted, so any directory they create in it is
       # root-owned, and on nash-srv the next actions/checkout can't clean it

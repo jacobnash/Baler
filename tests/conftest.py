@@ -83,3 +83,25 @@ def _no_leaked_site_prefixes(request):
         except Exception as exc:  # noqa: BLE001 - the guard must never fail a test itself
             warnings.warn(f"site-prefix guard skipped: {exc!r}", stacklevel=1)
         conn.close()
+
+
+# --- CI sharding (#27) ---------------------------------------------------------
+# BALER_SHARD=i/n keeps only the test files whose position in the sorted file
+# list is i-1 modulo n, so n CI jobs (each with its own stack) split the
+# integration suite. Whole files, so module-scoped fixtures stay together.
+
+
+def pytest_collection_modifyitems(config, items):
+    import os
+
+    spec = os.environ.get("BALER_SHARD", "").strip()
+    if not spec:
+        return
+    index, total = (int(x) for x in spec.split("/"))
+    files = sorted({item.nodeid.split("::")[0] for item in items})
+    mine = {f for n, f in enumerate(files) if n % total == index - 1}
+    keep = [item for item in items if item.nodeid.split("::")[0] in mine]
+    dropped = [item for item in items if item.nodeid.split("::")[0] not in mine]
+    if dropped:
+        config.hook.pytest_deselected(items=dropped)
+        items[:] = keep
