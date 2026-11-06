@@ -233,7 +233,12 @@ def make_handler(store, ts_pool):
                 # Optional total-sample budget: past it, an un-rolled-up read
                 # is averaged into buckets (the chart page sends this).
                 try:
-                    max_samples = int(query["maxSamples"][0]) if "maxSamples" in query else None
+                    # A total-sample budget by default, not only when the chart
+                    # page asks: readAll(equip) from anywhere else fetched every
+                    # raw sample of the day (5.1M rows, #33). maxSamples=0 opts out.
+                    max_samples = int(query["maxSamples"][0]) if "maxSamples" in query else hisquery.DEFAULT_MAX_SAMPLES
+                    if max_samples == 0:
+                        max_samples = None
                 except ValueError:
                     _respond_error(self, 400, "maxSamples must be an integer")
                     return

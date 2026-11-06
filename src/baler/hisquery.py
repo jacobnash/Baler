@@ -76,6 +76,9 @@ DEFAULT_SPAN = "today"
 # `{-limit}` to lift it) - this keeps a month of 5-second data from
 # turning one browser request into a 500k-row JSON body by accident.
 DEFAULT_LIMIT = 10_000
+# Values a /his response may carry in total, raw or rolled up (#33); a
+# request can ask for another budget, or 0 for none.
+DEFAULT_MAX_SAMPLES = 200_000
 
 # Auto-downsampling (run_query's max_samples, the chart page's /his): the
 # bucket widths it picks from, and the narrowest worth folding - below this
@@ -1520,6 +1523,10 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
     else:
         with tracer.start_as_current_span("hisquery.read_range_many") as sp:
             sp.set_attribute("points", len(point_uris))
+            # the per-point limit is also a share of the request's budget, so a
+            # raw read can't add up to millions of rows across many points (#33)
+            if max_samples and point_uris:
+                limit = min(limit, max(_AUTO_MIN_PER_SERIES, max_samples // len(point_uris)))
             history = timeseries.read_range_many(ts_conn, point_uris, date_span.start, date_span.end, limit)
 
     series = []
