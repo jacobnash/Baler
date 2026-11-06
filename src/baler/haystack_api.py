@@ -42,7 +42,7 @@ import argparse
 import os
 import threading
 import time as _time
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from urllib.parse import parse_qsl, urlsplit
 
@@ -365,11 +365,18 @@ class Backend:
         return uri, rec
 
     def point_write(self, ref: oh.Ref, level: int, val, who: str, user_sub: str | None,
-                    scope: Scope = EVERYTHING) -> None:
+                    scope: Scope = EVERYTHING, duration_s: float | None = None) -> None:
         """Command the point through the Windrow instance that owns it (see
-        point_write.py), then record the level. val None relinquishes."""
-        if not 1 <= level <= 16:
-            raise OpError(f"level must be 1-16, got {level}")
+        point_write.py), then record the level. val None relinquishes.
+        Level 17 is the default (BACnet relinquish-default). At level 8 a
+        duration makes a timed override, relinquished when it runs out
+        (expire_overrides); without one it stays, as in haxall."""
+        if not 1 <= level <= 17:
+            raise OpError(f"level must be 1-17, got {level}")
+        if level == 17 and val is None:
+            raise OpError("level 17 (default) can be set but not relinquished")
+        if duration_s is not None and level != 8:
+            raise OpError("duration only applies to level 8")
         uri, rec = self._writable_point(ref, scope)
         if "writable" not in rec:
             raise OpError(f"@{ref.id} is not writable")
@@ -385,22 +392,45 @@ class Backend:
             self.commander.point_write(site, instance, uri[len("urn:point:"):], value, level)
         except pw.CommandError as exc:
             raise OpError(str(exc)) from exc
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=duration_s)
+                      if duration_s is not None and value is not None else None)
         with self._conn() as conn:
-            pw.record_level(conn, uri, level, value, who, user_sub)
+            pw.record_level(conn, uri, level, value, who, user_sub, expires_at)
+
+    def expire_overrides(self) -> int:
+        """Relinquish every timed level-8 override whose duration is up.
+        Called on a timer by main(); returns how many ended. A point whose
+        site can't be reached right now is retried on the next tick."""
+        with self._conn() as conn:
+            due = pw.expired(conn, datetime.now(timezone.utc))
+        ended = 0
+        for uri, level, who in due:
+            try:
+                self.point_write(oh.Ref(uri_to_ref(uri)), level, None, who, None)
+                ended += 1
+            except OpError as exc:
+                tracer.start_span("haystack.expire_override_failed",
+                                  attributes={"point": uri, "error": str(exc)}).end()
+        return ended
 
     def point_write_array(self, ref: oh.Ref, scope: Scope = EVERYTHING) -> oh.Grid:
         uri, _ = self._writable_point(ref, scope)
         with self._conn() as conn:
             stored = pw.levels(conn, uri)
         rows = []
-        for level in range(1, 17):
+        now = datetime.now(timezone.utc)
+        for level in pw.LEVELS:
             row = {"level": oh.Number(level), "levelDis": pw.LEVEL_DIS.get(level, str(level))}
             if level in stored:
                 v = stored[level]["val"]
                 row["val"] = oh.Number(float(v)) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
+                row["valDis"] = str(v)
                 row["who"] = stored[level]["who"]
+                exp = stored[level].get("expires_at")
+                if exp is not None:
+                    row["expires"] = oh.Number(max(0.0, (exp - now).total_seconds()), "s")
             rows.append(row)
-        return oh.Grid.from_rows(rows, cols=["level", "levelDis", "val", "who"])
+        return oh.Grid.from_rows(rows, cols=["level", "levelDis", "val", "valDis", "who", "expires"])
 
     def his_read(self, ref: oh.Ref, range_text: str, scope: Scope = EVERYTHING) -> oh.Grid:
         uri = ref_to_uri(ref.id)
@@ -412,10 +442,7 @@ class Backend:
                 raise OpError(f"unknown rec: @{ref.id}")
             raw_tz = rec.get("tz")
             tz: str = raw_tz if isinstance(raw_tz, str) else DEFAULT_TZ
-            try:
-                span = hisquery.resolve_span(_range_to_span(range_text), datetime.now(timezone.utc), _iana(tz))
-            except hisquery.HisQueryError as exc:
-                raise OpError(f"range: {exc}") from exc
+            span = _resolve_range(range_text, tz)
             history = timeseries.read_range_many(conn, [uri], span.start, span.end, HIS_LIMIT)
         rows, truncated = history.get(uri, ([], False))
         zone = oh.haystack_tz(tz)
@@ -429,6 +456,43 @@ class Backend:
         if truncated:
             meta["hisLimit"] = oh.Number(HIS_LIMIT)
         return oh.Grid.from_rows(out, meta=meta, cols=["ts", "val"])
+
+    def his_read_batch(self, refs: list[oh.Ref], range_text: str, tz_name: str | None,
+                       scope: Scope = EVERYTHING) -> oh.Grid:
+        """Batch hisRead (meta `range`, one `id` row per point): one grid,
+        `ts` plus `v0..vN`, each `vN` column carrying its point's id. Like
+        haxall, the points must share a timezone unless the request names
+        one in meta `tz`."""
+        uris = [ref_to_uri(r.id) for r in refs]
+        if not uris:
+            raise OpError("hisRead batch needs at least one id")
+        for r, u in zip(refs, uris):
+            if not scope.allows(u):
+                raise OpError(f"unknown rec: @{r.id}")
+        with self._conn() as conn:
+            recs = build_records(self.store, conn, uris)
+            missing = [r.id for r, u in zip(refs, uris) if u not in recs]
+            if missing:
+                raise OpError(f"unknown rec: @{missing[0]}")
+            if tz_name is None:
+                tzs: set[str] = {str(t) if isinstance(t := recs[u].get("tz"), str) else DEFAULT_TZ for u in uris}
+                if len(tzs) > 1:
+                    raise OpError("points do not share a timezone; pass tz in the request meta")
+                tz_name = tzs.pop()
+            span = _resolve_range(range_text, tz_name)
+            history = timeseries.read_range_many(conn, uris, span.start, span.end, HIS_LIMIT)
+        zone = oh.haystack_tz(tz_name)
+        by_ts: dict[datetime, dict] = {}
+        for i, u in enumerate(uris):
+            unit = recs[u]["curVal"].unit if isinstance(recs[u].get("curVal"), oh.Number) else None
+            for ts, val in history.get(u, ([], False))[0]:
+                if isinstance(val, (int, float)) and not isinstance(val, bool):
+                    val = oh.Number(float(val), unit)
+                by_ts.setdefault(ts, {"ts": ts.astimezone(zone)})[f"v{i}"] = val
+        cols = [oh.Col("ts")] + [oh.Col(f"v{i}", {"id": recs[u]["id"]}) for i, u in enumerate(uris)]
+        meta = {"hisStart": span.start.astimezone(zone), "hisEnd": span.end.astimezone(zone)}
+        grid = oh.Grid(meta=meta, cols=cols, rows=[by_ts[t] for t in sorted(by_ts)])
+        return grid
 
     def his_write(self, ref: oh.Ref, rows: list[dict], scope: Scope = EVERYTHING) -> None:
         uri = ref_to_uri(ref.id)
@@ -454,6 +518,27 @@ def _iana(tz: str) -> str:
     return getattr(z, "key", "UTC")
 
 
+def _resolve_range(range_text: str, tz: str) -> hisquery.Span:
+    """Every Haystack hisRead range: `today`, `yesterday`, `{date}`,
+    `{date},{date}`, `{dateTime},{dateTime}` and `{dateTime}` (from then until
+    now). Dates are whole local days in the point's tz; the end is exclusive."""
+    text = range_text.strip().strip('"')
+    if "T" in text:
+        try:
+            parts = [oh.from_zinc(p.strip()) for p in text.split(",", 1)]
+        except ValueError as exc:
+            raise OpError(f"range: {exc}") from exc
+        if not all(isinstance(p, datetime) for p in parts):
+            raise OpError(f"range: expected dateTime values in {range_text!r}")
+        start = parts[0]
+        end = parts[1] if len(parts) == 2 else datetime.now(timezone.utc)
+        return hisquery.Span(start, end, text)
+    try:
+        return hisquery.resolve_span(_range_to_span(text), datetime.now(timezone.utc), _iana(tz))
+    except hisquery.HisQueryError as exc:
+        raise OpError(f"range: {exc}") from exc
+
+
 def _range_to_span(text: str) -> str:
     """Haystack range syntax -> hisquery's DateSpan syntax.
     `2024-01-01,2024-01-31` -> `2024-01-01..2024-01-31`; named and single
@@ -461,8 +546,6 @@ def _range_to_span(text: str) -> str:
     text = text.strip().strip('"')
     if "," in text:
         a, b = (p.strip() for p in text.split(",", 1))
-        if "T" in a or "T" in b:
-            raise hisquery.HisQueryError("datetime ranges aren't supported yet - use dates or today/yesterday/...")
         return f"{a}..{b}"
     return text
 
@@ -552,6 +635,16 @@ def _ref(v) -> oh.Ref:
     raise OpError("expected a Ref id")
 
 
+_SECONDS = {"ms": 0.001, "s": 1, "sec": 1, "min": 60, "h": 3600, "hr": 3600, "day": 86400, "d": 86400}
+
+
+def _duration_secs(v) -> float:
+    """A Haystack duration (`30min`, `1h`) in seconds."""
+    if not isinstance(v, oh.Number) or v.unit not in _SECONDS:
+        raise OpError("duration must be a Number with a time unit, e.g. 30min")
+    return v.val * _SECONDS[v.unit]
+
+
 def _lease_secs(v) -> float | None:
     if not isinstance(v, oh.Number):
         return None
@@ -580,9 +673,18 @@ def dispatch(backend: Backend, op: str, req: oh.Grid, scope: Scope = EVERYTHING,
             "serverBootTime": backend.boot, "tz": DEFAULT_TZ, "productName": "Baler",
             "productUri": oh.Uri("https://github.com/jacobnash/baler"), "productVersion": "0.1.0",
             "vendorName": "Baler", "vendorUri": oh.Uri("https://github.com/jacobnash/baler"),
+            "moduleName": "baler.haystack_api", "moduleVersion": "0.1.0",
         }])
     if op == "ops":
-        return oh.Grid.from_rows([{"name": n, "summary": s} for n, s in OPS])
+        # Like haxall: the `op` defs from the namespace (def ^op:about, doc,
+        # is, lib, ...), limited to the ops this server actually serves.
+        served = {f"op:{n}" for n, _ in OPS} | {"op:pointWrite", "op:invokeAction"}
+        limit = row.get("limit")
+        defs = oh.defs("defs", str(row["filter"]) if row.get("filter") else None)
+        rows = [r for r in defs.rows if str(getattr(r.get("def"), "val", "")) in served]
+        if isinstance(limit, oh.Number):
+            rows = rows[: int(limit.val)]
+        return oh.Grid(meta=defs.meta, cols=defs.cols, rows=rows)
     if op == "formats":
         return oh.Grid.from_rows([
             {"mime": "text/zinc", "receive": oh.MARKER, "send": oh.MARKER},
@@ -612,12 +714,27 @@ def dispatch(backend: Backend, op: str, req: oh.Grid, scope: Scope = EVERYTHING,
         nav_id = row.get("navId")
         return _rows_grid(backend.nav(str(nav_id) if nav_id else None, scope))
     if op == "hisRead":
+        if "range" in req.meta:  # batch: meta range, one id row per point
+            rng = req.meta["range"]
+            tz = req.meta.get("tz")
+            return backend.his_read_batch([_ref(r.get("id")) for r in req.rows],
+                                          rng if isinstance(rng, str) else oh.to_zinc(rng),
+                                          str(tz) if tz else None, scope)
         rng = row.get("range")
         if rng is None:
             raise OpError("missing range")
         return backend.his_read(_ref(row.get("id")), rng if isinstance(rng, str) else oh.to_zinc(rng), scope)
     if op == "hisWrite":
-        backend.his_write(_ref(req.meta.get("id")), req.rows, scope)
+        if "id" in req.meta:
+            backend.his_write(_ref(req.meta.get("id")), req.rows, scope)
+            return oh.Grid()
+        # batch: ts plus one column per point, each column's meta naming it
+        cols = [c for c in req.cols if c.name != "ts" and "id" in c.meta]
+        if not cols:
+            raise OpError("hisWrite needs meta id, or columns with an id in their meta")
+        for c in cols:
+            rows = [{"ts": r.get("ts"), "val": r.get(c.name)} for r in req.rows if r.get(c.name) is not None]
+            backend.his_write(_ref(c.meta["id"]), rows, scope)
         return oh.Grid()
     if op == "watchSub":
         refs = [_ref(r["id"]) for r in req.rows if "id" in r]
@@ -640,6 +757,10 @@ def dispatch(backend: Backend, op: str, req: oh.Grid, scope: Scope = EVERYTHING,
                                     [_ref(r["id"]) for r in req.rows if "id" in r], "close" in req.meta)
         return oh.Grid()
     if op == "close":
+        # Haystack: close the session and invalidate its bearer token.
+        if caller:
+            with backend.ts_pool.connection() as conn:
+                auth.revoke_session(conn, caller)
         return oh.Grid()
     if op == "pointWrite":
         ref = _ref(row.get("id"))
@@ -649,7 +770,9 @@ def dispatch(backend: Backend, op: str, req: oh.Grid, scope: Scope = EVERYTHING,
         user_sub = (caller or {}).get("sub")
         raw_who = row.get("who")
         who: str = raw_who if isinstance(raw_who, str) else (user_sub or "baler")
-        backend.point_write(ref, int(level.val), row.get("val"), who, user_sub, scope)
+        duration = row.get("duration")
+        backend.point_write(ref, int(level.val), row.get("val"), who, user_sub, scope,
+                            duration_s=_duration_secs(duration) if duration is not None else None)
         return oh.Grid()
     if op == "invokeAction":
         raise OpError("invokeAction is not supported yet")
@@ -830,11 +953,13 @@ def make_handler(backend: Backend, login: ScramLogin | None):
                                 row[k] = v
                         req = oh.Grid.from_rows([row]) if row else oh.Grid()
                     claims = claims_from_header(self.headers.get("Authorization"))
-                    if op in _DATA_FREE_OPS:
-                        caller_scope = EVERYTHING
-                    else:
-                        with backend.ts_pool.connection() as conn:
-                            caller_scope = scope_for(conn, claims)
+                    with backend.ts_pool.connection() as conn:
+                        # A token ended by `close` is refused here at once;
+                        # the gateway's denylist catches up within 30s.
+                        if claims and auth.is_revoked(conn, claims.get("jti")):
+                            self._send(401, b"session closed\n")
+                            return
+                        caller_scope = EVERYTHING if op in _DATA_FREE_OPS else scope_for(conn, claims)
                     grid = dispatch(backend, op, req, caller_scope, claims)
                 except OpError as exc:
                     span.set_attribute("error", str(exc))
@@ -867,6 +992,16 @@ def main() -> None:
         pw.ensure_schema(conn)
     login = ScramLogin(ts_pool) if os.environ.get("BALER_JWT_SECRET") else None
     backend = Backend(RemoteStore(), ts_pool)
+
+    def expire_loop():
+        while True:
+            _time.sleep(5)
+            try:
+                backend.expire_overrides()
+            except Exception as exc:  # noqa: BLE001 - never let the timer die
+                print(f"expire_overrides: {exc}")
+
+    threading.Thread(target=expire_loop, name="expire-overrides", daemon=True).start()
     server = ThreadingHTTPServer((args.host, args.port), make_handler(backend, login))
     print(f"Haystack API listening on {args.host}:{args.port} (/api/{{project}}/{{op}})")
     server.serve_forever()

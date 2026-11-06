@@ -69,17 +69,29 @@ class FakeTS:
             levels.pop((params[0], params[1]), None)
             rows = []
         elif "INSERT INTO point_write_levels" in sql:
-            uri, level, value_json, who, _user_sub, ts = params
-            levels[(uri, level)] = (level, value_json, who, ts)
+            uri, level, value_json, who, _user_sub, ts, expires_at = params
+            levels[(uri, level)] = (level, value_json, who, ts, expires_at)
             rows = []
+        elif "expires_at <= %s" in sql:
+            rows = [(u, v[0], v[2]) for (u, _), v in levels.items() if v[4] is not None and v[4] <= params[0]]
         elif "FROM point_write_levels" in sql:
             rows = [v for (u, _), v in levels.items() if u == params[0]]
+        elif "INSERT INTO revoked_tokens" in sql:
+            self.__dict__.setdefault("revoked", set()).add(params[0])
+            rows = []
+        elif sql.lstrip().startswith("DELETE FROM revoked_tokens"):
+            rows = []
+        elif "FROM revoked_tokens" in sql:
+            rows = [(1,)] if params[0] in self.__dict__.get("revoked", set()) else []
         else:
             raise AssertionError(sql)
 
         class _Cur:
             def fetchall(self):
                 return rows
+
+            def fetchone(self):
+                return rows[0] if rows else None
 
         return _Cur()
 
@@ -188,6 +200,33 @@ def test_his_read_and_write(backend):
     assert len(backend.his_read(ref, "2026-09-08,2026-09-08").rows) == 3
 
 
+def test_his_read_datetime_ranges(backend):
+    ref = oh.Ref(ha.uri_to_ref(DAT))
+    # {dateTime},{dateTime}: start inclusive, end exclusive
+    g = backend.his_read(ref, "2026-09-08T12:00:00Z UTC,2026-09-08T12:05:00Z UTC")
+    assert [r["val"] for r in g.rows] == [oh.Number(55.0, "°F")]
+    # {dateTime} alone: from then until now
+    g = backend.his_read(ref, "2026-09-08T12:01:00Z UTC")
+    assert [r["val"] for r in g.rows] == [oh.Number(55.5, "°F")]
+
+
+def test_his_read_batch_and_his_write_batch(backend):
+    dat, fan = oh.Ref(ha.uri_to_ref(DAT)), oh.Ref(ha.uri_to_ref(FAN))
+    req = oh.Grid(meta={"range": "2026-09-08"}, cols=[oh.Col("id")], rows=[{"id": dat}, {"id": fan}])
+    g = ha.dispatch(backend, "hisRead", req)
+    assert g.col_names == ["ts", "v0", "v1"]
+    assert g.cols[1].meta["id"] == dat and g.cols[2].meta["id"] == fan
+    assert g.rows[0]["v0"] == oh.Number(55.0, "°F") and g.rows[0]["v1"] is True
+    assert "v1" not in g.rows[1]  # FAN has no sample at 12:05
+
+    t = T0 + timedelta(hours=3)
+    write = oh.Grid(cols=[oh.Col("ts"), oh.Col("v0", {"id": dat}), oh.Col("v1", {"id": fan})],
+                    rows=[{"ts": t, "v0": oh.Number(70.0, "°F"), "v1": False}])
+    ha.dispatch(backend, "hisWrite", write)
+    assert backend.his_read(dat, "2026-09-08").rows[-1]["val"] == oh.Number(70.0, "°F")
+    assert backend.his_read(fan, "2026-09-08").rows[-1]["val"] is False
+
+
 def test_his_write_rejects_non_point(backend):
     with pytest.raises(ha.OpError):
         backend.his_write(oh.Ref(ha.uri_to_ref(AHU)), [{"ts": T0, "val": 1}])
@@ -251,10 +290,12 @@ def test_point_write_routes_to_owning_windrow_and_records_level(writable):
     _pw(writable, 8, oh.Number(72.5, "°F"), caller={"sub": "user-1"})
     assert writable.commander.sent == [("site-a", "i1", "fbf/ahu-1/analogValue,9", 72.5, 8)]
     arr = _pw(writable)
-    assert len(arr.rows) == 16
+    assert len(arr.rows) == 17  # 1-16 plus 17, the default
+    assert arr.col_names == ["level", "levelDis", "val", "valDis", "who", "expires"]
     eight = arr.rows[7]
     assert eight["level"] == oh.Number(8) and eight["val"] == oh.Number(72.5) and eight["who"] == "user-1"
-    assert "val" not in arr.rows[15]
+    assert eight["levelDis"] == "8 (manual)" and arr.rows[16]["levelDis"] == "def"
+    assert "val" not in arr.rows[15] and "expires" not in eight  # no duration = permanent
 
 
 def test_relinquish_clears_level(writable):
@@ -269,14 +310,45 @@ def test_point_write_refusals(writable, store):
     with pytest.raises(ha.OpError, match="not writable"):
         ha.dispatch(writable, "pointWrite", oh.Grid.from_rows(
             [{"id": oh.Ref(ha.uri_to_ref(DAT)), "level": oh.Number(8), "val": oh.Number(1)}]))
-    with pytest.raises(ha.OpError, match="1-16"):
-        _pw(writable, 17, oh.Number(1))
+    with pytest.raises(ha.OpError, match="1-17"):
+        _pw(writable, 18, oh.Number(1))
+    with pytest.raises(ha.OpError, match="not relinquished"):
+        _pw(writable, 17, None)
     with pytest.raises(ha.OpError, match="unknown rec"):
         _pw(writable, 8, oh.Number(1), scope=ha.Scope(("somewhere-else",)))
     writable.commander = FakeCommander(fail="site refused the write: not commandable")
     with pytest.raises(ha.OpError, match="refused"):
         _pw(writable, 8, oh.Number(1))
     assert "val" not in _pw(writable).rows[7]  # a refused write is never recorded
+
+
+def test_level_17_and_timed_level_8_override(writable):
+    _pw(writable, 17, oh.Number(68.0))
+    assert writable.commander.sent[-1][4] == 17  # Windrow writes relinquish-default
+    assert _pw(writable).rows[16]["val"] == oh.Number(68.0)
+
+    ha.dispatch(writable, "pointWrite", oh.Grid.from_rows([{
+        "id": oh.Ref(ha.uri_to_ref(SP)), "level": oh.Number(8), "val": oh.Number(70.0),
+        "duration": oh.Number(30, "min")}]))
+    left = _pw(writable).rows[7]["expires"]
+    assert left.unit == "s" and 1790 < left.val <= 1800
+    assert writable.expire_overrides() == 0  # not due yet
+
+    # time passes: the override is relinquished at level 8, nothing else
+    later = datetime.now(timezone.utc) + timedelta(minutes=31)
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(ha, "datetime", type("dt", (datetime,), {"now": staticmethod(lambda tz=None: later)}))
+    try:
+        assert writable.expire_overrides() == 1
+    finally:
+        monkey.undo()
+    assert writable.commander.sent[-1][3:] == (None, 8)
+    arr = _pw(writable)
+    assert "val" not in arr.rows[7] and arr.rows[16]["val"] == oh.Number(68.0)
+    with pytest.raises(ha.OpError, match="only applies to level 8"):
+        ha.dispatch(writable, "pointWrite", oh.Grid.from_rows([{
+            "id": oh.Ref(ha.uri_to_ref(SP)), "level": oh.Number(10), "val": oh.Number(1),
+            "duration": oh.Number(1, "min")}]))
 
 
 def test_point_write_without_route_is_explained(writable, store):
@@ -328,8 +400,8 @@ def test_http_defs_libs_filetypes(http):
     assert [r["def"] for r in site] == [oh.Symbol("site")]
     assert len(oh.decode_grid(_req(f"{http}/api/demo/filetypes?limit=2")[2])) == 2
     assert oh.decode_grid(_req(f"{http}/api/defs?filter=def%20%3D%3D")[2]).is_error
-    ops = {r["name"] for r in oh.decode_grid(_req(f"{http}/api/ops")[2])}
-    assert {"defs", "libs", "filetypes"} <= ops
+    ops = {r["def"].val for r in oh.decode_grid(_req(f"{http}/api/ops")[2])}
+    assert {"op:defs", "op:libs", "op:filetypes"} <= ops
 
 
 def test_http_flat_layout_and_error_grid(http):
@@ -438,3 +510,23 @@ def test_records_keep_haystack_types_from_an_import(tmp_path, monkeypatch):
     assert [r["dis"] for r in backend.read_filter('feeds->dis == "AHU-1"', None)] == ["AHU-2"]
     assert [r["dis"] for r in backend.read_filter("area > 1000ft²", None)] == ["AHU-1"]
     assert backend.read_filter("area > 1000", None) == []  # units must match
+
+
+def test_close_revokes_the_session_token(backend):
+    from baler import auth
+
+    caller = {"sub": "u1", "jti": "session-123", "exp": int(T0.timestamp()) + 3600}
+    assert not auth.is_revoked(backend.ts_pool, "session-123")
+    assert len(ha.dispatch(backend, "close", oh.Grid(), caller=caller)) == 0
+    assert auth.is_revoked(backend.ts_pool, "session-123")
+    assert not auth.is_revoked(backend.ts_pool, "another-session")
+
+
+def test_ops_are_op_defs_for_served_ops(backend):
+    g = ha.dispatch(backend, "ops", oh.Grid())
+    names = {r["def"].val for r in g.rows}
+    assert {"op:about", "op:read", "op:hisRead", "op:pointWrite", "op:close"} <= names
+    assert all(r["def"].val.startswith("op:") and oh.Symbol("op") in r["is"] for r in g.rows)
+    assert all(n[len("op:"):] in {o for o, _ in ha.OPS} | {"pointWrite", "invokeAction"} for n in names)
+    about = ha.dispatch(backend, "about", oh.Grid()).rows[0]
+    assert about["moduleName"] and about["moduleVersion"]

@@ -33,16 +33,22 @@ from baler import ddl
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS point_write_levels (
     point_uri  TEXT NOT NULL,
-    level      SMALLINT NOT NULL CHECK (level BETWEEN 1 AND 16),
+    level      SMALLINT NOT NULL,
     value_json TEXT NOT NULL,
     who        TEXT NOT NULL,
     user_sub   TEXT,
     written_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (point_uri, level)
 );
+-- Level 17 is Haystack's default (BACnet relinquish-default); the original
+-- table capped levels at 16. expires_at: when a timed level-8 override ends.
+ALTER TABLE point_write_levels DROP CONSTRAINT IF EXISTS point_write_levels_level_check;
+ALTER TABLE point_write_levels ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
 """
 
-LEVEL_DIS = {1: "1 (emergency)", 8: "8 (manual)", 16: "16 (default)"}
+# Haystack's level names, as haxall labels them (WriteRec.levelDis).
+LEVEL_DIS = {1: "1 (emergency)", 8: "8 (manual)", 17: "def"}
+LEVELS = range(1, 18)
 COMMAND_TTL_SECONDS = 30.0
 RESULT_TIMEOUT_SECONDS = 10.0
 
@@ -55,27 +61,39 @@ def ensure_schema(conn) -> None:
     ddl.run(conn, SCHEMA)
 
 
-def record_level(conn, point_uri: str, level: int, value, who: str, user_sub: str | None) -> None:
+def record_level(conn, point_uri: str, level: int, value, who: str, user_sub: str | None,
+                 expires_at: datetime | None = None) -> None:
     if value is None:
         conn.execute("DELETE FROM point_write_levels WHERE point_uri = %s AND level = %s", (point_uri, level))
         return
     conn.execute(
         """
-        INSERT INTO point_write_levels (point_uri, level, value_json, who, user_sub, written_at)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO point_write_levels (point_uri, level, value_json, who, user_sub, written_at, expires_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (point_uri, level) DO UPDATE SET
             value_json = EXCLUDED.value_json, who = EXCLUDED.who,
-            user_sub = EXCLUDED.user_sub, written_at = EXCLUDED.written_at
+            user_sub = EXCLUDED.user_sub, written_at = EXCLUDED.written_at,
+            expires_at = EXCLUDED.expires_at
         """,
-        (point_uri, level, json.dumps(value), who, user_sub, datetime.now(timezone.utc)),
+        (point_uri, level, json.dumps(value), who, user_sub, datetime.now(timezone.utc), expires_at),
     )
 
 
 def levels(conn, point_uri: str) -> dict[int, dict]:
     rows = conn.execute(
-        "SELECT level, value_json, who, written_at FROM point_write_levels WHERE point_uri = %s", (point_uri,)
+        "SELECT level, value_json, who, written_at, expires_at FROM point_write_levels WHERE point_uri = %s",
+        (point_uri,),
     ).fetchall()
-    return {int(lvl): {"val": json.loads(v), "who": who, "ts": ts} for lvl, v, who, ts in rows}
+    return {int(lvl): {"val": json.loads(v), "who": who, "ts": ts, "expires_at": exp} for lvl, v, who, ts, exp in rows}
+
+
+def expired(conn, now: datetime) -> list[tuple[str, int, str]]:
+    """(point_uri, level, who) of timed overrides whose duration is up."""
+    rows = conn.execute(
+        "SELECT point_uri, level, who FROM point_write_levels WHERE expires_at IS NOT NULL AND expires_at <= %s",
+        (now,),
+    ).fetchall()
+    return [(u, int(lvl), who) for u, lvl, who in rows]
 
 
 class Commander:

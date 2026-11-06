@@ -61,6 +61,9 @@ CREATE TABLE IF NOT EXISTS revoked_tokens (
     jti        TEXT PRIMARY KEY,
     revoked_at TIMESTAMPTZ NOT NULL
 );
+-- Set for revoked *session* tokens (Haystack close), so the denylist can
+-- drop them once they'd have expired anyway. NULL = keep (API keys).
+ALTER TABLE revoked_tokens ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
 """
 
 SESSION_TTL_SECONDS = 12 * 3600
@@ -293,6 +296,28 @@ def revoke_api_key(conn: psycopg.Connection, key_id: str) -> bool:
         (jti, now),
     )
     return True
+
+
+def revoke_session(conn: psycopg.Connection, claims: dict) -> bool:
+    """End one session token now (Haystack's `close` op): its jti joins the
+    denylist until the token would have expired anyway, and rows past that
+    are pruned here, so the list stays as small as the live sessions."""
+    jti, exp = claims.get("jti"), claims.get("exp")
+    if not jti:
+        return False
+    expires = datetime.fromtimestamp(exp, timezone.utc) if exp else None
+    conn.execute(
+        "INSERT INTO revoked_tokens (jti, revoked_at, expires_at) VALUES (%s, now(), %s) ON CONFLICT (jti) DO NOTHING",
+        (jti, expires),
+    )
+    conn.execute("DELETE FROM revoked_tokens WHERE expires_at IS NOT NULL AND expires_at < now()")
+    return True
+
+
+def is_revoked(conn: psycopg.Connection, jti: str | None) -> bool:
+    if not jti:
+        return False
+    return conn.execute("SELECT 1 FROM revoked_tokens WHERE jti = %s", (jti,)).fetchone() is not None
 
 
 def list_revoked_jtis(conn: psycopg.Connection) -> list[str]:

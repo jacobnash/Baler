@@ -43,7 +43,8 @@ except ImportError:
 HAXALL_API = os.environ.get("HAXALL_API", "")
 HAXALL_USER = os.environ.get("HAXALL_SU_USERNAME", "su")
 HAXALL_PASS = os.environ.get("HAXALL_SU_PASSWORD", "")
-OPS = ["about", "read", "readById", "nav", "hisWrite+Read", "watch", "pointWrite", "defs"]
+OPS = ["about", "read", "readById", "nav", "hisWrite+Read", "watch", "pointWrite", "defs",
+       "hisRead dateTime", "hisRead batch", "pointWrite 17", "close"]
 NY = oh.haystack_tz("New_York")
 
 
@@ -58,7 +59,31 @@ def _skip_or_fail(why):
 
 class OpenhayClient:
     def __init__(self, base, user, pw, fmt):
+        self.base, self.user, self.pw, self.fmt = base, user, pw, fmt
         self.c = oh.Client(base, user=user, password=pw, format=fmt)
+
+    def his_read_range(self, ref, rng):
+        return [r["val"].val for r in self.c.call("hisRead", oh.Grid.from_rows([{"id": ref, "range": rng}])).rows]
+
+    def his_read_batch(self, refs, day):
+        g = self.c.call("hisRead", oh.Grid(meta={"range": day.isoformat()}, cols=[oh.Col("id")],
+                                           rows=[{"id": r} for r in refs]))
+        return g
+
+    def array(self, ref):
+        return self.c.point_write_array(ref)
+
+    def close_then_reuse(self):
+        """A fresh session: close it, then the same token must be refused."""
+        c = oh.Client(self.base, user=self.user, password=self.pw, format=self.fmt)
+        token = c.token
+        c.call("close")
+        stale = oh.Client(self.base, bearer=token, format=self.fmt)
+        try:
+            stale.about()
+        except (oh.AuthError, oh.HaystackError):
+            return True
+        return False
 
     def about(self):
         return self.c.about()["productName"]
@@ -113,6 +138,7 @@ class PhableClient:
     def read_by_id(self, ref):
         return self.c.read_by_id(self._ref(ref))
 
+    his_read_range = his_read_batch = array = close_then_reuse = None  # not in phable's API
     nav = None  # phable has no nav
     watch = None  # nor watches
     defs = None  # nor the defs/libs ops
@@ -183,6 +209,35 @@ def _run_ops(client, marker, dat, sp, day):
 
     cell("pointWrite", _pw)
     cell("defs", client.defs and _defs)
+
+    def _his_dt():
+        t1, t2 = dt.datetime.combine(day, dt.time(10), NY), dt.datetime.combine(day, dt.time(11), NY)
+        client.his_write(dat, [(t1, 70.25), (t2, 71.75)])
+        # {dateTime},{dateTime}: start inclusive, end exclusive
+        rng = f"{oh.to_zinc(t1)},{oh.to_zinc(t2)}"
+        vals = client.his_read_range(dat, rng)
+        assert 70.25 in vals and 71.75 not in vals, vals
+        # {dateTime} alone: from then until now
+        assert 71.75 in client.his_read_range(dat, oh.to_zinc(t2))
+
+    def _his_batch():
+        g = client.his_read_batch([dat, dat], day)
+        assert g.col_names[:3] == ["ts", "v0", "v1"], g.col_names
+        assert str(getattr(g.cols[1].meta.get("id"), "id", "")).endswith(dat.id.split(":")[-1]) or g.cols[1].meta.get("id")
+        assert any("v0" in r for r in g.rows)
+
+    def _pw17():
+        rows = client.array(sp).rows
+        assert len(rows) == 17, len(rows)
+        assert rows[7].get("levelDis") == "8 (manual)", rows[7]
+
+    def _close():
+        assert client.close_then_reuse(), "token still accepted after close"
+
+    cell("hisRead dateTime", client.his_read_range and _his_dt)
+    cell("hisRead batch", client.his_read_batch and _his_batch)
+    cell("pointWrite 17", client.array and _pw17)
+    cell("close", client.close_then_reuse and _close)
     return cells
 
 

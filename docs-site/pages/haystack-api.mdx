@@ -84,8 +84,9 @@ clients keep working.
 
 ## Commanding points (pointWrite)
 
-`pointWrite` with a `level` (1-16) commands a real BACnet point. A `val` of `null` relinquishes that
-level. It works the way an operator's command at a controller does: a write at 8 overrides the
+`pointWrite` with a `level` (1-17) commands a real BACnet point. A `val` of `null` relinquishes that
+level. Level 17 is the default the point falls back to when every other level is empty (BACnet's
+relinquish-default): it can be set but not relinquished. It works the way an operator's command at a controller does: a write at 8 overrides the
 controller's own logic until it's released.
 
 - **Writable points:** Windrow tags BACnet setpoints and commands (analog, binary and multi-state
@@ -98,9 +99,12 @@ controller's own logic until it's released.
 - **Offline sites:** if the site is offline, the call fails after 10 seconds. The command expires
   30 seconds after it was sent, and the site refuses it after that, so it can never apply a stale
   setpoint when it reconnects.
-- **Reading the array:** `pointWrite` without a `level` returns the 16-level array of what Baler
-  has commanded, with `who` and the value at each level. The controller's own array can also hold
-  other writers' levels.
+- **Timed overrides:** a level-8 write with a `duration` (`30min`, `2h`) is relinquished
+  automatically when it runs out; without one it stays until released, as in Haxall. The array's
+  `expires` column shows the time left.
+- **Reading the array:** `pointWrite` without a `level` returns the 17-level array of what Baler
+  has commanded (`level`, `levelDis`, `val`, `valDis`, `who`, `expires`, as Haxall returns it).
+  The controller's own array can also hold other writers' levels.
 - **Units:** a Number's unit is not converted. Send the value in the point's own unit.
 - **Roles:** writing needs the `operator` role. Haystack clients POST pointWrite for reads too, so
   reading the array also needs `operator`.
@@ -108,4 +112,12 @@ controller's own logic until it's released.
 ## Not yet
 
 - `invokeAction` returns an error grid.
-- `hisRead` with two datetimes. Dates, date ranges and `today`/`yesterday`/`thisWeek`/… all work.
+
+## Ops, checked against Haxall
+
+`hisRead` takes every range the spec defines (`today`, `yesterday`, a date, a date range, two
+dateTimes, or one dateTime meaning "until now"), and the **batch** form (meta `range`, one `id` row
+per point, returning `ts, v0..vN`). `hisWrite` takes the batch form too. `close` ends the session:
+the token is refused by `/api` at once and by the gateway within 30 seconds. `ops` returns the
+Haystack 4 op defs. Each of these is a column in the CI conformance matrix, run against Haxall
+as the reference ([Haystack conformance](/haystack-conformance)).
