@@ -483,3 +483,17 @@ def test_run_query_read_singular_with_no_match_is_nomatcherror(graph):
 
     with pytest.raises(h.NoMatchError):
         h.run_query(graph, NoTs(), h.parse_query("read(nothing).hisRead(today)"), now=NOW)
+
+
+def test_auto_interval_keeps_charts_under_budget():
+    day = 86400
+    # one point, a day: 2000/series budget -> 43s wanted -> 60s buckets
+    assert h.auto_interval(day, 1, 2000) == 60
+    # 614 points (nash-srv's readAll(point)) under 200k values: 325/series -> 5min
+    assert h.auto_interval(day, 614, 200_000) == 300
+    # an hour of 10 points fits raw (budget allows < 10s buckets)
+    assert h.auto_interval(3600, 10, 200_000) is None
+    # floor of 100/series however many points; a year tops out at 1 day
+    assert h.auto_interval(day, 100_000, 200_000) == 900
+    assert h.auto_interval(365 * day, 1000, 1000) == 86400
+    assert h.auto_interval(day, 0, 1000) is None

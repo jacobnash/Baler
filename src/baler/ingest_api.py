@@ -224,6 +224,13 @@ def make_handler(store, ts_pool):
                 if limit < 1 or limit > hisquery.MAX_LIMIT:
                     _respond_error(self, 400, f"limit must be between 1 and {hisquery.MAX_LIMIT}")
                     return
+                # Optional total-sample budget: past it, an un-rolled-up read
+                # is averaged into buckets (the chart page sends this).
+                try:
+                    max_samples = int(query["maxSamples"][0]) if "maxSamples" in query else None
+                except ValueError:
+                    _respond_error(self, 400, "maxSamples must be an integer")
+                    return
                 span.set_attribute("expr", expr)
                 span.set_attribute("tz", tz)
 
@@ -232,7 +239,8 @@ def make_handler(store, ts_pool):
                     with ts_pool.connection() as conn:
                         caller_scope = scope_for(conn, claims_from_header(self.headers.get("Authorization")))
                         result = hisquery.run_query(
-                            store, conn, parsed, now=datetime.now(timezone.utc), tz=tz, limit=limit, scope=caller_scope
+                            store, conn, parsed, now=datetime.now(timezone.utc), tz=tz, limit=limit, scope=caller_scope,
+                            max_samples=max_samples,
                         )
                 except hisquery.NoMatchError as exc:
                     span.set_attribute("error", str(exc))

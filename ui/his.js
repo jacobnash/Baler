@@ -103,6 +103,8 @@ function showError(message) {
   errorEl.hidden = false;
 }
 
+const MAX_SAMPLES = 200000;
+
 async function run({ silent = false } = {}) {
   const expr = exprEl.value.trim();
   if (!expr) return;
@@ -110,7 +112,9 @@ async function run({ silent = false } = {}) {
     runBtn.disabled = true;
     statusEl.textContent = "running…";
   }
-  const url = `${INGEST_API_URL}/his?expr=${encodeURIComponent(expr)}&tz=${encodeURIComponent(TZ)}`;
+  // maxSamples: past ~200k values in total the server averages into
+  // buckets instead of shipping raw samples a chart can't draw anyway.
+  const url = `${INGEST_API_URL}/his?expr=${encodeURIComponent(expr)}&tz=${encodeURIComponent(TZ)}&maxSamples=${MAX_SAMPLES}`;
   try {
     const res = await fetch(url, { headers: authHeaders() });
     if (res.status === 401) {
@@ -186,7 +190,11 @@ function render() {
     `<span><code>${escapeHtml(r.filter)}</code> matched <strong>${r.matchedCount}</strong> ${r.matchedCount === 1 ? "entity" : "entities"} → <strong>${pointCount}</strong> point${pointCount === 1 ? "" : "s"} (${withData} with data)</span>`,
     `<span><strong>${escapeHtml(span.label)}</strong>: ${fmtTime(span.start)} – ${fmtTime(span.end)} (${escapeHtml(span.tz)})</span>`,
   ];
-  if (r.rollup) parts.push(`<span>rollup <strong>${escapeHtml(r.rollup.fold)}</strong> per <strong>${escapeHtml(r.rollup.interval)}</strong></span>`);
+  if (r.rollup && r.rollup.auto) {
+    parts.push(`<span>averaged per <strong>${escapeHtml(r.rollup.interval)}</strong> to fit the chart - narrow the filter or span, or pick a rollup, for raw samples (text points have no average)</span>`);
+  } else if (r.rollup) {
+    parts.push(`<span>rollup <strong>${escapeHtml(r.rollup.fold)}</strong> per <strong>${escapeHtml(r.rollup.interval)}</strong></span>`);
+  }
   if (truncated) parts.push(`<span class="field-error">${truncated} series capped at ${r.limit.toLocaleString()} samples - add a .hisRollup(...) for long spans</span>`);
   summaryEl.insertAdjacentHTML("beforeend", parts.map((p) => p).join(""));
   if (r.matched.length) {

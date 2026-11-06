@@ -166,16 +166,18 @@ def read_range_many(
     says whether that point had more rows than were returned."""
     if not point_uris:
         return {}
+    # One primary-key range scan per point that stops at its limit.
+    # (ROW_NUMBER() over every row in the span numbered and sorted all of
+    # them first: >55s for a day of 614 points at 5s data on nash-srv.)
     cur = conn.execute(
         """
-        SELECT point_uri, ts, value, value_text, value_bool FROM (
-            SELECT point_uri, ts, value, value_text, value_bool,
-                   ROW_NUMBER() OVER (PARTITION BY point_uri ORDER BY ts) AS rn
-            FROM point_history
-            WHERE point_uri = ANY(%s) AND ts >= %s AND ts < %s
-        ) t
-        WHERE rn <= %s
-        ORDER BY point_uri, ts
+        SELECT u.uri, h.ts, h.value, h.value_text, h.value_bool
+        FROM unnest(%s::text[]) AS u(uri)
+        CROSS JOIN LATERAL (
+            SELECT ts, value, value_text, value_bool FROM point_history
+            WHERE point_uri = u.uri AND ts >= %s AND ts < %s
+            ORDER BY ts LIMIT %s
+        ) h
         """,
         (point_uris, start_ts, end_ts, limit + 1),
     )

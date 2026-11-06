@@ -180,7 +180,7 @@ def test_id_ref_selects_equipment_by_uri(live_server, gw, ahu):
 def test_rollup_folds_in_sql_including_bools_as_0_1(live_server, gw, ahu):
     base_url, _ = live_server
     body = _his(gw, base_url, f"readAll(ahu and {ahu['run']}).hisRead(today).hisRollup(avg, 2hr)").json()
-    assert body["rollup"] == {"fold": "avg", "interval": "2hr"}
+    assert body["rollup"] == {"fold": "avg", "interval": "2hr", "auto": False}
     by_point = {s["point"]: s for s in body["series"]}
     # Samples at hours 1,2 -> bucket [0,2) has 50.0; bucket [2,4) has 51,52; bucket [4,6) has 53.
     assert [r["value"] for r in by_point[ahu["temp"]]["history"]] == [50.0, 51.5, 53.0]

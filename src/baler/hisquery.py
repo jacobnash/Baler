@@ -76,6 +76,24 @@ DEFAULT_SPAN = "today"
 # `{-limit}` to lift it) - this keeps a month of 5-second data from
 # turning one browser request into a 500k-row JSON body by accident.
 DEFAULT_LIMIT = 10_000
+
+# Auto-downsampling (run_query's max_samples, the chart page's /his): the
+# bucket widths it picks from, and the narrowest worth folding - below this
+# raw samples are already about that dense.
+_AUTO_STEPS = [10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 21600, 43200, 86400]
+_AUTO_MIN_PER_SERIES = 100
+
+
+def auto_interval(span_seconds: float, n_series: int, max_samples: int) -> int | None:
+    """Bucket width (s) that keeps n_series under max_samples total for the
+    span, or None when raw samples would fit at that density anyway."""
+    if n_series <= 0 or span_seconds <= 0:
+        return None
+    per_series = max(_AUTO_MIN_PER_SERIES, max_samples // n_series)
+    want = span_seconds / per_series
+    if want < _AUTO_STEPS[0]:
+        return None
+    return next((s for s in _AUTO_STEPS if s >= want), _AUTO_STEPS[-1])
 MAX_LIMIT = 200_000
 
 FOLDS = ("avg", "min", "max", "sum", "count")
@@ -1257,7 +1275,8 @@ def describe_points(store, point_uris: list[str]) -> dict[str, dict]:
     return out
 
 
-def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limit: int = DEFAULT_LIMIT, scope=None) -> dict:
+def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limit: int = DEFAULT_LIMIT, scope=None,
+              max_samples: int | None = None) -> dict:
     """The whole read(...).hisRead(...).hisRollup(...) pipeline against
     live stores. Raises HisQueryError for a `read` (singular) that matches
     nothing - Axon's read() throws UnknownRecErr for the same case; a
@@ -1297,8 +1316,14 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
             info["dis"] = label
 
     rollup = None
-    if query.rollup:
-        interval = parse_interval(query.rollup.interval)
+    rollup_spec = query.rollup
+    auto_secs = None
+    if rollup_spec is None and max_samples:
+        auto_secs = auto_interval((date_span.end - date_span.start).total_seconds(), len(point_uris), max_samples)
+        if auto_secs is not None:
+            rollup_spec = Rollup("avg", f"{auto_secs // 60}min" if auto_secs % 60 == 0 else f"{auto_secs}s")
+    if rollup_spec:
+        interval = parse_interval(rollup_spec.interval)
         try:
             with tracer.start_as_current_span("hisquery.read_rollup") as sp:
                 sp.set_attribute("points", len(point_uris))
@@ -1306,13 +1331,13 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
                 history = {
                     uri: (rows, False)
                     for uri, rows in timeseries.read_rollup(
-                        ts_conn, point_uris, date_span.start, date_span.end, query.rollup.fold,
+                        ts_conn, point_uris, date_span.start, date_span.end, rollup_spec.fold,
                         interval.seconds, interval.months, tz,
                     ).items()
                 }
         except ValueError as exc:
             raise HisQueryError(str(exc)) from exc
-        rollup = {"fold": query.rollup.fold, "interval": interval.text}
+        rollup = {"fold": rollup_spec.fold, "interval": interval.text, "auto": auto_secs is not None}
     else:
         with tracer.start_as_current_span("hisquery.read_range_many") as sp:
             sp.set_attribute("points", len(point_uris))
