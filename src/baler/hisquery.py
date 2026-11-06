@@ -282,6 +282,9 @@ class Query:
     span_text: str | None  # None -> DEFAULT_SPAN
     rollup: Rollup | None
     source: str
+    # after the read, in order: ("sort", tag) ("sortr", tag) ("first",)
+    # ("hisClip", span text or None) ("hisInterpolate",)  - Baler#18
+    post: tuple = ()
 
 
 # --- parser --------------------------------------------------------------
@@ -294,6 +297,8 @@ class Parser:
               | filter                        # bare filter = readAll
     call     := "hisRead" "(" spanText ")"
               | "hisRollup" "(" fold "," interval ")"
+              | "hisClip" "(" [spanText] ")" | "hisInterpolate" "(" ")"
+              | ("sort" | "sortr") "(" [string] ")" | "first" "(" ")"
     filter   := condOr
     condOr   := condAnd ("or" condAnd)*
     condAnd  := term ("and" term)*
@@ -344,28 +349,33 @@ class Parser:
 
         span_text = None
         rollup = None
+        post: list[tuple] = []
         while self._at("PUNCT", "."):
             self._advance()
             fn = self._expect("NAME")
             if fn.value == "hisRead":
                 if span_text is not None:
                     raise HisQueryError("hisRead may only appear once")
-                self._expect("PUNCT", "(")
-                span_start = self._peek().pos
-                depth = 0
-                while not (self._at("PUNCT", ")") and depth == 0):
-                    tok = self._advance()
-                    if tok.kind == "EOF":
-                        raise HisQueryError("unclosed hisRead( - missing ')'")
-                    if tok.kind == "PUNCT" and tok.value == "(":
-                        depth += 1
-                    elif tok.kind == "PUNCT" and tok.value == ")":
-                        depth -= 1
-                close = self._expect("PUNCT", ")")
-                span_text = self.source[span_start:close.pos].strip()
+                span_text = self._span_arg("hisRead")
                 if not span_text:
                     raise HisQueryError("hisRead() needs a span, e.g. hisRead(today) or hisRead(2026-09)")
-                validate_span_text(span_text)
+            elif fn.value == "hisClip":
+                post.append(("hisClip", self._span_arg("hisClip") or None))
+            elif fn.value == "hisInterpolate":
+                self._expect("PUNCT", "(")
+                self._expect("PUNCT", ")")
+                post.append(("hisInterpolate",))
+            elif fn.value in ("sort", "sortr"):
+                self._expect("PUNCT", "(")
+                tag = "dis"
+                if self._at("STRING"):
+                    tag = _unescape_string(self._advance().value[1:-1])
+                self._expect("PUNCT", ")")
+                post.append((fn.value, tag))
+            elif fn.value == "first":
+                self._expect("PUNCT", "(")
+                self._expect("PUNCT", ")")
+                post.append(("first",))
             elif fn.value == "hisRollup":
                 if rollup is not None:
                     raise HisQueryError("hisRollup may only appear once")
@@ -381,13 +391,32 @@ class Parser:
                 rollup = Rollup(fold, interval_text)
             else:
                 raise HisQueryError(
-                    f"unsupported function {fn.value!r} at position {fn.pos}; only hisRead(span) and hisRollup(fold, interval) are supported"
+                    f"unsupported function {fn.value!r} at position {fn.pos}; supported: {', '.join(SUPPORTED_CALLS)}"
                 )
 
         tok = self._peek()
         if tok.kind != "EOF":
             raise HisQueryError(f"unexpected {tok.value!r} at position {tok.pos}")
-        return Query(mode, node, filter_text, span_text, rollup, self.source)
+        return Query(mode, node, filter_text, span_text, rollup, self.source, tuple(post))
+
+    def _span_arg(self, fn: str) -> str:
+        """The raw text between ( and ), validated as a span if not empty."""
+        self._expect("PUNCT", "(")
+        start = self._peek().pos
+        depth = 0
+        while not (self._at("PUNCT", ")") and depth == 0):
+            tok = self._advance()
+            if tok.kind == "EOF":
+                raise HisQueryError(f"unclosed {fn}( - missing ')'")
+            if tok.kind == "PUNCT" and tok.value == "(":
+                depth += 1
+            elif tok.kind == "PUNCT" and tok.value == ")":
+                depth -= 1
+        close = self._expect("PUNCT", ")")
+        text = self.source[start:close.pos].strip()
+        if text:
+            validate_span_text(text)
+        return text
 
     def _parse_filter(self):
         node = self._parse_and()
@@ -479,9 +508,22 @@ def _unescape_string(body: str) -> str:
     return re.sub(r"\\(.)", lambda m: {"n": "\n", "t": "\t"}.get(m.group(1), m.group(1)), body)
 
 
+SUPPORTED_CALLS = ("hisRead(span)", "hisRollup(fold, interval)", "hisClip([span])", "hisInterpolate()",
+                   "sort([tag])", "sortr([tag])", "first()")
+_LAMBDA = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\s*=>|\([^()]*\)\s*=>")
+
+
 def parse_query(source: str) -> Query:
     if not source or not source.strip():
         raise HisQueryError("empty query - try readAll(ahu).hisRead(today)")
+    m = _LAMBDA.search(source)
+    if m:
+        # the tokenizer would only say "unexpected character '='" (Baler#18)
+        raise HisQueryError(
+            f"lambdas (x => ...) aren't supported (position {m.start()}): this is a "
+            f"readAll(filter).hisRead(span) pipeline, not general Axon. Supported calls: {', '.join(SUPPORTED_CALLS)}; "
+            "a filter path like equipRef->dis == \"AHU-1\" covers most map/findAll uses"
+        )
     query = Parser(source).parse()
     # Semantic checks (id needs a @ref, '<' doesn't apply to refs, ...)
     # live in the compiler; running it here means every error a query can
@@ -1354,6 +1396,65 @@ def describe_points(store, point_uris: list[str]) -> dict[str, dict]:
     return out
 
 
+_INTERPOLATE_MAX = 500_000  # values hisInterpolate may produce in total
+
+
+def _interpolate(history: list[dict], times: list[float]) -> list[dict]:
+    """One series at every timestamp in `times` within its own first..last:
+    linear between numbers, the previous value otherwise (bools, text)."""
+    if not history:
+        return []
+    out, j = [], 0
+    first, last = history[0]["ts"], history[-1]["ts"]
+    for t in times:
+        if t < first or t > last:
+            continue
+        while j + 1 < len(history) and history[j + 1]["ts"] <= t:
+            j += 1
+        a = history[j]
+        b = history[j + 1] if j + 1 < len(history) else a
+        va, vb = a["value"], b["value"]
+        numeric = all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (va, vb))
+        if a["ts"] == t or b["ts"] == a["ts"] or not numeric:
+            out.append({"ts": t, "value": va if a["ts"] <= t else vb})
+        else:
+            out.append({"ts": t, "value": va + (vb - va) * (t - a["ts"]) / (b["ts"] - a["ts"])})
+    return out
+
+
+def _apply_post(series: list[dict], post: tuple, now: datetime, tz: str) -> list[dict]:
+    """The calls after hisRead/hisRollup, in order (Baler#18)."""
+    for step in post:
+        name = step[0]
+        if name in ("sort", "sortr"):
+            tag = step[1]
+
+            def key(s, tag=tag):
+                v = s.get(tag) if tag in s else (tag if tag in (s.get("tags") or []) else None)
+                return (v is None, str(v).lower() if v is not None else "")
+
+            series = sorted(series, key=key, reverse=(name == "sortr"))
+            if name == "sortr":  # missing values still last
+                series = [s for s in series if key(s)[0] is False] + [s for s in series if key(s)[0] is True]
+        elif name == "first":
+            series = series[:1]
+        elif name == "hisClip":
+            if step[1]:
+                span = resolve_span(step[1], now, tz)
+                lo, hi = span.start.timestamp(), span.end.timestamp()
+                series = [{**s, "history": [h for h in s["history"] if lo <= h["ts"] < hi]} for s in series]
+            # no span: hisRead already returns only its span - nothing to trim
+        elif name == "hisInterpolate":
+            times = sorted({h["ts"] for s in series for h in s["history"]})
+            if len(times) * max(len(series), 1) > _INTERPOLATE_MAX:
+                raise HisQueryError(
+                    f"hisInterpolate would produce {len(times) * len(series):,} values (limit {_INTERPOLATE_MAX:,}); "
+                    "narrow the filter or span, or hisRollup first"
+                )
+            series = [{**s, "history": _interpolate(s["history"], times)} for s in series]
+    return series
+
+
 def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limit: int = DEFAULT_LIMIT, scope=None,
               max_samples: int | None = None) -> dict:
     """The whole read(...).hisRead(...).hisRollup(...) pipeline against
@@ -1434,6 +1535,7 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
         info["truncated"] = truncated
         series.append(info)
     series.sort(key=lambda s: ((s["equipDis"] or ""), s["dis"], s["id"]))
+    series = _apply_post(series, query.post, now, tz)
 
     return {
         "expr": query.source,

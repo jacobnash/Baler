@@ -189,6 +189,19 @@ comment.
 These rules are checked against haxall's own filter test cases on every build
 (`tests/test_haxall_filter_vectors.py`, run on both rdflib and Oxigraph).
 
+**After the read** (Baler#18), in the order written:
+
+- `.sort("tag")` / `.sortr("tag")` order the series by a tag (default `dis`, case-insensitive;
+  series missing the tag go last). `.first()` keeps only the first series.
+- `.hisClip()` trims to the `hisRead` span (already the case); `.hisClip(span)` trims further,
+  e.g. `.hisRead(thisWeek).hisClip(today)`.
+- `.hisInterpolate()` puts every series on the same timestamps (the union of them all), each
+  within its own first..last sample: linear between numbers, the previous value for bools and
+  text. Capped at 500,000 values; `hisRollup` first for long spans.
+
+Lambdas (`map(p => ...)`) and general Axon aren't supported - a filter path such as
+`equipRef->dis == "AHU-1"` covers most `map`/`findAll` uses.
+
 **`read` vs `readAll`.** `readAll(filter)` returns every match. `read(filter)` takes the first
 match only, and if nothing matches it's a **404**, the same as Axon's `UnknownRecErr` — a
 `readAll` that matches nothing is an empty, successful 200. A bare filter with no

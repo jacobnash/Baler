@@ -497,3 +497,33 @@ def test_auto_interval_keeps_charts_under_budget():
     assert h.auto_interval(day, 100_000, 200_000) == 900
     assert h.auto_interval(365 * day, 1000, 1000) == 86400
     assert h.auto_interval(day, 0, 1000) is None
+
+
+def test_post_read_calls_parse_and_lambdas_get_a_clear_error():
+    """Baler#18."""
+    q = h.parse_query('ahu.hisRead(yesterday).hisClip(today).hisInterpolate().sortr("dis").first()')
+    assert q.post == (("hisClip", "today"), ("hisInterpolate",), ("sortr", "dis"), ("first",))
+    assert h.parse_query("readAll(equip).sort()").post == (("sort", "dis"),)
+    with pytest.raises(h.HisQueryError, match="lambdas"):
+        h.parse_query("readAll(point).map(p=>p->equipRef->dis)")
+    with pytest.raises(h.HisQueryError, match="supported: hisRead"):
+        h.parse_query("ahu.size()")
+
+
+def test_his_interpolate_sort_first_and_clip():
+    from datetime import timezone
+
+    now = datetime(2026, 1, 2, 12, tzinfo=timezone.utc)
+    series = [
+        {"dis": "b", "tags": [], "history": [{"ts": 0, "value": 0.0}, {"ts": 10, "value": 10.0}]},
+        {"dis": "A", "tags": [], "history": [{"ts": 5, "value": True}, {"ts": 20, "value": False}]},
+    ]
+    out = h._apply_post(series, (("hisInterpolate",), ("sort", "dis")), now, "UTC")
+    assert [s["dis"] for s in out] == ["A", "b"]  # case-insensitive
+    assert out[1]["history"] == [{"ts": 0, "value": 0.0}, {"ts": 5, "value": 5.0}, {"ts": 10, "value": 10.0}]  # linear
+    assert [p["value"] for p in out[0]["history"]] == [True, True, False]  # previous value, own range only
+    assert [s["dis"] for s in h._apply_post(series, (("sortr", "dis"), ("first",)), now, "UTC")] == ["b"]
+    day = datetime(2026, 1, 2, tzinfo=timezone.utc).timestamp()
+    clipped = h._apply_post([{"dis": "x", "tags": [], "history": [{"ts": day - 60, "value": 1}, {"ts": day + 60, "value": 2}]}],
+                            (("hisClip", "today"),), now, "UTC")
+    assert [p["value"] for p in clipped[0]["history"]] == [2]
