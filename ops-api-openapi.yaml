@@ -36,6 +36,56 @@ paths:
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
+  /orphans:
+    get:
+      operationId: listOrphanedPoints
+      summary: Points nothing maintains any more
+      description: >-
+        admin-only, limited to the caller's sites. `derivation_gone`: a computed output
+        whose derivation was deleted (nothing will write it again). `no_equip`: a point
+        linked to no equipment. Each with its last value, for review before removing.
+      responses:
+        "200":
+          description: Orphaned points.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/OrphanedPoint" }
+        "401":
+          description: Not through the gateway.
+  /orphans/remove:
+    post:
+      operationId: removeOrphanedPoints
+      summary: Remove orphaned points
+      description: >-
+        admin-only. Deletes each point's graph record (and its history rows only if
+        `purge_history`), logged in the record edit audit. Ids that aren't currently
+        orphans the caller can see are skipped, not touched.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids: { type: array, items: { type: string } }
+                purge_history: { type: boolean, default: false }
+      responses:
+        "200":
+          description: What was removed and what was skipped.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  removed: { type: array, items: { type: string } }
+                  skipped: { type: array, items: { type: string } }
+        "400":
+          description: Malformed body.
+        "401":
+          description: Not through the gateway.
   /sources:
     get:
       operationId: listSources
@@ -118,6 +168,17 @@ paths:
           description: No such source.
 components:
   schemas:
+    OrphanedPoint:
+      type: object
+      required: [id, kind, reason]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [derivation_gone, no_equip] }
+        reason: { type: string }
+        dis: { type: [string, "null"] }
+        equip: { type: [string, "null"] }
+        last_ts: { type: [string, "null"], format: date-time }
+        last_value: {}
     Source:
       type: object
       properties:

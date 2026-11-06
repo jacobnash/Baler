@@ -318,6 +318,7 @@ async function initUsers() {
   if (me.role !== "admin") return;
   initSources(); // sources.js: the source registry, admin-only like Users
   initEdge(); // edge.js: edge-node broker accounts, admin-only too
+  initOrphans(); // orphans.js: orphaned points to review/remove, admin-only
   $("users-section").hidden = false;
   try {
     await loadUsers();

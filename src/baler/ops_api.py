@@ -12,9 +12,10 @@ import re
 from http.server import ThreadingHTTPServer
 from urllib.parse import urlparse
 
-from baler import docs_ui, gateway_auth, sources, tracing
+from baler import auth, docs_ui, gateway_auth, orphans, record_edit, sources, tracing
 from baler.http_handler_base import BaseAPIHandler, respond_error, respond_json
 from baler.ops_status import collect_status
+from baler.scope import claims_from_header, scope_for
 from baler.timeseries import connect_pool
 
 tracer = tracing.get_tracer(__name__)
@@ -22,7 +23,7 @@ tracer = tracing.get_tracer(__name__)
 OPENAPI_SPEC_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "ops-api-openapi.yaml")
 
 
-def make_handler(ts_pool=None):
+def make_handler(ts_pool=None, store=None):
     class OpsHandler(BaseAPIHandler):
         TRACER = tracer
         ALLOWED_METHODS = "GET, POST, PATCH, DELETE, OPTIONS"
@@ -66,8 +67,40 @@ def make_handler(ts_pool=None):
             self.send_response(204 if found else 404)
             self.end_headers()
 
+        # --- orphaned points; admin-only in gateway/njs/policy.js
+
+        def _store(self):
+            nonlocal store
+            if store is None:
+                from baler.remote_store import RemoteStore
+
+                store = RemoteStore()
+            return store
+
+        def _orphans_get(self, span) -> None:
+            with ts_pool.connection() as conn:
+                scope = scope_for(conn, claims_from_header(self.headers.get("Authorization")))
+                items = orphans.find(self._store(), conn, scope)
+            span.set_attribute("count", len(items))
+            respond_json(self, 200, items)
+
+        def _orphans_remove(self, span) -> None:
+            body = self.read_json_body()
+            claims = claims_from_header(self.headers.get("Authorization")) or {}
+            with ts_pool.connection() as conn:
+                scope = scope_for(conn, claims)
+                sub = claims.get("sub")
+                user = auth.get_user(conn, sub) if sub and claims.get("kind") == "session" else None
+                result = orphans.remove(self._store(), conn, body.get("ids"), bool(body.get("purge_history")),
+                                        (sub, user["email"] if user else sub), scope)
+            span.set_attribute("removed", len(result["removed"]))
+            respond_json(self, 200, result)
+
         def do_POST(self):
             if not self._gateway():
+                return
+            if urlparse(self.path).path == "/orphans/remove":
+                self.handle_traced("ops_api.remove_orphans", self._orphans_remove)
                 return
             if urlparse(self.path).path == "/sources":
                 self.handle_traced("ops_api.post_source", self._sources_post)
@@ -107,6 +140,11 @@ def make_handler(ts_pool=None):
                     return
                 self.handle_traced("ops_api.get_sources", self._sources_get)
                 return
+            if urlparse(self.path).path == "/orphans":
+                if not self._gateway():
+                    return
+                self.handle_traced("ops_api.get_orphans", self._orphans_get)
+                return
             if self.path == "/status":
                 if not gateway_auth.request_came_through_gateway(self):
                     self.send_response(401)
@@ -137,6 +175,7 @@ def main() -> None:
     ts_pool = connect_pool(statement_timeout="55s")
     with ts_pool.connection() as conn:
         sources.ensure_schema(conn)
+        record_edit.ensure_schema(conn)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(ts_pool))
     print(f"ops API listening on {args.host}:{args.port}")
     server.serve_forever()

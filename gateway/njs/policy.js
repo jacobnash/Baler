@@ -71,6 +71,8 @@ const ROUTES = [
   ["POST",   /^\/ops\/sources$/,                     "ops", "admin"],
   ["PATCH",  /^\/ops\/sources\/[^/]+$/,                "ops", "admin"],
   ["DELETE", /^\/ops\/sources\/[^/]+$/,                "ops", "admin"],
+  ["GET",    /^\/ops\/orphans$/,                     "ops", "admin"],
+  ["POST",   /^\/ops\/orphans\/remove$/,              "ops", "admin"],
 
   // commissioning_api (Baler#37): reads viewer, changes operator,
   // archiving a project admin. The backend also checks the caller's org

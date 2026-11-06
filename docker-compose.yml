@@ -280,9 +280,13 @@ services:
   ops_api:
     build: .
     command: python -m baler.ops_api
-    environment: *daemon-env
+    environment:
+      <<: *daemon-env
+      # reads derivations.json to find computed points whose derivation is gone
+      BALER_DATA_DIR: /data
     volumes:
       - .:/app
+      - baler-data:/data:ro
     depends_on: *daemon-depends-on
     healthcheck:
       <<: *http-api-healthcheck

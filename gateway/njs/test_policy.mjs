@@ -142,6 +142,11 @@ check("user lifecycle routes: admin, except changing your own password", () => {
     assert.equal(policy.resolveRoute("POST", "/auth/me/password").minRole, "viewer");
 });
 
+check("orphaned points: admin only", () => {
+    assert.equal(policy.resolveRoute("GET", "/ops/orphans").minRole, "admin");
+    assert.equal(policy.resolveRoute("POST", "/ops/orphans/remove").minRole, "admin");
+});
+
 check("edge-node broker accounts: admin only", () => {
     assert.equal(policy.resolveRoute("GET", "/auth/broker-accounts").minRole, "admin");
     assert.equal(policy.resolveRoute("POST", "/auth/broker-accounts").minRole, "admin");

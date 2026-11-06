@@ -145,3 +145,16 @@ failures for one specific target disable *that target* (tracked via
 that pass, not the whole engine sweep. A lambda that runs cleanly but returns a value you didn't
 expect is a success from the engine's point of view — that's a data-quality problem in your own
 `fn_source`, not something this layer judges.
+
+## Orphaned outputs
+
+Deleting a derivation stops its outputs (`urn:point:computed/<derivation id>/…`)
+being written, but leaves the points and their last values in place. They're
+listed under **Ops → Orphaned points** (admin), alongside points attached to
+no equipment, with each point's last value. Select and remove them there. That
+deletes the graph record, and also the history only if you tick *Also delete
+their history*. Each removal is logged in the record edit history. Only points
+that are still orphaned when you confirm are removed.
+
+An input masked by an open stale/stuck fault shows up in a derivation's trace
+as `masked_inputs` (point → rule id), so a target that produces nothing says why.

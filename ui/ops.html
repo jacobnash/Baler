@@ -92,6 +92,21 @@
       </table>
     </section>
 
+    <section id="orphans-section" hidden>
+      <h2>Orphaned points</h2>
+      <p class="hint">Points nothing maintains any more: outputs of deleted derivations, and points attached to no equipment. Review them here before removing.</p>
+      <div class="toolbar">
+        <button type="button" id="orphans-remove-btn" disabled>Remove selected</button>
+        <label class="inline"><input type="checkbox" id="orphans-purge" /> Also delete their history</label>
+        <button type="button" id="orphans-refresh-btn">Refresh</button>
+        <span id="orphans-status" class="hint"></span>
+      </div>
+      <table>
+        <thead><tr><th><input type="checkbox" id="orphans-all" aria-label="select all" /></th><th>Point</th><th>Why</th><th>Last value</th></tr></thead>
+        <tbody id="orphans-body"></tbody>
+      </table>
+    </section>
+
     <section id="edge-section" hidden>
       <h2>Edge nodes</h2>
       <p class="hint">MQTT accounts for Windrows publishing from a site (e.g. a Raspberry Pi). Each may publish only under its site's topic prefixes, plus its own command channel <code>cmd/&lt;username&gt;/#</code>.</p>
@@ -213,6 +228,7 @@
   <script src="sources.js"></script>
   <script src="users.js"></script>
   <script src="edge.js"></script>
+  <script src="orphans.js"></script>
   <script src="ops.js"></script>
 </body>
 </html>
