@@ -201,3 +201,10 @@ button.danger { margin-left: auto; color: var(--color-critical, #c53030); }
 .cx-dot.st-pass { background: var(--color-success); }
 .cx-dot.st-inconclusive { background: var(--color-warning); }
 .cx-dot.st-not_applicable { background: var(--muted); }
+
+/* app.js point-history window picker (Baler#61) */
+.range-picker { display: flex; gap: 0.25rem; margin-bottom: 0.4rem; }
+.range-picker button { font-size: 0.8rem; padding: 0.1rem 0.5rem; }
+.range-picker button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+/* a deleted derivation's leftover output in the point list (Baler#62) */
+#tree button.orphan { opacity: 0.6; }

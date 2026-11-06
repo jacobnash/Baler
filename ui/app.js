@@ -107,39 +107,99 @@ async function loadEquipment() {
   return { byType, equips };
 }
 
+// Derivations by id, for naming computed points (Baler#62). Optional: a
+// caller who can't read derivations just gets "computed" with no name.
+const DERIVATION_API_URL = params.get("derivation") || "/derivation";
+let derivationsPromise = null;
+function loadDerivations() {
+  if (!derivationsPromise) {
+    derivationsPromise = fetch(`${DERIVATION_API_URL}/derivations`, { headers: authHeaders() })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((list) => (Array.isArray(list) ? new Map(list.map((d) => [d.id, d])) : null))
+      .catch(() => null);
+  }
+  return derivationsPromise;
+}
+
+// urn:point:computed/<derivation id>/<target> (derivation_engine._output_uri)
+const COMPUTED_PREFIX = "urn:point:computed/";
+
+// What produced a computed point: {id, name} for a live derivation,
+// {id, orphan: true} when its derivation was deleted (nothing will write it
+// again - Ops -> Orphaned points lists it for removal), null otherwise or
+// when the derivation list couldn't be read.
+function computedSource(uri, derivations) {
+  if (!uri.startsWith(COMPUTED_PREFIX)) return null;
+  const id = uri.slice(COMPUTED_PREFIX.length).split("/")[0];
+  if (!derivations) return { id, unknown: true };
+  const d = derivations.get(id);
+  return d ? { id, name: d.name || id } : { id, orphan: true };
+}
+
 async function loadPoints(equip) {
-  const rows = await haystackRead(`point and equipRef==@${equip.id}`);
-  const points = rows.map(entity).sort((a, b) => a.dis.localeCompare(b.dis, undefined, { sensitivity: "base" }) || a.uri.localeCompare(b.uri));
-  // Two points with the same dis (e.g. computed ones) - tell them apart.
+  const [rows, derivations] = await Promise.all([haystackRead(`point and equipRef==@${equip.id}`), loadDerivations()]);
+  const points = rows.map(entity);
+  for (const p of points) p.computed = computedSource(p.uri, derivations);
+  // Orphaned outputs of deleted derivations sort after the live points.
+  points.sort((a, b) => !!(a.computed && a.computed.orphan) - !!(b.computed && b.computed.orphan)
+    || a.dis.localeCompare(b.dis, undefined, { sensitivity: "base" }) || a.uri.localeCompare(b.uri));
+  // Two points with the same dis - tell them apart. A computed point says
+  // which derivation made it (or that it's an orphan), never a raw hash.
   const seen = new Map();
   for (const p of points) seen.set(p.dis, (seen.get(p.dis) || 0) + 1);
-  for (const p of points) if (seen.get(p.dis) > 1) p.dis = `${p.dis} (${p.uri.split(/[/:]/).slice(-2).join("/")})`;
+  for (const p of points) {
+    if (p.computed && p.computed.orphan) p.note = "orphaned: derivation deleted";
+    else if (seen.get(p.dis) > 1 && p.computed && p.computed.name) p.note = `from ${p.computed.name}`;
+    else if (seen.get(p.dis) > 1 && !p.computed) p.note = localName(p.uri);
+  }
   return points;
 }
 
 // Stored values are often float32 (61.02000045776367): show what a person
 // would read off the controller.
 const fmtNum = (v) => (typeof v === "number" ? String(+v.toFixed(2)) : String(v));
+const fmtWhen = (iso) => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso
+    : d.toLocaleString([], { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+};
 
-function tagText(name, val) {
+function tagText(name, val, unit = "") {
+  // Hayson writes a unitless Number as a bare JSON number (Baler#60):
+  // round it, and give curVal the point's unit tag.
+  if (typeof val === "number") return `${name}: ${fmtNum(val)}${unit ? ` ${unit}` : ""}`;
   if (val && typeof val === "object" && !Array.isArray(val)) {
     if (val._kind === "marker") return name;
-    if (val._kind === "number") return `${name}: ${fmtNum(val.val)}${val.unit ? ` ${val.unit}` : ""}`;
+    if (val._kind === "number") return `${name}: ${fmtNum(val.val)}${val.unit || unit ? ` ${val.unit || unit}` : ""}`;
+    if (val._kind === "dateTime") return `${name}: ${fmtWhen(val.val)}`;
     if (val._kind === "ref") return `${name}: ${val.dis || localName(refToUri(val.val))}`;
     if ("val" in val) return `${name}: ${val.val}`;
   }
   return `${name}: ${typeof val === "object" ? JSON.stringify(val) : val}`;
 }
 
+function pointUnit(rec) {
+  if (typeof rec.unit === "string") return rec.unit;
+  return rec.curVal && rec.curVal._kind === "number" && rec.curVal.unit ? rec.curVal.unit : "";
+}
+
 function pointTags(rec) {
+  const unit = pointUnit(rec);
   return Object.keys(rec)
     .filter((k) => !STRUCTURAL_TAGS.has(k))
     .sort()
-    .map((k) => tagText(k, rec[k]));
+    .map((k) => tagText(k, rec[k], k === "curVal" ? unit : ""));
 }
 
-async function loadHistory(topic) {
-  const url = `${INGEST_API_URL}/history?point=${encodeURIComponent(topic)}`;
+// History windows for the point chart (Baler#61): the last day by default,
+// not the point's whole history. Seconds; null = everything.
+const HISTORY_RANGES = [["1h", 3600], ["24h", 86400], ["7d", 7 * 86400], ["30d", 30 * 86400], ["All", null]];
+let historyRange = 86400;
+let historyFullScale = false;
+
+async function loadHistory(topic, seconds = null) {
+  const since = seconds ? `&start=${Math.floor(Date.now() / 1000 - seconds)}` : "";
+  const url = `${INGEST_API_URL}/history?point=${encodeURIComponent(topic)}${since}`;
   const res = await fetch(url, { headers: authHeaders() });
   if (res.status === 401) {
     handleUnauthorized();
@@ -228,6 +288,11 @@ function buildEquipNode(equip, label) {
         const li = document.createElement("li");
         const btn = document.createElement("button");
         btn.textContent = point.brickClass ? `${point.dis} — ${point.brickClass}` : point.dis;
+        if (point.note) {
+          const note = Object.assign(document.createElement("span"), { className: "hint", textContent: ` (${point.note})` });
+          btn.appendChild(note);
+          if (point.computed && point.computed.orphan) btn.classList.add("orphan");
+        }
         btn.addEventListener("click", () => selectPoint(point, btn));
         li.appendChild(btn);
         pointList.appendChild(li);
@@ -355,7 +420,7 @@ async function selectPoint(point, btn) {
   const historyKey = point.uri.startsWith("urn:point:") ? point.uri.slice("urn:point:".length) : null;
 
   const tags = pointTags(point.rec);
-  const history = historyKey ? await loadHistory(historyKey).catch(() => []) : [];
+  const history = historyKey ? await loadHistory(historyKey, historyRange).catch(() => []) : [];
 
   detailEl.innerHTML = "";
   const h2 = document.createElement("h2");
@@ -371,6 +436,20 @@ async function selectPoint(point, btn) {
   if (point.brickClass) {
     const p = document.createElement("p");
     p.textContent = `Brick class: ${point.brickClass}`;
+    detailEl.appendChild(p);
+  }
+  if (point.computed) {
+    const p = document.createElement("p");
+    const c = point.computed;
+    if (c.orphan) {
+      p.className = "field-error";
+      p.append(`Computed by derivation ${c.id}, which no longer exists - nothing updates this point. Review it in `);
+      p.appendChild(Object.assign(document.createElement("a"), { href: "ops.html#orphans-section", textContent: "Ops → Orphaned points" }));
+      p.append(".");
+    } else {
+      p.append("Computed by derivation ");
+      p.appendChild(Object.assign(document.createElement("a"), { href: `derivations.html?id=${encodeURIComponent(c.id)}`, textContent: c.name || c.id }));
+    }
     detailEl.appendChild(p);
   }
   const queryP = document.createElement("p");
@@ -392,27 +471,47 @@ async function selectPoint(point, btn) {
   // position on a live-updating point isn't a thing.
   const historyContainer = document.createElement("div");
   detailEl.appendChild(historyContainer);
-  const unit = typeof point.rec.unit === "string" ? point.rec.unit : "";
-  renderHistoryInto(historyContainer, history, unit);
+  const unit = pointUnit(point.rec);
+  const hisEnd = point.rec.hisEnd && point.rec.hisEnd.val ? point.rec.hisEnd.val : null;
+  const view = { history, unit, hisEnd };
+  const redraw = () => renderHistoryInto(historyContainer, view, reload);
+  const reload = async () => {
+    const fresh = historyKey ? await loadHistory(historyKey, historyRange).catch(() => null) : [];
+    if (fresh) view.history = fresh;
+    redraw();
+  };
+  redraw();
 
-  if (historyKey) {
-    refreshTimer = setInterval(async () => {
-      const fresh = await loadHistory(historyKey).catch(() => null);
-      if (fresh) renderHistoryInto(historyContainer, fresh, unit);
-    }, REFRESH_INTERVAL_MS);
-  }
+  if (historyKey) refreshTimer = setInterval(reload, REFRESH_INTERVAL_MS);
 }
 
-function renderHistoryInto(container, history, unit = "") {
+function renderHistoryInto(container, view, reload) {
+  const { history, unit, hisEnd } = view;
   container.innerHTML = "";
   const heading = document.createElement("h3");
   heading.textContent = "History";
   container.appendChild(heading);
 
+  // Range picker: the window persists across points and refresh ticks.
+  const picker = document.createElement("div");
+  picker.className = "range-picker";
+  for (const [label, seconds] of HISTORY_RANGES) {
+    const b = Object.assign(document.createElement("button"), { type: "button", textContent: label });
+    b.setAttribute("aria-pressed", String(seconds === historyRange));
+    b.addEventListener("click", () => {
+      historyRange = seconds;
+      reload();
+    });
+    picker.appendChild(b);
+  }
+  container.appendChild(picker);
+
   if (!history.length) {
     const p = document.createElement("p");
     p.className = "hint";
-    p.textContent = "No history yet.";
+    p.textContent = hisEnd
+      ? `No samples in this window - the last one was ${fmtWhen(hisEnd)}. Pick a longer range.`
+      : "No history yet.";
     container.appendChild(p);
     return;
   }
@@ -433,7 +532,30 @@ function renderHistoryInto(container, history, unit = "") {
   canvas.width = 640;
   canvas.height = 220;
   container.appendChild(canvas);
-  drawLineChart(canvas, history, 30, unit);
+  const now = Date.now() / 1000;
+  const win = historyRange ? { start: now - historyRange, end: now } : {};
+  const drawn = drawLineChart(canvas, history, 30, unit, { ...win, fullRange: historyFullScale });
+  const caption = document.createElement("p");
+  caption.className = "hint";
+  caption.textContent = `${history.length.toLocaleString()} samples${unit ? ` · ${unit}` : " · no unit recorded"}`;
+  if (drawn.clipped || historyFullScale) {
+    const fmt = (v) => `${fmtNum(v)}${unit ? ` ${unit}` : ""}`;
+    caption.append(
+      drawn.clipped
+        ? ` · ${drawn.outliers} sample${drawn.outliers === 1 ? "" : "s"} off the scale (▲▼ at the edge; full range ${fmt(drawn.fullMin)} – ${fmt(drawn.fullMax)}) `
+        : " · full range ",
+    );
+    const toggle = Object.assign(document.createElement("button"), {
+      type: "button",
+      textContent: historyFullScale ? "Fit to typical range" : "Show full range",
+    });
+    toggle.addEventListener("click", () => {
+      historyFullScale = !historyFullScale;
+      reload();
+    });
+    caption.appendChild(toggle);
+  }
+  container.appendChild(caption);
 }
 
 // drawLineChart itself now lives in chart.js (shared with derivations.js) -
