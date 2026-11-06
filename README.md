@@ -200,13 +200,15 @@ deliberately *not* supported (tag paths, arithmetic, other Axon
 functions):
 [`docs-site/pages/his-query.mdx`](docs-site/pages/his-query.mdx).
 
-`ui_server.py` also serves `ui/devices.html` (localhost:8004/devices.html)
-- a dashboard for Windrow's periodic BACnet/Modbus device discovery: review
-discovered devices, set per-device credentials, and provision connections,
-all via direct browser calls to `windrow.api` (see
+`ui/devices.html` is a dashboard for Windrow's periodic BACnet/Modbus device
+discovery: review discovered devices, set per-device credentials, and
+provision connections (see
 [`docs-site/pages/windrow-periodic-discovery.mdx`](docs-site/pages/windrow-periodic-discovery.mdx)).
-Pass `?windrow=<url>` if
-`windrow.api` isn't on the default `localhost:8001`.
+It calls `windrow.api` through the gateway's `/windrow/` route: login
+required, every change admin-only, and site-restricted logins refused
+(Windrow has no per-site filter yet). A deploy without a `windrow_api`
+service answers `/windrow/` with 502. Pass `?windrow=<url>` to point the
+page at another instance when serving `ui/` standalone.
 
 `autotag.py` sweeps every point/equip with tags but no direct Brick match,
 runs `mapping.classify_point_with_fallback` on each (rule engine first,

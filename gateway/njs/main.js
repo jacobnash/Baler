@@ -58,6 +58,11 @@ async function authorize(r) {
         return;
     }
 
+    if (!policy.scopeSatisfies(route.resource, claims)) {
+        r.return(403, "this resource spans the whole org; a site-restricted login can't use it\n");
+        return;
+    }
+
     // Only long-lived (api_key-class) tokens are checked against the
     // revocation cache - short-TTL session tokens skip it entirely, per
     // the original design rationale (their own expiry is the guard).

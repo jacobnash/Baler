@@ -87,6 +87,16 @@ const ROUTES = [
   ["POST",   /^\/api\/(?:[^/]+\/)?(about|ops|formats|read|nav|hisRead|watchSub|watchUnsub|watchPoll|close|defs|libs|filetypes)$/, "haystack", "viewer"],
   ["POST",   /^\/api\/(?:[^/]+\/)?(hisWrite|pointWrite|invokeAction)$/,                                         "haystack", "operator"],
 
+  // windrow_api (the Devices page): BACnet/Modbus connections, discovery,
+  // device credentials. Reads for any role; every change is admin-only.
+  // WHOLE_ORG below also keeps site-restricted logins out entirely -
+  // Windrow has no notion of orgs or sites to filter by (Baler#14).
+  ["GET",    /^\/windrow\/.+$/,                    "devices", "viewer"],
+  ["POST",   /^\/windrow\/.+$/,                    "devices", "admin"],
+  ["PATCH",  /^\/windrow\/.+$/,                    "devices", "admin"],
+  ["PUT",    /^\/windrow\/.+$/,                    "devices", "admin"],
+  ["DELETE", /^\/windrow\/.+$/,                    "devices", "admin"],
+
   // public on every service - no token required
   ["GET",    /^\/[a-z]+\/(openapi\.yaml|docs)$/,     null, null],
 ];
@@ -136,6 +146,22 @@ function resolveRoute(method, uri) {
     return { resource: row[2], minRole: row[3] };
 }
 
+// Resources a site-restricted token can't reach at all: they span the
+// whole org and have no per-site filter to apply.
+const WHOLE_ORG = { devices: true };
+
+/*
+ * Whether these claims may reach a resource: site-restricted tokens
+ * (non-empty site_ids) are kept out of WHOLE_ORG resources.
+ */
+function scopeSatisfies(resource, claims) {
+    if (!WHOLE_ORG[resource]) {
+        return true;
+    }
+    const sites = claims && claims.site_ids;
+    return !(Array.isArray(sites) && sites.length > 0);
+}
+
 function roleSatisfies(role, minRole) {
     if (minRole === null) {
         return true; // public route
@@ -145,4 +171,4 @@ function roleSatisfies(role, minRole) {
     return typeof have === "number" && typeof need === "number" && have >= need;
 }
 
-export default { ROLE_RANK, ROUTES, resolveRoute, roleSatisfies, bearerFromHeader, isHaystackHandshake };
+export default { ROLE_RANK, ROUTES, resolveRoute, roleSatisfies, scopeSatisfies, bearerFromHeader, isHaystackHandshake };

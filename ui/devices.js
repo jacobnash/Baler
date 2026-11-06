@@ -1,21 +1,34 @@
-// No build step, no framework - same spirit as app.js. Talks directly to
-// windrow.api (a separate process/repo, not part of baler's own
-// backend - see api.py's CORS end_headers() override, added specifically
-// so this page can call it cross-origin).
+// No build step, no framework - same spirit as app.js. Talks to
+// windrow.api (a separate process/repo) through the gateway's /windrow/
+// route: login required, changes admin-only, and site-restricted logins
+// are refused there (Windrow has no per-site filter - Baler#14).
+// ?windrow=<url> still points it at another instance for local dev.
 const params = new URLSearchParams(location.search);
-const WINDROW_API_URL = params.get("windrow") || "http://localhost:8001";
+const WINDROW_API_URL = params.get("windrow") || "/windrow";
 
 const statusEl = document.getElementById("status");
 const REFRESH_INTERVAL_MS = 5000;
 
 async function windrow(method, path, body) {
+  const headers = { ...authHeaders() };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
   const res = await fetch(`${WINDROW_API_URL}${path}`, {
     method,
-    headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
+    headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  if (res.status === 401) {
+    handleUnauthorized();
+    throw new Error("session expired - sign in again");
+  }
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
+  if (res.status === 403) throw new Error(text.trim() || "not allowed for your role");
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error(`${method} ${path} failed: ${res.status}`);
+  }
   if (!res.ok) throw new Error(data && data.error ? data.error : `${method} ${path} failed: ${res.status}`);
   return data;
 }
@@ -259,12 +272,9 @@ async function loadAll() {
     renderModbusConnections(modbusConnections);
     statusEl.textContent = `${devices.length} known devices, ${connections.length + modbusConnections.length} connections`;
   } catch (err) {
-    // The default WINDROW_API_URL (localhost:8001) is only ever reachable if
-    // *you* have Windrow running on the machine viewing this page - it's a
-    // separate BACnet/Modbus bridge project, not something this deploy
-    // stands up. Spell that out instead of a bare fetch error, since on a
-    // public deployment every visitor hits this by default.
-    statusEl.textContent = `Can't reach windrow.api at ${WINDROW_API_URL} (${err.message}). This page only works against your own local Windrow instance - run Windrow, or add ?windrow=<url> pointing at one you have access to.`;
+    // A 502 here means the gateway has no Windrow behind it (a deploy that
+    // doesn't run windrow_api); 403s carry the gateway's own reason.
+    statusEl.textContent = `Can't load devices from ${WINDROW_API_URL}: ${err.message}`;
   }
 }
 

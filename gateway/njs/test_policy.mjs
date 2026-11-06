@@ -112,4 +112,20 @@ check("derivation target enable: the target URI's own slashes (decoded %2F) stil
     assert.equal(policy.resolveRoute("GET", uri), null);
 });
 
+check("windrow (Devices page): reads for any role, every change admin-only", () => {
+    assert.equal(policy.resolveRoute("GET", "/windrow/devices").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/windrow/connections").minRole, "admin");
+    assert.equal(policy.resolveRoute("PATCH", "/windrow/devices/1234/credential").minRole, "admin");
+    assert.equal(policy.resolveRoute("DELETE", "/windrow/connections/bacnet-1").minRole, "admin");
+    assert.equal(policy.resolveRoute("POST", "/windrow/learn").minRole, "admin");
+    assert.equal(policy.resolveRoute("GET", "/windrow/"), null);
+});
+
+check("windrow: site-restricted logins are kept out; whole-org logins and other resources aren't", () => {
+    assert.equal(policy.scopeSatisfies("devices", { site_ids: ["s1"] }), false);
+    assert.equal(policy.scopeSatisfies("devices", { site_ids: [] }), true);
+    assert.equal(policy.scopeSatisfies("devices", {}), true);
+    assert.equal(policy.scopeSatisfies("points", { site_ids: ["s1"] }), true);
+});
+
 console.log(`\n${passed} passed`);
