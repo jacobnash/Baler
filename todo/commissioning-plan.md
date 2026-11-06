@@ -1,14 +1,94 @@
 # Commissioning agent: research and plan (Baler#32)
 
-Status: **research and plan only. Implementation is parked** until Jacob
-answers the [open questions](#11-open-questions-for-jacob). This is a
-living doc: update it as answers come in, and don't treat a section as
-settled until its question is closed.
+Status: **in progress.** Jacob answered the open questions on
+2026-11-06 (see [Decisions](#0-decisions-jacob-2026-11-06)), and the
+work is split into the shippable slices in [§0.2](#02-slices). This is a
+living doc: keep it current as slices land. Where §5 and §11 below
+disagree with §0, §0 wins. Those sections are kept as the original
+research-time reasoning.
 
 Supersedes nothing. The earlier attempt, PR #5 (branch
 `cursor/commissioning-agent-6550`, closed as stale), is reviewed in
 [§3](#3-what-pr-5-got-right-and-wrong) and mined for design and tests,
 not rebased.
+
+---
+
+## 0. Decisions (Jacob, 2026-11-06)
+
+Jacob's words are in quotes; the effect on the plan follows each one.
+
+| # | Question | Decision | Effect on the plan |
+|---|---|---|---|
+| 1 | Scope | "agentic commissioning" | Build toward the full product: an agent that drives discovery, verification, issue tracking and test execution. The MVP is still the foundation, but every slice is designed as a tool the agent can call (Cx 10). |
+| 2 | Placement | New `commissioning_api` on **8009** at `/cx/` | As proposed (§8). |
+| 3 | Model | "inter-op preferred brick then haystack" | Brick classes first. Haystack markers and the ph Xeto spec are the second vocabulary on every inventory row, from `hisquery`'s Xeto table and the mapping rules reversed (the code `haystack_api` already used for `spec`, now lifted into `hisquery`). A point with no Brick class can still satisfy a template through its Haystack markers. No third model. |
+| 4 | Phases | Explicit, "but make them manageable" | Phases are first-class rows per project (`cx_phases`): editable, reorderable and visible, with status and timestamps. Default list: design → construction → start-up → functional testing → acceptance → warranty → operations. Every run records the phase it ran in, and every phase change is an audited event. |
+| 5 | Active tests | Yes, with the safeguards | `BALER_CX_ALLOW_WRITES`, admin only, a scheduled window, `expires_at`, guaranteed relinquish via `point_write` (§6.4, Cx 9). |
+| 6 | Spec ingestion | "yes AI extraction" | LLM extraction from PDFs via the Claude API (latest model, `llm` extra, the `autotag` pattern), stored as proposals a human reviews. CSV/XLSX as the simple path (Cx 7). |
+| 7 | Faults | Opt-in, confirmed equip only, "or allow you to have something to be ingested" | Mirroring as proposed (Cx 8), plus import of external issues and punch items (Cx 4) and of external or `fault_detector` faults as Cx issues (Cx 8). |
+| 8 | Re-runs | "think about Power on Testing and all that start-up" | Start-up / power-on and functional tests become explicit procedures (Cx 6). On demand first, then scheduled. |
+| 9 | Templates | SHACL in `ontology/` | `ontology/cx-expected-points.ttl` (Cx 1). The same file is valid SHACL for pyshacl and is evaluated subclass-aware by `commissioning.templates`. |
+| 10 | GL36 | "YES YES YES": adopt PNNL ConStrain | Spike early (Cx 3): licence (BSD-2), how it runs, mapping its verification items onto Baler history. |
+| 11 | Integrations | Unanswered | Keep CSV/JSON export first (Cx 4). |
+| 12 | #5's tests | "GOOOD" | Port them as planned: ladder and points in Cx 2, spec/alignment/reconcile in Cx 7. |
+
+### 0.1 Re-plan around the agentic goal
+
+The agent (Cx 10) is the product. Every earlier slice is a capability it
+calls through the same `/cx/` API a person uses:
+
+| Capability | Slice |
+|---|---|
+| Inventory | Cx 1 |
+| Templates and gaps | Cx 1 |
+| Runs | Cx 1, Cx 2 |
+| GL36 checks | Cx 3 |
+| Issues and risks | Cx 4 |
+| Test procedures | Cx 6, Cx 9 |
+| Spec items and alignment | Cx 7 |
+
+Design rules that follow from this:
+
+- **Every capability is an API call that returns structured evidence.**
+  The agent never reads raw SQL or SPARQL, so it is bounded by the same
+  scope and role checks as a human.
+- **Every write the agent makes is either a proposal** (spec items,
+  mappings, issues, test procedures) that a human accepts, **or happens
+  inside an existing safety envelope.** Passive runs are always allowed.
+  Active tests only through Cx 9.
+- **Every agent and human action lands in `cx_events`**, so "what did
+  the agent do on this project" is one query.
+- **The commissioning lifecycle is the phase list.** The agent's next
+  step comes from the current phase:
+  - *start-up*: power-on procedures, template gaps;
+  - *functional testing*: FPT procedures, GL36 items;
+  - *warranty and operations*: scheduled re-runs, fault ingest.
+
+### 0.2 Slices
+
+Each slice is a GitHub issue, and each is independently mergeable.
+
+| Slice | Issue | What | Depends on |
+|---|---|---|---|
+| Cx 1 | #37 | Foundation: `src/baler/commissioning/`; `read_latest_many` moved to `timeseries`; Xeto matching lifted into `hisquery`; scoped inventory; SHACL expected-point templates (6 classes); `cx_projects`/`cx_phases`/`cx_events`/`cx_runs`/`cx_results`; `commissioning_api` :8009 with project/phase/inventory/run endpoints; rung-1 existence; compose, gateway, policy, OpenAPI | none |
+| Cx 2 | #38 | Ladder rungs 1–3 over trends; stale/stuck predicates shared with `fault_detector`; port #5 ladder and points tests and `cx_fixtures` | Cx 1 |
+| Cx 3 | #39 | PNNL ConStrain spike: GL36 items over Baler history, `gl36:<item>` results | Cx 1 |
+| Cx 4 | #40 | Issues log (close on evidence), accepted risks, CSV/JSON import of external issues and punch items, export | Cx 1 |
+| Cx 5 | #41 | UI: `cx.html`, phase bar, runs grid, tree badge, printable report | Cx 1 |
+| Cx 6 | #42 | Start-up / power-on and functional test procedures as data; passive execution on demand, then scheduled; run diff (reconcile) | Cx 2, Cx 4 |
+| Cx 7 | #43 | Spec ingestion: Claude PDF extraction as proposals, CSV/XLSX; spec↔device alignment; `record_edit` write-back | Cx 1, Cx 4 |
+| Cx 8 | #44 | Opt-in fault mirroring (real URIs); ingest of faults as Cx issues | Cx 2, Cx 4 |
+| Cx 9 | #45 | Active tests via `point_write` inside the safety envelope | Cx 6 |
+| Cx 10 | #46 | The commissioning agent (Claude tool use over `/cx/`) | Cx 1–Cx 9, can start after Cx 4 |
+
+**Slice 1 deviations from §6.1:**
+
+- `cx_projects.site_id` is nullable. A site-less project is org-wide,
+  hidden from site-restricted logins, and its runs use the caller's
+  scope.
+- `cx_issues`/`cx_issue_events`/`cx_risks` move to Cx 4.
+- Phases are in `cx_phases` instead of a `phase` column.
 
 ---
 
@@ -721,7 +801,7 @@ The author of every write is taken from the verified JWT (`sub`,
 
 ---
 
-## 11. Open questions for Jacob
+## 11. Open questions for Jacob (answered, see §0)
 
 Each has a recommended answer. Implementation stays parked until these
 are answered.
