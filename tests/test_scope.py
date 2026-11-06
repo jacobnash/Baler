@@ -54,6 +54,15 @@ def test_once_scoping_is_on_no_token_sees_nothing():
     assert scope_for(Conn(SITES), None).prefixes == ()
 
 
+def test_org_with_no_prefixes_still_sees_unclaimed_data_but_not_other_orgs():
+    """The other half of #65: scoping being on hides only *claimed* topics
+    from an org that claims none - not everything, as a tokenless caller."""
+    s = scope_for(Conn(SITES), {"org_id": "org-3", "site_ids": []})
+    assert s.allows("urn:point:test-his/hisq/ahu/sat")
+    assert not s.allows("urn:point:fbf/hospital-a/x")
+    assert not s.allows("urn:point:fbf/other-co/x")
+
+
 def test_site_scoped_token_sees_only_its_sites():
     s = scope_for(Conn(SITES), {"org_id": "org-1", "site_ids": ["s-a"]})
     assert s.prefixes == ("fbf/hospital-a",)

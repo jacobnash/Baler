@@ -1,0 +1,50 @@
+name: Main health
+
+# A red main never deploys (deploy.yml only runs after a green CI), and a
+# skipped deploy looks like nothing happened: main was red for over an hour
+# and eight commits before anyone noticed (#65). So: when CI fails on main,
+# open (or comment on) one "main is red" issue, which notifies the repo's
+# watchers; when CI is green again, close it.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  issues: write
+
+concurrency:
+  group: main-health
+  cancel-in-progress: false
+
+jobs:
+  report:
+    if: github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+      TITLE: "main is red: CI failing, deploys are skipped"
+    steps:
+      - name: Open, update or close the main-is-red issue
+        run: |
+          set -euo pipefail
+          gh label create main-red --color B60205 --description "CI failing on main" 2>/dev/null || true
+          open=$(gh issue list --label main-red --state open --json number --jq '.[0].number // empty')
+          short=${SHA:0:7}
+          if [ "$CONCLUSION" = "failure" ] || [ "$CONCLUSION" = "timed_out" ]; then
+            body="CI **${CONCLUSION}** on main at \`${short}\`: ${RUN_URL}
+
+          Deploy only runs after a green CI, so nash-srv stays on the last green commit until this is fixed."
+            if [ -n "$open" ]; then
+              gh issue comment "$open" --body "$body"
+            else
+              gh issue create --title "$TITLE" --label main-red,bug --body "$body"
+            fi
+          elif [ "$CONCLUSION" = "success" ] && [ -n "$open" ]; then
+            gh issue close "$open" --comment "CI is green again on main at \`${short}\` (${RUN_URL}); Deploy runs from here."
+          fi
