@@ -15,7 +15,9 @@ const detailEl = document.getElementById("detail");
 
 // Tags the tree shows structurally (or that are bookkeeping), not in a
 // point's tag list.
-const STRUCTURAL_TAGS = new Set(["id", "dis", "equipRef", "siteRef", "brickClass", "brickHasPart", "brickFeeds", "tz", "mod"]);
+const STRUCTURAL_TAGS = new Set(["id", "dis", "brickClass", "brickHasPart", "brickFeeds"]);
+// Brick location classes: shown in the Site tree, not as equipment classes.
+const LOCATION_CLASSES = new Set(["Site", "Building", "Floor", "Zone", "Room", "Space"]);
 
 // Haystack equipment-type markers, most specific first, for grouping equips
 // that carry Haystack tags but no Brick class (e.g. a Windrow/Haystack
@@ -97,6 +99,7 @@ async function loadEquipment() {
   const equips = (await haystackRead("equip")).map(entity);
   const byType = new Map();
   for (const e of equips) {
+    if (LOCATION_CLASSES.has(e.brickClass)) continue;
     const label = equipKind(e.rec) || "Unclassified";
     if (!byType.has(label)) byType.set(label, []);
     byType.get(label).push(e);
@@ -106,14 +109,23 @@ async function loadEquipment() {
 
 async function loadPoints(equip) {
   const rows = await haystackRead(`point and equipRef==@${equip.id}`);
-  return rows.map(entity).sort((a, b) => a.uri.localeCompare(b.uri));
+  const points = rows.map(entity).sort((a, b) => a.dis.localeCompare(b.dis, undefined, { sensitivity: "base" }) || a.uri.localeCompare(b.uri));
+  // Two points with the same dis (e.g. computed ones) - tell them apart.
+  const seen = new Map();
+  for (const p of points) seen.set(p.dis, (seen.get(p.dis) || 0) + 1);
+  for (const p of points) if (seen.get(p.dis) > 1) p.dis = `${p.dis} (${p.uri.split(/[/:]/).slice(-2).join("/")})`;
+  return points;
 }
+
+// Stored values are often float32 (61.02000045776367): show what a person
+// would read off the controller.
+const fmtNum = (v) => (typeof v === "number" ? String(+v.toFixed(2)) : String(v));
 
 function tagText(name, val) {
   if (val && typeof val === "object" && !Array.isArray(val)) {
     if (val._kind === "marker") return name;
-    if (val._kind === "number") return `${name}: ${val.val}${val.unit || ""}`;
-    if (val._kind === "ref") return `${name}: @${val.dis || refToUri(val.val)}`;
+    if (val._kind === "number") return `${name}: ${fmtNum(val.val)}${val.unit ? ` ${val.unit}` : ""}`;
+    if (val._kind === "ref") return `${name}: ${val.dis || localName(refToUri(val.val))}`;
     if ("val" in val) return `${name}: ${val.val}`;
   }
   return `${name}: ${typeof val === "object" ? JSON.stringify(val) : val}`;
@@ -340,17 +352,18 @@ async function selectPoint(point, btn) {
   // position on a live-updating point isn't a thing.
   const historyContainer = document.createElement("div");
   detailEl.appendChild(historyContainer);
-  renderHistoryInto(historyContainer, history);
+  const unit = typeof point.rec.unit === "string" ? point.rec.unit : "";
+  renderHistoryInto(historyContainer, history, unit);
 
   if (historyKey) {
     refreshTimer = setInterval(async () => {
       const fresh = await loadHistory(historyKey).catch(() => null);
-      if (fresh) renderHistoryInto(historyContainer, fresh);
+      if (fresh) renderHistoryInto(historyContainer, fresh, unit);
     }, REFRESH_INTERVAL_MS);
   }
 }
 
-function renderHistoryInto(container, history) {
+function renderHistoryInto(container, history, unit = "") {
   container.innerHTML = "";
   const heading = document.createElement("h3");
   heading.textContent = "History";
@@ -380,7 +393,7 @@ function renderHistoryInto(container, history) {
   canvas.width = 640;
   canvas.height = 220;
   container.appendChild(canvas);
-  drawLineChart(canvas, history);
+  drawLineChart(canvas, history, 30, unit);
 }
 
 // drawLineChart itself now lives in chart.js (shared with derivations.js) -
