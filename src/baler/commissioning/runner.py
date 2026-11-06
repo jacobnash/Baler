@@ -306,20 +306,23 @@ class RunWorker:
         self.repo = repo
         self.clock = clock
         self.run_fn = run_fn
-        self._queue: queue.Queue[RunJob | TestJob | ExtractJob] = queue.Queue()
+        self._queue: queue.Queue = queue.Queue()
         self.extract_fn = None  # tests swap the Claude call
         self.notify = None  # fault webhooks for mirrored faults (commissioning_api sets fault_detector's)
         for i in range(workers):
             threading.Thread(target=self._loop, name=f"cx-run-{i}", daemon=True).start()
 
-    def submit(self, job: RunJob | TestJob | ExtractJob) -> None:
+    def submit(self, job) -> None:
+        """A RunJob, TestJob or ExtractJob, or any callable (run as is)."""
         self._queue.put(job)
 
     def _loop(self) -> None:
         while True:
             job = self._queue.get()
             try:
-                if isinstance(job, TestJob):
+                if callable(job):  # e.g. an agent turn (Cx 10)
+                    job()
+                elif isinstance(job, TestJob):
                     execute_test(self.repo, job, self.clock, self.run_fn)
                 elif isinstance(job, ExtractJob):
                     execute_extract(self.repo, job, self.clock, self.extract_fn)

@@ -293,3 +293,20 @@ def test_cx_levels_in_point_write_levels(repo):
     finally:
         with repo.pool.connection() as conn:
             conn.execute("DELETE FROM point_write_levels WHERE point_uri = %s", (uri,))
+
+
+def test_agent_rows_round_trip(repo):
+    """Cx 10 (#46) on PgRepo: a session's transcript and a proposal, JSON intact."""
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    pid = _new_project(repo, _org(repo, "agent"), now)
+    msgs = [{"role": "user", "content": [{"type": "text", "text": "hi"}]},
+            {"role": "assistant", "content": [{"type": "thinking", "thinking": "", "signature": "s"}, {"type": "text", "text": "ok"}]}]
+    sess = {"id": db.new_id(), "project_id": pid, "created_by": "it", "claims": {"org_id": "o", "site_ids": []}, "status": "idle",
+            "messages": msgs, "last_reply": "ok", "error": None, "created_at": now, "updated_at": now}
+    repo.put_rows("cx_agent_sessions", [sess])
+    assert repo.get_row("cx_agent_sessions", sess["id"])["messages"] == msgs
+    prop = {"id": db.new_id(), "project_id": pid, "session_id": sess["id"], "kind": "phase", "payload": {"key": "functional"},
+            "reason": "r", "status": "proposed", "result": None, "decided_by": None, "decided_at": None, "created_at": now}
+    repo.put_rows("cx_agent_proposals", [prop])
+    repo.update_row("cx_agent_proposals", prop["id"], {"status": "accepted", "result": {"phase": "functional"}})
+    assert repo.find_rows("cx_agent_proposals", project_id=pid, status="accepted")[0]["result"] == {"phase": "functional"}

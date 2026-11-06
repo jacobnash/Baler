@@ -281,6 +281,37 @@ CREATE TABLE IF NOT EXISTS cx_active_runs (
     abort_requested BOOLEAN NOT NULL DEFAULT false
 );
 CREATE INDEX IF NOT EXISTS cx_active_runs_project ON cx_active_runs (project_id, created_at DESC);
+
+-- Cx 10 (#46): the commissioning agent's sessions (the API transcript,
+-- replayed unchanged) and its proposals, which a person accepts.
+CREATE TABLE IF NOT EXISTS cx_agent_sessions (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES cx_projects(id),
+    created_by  TEXT,
+    claims      JSONB NOT NULL,             -- org, sites, role of the starter: the agent's scope
+    status      TEXT NOT NULL,              -- idle | working | failed
+    messages    JSONB NOT NULL DEFAULT '[]',
+    last_reply  TEXT,
+    error       TEXT,
+    created_at  TIMESTAMPTZ NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cx_agent_sessions_project ON cx_agent_sessions (project_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS cx_agent_proposals (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES cx_projects(id),
+    session_id  TEXT,
+    kind        TEXT NOT NULL,              -- issue | procedure | phase | spec_item | mapping | active_test
+    payload     JSONB NOT NULL,
+    reason      TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL,              -- proposed | accepted | rejected | failed
+    result      JSONB,
+    decided_by  TEXT,
+    decided_at  TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cx_agent_proposals_project ON cx_agent_proposals (project_id, status);
 """
 
 ROW_TABLES: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
@@ -293,6 +324,10 @@ ROW_TABLES: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
                         "created_by", "created_at", "confirmed_by", "confirmed_at", "started_at", "finished_at", "before",
                         "writes", "results", "error", "abort_requested"),
                        frozenset({"steps", "plan", "before", "writes", "results"})),
+    "cx_agent_sessions": (("id", "project_id", "created_by", "claims", "status", "messages", "last_reply", "error",
+                           "created_at", "updated_at"), frozenset({"claims", "messages"})),
+    "cx_agent_proposals": (("id", "project_id", "session_id", "kind", "payload", "reason", "status", "result",
+                            "decided_by", "decided_at", "created_at"), frozenset({"payload", "result"})),
     "cx_mappings": (("id", "project_id", "spec_item_id", "equip_uri", "confidence", "basis", "alternatives", "status",
                      "decided_by", "decided_at", "written_back", "created_at"),
                     frozenset({"basis", "alternatives", "written_back"})),

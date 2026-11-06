@@ -143,6 +143,16 @@ const ROUTES = [
   ["GET",    /^\/cx\/active-runs\/[^/]+$/,                     "commissioning", "viewer"],
   ["POST",   /^\/cx\/active-runs\/[^/]+\/confirm$/,             "commissioning", "admin"],
   ["POST",   /^\/cx\/active-runs\/[^/]+\/abort$/,               "commissioning", "operator"],
+  // Cx 10 (Baler#46): the agent. Talking to it is a change (it can start
+  // passive runs and propose); accepting a proposal is the change itself,
+  // and the backend requires admin for an active-test proposal.
+  ["GET",    /^\/cx\/projects\/[^/]+\/agent\/sessions$/,         "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/agent\/sessions$/,         "commissioning", "operator"],
+  ["GET",    /^\/cx\/agent-sessions\/[^/]+$/,                  "commissioning", "viewer"],
+  ["POST",   /^\/cx\/agent-sessions\/[^/]+\/messages$/,         "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/agent\/proposals$/,        "commissioning", "viewer"],
+  ["POST",   /^\/cx\/agent-proposals\/[^/]+\/accept$/,          "commissioning", "operator"],
+  ["POST",   /^\/cx\/agent-proposals\/[^/]+\/reject$/,          "commissioning", "operator"],
 
   // auth_api - POST /auth/login has its own exact-match nginx location
   // with no js_access at all (can't require a token to get a token), so

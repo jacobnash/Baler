@@ -233,6 +233,14 @@ check("commissioning (/cx/): reads viewer, changes operator, archive admin, site
     assert.equal(policy.resolveRoute("POST", "/cx/active-runs/a1/confirm").minRole, "admin");
     assert.equal(policy.resolveRoute("POST", "/cx/active-runs/a1/abort").minRole, "operator");
     assert.equal(policy.resolveRoute("DELETE", "/cx/active-runs/a1"), null);
+    // Cx 10 agent
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/agent/sessions").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/projects/p1/agent/sessions").minRole, "operator");
+    assert.equal(policy.resolveRoute("GET", "/cx/agent-sessions/s1").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/agent-sessions/s1/messages").minRole, "operator");
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/agent/proposals").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/agent-proposals/x1/accept").minRole, "operator");
+    assert.equal(policy.resolveRoute("POST", "/cx/agent-proposals/x1/reject").minRole, "operator");
     // per-project tenancy is checked by commissioning_api, so not WHOLE_ORG
     assert.equal(policy.scopeSatisfies("commissioning", { site_ids: ["s1"] }), true);
 });

@@ -63,3 +63,9 @@ label.inline { display: inline-flex; gap: 0.3rem; align-items: center; }
 .cx-main [hidden], .cx-drawer[hidden] { display: none !important; }
 button.danger { border-color: var(--color-critical); color: var(--color-critical); }
 .plan-table td { font-size: 0.8rem; }
+.agent-transcript { max-height: 22rem; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.5rem; margin-bottom: 0.5rem; font-size: 0.85rem; }
+.agent-transcript:empty { display: none; }
+.agent-transcript .msg { margin: 0.3rem 0; white-space: pre-wrap; }
+.agent-transcript .msg.user { font-weight: 600; }
+.agent-transcript .msg.tool { color: var(--muted); font-size: 0.75rem; }
+.agent-input textarea { flex: 1; font: inherit; font-size: 0.85rem; padding: 0.3rem; }
