@@ -1,0 +1,56 @@
+# CI only (#27): a GitHub Actions layer cache for the one app image every
+# service builds - the openhay Rust stage alone is ~1 min uncached. Every
+# service reads the cache; only `migrate` writes it (they're the same
+# image, so one export is enough). Needs a docker-container buildx builder
+# and the Actions runtime token (setup-buildx-action, ghaction-github-runtime
+# in ci.yml). Used via COMPOSE_FILE in ci.yml, never on nash-srv.
+services:
+  migrate:
+    build:
+      cache_from: ["type=gha,scope=baler-app"]
+      cache_to: ["type=gha,scope=baler-app,mode=max"]
+  mqtt_listener:
+    build:
+      cache_from: ["type=gha,scope=baler-app"]
+  ingest_api:
+    build:
+      cache_from: ["type=gha,scope=baler-app"]
+  fault_api:
+    build:
+      cache_from: ["type=gha,scope=baler-app"]
+  fault_detector:
+    build:
+      cache_from: ["type=gha,scope=baler-app"]
+  derivation_api:
+    build:
+      cache_from: ["type=gha,scope=baler-app"]
+  derivation_engine:
+    build:
+      cache_from: ["type=gha,scope=baler-app"]
+  validate_api:
+    build:
+      cache_from: ["type=gha,scope=baler-app"]
+  auth_api:
+    build:
+      cache_from: ["type=gha,scope=baler-app"]
+  ops_api:
+    build:
+      cache_from: ["type=gha,scope=baler-app"]
+  haystack_api:
+    build:
+      cache_from: ["type=gha,scope=baler-app"]
+  haystack_puller:
+    build:
+      cache_from: ["type=gha,scope=baler-app"]
+  sql_puller:
+    build:
+      cache_from: ["type=gha,scope=baler-app"]
+  energystar_puller:
+    build:
+      cache_from: ["type=gha,scope=baler-app"]
+  source_runner:
+    build:
+      cache_from: ["type=gha,scope=baler-app"]
+  openmeteo_puller:
+    build:
+      cache_from: ["type=gha,scope=baler-app"]

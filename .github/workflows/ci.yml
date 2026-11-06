@@ -72,6 +72,8 @@ jobs:
       MQTT_USERNAME: baler
       MQTT_PASSWORD: ci-only-mqtt-password
       BALER_ALLOW_PRIVATE_WEBHOOKS: "1"
+      # base file + the CI layer cache (#27); every docker compose call below
+      COMPOSE_FILE: docker-compose.yml:.github/ci/compose.cache.yml
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -80,6 +82,10 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - run: pip install -e ".[dev,validate]"
+      # docker-container builder + Actions cache token: the type=gha layer
+      # cache in .github/ci/compose.cache.yml needs both (#27)
+      - uses: docker/setup-buildx-action@v3
+      - uses: crazy-max/ghaction-github-runtime@v3
       - run: docker compose up -d --build
       - name: Wait for postgres to be healthy
         run: |
@@ -94,7 +100,9 @@ jobs:
       # Coverage is reporting-only for now (PLAN.md Stage 0.2/Guardrails) -
       # baseline is 81% (BASELINE.md). No --cov-fail-under yet: the floor
       # should ratchet up from a real baseline, not block on day one.
-      - run: pytest -m "integration or not integration" --cov=baler --cov-report=term-missing
+      # Integration tests only: the unit job runs the rest, and re-running all
+      # of them here was most of this job's ~5 min of pytest (#27).
+      - run: pytest -m integration --cov=baler --cov-report=term-missing
       - if: always()
         run: docker compose logs
 
@@ -113,6 +121,7 @@ jobs:
       HAXALL_API: http://localhost:8280/api/sys
       HAXALL_SU_USERNAME: su
       HAXALL_SU_PASSWORD: ci-only-haxall-password
+      COMPOSE_FILE: docker-compose.yml:.github/ci/compose.cache.yml
     steps:
       - uses: actions/checkout@v4
         with:
@@ -139,6 +148,10 @@ jobs:
       - run: >-
           docker run -d --name haxall -p 8280:8080 haxall:ci sh -c
           "bin/hx init -headless -suUser su -suPass $HAXALL_SU_PASSWORD -httpPort 8080 /haxall/var/ci && bin/hx run /haxall/var/ci"
+      # docker-container builder + Actions cache token: the type=gha layer
+      # cache in .github/ci/compose.cache.yml needs both (#27)
+      - uses: docker/setup-buildx-action@v3
+      - uses: crazy-max/ghaction-github-runtime@v3
       - run: docker compose up -d --build --wait
       - name: Wait for Haxall
         run: |
