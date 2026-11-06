@@ -727,10 +727,13 @@ class _Compiler:
     `!BOUND`, and a comparison on a missing tag is unbound, i.e. false -
     Haystack's semantics for free."""
 
-    def __init__(self, graph: GraphVocab | None = None, prefix: str = ""):
+    def __init__(self, graph: GraphVocab | None = None, prefix: str = "", scope=None):
         self.n = 0
         self.prefix = prefix  # keeps a path leaf's variables apart from ours
         self.graph = graph or GraphVocab()
+        # baler.scope.Scope or None: every record a path hop reaches must be
+        # visible too, or a filter could test tags on records out of scope.
+        self.scope = scope
         self.flags: list[tuple[str, str]] = []  # (flag var, pattern that binds ?s)
 
     def _var(self) -> str:
@@ -957,7 +960,9 @@ class _Compiler:
         hops, cur = [], "s"
         for i, name in enumerate(node.hops):
             nxt = end if i == len(node.hops) - 1 else self._var()
-            hops.append(self._hop(name, cur, nxt))
+            hop = self._hop(name, cur, nxt)
+            visible = self.scope.sparql(nxt) if self.scope is not None else None
+            hops.append(f"{hop} FILTER({visible})" if visible else hop)
             cur = nxt
         leaf = "".join(
             f" OPTIONAL {{ {{ SELECT DISTINCT ?{end} (true AS ?{m}) WHERE {{ {rebind(pat)} }} }} }}"
@@ -978,7 +983,7 @@ def _uri(text: str) -> str:
     return text
 
 
-def compile_filter(node, graph: GraphVocab | None = None) -> str:
+def compile_filter(node, graph: GraphVocab | None = None, scope=None) -> str:
     """One SELECT over every subject in the graph. Each leaf test of the
     filter is a subject-set (see _Compiler), left-joined once; the whole
     boolean expression is one FILTER over those flags, so and/or/not
@@ -991,8 +996,11 @@ def compile_filter(node, graph: GraphVocab | None = None) -> str:
     match_entities, which drops them after the fact (each ?s is judged
     independently, so the result is identical and the query stays a plain
     scan instead of a per-candidate NOT EXISTS)."""
-    compiler = _Compiler(graph)
+    compiler = _Compiler(graph, scope=scope)
     body = compiler.expr(node)
+    visible = scope.sparql("s") if scope is not None else None
+    if visible:  # the caller's scope, in the query itself (Baler#16)
+        body = f"({body}) && ({visible})"
     flags = "\n".join(
         f"  OPTIONAL {{ {{ SELECT DISTINCT ?s (true AS ?{m}) WHERE {{ {pattern} }} }} }}"
         for m, pattern in compiler.flags
@@ -1199,7 +1207,7 @@ def _infer_kind(rows) -> str | None:
     return None
 
 
-def match_entities(store, node, graph: GraphVocab | None = None) -> list[str]:
+def match_entities(store, node, graph: GraphVocab | None = None, scope=None) -> list[str]:
     """Every entity the filter selects. Ontology-level subjects - Brick's
     own vocabulary when it's loaded, an extension's class/tag declarations
     - are dropped here (see _VOCABULARY_NAMESPACES / GraphVocab.is_schema):
@@ -1207,8 +1215,20 @@ def match_entities(store, node, graph: GraphVocab | None = None) -> list[str]:
     after the fact is the same result as excluding them as candidates,
     minus a per-candidate NOT EXISTS that cost ~0.4s per query."""
     graph = graph if graph is not None else graph_vocab(store)
-    rows = store.query(compile_filter(node, graph))
+    rows = store.query(compile_filter(node, graph, scope))
     return sorted(uri for uri in (str(row.s) for row in rows) if not graph.is_schema(uri))
+
+
+def visible_uris(store, uris: list[str], scope) -> list[str]:
+    """The given entities the scope lets the caller see, in order - the
+    same rule graph reads apply (Scope.sparql), for reads by id."""
+    expr = scope.sparql("s") if scope is not None else None
+    if not expr or not uris:
+        return list(uris)
+    values = " ".join(f"<{_uri(u)}>" for u in uris)
+    rows = store.query(f"SELECT ?s WHERE {{ VALUES ?s {{ {values} }} FILTER({expr}) }}")
+    seen = {str(r.s) for r in rows}
+    return [u for u in uris if u in seen]
 
 
 def expand_to_points(store, entity_uris: list[str]) -> list[str]:
@@ -1312,9 +1332,8 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
     with tracer.start_as_current_span("hisquery.graph_vocab"):
         graph = graph_vocab(store)
     with tracer.start_as_current_span("hisquery.match_entities") as sp:
-        matched = match_entities(store, query.filter, graph)
-        if scope is not None:  # baler.scope.Scope: the caller's sites only
-            matched = scope.filter(matched)
+        # baler.scope.Scope: the caller's sites only, applied in the query
+        matched = match_entities(store, query.filter, graph, scope)
         sp.set_attribute("matched", len(matched))
     if query.mode == "read":
         if not matched:

@@ -391,15 +391,16 @@ def _relax(node):
     return None if left is None or right is None else hisquery.Or(left, right)
 
 
-def _graph_sets(store, node, sets: dict[int, set[str]]) -> None:
-    """The SPARQL answer for each maximal graph-only subtree."""
+def _graph_sets(store, node, sets: dict[int, set[str]], scope: Scope = EVERYTHING) -> None:
+    """The SPARQL answer for each maximal graph-only subtree (path hops
+    scoped like any read)."""
     if not _live(node):
-        sets[id(node)] = set(hisquery.match_entities(store, node))
+        sets[id(node)] = set(hisquery.match_entities(store, node, scope=scope))
     elif isinstance(node, hisquery.Not):
-        _graph_sets(store, node.node, sets)
+        _graph_sets(store, node.node, sets, scope)
     elif isinstance(node, (hisquery.And, hisquery.Or)):
-        _graph_sets(store, node.left, sets)
-        _graph_sets(store, node.right, sets)
+        _graph_sets(store, node.left, sets, scope)
+        _graph_sets(store, node.right, sets, scope)
 
 
 def _eval_live(node, uri: str, rec: dict, sets: dict[int, set[str]]) -> bool:
@@ -461,7 +462,7 @@ class Backend:
             raise OpError("read takes a plain Haystack filter, not a hisRead/hisRollup expression")
         node = _decode_refs(q.filter)
         if not _live(node):
-            uris = scope.filter(hisquery.match_entities(self.store, node))
+            uris = hisquery.match_entities(self.store, node, scope=scope)
             if limit is not None:
                 uris = uris[:limit]
             with self._conn() as conn:
@@ -472,9 +473,9 @@ class Backend:
         # then the exact filter: graph-only parts by SPARQL set membership,
         # live tags against the built record.
         relaxed = _relax(node)
-        cands = scope.filter(hisquery.match_entities(self.store, relaxed if relaxed is not None else _ANY_ENTITY))
+        cands = hisquery.match_entities(self.store, relaxed if relaxed is not None else _ANY_ENTITY, scope=scope)
         sets: dict[int, set[str]] = {}
-        _graph_sets(self.store, node, sets)
+        _graph_sets(self.store, node, sets, scope)
         with self._conn() as conn:
             recs = build_records(self.store, conn, cands)
         out = [recs[u] for u in cands if u in recs and _eval_live(node, u, recs[u], sets)]
@@ -482,7 +483,7 @@ class Backend:
 
     def read_ids(self, refs: list[oh.Ref], scope: Scope = EVERYTHING) -> list[dict | None]:
         uris = [ref_to_uri(r.id) for r in refs]
-        visible = scope.filter(uris)
+        visible = hisquery.visible_uris(self.store, uris, scope)
         with self._conn() as conn:
             recs = build_records(self.store, conn, visible)
         return [recs.get(u) for u in uris]  # out-of-scope ids read as missing, never as "forbidden"
@@ -497,7 +498,7 @@ class Backend:
                 "FILTER(STRSTARTS(STR(?s), \"urn:equip:\")) "
                 f"FILTER NOT EXISTS {{ ?site a brick:Site . ?site {hisquery.SITE_MEMBER} ?s }} }} }}"
             )
-            uris = scope.filter(sorted({str(r.s) for r in rows}))
+            uris = hisquery.visible_uris(self.store, sorted({str(r.s) for r in rows}), scope)
         elif _kind_of(ref_to_uri(nav_id)) != "equip" and list(self.store.query(
                 hisquery.PREFIXES + f"SELECT ?t WHERE {{ <{hisquery._uri(ref_to_uri(nav_id))}> a brick:Site . BIND(1 AS ?t) }}")):
             site = hisquery._uri(ref_to_uri(nav_id))
@@ -506,7 +507,7 @@ class Backend:
                 + f"SELECT DISTINCT ?e WHERE {{ <{site}> {hisquery.SITE_MEMBER} ?e . "
                 "FILTER(STRSTARTS(STR(?e), \"urn:equip:\")) }"
             )
-            uris = scope.filter(sorted({str(r.e) for r in rows}))
+            uris = hisquery.visible_uris(self.store, sorted({str(r.e) for r in rows}), scope)
         else:
             equip = ref_to_uri(nav_id)
             rows = self.store.query(
@@ -514,7 +515,7 @@ class Backend:
                 + f"SELECT DISTINCT ?p WHERE {{ {{ <{hisquery._uri(equip)}> brick:hasPoint ?p }}"
                 f" UNION {{ ?p brick:isPointOf <{hisquery._uri(equip)}> }} }}"
             )
-            uris = scope.filter(sorted({str(r.p) for r in rows}))
+            uris = hisquery.visible_uris(self.store, sorted({str(r.p) for r in rows}), scope)
         with self._conn() as conn:
             recs = build_records(self.store, conn, uris)
         out = []

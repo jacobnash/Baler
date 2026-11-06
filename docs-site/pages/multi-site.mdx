@@ -48,12 +48,21 @@ equip `urn:equip:fbf/hospital-a/...`.
 
 - **No site anywhere owns a prefix:** everyone sees everything. This is a
   single-tenant install, and it's how every install behaved before scoping existed.
-- **Any site owns a prefix:** reads are scoped. A caller sees only the
-  prefixes of their sites: their token's `site_ids`, or all of their org's
-  sites if the token carries none. Out-of-scope points read as missing, never
-  as "forbidden", so their existence isn't revealed. This applies to the
-  Haystack API (`/api`: read, nav, hisRead, hisWrite, watches) and to
-  `/ingest/his` and `/ingest/history`.
+- **Your org owns prefixes:** you see only those - your token's `site_ids`'
+  prefixes, or all of your org's if the token carries none.
+- **Your org owns none** (while another does): you see everything *except*
+  what other orgs claimed. Scoping is per org, so one org partitioning its
+  data doesn't blind the rest.
+- **Locations** (Site, Building, Floor, Zone) have no prefix: one is visible
+  when it contains something you can see (through `hasPart`, backwards along
+  `feeds`, `hasPoint`), and hidden when it contains something another org
+  claimed.
+- Out-of-scope records read as missing, never as "forbidden", so their
+  existence isn't revealed. Graph reads apply scope **inside the query**: to
+  the result and to every record a filter path reaches, so
+  `spaceRef->dis == "x"` can't test tags on a record you can't see. This
+  applies to the Haystack API (`/api`: read, nav, hisRead, hisWrite, watches)
+  and to `/ingest/his` and `/ingest/history`.
 - **Prefixes never overlap across orgs.** Claiming `fbf` while another
   org owns `fbf/hospital-a` (or the reverse) is rejected, otherwise the
   broader claim would expose the other org's data.

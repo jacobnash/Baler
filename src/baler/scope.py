@@ -6,15 +6,25 @@ A site owns data by **topic prefix**: `fbf/hospital-a` owns
 equip `urn:equip:fbf/hospital-a` itself). That's the namespace Windrow
 already gives each building (multi-site.mdx), so no stored data changes.
 
-Rules:
+Rules (per org - Baler#16):
 
   - No site anywhere has a prefix: everything is visible (single-tenant
     installs, and every install before this existed).
-  - Otherwise a caller sees only the prefixes of their sites: the token's
-    `site_ids`, or every site of their org when it carries none (an
-    org-wide user or API key). Anything outside those prefixes, including
-    entities that aren't points or equipment, is invisible.
+  - The caller's org has prefixed sites: they see only those prefixes -
+    the token's `site_ids`, or every site of their org when it carries
+    none (an org-wide user or API key).
+  - The caller's org has none: they see everything *except* what other
+    orgs' sites have claimed. (Partitioning one org doesn't blind the
+    others, as a global switch did.)
+  - Locations (Site/Building/Floor/Zone, anything that isn't a point or
+    equipment) have no prefix of their own: one is visible when it
+    contains something visible (hisquery.SITE_MEMBER reaches it), and
+    hidden when it contains something another org claimed.
   - A request with no verifiable token sees nothing once scoping is on.
+
+Graph reads (/api read and nav, /his) apply scope inside the SPARQL, to the
+result and to every record a path hop reaches - see Scope.sparql - so a
+filter can't test tags on records the caller can't see.
 
 Backends verify the caller's own JWT here (not just trusting the gateway's
 X-User header) because they need its `site_ids`/`org_id` claims.
@@ -55,10 +65,21 @@ def normalize_prefix(prefix: str) -> str:
     return p
 
 
+def _under(key: str, prefixes) -> bool:
+    return any(key == p or key.startswith(p + "/") for p in prefixes)
+
+
+# Same order and names as hisquery.SITE_MEMBER (kept here, not imported,
+# because hisquery imports nothing from scope and must stay that way).
+_SITE_MEMBER = "(<https://brickschema.org/schema/Brick#hasPart>|^<https://brickschema.org/schema/Brick#feeds>|<https://brickschema.org/schema/Brick#hasPoint>)+"
+
+
 @dataclass(frozen=True)
 class Scope:
-    # None = unrestricted; otherwise normalized prefixes (no trailing "/").
+    # None = no allow-list; otherwise only these normalized prefixes.
     prefixes: tuple[str, ...] | None
+    # Claimed by other orgs: hidden even without an allow-list.
+    exclude: tuple[str, ...] = ()
 
     @classmethod
     def everything(cls) -> Scope:
@@ -70,15 +91,42 @@ class Scope:
 
     @property
     def unrestricted(self) -> bool:
-        return self.prefixes is None
+        return self.prefixes is None and not self.exclude
 
     def allows(self, uri: str) -> bool:
-        if self.prefixes is None:
-            return True
+        """Points and equipment by prefix. A location can't be judged
+        without the graph: allowed unless there's an allow-list (graph
+        reads decide it properly, in Scope.sparql)."""
         key = entity_key(uri)
         if key is None:
-            return False
-        return any(key == p or key.startswith(p + "/") for p in self.prefixes)
+            return self.prefixes is None
+        if self.prefixes is not None:
+            return _under(key, self.prefixes)
+        return not _under(key, self.exclude)
+
+    def sparql(self, var: str) -> str | None:
+        """A SPARQL FILTER expression: ?var is visible. None when everything is."""
+        if self.unrestricted:
+            return None
+
+        def under(v: str, prefixes) -> str:
+            tests = []
+            for kind in _KEYED_PREFIXES:
+                for p in prefixes:
+                    full = (kind + p).replace("\\", "\\\\").replace('"', '\\"')
+                    tests.append(f'STR(?{v}) = "{full}" || STRSTARTS(STR(?{v}), "{full}/")')
+            return "(" + " || ".join(tests) + ")" if tests else "false"
+
+        keyed = f'(STRSTARTS(STR(?{var}), "urn:point:") || STRSTARTS(STR(?{var}), "urn:equip:"))'
+        k = f"{var}_k"
+        if self.prefixes is not None:
+            if not self.prefixes:
+                return "false"
+            return (f"({keyed} && {under(var, self.prefixes)}) || "
+                    f'(!{keyed} && STRSTARTS(STR(?{var}), "urn:") && '
+                    f"EXISTS {{ ?{var} {_SITE_MEMBER} ?{k} . FILTER({under(k, self.prefixes)}) }})")
+        return (f"({keyed} && !{under(var, self.exclude)}) || "
+                f"(!{keyed} && NOT EXISTS {{ ?{var} {_SITE_MEMBER} ?{k} . FILTER({under(k, self.exclude)}) }})")
 
     def filter(self, uris):
         return list(uris) if self.prefixes is None else [u for u in uris if self.allows(u)]
@@ -107,13 +155,14 @@ def scope_for(conn, claims: dict | None) -> Scope:
         return Scope.nothing()
     org_id = claims.get("org_id")
     wanted = set(claims.get("site_ids") or [])
-    prefixes = {
-        normalize_prefix(p)
-        for site_id, site_org, site_prefixes in rows
-        if site_org == org_id and (not wanted or site_id in wanted)
-        for p in (site_prefixes or [])
-    }
-    return Scope(tuple(sorted(prefixes)))
+    own = {normalize_prefix(p) for _, o, ps in rows if o == org_id for p in (ps or [])}
+    others = {normalize_prefix(p) for _, o, ps in rows if o != org_id for p in (ps or [])}
+    if wanted:  # a site-restricted login: exactly its sites' prefixes
+        mine = {normalize_prefix(p) for sid, o, ps in rows if o == org_id and sid in wanted for p in (ps or [])}
+        return Scope(tuple(sorted(mine)))
+    if own:
+        return Scope(tuple(sorted(own)))
+    return Scope(None, tuple(sorted(others)))
 
 
 def request_scope(conn, headers) -> Scope:
