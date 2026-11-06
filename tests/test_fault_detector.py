@@ -26,6 +26,12 @@ from baler.mapping import classify_point
 from baler.store import Store
 from baler.timeseries import connect, write_point_value
 
+# Webhook delivery runs in its own daemon thread (it must never block
+# evaluation), so tests poll for it. 2s was too short on a busy CI runner:
+# both events arrived just after the wait ended (#56). Up to 15s; a passing
+# run still returns as soon as they're in.
+WEBHOOK_WAIT_STEPS = 150
+
 
 @pytest.fixture
 def fault_conn():
@@ -129,7 +135,7 @@ def test_cur_range_rule_opens_fault_and_fires_webhook(fault_conn, receiver, tmp_
     assert len(faults) == 1
     assert faults[0]["point_uri"] == "urn:point:test-fd/zone-temp"
 
-    for _ in range(20):
+    for _ in range(WEBHOOK_WAIT_STEPS):
         if received:
             break
         time.sleep(0.1)
@@ -158,7 +164,7 @@ def test_cur_range_rule_resolves_and_fires_resolved_webhook(fault_conn, receiver
     resolved = list_faults(fault_conn, rule_id="test-fd:range2", status="resolved")
     assert len(resolved) == 1
 
-    for _ in range(20):
+    for _ in range(WEBHOOK_WAIT_STEPS):
         if len(received) >= 2:
             break
         time.sleep(0.1)
