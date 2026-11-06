@@ -307,6 +307,85 @@ def read_latest_many(conn, point_uris: list[str]) -> dict[str, tuple[datetime, o
     return {uri: (ts, timeseries._row_to_value((v, vt, vb))) for uri, ts, v, vt, vb in cur.fetchall()}
 
 
+# ------------------------------------------------------------ live-tag filters
+
+# Tags build_records derives from point_history, never stored in the graph.
+_LIVE_TAGS = {"his", "curVal", "curStatus"}
+# "every entity", for a filter whose relaxation constrains nothing (`not his`)
+_ANY_ENTITY = hisquery.parse_query("point or equip or site or Site or Building or Floor or Zone").filter
+
+
+def _live(node) -> bool:
+    if isinstance(node, (hisquery.Has, hisquery.Cmp)):
+        return node.name in _LIVE_TAGS
+    if isinstance(node, hisquery.Not):
+        return _live(node.node)
+    if isinstance(node, (hisquery.And, hisquery.Or)):
+        return _live(node.left) or _live(node.right)
+    return False
+
+
+def _relax(node):
+    """A graph-only filter matching a superset of `node` (None: matches
+    everything). Live terms, and any `not` over one, become "true" - sound
+    because and/or are monotone and `not` only wraps exact subtrees."""
+    if not _live(node):
+        return node
+    if isinstance(node, (hisquery.Has, hisquery.Cmp, hisquery.Not)):
+        return None
+    left, right = _relax(node.left), _relax(node.right)
+    if isinstance(node, hisquery.And):
+        if left is None or right is None:
+            return right if left is None else left
+        return hisquery.And(left, right)
+    return None if left is None or right is None else hisquery.Or(left, right)
+
+
+def _graph_sets(store, node, sets: dict[int, set[str]]) -> None:
+    """The SPARQL answer for each maximal graph-only subtree."""
+    if not _live(node):
+        sets[id(node)] = set(hisquery.match_entities(store, node))
+    elif isinstance(node, hisquery.Not):
+        _graph_sets(store, node.node, sets)
+    elif isinstance(node, (hisquery.And, hisquery.Or)):
+        _graph_sets(store, node.left, sets)
+        _graph_sets(store, node.right, sets)
+
+
+def _eval_live(node, uri: str, rec: dict, sets: dict[int, set[str]]) -> bool:
+    if id(node) in sets:
+        return uri in sets[id(node)]
+    if isinstance(node, hisquery.Has):
+        return rec.get(node.name) is not None
+    if isinstance(node, hisquery.Cmp):
+        return _cmp_live(rec.get(node.name), node.op, node.value)
+    if isinstance(node, hisquery.Not):
+        return not _eval_live(node.node, uri, rec, sets)
+    if isinstance(node, hisquery.And):
+        return _eval_live(node.left, uri, rec, sets) and _eval_live(node.right, uri, rec, sets)
+    return _eval_live(node.left, uri, rec, sets) or _eval_live(node.right, uri, rec, sets)
+
+
+_CMP = {"==": lambda a, b: a == b, "!=": lambda a, b: a != b, "<": lambda a, b: a < b,
+        "<=": lambda a, b: a <= b, ">": lambda a, b: a > b, ">=": lambda a, b: a >= b}
+
+
+def _cmp_live(have, op: str, want) -> bool:
+    """Haystack comparison semantics, as hisquery compiles them: never on a
+    missing tag, never across kinds, Numbers only with an identical unit."""
+    if have is None or op not in _CMP:
+        return False
+    if isinstance(have, oh.Number):
+        if not isinstance(want, hisquery.Num) or (have.unit or None) != (want.unit or None):
+            return False
+        return _CMP[op](have.val, want.val)
+    if isinstance(have, bool):
+        return isinstance(want, bool) and op in ("==", "!=") and _CMP[op](have, want)
+    if isinstance(have, str):
+        return isinstance(want, str) and _CMP[op](have, want)
+    return False
+
+
 # --------------------------------------------------------------------------- backend
 
 
@@ -330,12 +409,26 @@ class Backend:
             raise OpError(f"filter: {exc}") from exc
         if q.span_text is not None or q.rollup is not None or q.mode != "readAll":
             raise OpError("read takes a plain Haystack filter, not a hisRead/hisRollup expression")
-        uris = scope.filter(hisquery.match_entities(self.store, _decode_refs(q.filter)))
-        if limit is not None:
-            uris = uris[:limit]
+        node = _decode_refs(q.filter)
+        if not _live(node):
+            uris = scope.filter(hisquery.match_entities(self.store, node))
+            if limit is not None:
+                uris = uris[:limit]
+            with self._conn() as conn:
+                recs = build_records(self.store, conn, uris)
+            return [recs[u] for u in uris if u in recs]
+        # `his`/`curVal`/`curStatus` come from point_history, not the graph,
+        # so SPARQL alone can't decide them. Candidates from a relaxed filter,
+        # then the exact filter: graph-only parts by SPARQL set membership,
+        # live tags against the built record.
+        relaxed = _relax(node)
+        cands = scope.filter(hisquery.match_entities(self.store, relaxed if relaxed is not None else _ANY_ENTITY))
+        sets: dict[int, set[str]] = {}
+        _graph_sets(self.store, node, sets)
         with self._conn() as conn:
-            recs = build_records(self.store, conn, uris)
-        return [recs[u] for u in uris if u in recs]
+            recs = build_records(self.store, conn, cands)
+        out = [recs[u] for u in cands if u in recs and _eval_live(node, u, recs[u], sets)]
+        return out[:limit] if limit is not None else out
 
     def read_ids(self, refs: list[oh.Ref], scope: Scope = EVERYTHING) -> list[dict | None]:
         uris = [ref_to_uri(r.id) for r in refs]

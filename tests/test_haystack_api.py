@@ -566,3 +566,43 @@ def test_brick_location_links_come_back_as_ref_lists():
     assert recs[str(site)]["brickClass"] == "Site"
     assert recs[str(site)]["brickHasPart"] == [oh.Ref(ha.uri_to_ref(str(bld)))]
     assert recs[str(ahu)]["brickFeeds"] == [oh.Ref(ha.uri_to_ref(str(bld)))]
+
+
+def test_live_tags_filter_on_point_history(monkeypatch):
+    """`his`, `curVal`, `curStatus` come from point_history, not the graph;
+    read must still filter on them (it returned nothing for `point and his`
+    on nash-srv while every record showed `his`)."""
+    store = Store()
+    g = store.graph
+    ahu = URIRef("urn:equip:w/ahu-1")
+    hot, cold, idle = (URIRef(f"urn:point:w/ahu-1/{n}") for n in ("hot", "cold", "idle"))
+    g.add((ahu, RDF.type, BRICK.AHU))
+    for p in (hot, cold, idle):
+        g.add((ahu, BRICK.hasPoint, p))
+        g.add((p, BRICK.isPointOf, ahu))
+        g.add((p, HAYSTACK.hasTag, Literal("sensor")))
+    now = datetime.now(timezone.utc)
+    latest = {str(hot): (now, 80.0), str(cold): (now, 55.0)}  # idle: no history
+    monkeypatch.setattr(ha, "read_latest_many", lambda conn, uris: {u: latest[u] for u in uris if u in latest})
+    monkeypatch.setattr(ha.timeseries, "read_point_labels", lambda conn, uris: {u: ("°F", None) for u in uris})
+
+    class Pool:
+        @contextmanager
+        def connection(self):
+            yield object()
+
+    be = ha.Backend(store, Pool())
+
+    def names(flt, limit=None):
+        return sorted(str(r["id"].dis) for r in be.read_filter(flt, limit))
+
+    assert names("point and his") == ["cold", "hot"]
+    assert names("his") == ["cold", "hot"]
+    assert names("point and not his") == ["idle"]
+    assert names("curVal > 70°F") == ["hot"]
+    assert names("curVal > 70") == []  # Haystack: no comparison across units
+    assert names("sensor and curVal < 60°F") == ["cold"]
+    assert names("curStatus == \"ok\"") == ["cold", "hot"]
+    assert names("not (his and curVal > 70°F) and point") == ["cold", "idle"]
+    assert names("equip or curVal > 70°F") == ["ahu-1", "hot"]
+    assert len(names("his", limit=1)) == 1
