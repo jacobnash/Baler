@@ -31,6 +31,13 @@ integrations). This file is gotchas only — don't duplicate those.
   jobs: `unit` needs no services, `integration` runs `docker compose up
   -d` first) — it just doesn't wrap anything, it runs the same bare
   commands above.
+- **App containers run as root with the checkout bind-mounted (`.:/app`).**
+  Anything they write into `/app` is root-owned on the host, and on nash-srv
+  a root-owned directory breaks the next deploy's `actions/checkout` (EACCES,
+  #29). The shared daemon env sets `PYTHONPYCACHEPREFIX` so bytecode stays
+  inside the container; a new service that bind-mounts `.:/app` needs that
+  env too, and don't add code that writes new directories under `/app`. CI's
+  integration job fails if any appear.
 - **Env vars**: `.env.example` at the repo root is the single source of
   truth for every var any process reads — check there before grepping
   source.
