@@ -73,3 +73,14 @@ def test_window_hours_validation(bad):
     with pytest.raises(ValueError):
         engine.window_hours(bad)
     assert engine.window_hours(None) == 24.0
+
+
+def test_every_equipment_gets_one_ladder_row(run):
+    summary, results = run
+    rows = [r for r in results if r["check_id"] == "ladder"]
+    assert sorted(r["equip_uri"] for r in rows) == [fx.AHU, fx.MTR, fx.VAV]
+    assert sum(summary["ladder"]["highest_rung_passed"].values()) == summary["equipment"]
+    # one sample per point in the fixture: rung 1 passes, liveness can't be judged yet
+    ahu = next(r for r in rows if r["equip_uri"] == fx.AHU)
+    assert ahu["evidence"]["rungs"]["1"] == "pass" and ahu["evidence"]["rungs"]["2"] == "inconclusive"
+    assert ahu["evidence"]["highest_rung_passed"] == 1

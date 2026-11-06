@@ -246,7 +246,8 @@ paths:
       operationId: createCxRun
       summary: Run verification now (operator)
       description: >-
-        Synchronous. Inventory, template completeness and rung-1 existence
+        Synchronous. Inventory, template completeness and the verification
+        ladder (rung 1 existence, rung 2 liveness, rung 3 responsiveness)
         over the trailing window, recorded against the current phase.
       requestBody:
         content:
@@ -451,6 +452,12 @@ components:
           type: object
           required: [equipment, points, by_status, by_check, freshness]
           properties:
+            ladder:
+              type: object
+              description: How many equipment reached each rung (0-3)
+              properties:
+                highest_rung_passed: { type: object, additionalProperties: { type: integer } }
+                rungs: { type: object }
             equipment: { type: integer }
             points: { type: integer }
             equipment_with_template: { type: integer }
@@ -469,7 +476,11 @@ components:
         equip_uri: { type: string }
         check_id:
           type: string
-          description: "`exists`, or `template:<requirement>`"
+          description: >-
+            `exists` (rung 1, per point), `live` (rung 2, per sensor),
+            `pair:<key>` (rung 3, subject `a|b`), `ladder` (per equipment:
+            evidence.highest_rung_passed, rungs, fell_to_rung), or
+            `template:<requirement>`.
         subject: { type: string, description: Point or equipment the result is about }
         status: { $ref: "#/components/schemas/Status" }
         severity: { type: [string, "null"], enum: [required, expected, optional, null] }

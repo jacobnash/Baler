@@ -71,8 +71,8 @@ Each slice is a GitHub issue, and each is independently mergeable.
 
 | Slice | Issue | What | Depends on |
 |---|---|---|---|
-| Cx 1 | #37 | Foundation: `src/baler/commissioning/`; `read_latest_many` moved to `timeseries`; Xeto matching lifted into `hisquery`; scoped inventory; SHACL expected-point templates (6 classes); `cx_projects`/`cx_phases`/`cx_events`/`cx_runs`/`cx_results`; `commissioning_api` :8009 with project/phase/inventory/run endpoints; rung-1 existence; compose, gateway, policy, OpenAPI | none |
-| Cx 2 | #38 | Ladder rungs 1–3 over trends; stale/stuck predicates shared with `fault_detector`; port #5 ladder and points tests and `cx_fixtures` | Cx 1 |
+| Cx 1 ✅ | #37 | Foundation: `src/baler/commissioning/`; `read_latest_many` moved to `timeseries`; Xeto matching lifted into `hisquery`; scoped inventory; SHACL expected-point templates (6 classes); `cx_projects`/`cx_phases`/`cx_events`/`cx_runs`/`cx_results`; `commissioning_api` :8009 with project/phase/inventory/run endpoints; rung-1 existence; compose, gateway, policy, OpenAPI | none |
+| Cx 2 ✅ | #38 | Ladder rungs 1–3 over trends; stale/stuck predicates shared with `fault_detector`; port #5 ladder and points tests and `cx_fixtures` | Cx 1 |
 | Cx 3 | #39 | PNNL ConStrain spike: GL36 items over Baler history, `gl36:<item>` results | Cx 1 |
 | Cx 4 | #40 | Issues log (close on evidence), accepted risks, CSV/JSON import of external issues and punch items, export | Cx 1 |
 | Cx 5 | #41 | UI: `cx.html`, phase bar, runs grid, tree badge, printable report | Cx 1 |
@@ -81,6 +81,19 @@ Each slice is a GitHub issue, and each is independently mergeable.
 | Cx 8 | #44 | Opt-in fault mirroring (real URIs); ingest of faults as Cx issues | Cx 2, Cx 4 |
 | Cx 9 | #45 | Active tests via `point_write` inside the safety envelope | Cx 6 |
 | Cx 10 | #46 | The commissioning agent (Claude tool use over `/cx/`) | Cx 1–Cx 9, can start after Cx 4 |
+
+**As built (Cx 2):** rungs are Brick-keyed (`commissioning/ladder.py`).
+A point's role comes from its Brick class family (Sensor, Setpoint,
+Command, Status), with Haystack markers as the fallback. Pairs found on
+one piece of equipment are command↔status (fan, pump, run) and
+sensor↔setpoint (zone air temperature, supply air temperature, duct
+static pressure, airflow). When a pair is ambiguous, for example heating
+and cooling setpoints with neither an exact match, the result is
+*inconclusive* rather than a guess. Stale and stuck share one definition
+with `fault_detector` (`baler/his_checks.py`). #5's name-classification
+tests (`points`/`vocabulary`) move to Cx 7, where vendor names are
+matched to spec tags. Their role expectations are ported now, against
+Brick classes.
 
 **Slice 1 deviations from §6.1:**
 

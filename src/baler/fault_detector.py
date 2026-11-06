@@ -22,7 +22,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from baler import json_store, mqtt_util, tracing
+from baler import his_checks, json_store, mqtt_util, tracing
 from baler.faults import (
     close_fault,
     ensure_schema,
@@ -192,14 +192,12 @@ def _evaluate_stuck(ts_conn, point_uri: str, stuck_seconds: float, now: datetime
         """,
         (point_uri, window_start),
     ).fetchone()
-    return n > 0 and distinct_values == 1
+    return his_checks.stuck_verdict(n, distinct_values)
 
 
 def _evaluate_stale(ts_conn, point_uri: str, max_age_seconds: float, now: datetime) -> bool:
     (max_ts,) = ts_conn.execute("SELECT MAX(ts) FROM point_history WHERE point_uri = %s", (point_uri,)).fetchone()
-    if max_ts is None:
-        return False
-    return (now - max_ts).total_seconds() >= max_age_seconds
+    return his_checks.is_stale(max_ts, now, max_age_seconds)
 
 
 def evaluate_his_rules(
