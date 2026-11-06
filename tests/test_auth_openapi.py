@@ -18,12 +18,31 @@ import yaml
 from conftest import assert_matches_schema, load_spec
 from openapi_spec_validator import validate
 
+from baler import broker_accounts
 from baler.auth import ensure_schema
 from baler.auth_api import OPENAPI_SPEC_PATH, make_handler
 from baler.timeseries import connect_pool
 
 GATEWAY_SECRET = "test-gateway-secret"
 GW_HEADERS = {"X-Gateway-Secret": GATEWAY_SECRET}
+
+
+class FakeBroker:
+    """Stands in for mosquitto's dynsec control topic (the real broker is
+    covered by test_broker_accounts.py). Set .fail to make it refuse."""
+
+    def __init__(self):
+        self.batches: list = []
+        self.fail: str | None = None
+
+    def run(self, commands, tolerate_missing=False):
+        self.batches.append(commands)
+        if self.fail:
+            raise broker_accounts.BrokerError(self.fail)
+        return [{"command": c["command"]} for c in commands]
+
+
+FAKE_BROKER = FakeBroker()
 
 
 @pytest.fixture(scope="module")
@@ -49,6 +68,7 @@ def live_server(monkeypatch):
     ts_pool = connect_pool()
     with ts_pool.connection() as conn:
         ensure_schema(conn)
+        broker_accounts.ensure_schema(conn)
         # FK-safe order (children before parents) - see test_auth.py's
         # conn fixture for the same pattern/reasoning.
         conn.execute("""
@@ -65,7 +85,7 @@ def live_server(monkeypatch):
         conn.execute("DELETE FROM sites WHERE org_id IN (SELECT id FROM orgs WHERE name LIKE 'OpenAPI Test Org%')")
         conn.execute("DELETE FROM users WHERE org_id IN (SELECT id FROM orgs WHERE name LIKE 'OpenAPI Test Org%')")
         conn.execute("DELETE FROM orgs WHERE name LIKE 'OpenAPI Test Org%'")
-    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(ts_pool))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(ts_pool, broker=FAKE_BROKER))
     server.daemon_threads = True
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -181,3 +201,53 @@ def test_logout_is_idempotent(live_server):
     assert first.status_code == 204
     second = requests.post(f"{live_server}/logout", headers=auth_headers)
     assert second.status_code == 204
+
+
+@pytest.mark.integration
+def test_broker_account_flow_matches_documented_schemas(live_server, spec):
+    requests.post(f"{live_server}/orgs", json={
+        "name": "OpenAPI Test Org Edge", "admin_email": "admin@openapi-edge.invalid",
+        "admin_password": "correct-horse-battery-staple"})
+    token = requests.post(f"{live_server}/login", json={
+        "email": "admin@openapi-edge.invalid", "password": "correct-horse-battery-staple"}).json()["token"]
+    h = {**GW_HEADERS, "Authorization": f"Bearer {token}"}
+    site = requests.post(f"{live_server}/sites", headers=h,
+                         json={"name": "Edge A", "topic_prefixes": ["fbf/openapi-edge-a"]}).json()
+
+    created = requests.post(f"{live_server}/broker-accounts", headers=h,
+                            json={"site_id": site["id"], "username": "openapi-edge-pi1"})
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert_matches_schema(body, {"$ref": "#/components/schemas/BrokerAccountSecret"}, spec)
+    acct_id = body["account"]["id"]
+
+    listed = requests.get(f"{live_server}/broker-accounts", headers=h).json()
+    assert [a["id"] for a in listed["accounts"]] == [acct_id]
+    assert body["password"] not in str(listed)
+
+    assert requests.post(f"{live_server}/broker-accounts", headers=h, json={
+        "site_id": "nope", "username": "openapi-edge-pi2"}).status_code == 404
+    assert requests.post(f"{live_server}/broker-accounts", headers=h, json={
+        "site_id": site["id"], "username": "Bad Name"}).status_code == 400
+
+    # prefixes change -> the account's role is rebuilt
+    put = requests.put(f"{live_server}/sites/{site['id']}/topic-prefixes", headers=h,
+                       json={"topic_prefixes": ["fbf/openapi-edge-b"]}).json()
+    assert put["broker_accounts_updated"] == 1
+    assert [c["command"] for c in FAKE_BROKER.batches[-1]] == ["deleteRole", "createRole", "addClientRole"]
+
+    FAKE_BROKER.fail = "broker down"
+    try:
+        r = requests.post(f"{live_server}/broker-accounts/{acct_id}/rotate", headers=h)
+        assert r.status_code == 502
+        assert requests.delete(f"{live_server}/broker-accounts/{acct_id}", headers=h).status_code == 502
+        put = requests.put(f"{live_server}/sites/{site['id']}/topic-prefixes", headers=h,
+                           json={"topic_prefixes": ["fbf/openapi-edge-c"]}).json()
+        assert put["topic_prefixes"] == ["fbf/openapi-edge-c"] and "broker_error" in put
+    finally:
+        FAKE_BROKER.fail = None
+
+    rotated = requests.post(f"{live_server}/broker-accounts/{acct_id}/rotate", headers=h)
+    assert rotated.status_code == 200 and rotated.json()["password"] != body["password"]
+    assert requests.delete(f"{live_server}/broker-accounts/{acct_id}", headers=h).status_code == 204
+    assert requests.delete(f"{live_server}/broker-accounts/{acct_id}", headers=h).status_code == 404

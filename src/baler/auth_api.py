@@ -21,7 +21,7 @@ import re
 from http.server import ThreadingHTTPServer
 from urllib.parse import urlparse
 
-from baler import auth, docs_ui, gateway_auth, tracing
+from baler import auth, broker_accounts, docs_ui, gateway_auth, tracing
 from baler.http_handler_base import BaseAPIHandler
 from baler.http_handler_base import respond_error as _respond_error
 from baler.http_handler_base import respond_json as _respond_json
@@ -32,7 +32,10 @@ tracer = tracing.get_tracer(__name__)
 OPENAPI_SPEC_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "auth-api-openapi.yaml")
 
 
-def make_handler(ts_pool):
+def make_handler(ts_pool, broker=None):
+    # Edge-node MQTT accounts (Baler#36); tests pass a fake control channel.
+    broker = broker or broker_accounts.DynsecClient()
+
     class AuthHandler(BaseAPIHandler):
         TRACER = tracer
         ALLOWED_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
@@ -86,6 +89,15 @@ def make_handler(ts_pool):
             if path == "/me/password":
                 self.handle_traced("auth_api.post_me_password", self._change_own_password)
                 return
+            if path == "/broker-accounts":
+                self.handle_traced("auth_api.post_broker_accounts", self._create_broker_account)
+                return
+            m = re.fullmatch(r"/broker-accounts/([^/]+)/rotate", path)
+            if m:
+                account_id = m.group(1)
+                self.handle_traced("auth_api.rotate_broker_account",
+                                   lambda span: self._rotate_broker_account(account_id, span))
+                return
             self.send_response(404)
             self.end_headers()
 
@@ -117,6 +129,9 @@ def make_handler(ts_pool):
                 return
             if path == "/sites":
                 self.handle_traced("auth_api.get_sites", self._list_sites)
+                return
+            if path == "/broker-accounts":
+                self.handle_traced("auth_api.get_broker_accounts", self._list_broker_accounts)
                 return
             self.send_response(404)
             self.end_headers()
@@ -162,6 +177,12 @@ def make_handler(ts_pool):
             if m:
                 user_id = m.group(1)
                 self.handle_traced("auth_api.delete_user", lambda span: self._delete_user(user_id, span))
+                return
+            m = re.fullmatch(r"/broker-accounts/([^/]+)", path)
+            if m:
+                account_id = m.group(1)
+                self.handle_traced("auth_api.delete_broker_account",
+                                   lambda span: self._revoke_broker_account(account_id, span))
                 return
             self.send_response(404)
             self.end_headers()
@@ -278,7 +299,81 @@ def make_handler(ts_pool):
                 _respond_error(self, 404, "no such site in your org")
                 return
             span.set_attribute("site_id", site_id)
+            # The site's edge-node accounts may publish only under its
+            # prefixes: re-apply them. The prefixes are saved either way; a
+            # broker that's down is reported, and the next change retries.
+            try:
+                with ts_pool.connection() as conn:
+                    site["broker_accounts_updated"] = broker_accounts.reapply_site(
+                        conn, broker, caller["org_id"], site_id)
+            except broker_accounts.BrokerError as exc:
+                span.set_attribute("broker_error", str(exc))
+                site["broker_error"] = f"saved, but the broker's account permissions weren't updated: {exc}"
             _respond_json(self, 200, site)
+
+        def _list_broker_accounts(self, span) -> None:
+            caller = self._require_caller(span)
+            if not caller:
+                return
+            with ts_pool.connection() as conn:
+                accounts = broker_accounts.list_accounts(conn, caller["org_id"])
+            _respond_json(self, 200, {"accounts": accounts, "connect": broker_accounts.connect_info()})
+
+        def _broker_call(self, span, fn):
+            """Run fn(conn); broker failures -> 502, unknown site -> 404.
+            Either way the transaction rolls back."""
+            try:
+                with ts_pool.connection() as conn:
+                    return fn(conn)
+            except broker_accounts.BrokerError as exc:
+                span.set_attribute("broker_error", str(exc))
+                _respond_error(self, 502, f"MQTT broker: {exc}")
+            except LookupError as exc:
+                if isinstance(exc, KeyError):
+                    raise
+                _respond_error(self, 404, str(exc.args[0]) if exc.args else "not found")
+            return None
+
+        def _create_broker_account(self, span) -> None:
+            caller = self._require_caller(span)
+            if not caller:
+                return
+            body = self.read_json_body()
+            site_id, username = body["site_id"], body["username"]
+            description = body.get("description")
+            if description is not None and not isinstance(description, str):
+                raise TypeError("description must be a string")
+            result = self._broker_call(span, lambda conn: broker_accounts.create_account(
+                conn, broker, caller["org_id"], site_id, username, description))
+            if result is None:
+                return
+            account, password = result
+            span.set_attribute("username", account["username"])
+            _respond_json(self, 201, {"account": account, "password": password,
+                                      "connect": broker_accounts.connect_info()})
+
+        def _rotate_broker_account(self, account_id: str, span) -> None:
+            caller = self._require_caller(span)
+            if not caller:
+                return
+            result = self._broker_call(span, lambda conn: broker_accounts.rotate_password(
+                conn, broker, caller["org_id"], account_id))
+            if result is None:
+                return
+            account, password = result
+            _respond_json(self, 200, {"account": account, "password": password,
+                                      "connect": broker_accounts.connect_info()})
+
+        def _revoke_broker_account(self, account_id: str, span) -> None:
+            caller = self._require_caller(span)
+            if not caller:
+                return
+            done = self._broker_call(span, lambda conn: broker_accounts.revoke(
+                conn, broker, caller["org_id"], account_id) or True)
+            if not done:
+                return
+            self.send_response(204)
+            self.end_headers()
 
         def _create_user(self, span) -> None:
             caller = self._require_caller(span)
@@ -421,6 +516,7 @@ def main() -> None:
     ts_pool = connect_pool()
     with ts_pool.connection() as conn:
         auth.ensure_schema(conn)
+        broker_accounts.ensure_schema(conn)
 
     server = ThreadingHTTPServer((args.host, args.port), make_handler(ts_pool))
     print(f"auth API listening on {args.host}:{args.port}")

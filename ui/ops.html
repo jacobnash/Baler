@@ -92,6 +92,17 @@
       </table>
     </section>
 
+    <section id="edge-section" hidden>
+      <h2>Edge nodes</h2>
+      <p class="hint">MQTT accounts for Windrows publishing from a site (e.g. a Raspberry Pi). Each may publish only under its site's topic prefixes, plus its own command channel <code>cmd/&lt;username&gt;/#</code>.</p>
+      <div class="toolbar"><button type="button" id="new-edge-btn">Add edge node</button>
+        <span id="edge-status" class="hint"></span></div>
+      <table>
+        <thead><tr><th>Username</th><th>Site</th><th>May publish under</th><th>Password set</th><th></th></tr></thead>
+        <tbody id="edge-body"></tbody>
+      </table>
+    </section>
+
     <section id="users-section" hidden>
       <h2>Users</h2>
       <div class="toolbar"><button type="button" id="new-user-btn">New user</button>
@@ -145,6 +156,23 @@
     </form>
   </dialog>
 
+  <dialog id="edge-dialog">
+    <form id="edge-form" method="dialog">
+      <h3>Add edge node</h3>
+      <label>Site <select id="edge-site" required></select></label>
+      <label>Username <input type="text" id="edge-username" autocomplete="off" required
+        pattern="[a-z0-9][a-z0-9._\-]{2,62}" placeholder="hospital-a-pi1" /></label>
+      <p class="hint">3-63 characters: lowercase letters, digits, . _ -. Its command channel is cmd/&lt;username&gt;/#.</p>
+      <label>Description <input type="text" id="edge-description" autocomplete="off" /></label>
+      <p class="hint">A password is generated and shown once.</p>
+      <p id="edge-error" class="field-error" hidden></p>
+      <menu>
+        <button type="submit" value="save">Create</button>
+        <button type="button" id="edge-cancel">Cancel</button>
+      </menu>
+    </form>
+  </dialog>
+
   <dialog id="secret-dialog">
     <h3 id="secret-title">Password</h3>
     <p class="hint" id="secret-intro"></p>
@@ -184,6 +212,7 @@
   <script src="auth.js"></script>
   <script src="sources.js"></script>
   <script src="users.js"></script>
+  <script src="edge.js"></script>
   <script src="ops.js"></script>
 </body>
 </html>

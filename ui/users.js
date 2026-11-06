@@ -317,6 +317,7 @@ async function initUsers() {
   $("change-password-btn").hidden = me.kind !== "session";
   if (me.role !== "admin") return;
   initSources(); // sources.js: the source registry, admin-only like Users
+  initEdge(); // edge.js: edge-node broker accounts, admin-only too
   $("users-section").hidden = false;
   try {
     await loadUsers();

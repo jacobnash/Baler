@@ -244,7 +244,19 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Site"
+                allOf:
+                  - $ref: "#/components/schemas/Site"
+                  - type: object
+                    properties:
+                      broker_accounts_updated:
+                        type: integer
+                        description: The site's edge-node broker accounts re-applied with the new prefixes.
+                      broker_error:
+                        type: string
+                        description: >-
+                          Set when the prefixes were saved but the MQTT broker couldn't be
+                          updated; the site's edge nodes keep their old permissions until the
+                          next change.
         "400":
           description: A topic prefix overlaps one owned by another org, or the body is malformed.
         "401":
@@ -475,6 +487,94 @@ paths:
           description: The caller is an API key.
         "401":
           description: Current password wrong, or no valid token.
+  /broker-accounts:
+    get:
+      operationId: listBrokerAccounts
+      tags: [Edge nodes]
+      summary: The org's edge-node MQTT broker accounts
+      description: >-
+        admin-only. Per-site accounts for Windrows publishing from outside this
+        host. Each may publish only under its site's topic prefixes and use its
+        own command channel `cmd/<username>/#`. Passwords are never returned here.
+      responses:
+        "200":
+          description: Accounts, and where nodes connect.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accounts: { type: array, items: { $ref: "#/components/schemas/BrokerAccount" } }
+                  connect: { $ref: "#/components/schemas/BrokerConnect" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createBrokerAccount
+      tags: [Edge nodes]
+      summary: Create an edge-node broker account for a site
+      description: admin-only. The site needs at least one topic prefix. The generated password is returned once.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [site_id, username]
+              properties:
+                site_id: { type: string }
+                username: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{2,62}$" }
+                description: { type: [string, "null"] }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BrokerAccountSecret" }
+        "400":
+          description: Bad or taken username, or the site has no topic prefix.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No such site in the caller's org.
+        "502":
+          description: The MQTT broker refused or didn't answer; nothing was created.
+  /broker-accounts/{id}/rotate:
+    post:
+      operationId: rotateBrokerAccount
+      tags: [Edge nodes]
+      summary: Give an edge node a new password
+      description: admin-only. The old password stops working immediately; returned once.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Rotated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BrokerAccountSecret" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No such account in the caller's org.
+        "502":
+          description: The MQTT broker refused or didn't answer; the password is unchanged.
+  /broker-accounts/{id}:
+    delete:
+      operationId: revokeBrokerAccount
+      tags: [Edge nodes]
+      summary: Revoke an edge node's broker account
+      description: admin-only. Deletes it from the broker, which disconnects the node.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204":
+          description: Revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No such account in the caller's org.
+        "502":
+          description: The MQTT broker refused or didn't answer; the account is unchanged.
   /openapi.yaml:
     get:
       operationId: getOpenApiSpec
@@ -520,6 +620,30 @@ components:
         revoked_at: { type: ["string", "null"], format: date-time }
         created_at: { type: string, format: date-time }
         last_used_at: { type: ["string", "null"], format: date-time }
+    BrokerAccount:
+      type: object
+      required: [id, site_id, username, created_at]
+      properties:
+        id: { type: string }
+        site_id: { type: string }
+        username: { type: string }
+        description: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        rotated_at: { type: [string, "null"], format: date-time }
+    BrokerConnect:
+      type: object
+      description: Where an edge node connects (BALER_MQTT_PUBLIC_* in .env).
+      properties:
+        host: { type: [string, "null"] }
+        port: { type: integer }
+        tls_port: { type: [integer, "null"] }
+    BrokerAccountSecret:
+      type: object
+      required: [account, password]
+      properties:
+        account: { $ref: "#/components/schemas/BrokerAccount" }
+        password: { type: string, description: Shown once. }
+        connect: { $ref: "#/components/schemas/BrokerConnect" }
     Error:
       type: object
       required: [error]

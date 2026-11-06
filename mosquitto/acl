@@ -13,5 +13,10 @@ pattern readwrite cmd/%u/#
 # The trusted central stack (mqtt_listener, fault_detector,
 # derivation_engine, and integration tests standing in for them) - same
 # Docker network as today's anonymous access, just now authenticated.
+#
+# It also manages edge-node accounts through the dynamic-security plugin's
+# control topic (`#` doesn't match `$`-topics, so it's granted explicitly).
+# Edge accounts themselves aren't in this file: the plugin decides for them.
 user baler
 topic readwrite #
+topic readwrite $CONTROL/dynamic-security/#

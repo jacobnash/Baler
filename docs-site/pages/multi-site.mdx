@@ -146,6 +146,42 @@ just telemetry, are both done:
   client publishing to `cmd/site-b/...` is silently dropped by the broker
   — a subscriber on `cmd/site-b/#` never receives it.
 
+## Edge nodes: per-site broker accounts
+
+A Windrow running *at* a site (a Raspberry Pi on the building network)
+connects to this broker from outside the Docker host. It gets its own
+account, made in **Ops → Edge nodes** (admin-only; API:
+`POST /auth/broker-accounts`, see the auth API's OpenAPI spec):
+
+- **One account per node, tied to one site.** It may publish only under
+  that site's topic prefixes (`<prefix>` and `<prefix>/…`; a prefix is a
+  whole topic level, so `fbf/hospital-a` doesn't cover `fbf/hospital-ab`),
+  and publish/subscribe only on its own `cmd/<username>/#`. It can't read
+  telemetry at all, not even its own site's. The broker enforces this
+  (mosquitto's dynamic-security plugin), so one site's node can't write
+  into another site's points.
+- **Use the Windrow's `--site-id` as the username** - Windrow's command
+  channel is `cmd/{site-id}/{instance}/#`, which is the account's
+  `cmd/<username>/#`. Its `--topic-prefix` must sit under the site's prefix.
+- **The password is generated and shown once**, with where to connect
+  (`BALER_MQTT_PUBLIC_HOST`/`_PORT`/`_TLS_PORT` in `.env`). Baler stores
+  only the account's metadata; the broker keeps a salted hash.
+  **New password** rotates it (the old one stops working at once);
+  **Revoke** deletes the account and disconnects the node.
+- **Changing a site's topic prefixes re-applies its nodes' permissions.**
+  If the broker is unreachable at that moment the prefixes are still saved
+  and the response says so (`broker_error`); the next change retries.
+
+How it fits with the existing accounts: `MOSQUITTO_USERS` (the `baler`
+backend account and any hand-added ones) stay in the password/ACL files.
+The plugin's own file, `dynamic-security.json` on the `mosquitto-data`
+volume, holds only edge accounts; a client it doesn't know falls through
+to the files. The `baler` account manages the plugin over
+`$CONTROL/dynamic-security/v1` (granted in `mosquitto/acl`), so there's no
+separate broker admin secret. Back up the `mosquitto-data` volume with the
+rest: losing that file loses the edge accounts (re-create them; Ops still
+lists them, and revoking tolerates an account the broker no longer has).
+
 ## MQTT delivery guarantees
 
 This matters more once sites are remote and links aren't as reliable as

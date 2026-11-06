@@ -142,6 +142,14 @@ check("user lifecycle routes: admin, except changing your own password", () => {
     assert.equal(policy.resolveRoute("POST", "/auth/me/password").minRole, "viewer");
 });
 
+check("edge-node broker accounts: admin only", () => {
+    assert.equal(policy.resolveRoute("GET", "/auth/broker-accounts").minRole, "admin");
+    assert.equal(policy.resolveRoute("POST", "/auth/broker-accounts").minRole, "admin");
+    assert.equal(policy.resolveRoute("POST", "/auth/broker-accounts/a1/rotate").minRole, "admin");
+    assert.equal(policy.resolveRoute("DELETE", "/auth/broker-accounts/a1").minRole, "admin");
+    assert.equal(policy.resolveRoute("PUT", "/auth/broker-accounts/a1"), null);
+});
+
 check("per-user session cutoff: parse denylist rows, reject older sessions only", () => {
     assert.deepEqual(policy.parseUserCutoff("user:abc:1700000000"), { key: "user:abc", epoch: 1700000000 });
     assert.equal(policy.parseUserCutoff("3f2a9c"), null);

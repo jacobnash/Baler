@@ -95,7 +95,8 @@ button.linkish {
 }
 
 /* Users section (users.js) */
-#users-section td.actions { white-space: nowrap; }
+#users-section td.actions, #edge-section td.actions { white-space: nowrap; }
+#secret-intro { white-space: pre-line; }
 .badge.role-admin { --badge-color: var(--color-critical); }
 .badge.role-operator { --badge-color: var(--color-warning); }
 .badge.role-viewer { --badge-color: var(--muted); }
