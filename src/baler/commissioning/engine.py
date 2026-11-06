@@ -39,9 +39,11 @@ def freshness_statement(now: datetime, window_h: float, n: int, fresh: int, stal
 
 def run(store, history: History, scopes: list[Scope], now: datetime, window_h: float = DEFAULT_WINDOW_HOURS,
         templates=None, ladder_config: dict | None = None,
-        progress: Callable[[dict], None] | None = None) -> tuple[dict, list[dict]]:
+        progress: Callable[[dict], None] | None = None, gl36_settings: dict | None = None) -> tuple[dict, list[dict]]:
     """(summary, results). `progress`, if given, is told the stage and how
-    many equipment are done; it must be cheap (it's called per equipment)."""
+    many equipment are done; it must be cheap (it's called per equipment).
+    `gl36_settings` (project settings `gl36`) adds ConStrain sequence items
+    as gl36:<item> results (Cx 3, needs the cx-gl36 extra)."""
     def report(stage: str, done: int = 0, total: int | None = None, points: int | None = None) -> None:
         if progress is not None:
             progress({"stage": stage, "equipment_done": done, "equipment_total": total, "points": points})
@@ -68,6 +70,11 @@ def run(store, history: History, scopes: list[Scope], now: datetime, window_h: f
             results.extend(checks.template_completeness(e, templates))
         else:
             without_template.append({"id": e["id"], "brickClass": e["brickClass"]})
+    if gl36_settings:
+        from baler.commissioning import gl36  # pandas only when a project asks for it
+
+        report("gl36", len(equips), len(equips), len(point_ids))
+        results.extend(gl36.run(equips, history, now, window, gl36_settings))
 
     by_status = {s: 0 for s in checks.STATUSES}
     by_check: dict[str, dict[str, int]] = {}

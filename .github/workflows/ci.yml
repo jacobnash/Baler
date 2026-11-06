@@ -32,8 +32,9 @@ jobs:
       - run: pip install openhay-wheel/openhay-*.whl
       # Not the `haystack` extra: that's openhay alone, already installed from
       # the cached wheel, and pip would rebuild it from git (a different URL).
-      # Without openhay tests/test_haystack_api.py skips.
-      - run: pip install -e ".[dev,validate]"
+      # Without openhay tests/test_haystack_api.py skips; without the
+      # cx-gl36 extra (pandas) tests/test_commissioning_gl36.py does.
+      - run: pip install -e ".[dev,validate,cx-gl36]"
       - run: pytest -m "not integration"
       - run: openapi-spec-validator openapi.yaml fault-api-openapi.yaml derivation-api-openapi.yaml validate-api-openapi.yaml auth-api-openapi.yaml haystack-api-openapi.yaml commissioning-api-openapi.yaml
       # Both blocking (PLAN.md Guardrails): ruff went 63 -> 0 and mypy

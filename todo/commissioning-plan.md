@@ -73,7 +73,7 @@ Each slice is a GitHub issue, and each is independently mergeable.
 |---|---|---|---|
 | Cx 1 ✅ | #37 | Foundation: `src/baler/commissioning/`; `read_latest_many` moved to `timeseries`; Xeto matching lifted into `hisquery`; scoped inventory; SHACL expected-point templates (6 classes); `cx_projects`/`cx_phases`/`cx_events`/`cx_runs`/`cx_results`; `commissioning_api` :8009 with project/phase/inventory/run endpoints; rung-1 existence; compose, gateway, policy, OpenAPI | none |
 | Cx 2 ✅ | #38 | Ladder rungs 1–3 over trends; stale/stuck predicates shared with `fault_detector`; port #5 ladder and points tests and `cx_fixtures` | Cx 1 |
-| Cx 3 | #39 | PNNL ConStrain spike: GL36 items over Baler history, `gl36:<item>` results | Cx 1 |
+| Cx 3 ✅ | #39 | PNNL ConStrain spike: GL36 items over Baler history, `gl36:<item>` results. As built: vendored subset (ConStrain can't co-install - rdflib 6 pin), `commissioning/gl36.py`, `cx-gl36` extra; write-up `todo/cx3-constrain-gl36-spike.md` | Cx 1 |
 | Cx 4 | #40 | Issues log (close on evidence), accepted risks, CSV/JSON import of external issues and punch items, export | Cx 1 |
 | Cx 5 | #41 | UI: `cx.html`, phase bar, runs grid, tree badge, printable report | Cx 1 |
 | Cx 6 | #42 | Start-up / power-on and functional test procedures as data; passive execution on demand, then scheduled; run diff (reconcile) | Cx 2, Cx 4 |

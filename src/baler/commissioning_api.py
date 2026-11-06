@@ -29,7 +29,7 @@ from http.server import ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from baler import docs_ui, gateway_auth, tracing
-from baler.commissioning import db, engine, inventory, phases, runner
+from baler.commissioning import db, engine, gl36, inventory, phases, runner
 from baler.commissioning import templates as tpl
 from baler.http_handler_base import BaseAPIHandler, respond_error, respond_json
 from baler.remote_store import RemoteStore
@@ -58,6 +58,8 @@ def _check_settings(settings) -> dict:
         raise TypeError("settings must be an object")
     if "window_hours" in settings:
         engine.window_hours(settings["window_hours"])
+    if "gl36" in settings:
+        gl36.validate_settings(settings["gl36"])
     return settings
 
 
@@ -315,7 +317,9 @@ def make_handler(repo, clock=None, worker=None):
             sub = claims.get("sub")
             email = repo.user_email(sub)
             repo.add_event(pid, "run.create", sub, email, {"run_id": run["id"], "phase": phase, "window_hours": wh}, now_fn())
-            worker.submit(runner.RunJob(run["id"], pid, phase, scopes, started, wh, sub, email))
+            gl36_settings = (p.get("settings") or {}).get("gl36")
+            worker.submit(runner.RunJob(run["id"], pid, phase, scopes, started, wh, sub, email,
+                                        {"gl36_settings": gl36_settings} if gl36_settings else {}))
             span.set_attribute("run_id", run["id"])
             respond_json(self, 202, db.public_run(run))
 

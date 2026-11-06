@@ -23,6 +23,11 @@ integrations). This file is gotchas only — don't duplicate those.
   (point identity). See `deploy/MIGRATING-TO-BALER.md` before touching any
   of these. A blanket `TIMBERDOODLE`->`BALER` find/replace will silently
   break the fallbacks (it did once).
+- **`commissioning/vendor_constrain/` is vendored PNNL ConStrain (BSD-2),
+  not ours to restyle**: `verify()` bodies stay upstream's so results mean
+  what they mean in ConStrain. `constrain` itself can't be a dependency
+  (it pins rdflib 6). `tests/test_commissioning_gl36.py` skips without
+  pandas (`pip install -e ".[cx-gl36]"`); CI's unit job installs it.
 - **No Makefile/justfile.** Every command is literally
   `python -m baler.<module>` or `docker compose ...` — check
   `docker-compose.yml`'s `command:` fields or a module's

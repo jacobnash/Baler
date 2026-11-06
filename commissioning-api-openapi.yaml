@@ -374,6 +374,25 @@ components:
       type: object
       properties:
         window_hours: { type: number, exclusiveMinimum: 0, maximum: 744 }
+        gl36:
+          type: object
+          description: >-
+            Opt-in sequence verification with vendored PNNL ConStrain items
+            (Cx 3, Baler#39; needs the server installed with the `cx-gl36`
+            extra, else 400). Each key enables one item - `zone_deadband`,
+            `sat_reset`, `chw_reset`, `hw_reset` - and holds its design
+            parameters (ConStrain names, deg C unless `unit` is `F`), plus
+            optional `step_minutes` (resampling grid, default 5). See
+            todo/cx3-constrain-gl36-spike.md.
+          additionalProperties:
+            type: object
+            properties:
+              unit: { type: string, enum: [C, F] }
+              step_minutes: { type: number, minimum: 1, maximum: 60 }
+            additionalProperties: { type: number }
+          example:
+            hw_reset: { unit: F, temperature_air_outdoor_min: 20, temperature_air_outdoor_max: 60,
+                        temperature_water_hot_setpoint_max: 180, temperature_water_hot_setpoint_min: 140 }
       additionalProperties: true
     PhaseInput:
       type: object
@@ -469,7 +488,7 @@ components:
           type: [object, "null"]
           description: While running, roughly every 2 s; null otherwise
           properties:
-            stage: { type: string, enum: [starting, inventory, history, checks] }
+            stage: { type: string, enum: [starting, inventory, history, checks, gl36] }
             equipment_done: { type: integer }
             equipment_total: { type: [integer, "null"] }
             points: { type: [integer, "null"] }
@@ -512,8 +531,9 @@ components:
           description: >-
             `exists` (rung 1, per point), `live` (rung 2, per sensor),
             `pair:<key>` (rung 3, subject `a|b`), `ladder` (per equipment:
-            evidence.highest_rung_passed, rungs, fell_to_rung), or
-            `template:<requirement>`.
+            evidence.highest_rung_passed, rungs, fell_to_rung),
+            `template:<requirement>`, or `gl36:<item>` (per equipment, when
+            the project enables ConStrain items in settings.gl36).
         subject: { type: string, description: Point or equipment the result is about }
         status: { $ref: "#/components/schemas/Status" }
         severity: { type: [string, "null"], enum: [required, expected, optional, null] }
