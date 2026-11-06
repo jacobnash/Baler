@@ -399,8 +399,10 @@ def _scheduled_projects(repo) -> list[dict]:
 class Scheduler:
     """A daemon thread in commissioning_api: once a minute, schedule_tick."""
 
-    def __init__(self, repo, worker, clock: Callable[[], datetime], every_s: float = 60.0):
+    def __init__(self, repo, worker, clock: Callable[[], datetime], every_s: float = 60.0,
+                 extra: list[Callable[[datetime], object]] | None = None):
         self.repo, self.worker, self.clock, self.every_s = repo, worker, clock, every_s
+        self.extra = extra or []  # e.g. the active-test sweeper (Cx 9)
         self._stop = threading.Event()
         threading.Thread(target=self._loop, name="cx-schedule", daemon=True).start()
 

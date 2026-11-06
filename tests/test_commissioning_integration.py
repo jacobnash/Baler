@@ -274,3 +274,22 @@ def test_mirrored_faults_round_trip(repo):
     finally:
         with repo.pool.connection() as conn:
             conn.execute("DELETE FROM faults WHERE point_uri = %s", (uri,))
+
+
+def test_cx_levels_in_point_write_levels(repo):
+    """Cx 9 (#45) on PgRepo: the sweeper's view of Cx-owned levels in the
+    shared point_write_levels, a person's untouched. Removes its rows."""
+    from baler import point_write
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    uri = f"urn:point:cx-it-active/{now.timestamp()}"
+    try:
+        with repo.pool.connection() as conn:
+            point_write.record_level(conn, uri, 8, 1, "cx:run-1", "it", now)
+            point_write.record_level(conn, uri, 10, 0, "alice@example.com", "it")
+        mine = [x for x in repo.cx_levels() if x[0] == uri]
+        assert mine == [(uri, 8, "cx:run-1", now)]
+        assert set(repo.point_levels(uri)) == {"8", "10"}
+    finally:
+        with repo.pool.connection() as conn:
+            conn.execute("DELETE FROM point_write_levels WHERE point_uri = %s", (uri,))

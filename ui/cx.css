@@ -61,3 +61,5 @@ label.inline { display: inline-flex; gap: 0.3rem; align-items: center; }
 
 /* `hidden` must win over the toolbar/label display rules above (auth.js explains why it otherwise loses) */
 .cx-main [hidden], .cx-drawer[hidden] { display: none !important; }
+button.danger { border-color: var(--color-critical); color: var(--color-critical); }
+.plan-table td { font-size: 0.8rem; }

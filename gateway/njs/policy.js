@@ -133,6 +133,16 @@ const ROUTES = [
   // Cx 8 (Baler#44): mirrored faults; FDD faults into the issues log
   ["GET",    /^\/cx\/projects\/[^/]+\/faults$/,                 "commissioning", "viewer"],
   ["POST",   /^\/cx\/projects\/[^/]+\/faults\/ingest$/,          "commissioning", "operator"],
+  // Cx 9 (Baler#45): active tests command equipment - admin. Aborting one
+  // is the safe direction, so an operator can pull that cord too. The
+  // backend re-checks admin, and BALER_CX_ALLOW_WRITES gates it all.
+  ["GET",    /^\/cx\/active\/status$/,                         "commissioning", "viewer"],
+  ["POST",   /^\/cx\/active\/kill$/,                           "commissioning", "admin"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/active-runs$/,            "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/active-runs$/,            "commissioning", "admin"],
+  ["GET",    /^\/cx\/active-runs\/[^/]+$/,                     "commissioning", "viewer"],
+  ["POST",   /^\/cx\/active-runs\/[^/]+\/confirm$/,             "commissioning", "admin"],
+  ["POST",   /^\/cx\/active-runs\/[^/]+\/abort$/,               "commissioning", "operator"],
 
   // auth_api - POST /auth/login has its own exact-match nginx location
   // with no js_access at all (can't require a token to get a token), so

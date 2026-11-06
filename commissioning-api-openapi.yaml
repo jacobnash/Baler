@@ -37,6 +37,7 @@ tags:
   - name: Procedures
   - name: Spec
   - name: Faults
+  - name: Active tests
 paths:
   /projects:
     get:
@@ -1273,6 +1274,160 @@ paths:
                   outside_project: { type: integer }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /active/status:
+    get:
+      tags: [Active tests]
+      operationId: getCxActiveStatus
+      summary: Whether this deployment allows active tests, and which are running
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [writes_allowed, executor, level, running]
+                properties:
+                  writes_allowed: { type: boolean, description: "BALER_CX_ALLOW_WRITES=1 on commissioning_api" }
+                  executor: { type: boolean, description: A point_write route is configured }
+                  level: { type: integer, description: The priority Cx writes at (8, manual operator) }
+                  running: { type: array, items: { type: string } }
+  /active/kill:
+    post:
+      tags: [Active tests]
+      operationId: killCxActiveRuns
+      summary: Kill switch - abort every running active test in your org and relinquish its writes now (admin)
+      responses:
+        "200":
+          description: What was stopped and relinquished
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  aborted: { type: array, items: { type: string } }
+                  relinquished: { type: array, items: { type: string } }
+        "403": { description: Not an admin }
+  /projects/{id}/active-runs:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Active tests]
+      operationId: listCxActiveRuns
+      summary: The project's active test runs, newest first
+      responses:
+        "200":
+          description: Active runs
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ActiveRun" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Active tests]
+      operationId: planCxActiveRun
+      summary: Plan an active test - the dry run (admin)
+      description: >-
+        Lists every write (point, value, priority 8, hold, expires_at - never
+        after the window end) and commands nothing. `command_response` is
+        rung 4: for each command/status pair on the equipment, command on
+        and off and expect the status to follow within response_minutes.
+        `custom` takes steps: [{writes: [{point, value}], hold_minutes,
+        expect: [{point, equals | min | max}], within_minutes}]. Written
+        points must be this equipment's and marked `writable`. The window
+        is at most 8 h.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [equip_uri, window_start, window_end]
+              properties:
+                equip_uri: { type: string }
+                window_start: { type: string, format: date-time }
+                window_end: { type: string, format: date-time }
+                kind: { type: string, enum: [command_response, custom], default: command_response }
+                response_minutes: { type: number }
+                steps: { type: array, items: { type: object } }
+      responses:
+        "201":
+          description: The planned run (status planned)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/ActiveRun" }
+                  - type: object
+                    properties:
+                      writes_allowed: { type: boolean }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: Not an admin }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /active-runs/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Active tests]
+      operationId: getCxActiveRun
+      summary: An active run, with every write and relinquish it made
+      responses:
+        "200":
+          description: The run
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActiveRun" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /active-runs/{id}/confirm:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Active tests]
+      operationId: confirmCxActiveRun
+      summary: Start a planned run (admin, inside its window, with the switch on)
+      description: >-
+        The body repeats the run's id, as the confirmation of the plan.
+        403 when BALER_CX_ALLOW_WRITES isn't 1; 409 outside the window or
+        if the run isn't planned. Captures the before-state, then runs in
+        the background: each step writes, watches, and relinquishes in a
+        finally; the run relinquishes everything it wrote in an outer
+        finally, and a sweeper relinquishes any Cx level left behind.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: string, description: This run's id }
+      responses:
+        "202":
+          description: Confirmed and starting
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActiveRun" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: "Not an admin, or active tests are switched off" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { description: No point_write route configured }
+  /active-runs/{id}/abort:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Active tests]
+      operationId: abortCxActiveRun
+      summary: Kill switch for one run (operator) - a running run stops and relinquishes; a planned one is cancelled
+      responses:
+        "202":
+          description: The run
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActiveRun" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /templates:
     get:
       tags: [Templates]
@@ -1736,6 +1891,41 @@ components:
         decided_at: { type: [string, "null"], format: date-time }
         written_back: { type: [object, "null"] }
         created_at: { type: string, format: date-time }
+    ActiveRun:
+      type: object
+      required: [id, project_id, equip_uri, kind, steps, plan, status, window_start, window_end, writes, results]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        equip_uri: { type: string }
+        kind: { type: string, enum: [command_response, custom] }
+        steps: { type: array, items: { type: object } }
+        plan:
+          type: array
+          description: The dry run - every write
+          items:
+            type: object
+            properties:
+              step: { type: string }
+              point: { type: string }
+              value: { type: number }
+              level: { type: integer }
+              hold_minutes: { type: number }
+              expires_at: { type: string, format: date-time }
+        status: { type: string, enum: [planned, confirmed, running, completed, failed, aborted, expired, cancelled] }
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        confirmed_by: { type: [string, "null"] }
+        confirmed_at: { type: [string, "null"], format: date-time }
+        started_at: { type: [string, "null"], format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+        before: { type: [object, "null"], description: "latest values and Baler's priority arrays before the first write" }
+        writes: { type: array, items: { type: object }, description: Every write and relinquish, in order }
+        results: { type: array, items: { type: object } }
+        error: { type: [string, "null"] }
+        abort_requested: { type: boolean }
     IssueSeverity:
       type: [string, "null"]
       enum: [critical, major, minor, info, null]
@@ -1808,6 +1998,7 @@ components:
                   equip_uri: { type: string }
                   results: { type: array, items: { $ref: "#/components/schemas/Result" } }
         issues: { type: array, items: { type: object } }
+        active_runs: { type: array, items: { type: object }, description: "Cx 9: active tests and every write they made" }
     Template:
       type: object
       required: [id, label, target_class, requirements]

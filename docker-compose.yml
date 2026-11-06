@@ -306,6 +306,9 @@ services:
       # Cx works.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       BALER_CX_MODEL: ${BALER_CX_MODEL:-}
+      # Active tests (Cx 9) command equipment through point_write only when
+      # this is 1. Blank/unset: planning (the dry run) works, nothing is written.
+      BALER_CX_ALLOW_WRITES: ${BALER_CX_ALLOW_WRITES:-}
       # Mirrored faults (Cx 8) fire webhooks.json's webhooks, like fault_detector
       BALER_DATA_DIR: /data
     extra_hosts: *host-gateway

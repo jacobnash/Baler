@@ -108,6 +108,22 @@
         </div>
       </section>
 
+      <section id="active-section">
+        <h2>Active tests</h2>
+        <p class="hint" id="active-status">…</p>
+        <div class="toolbar" data-min-role="admin">
+          <label>Equipment <select id="active-equip"></select></label>
+          <label>Window <input type="number" id="active-hours" min="0.25" max="8" step="0.25" value="1" /> h from now</label>
+          <button type="button" id="active-plan-btn">Plan (dry run)</button>
+          <button type="button" id="active-kill-btn" class="danger">Kill switch</button>
+        </div>
+        <table>
+          <thead><tr><th>Planned</th><th>Equipment</th><th>Status</th><th>Writes</th><th>Result</th><th></th></tr></thead>
+          <tbody id="active-body"></tbody>
+        </table>
+        <div id="active-detail" class="hint"></div>
+      </section>
+
       <section id="spec-section">
         <h2>Spec and alignment</h2>
         <p class="hint">Equipment schedules and point lists from the design documents. CSV/XLSX rows you import are accepted; a PDF is read by Claude into proposals, each citing its page, that someone must accept before they count.</p>
@@ -294,5 +310,6 @@
   <script src="cx_issues.js"></script>
   <script src="cx_procedures.js"></script>
   <script src="cx_spec.js"></script>
+  <script src="cx_active.js"></script>
 </body>
 </html>

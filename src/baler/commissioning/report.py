@@ -42,7 +42,8 @@ def equipment_summary(results: list[dict]) -> dict[str, dict]:
     return out
 
 
-def build(project: dict, run: dict, results: list[dict], issues: list[dict] | None = None) -> dict:
+def build(project: dict, run: dict, results: list[dict], issues: list[dict] | None = None,
+          active_runs: list[dict] | None = None) -> dict:
     summary = equipment_summary(results)
     equipment = []
     for equip in sorted(summary, key=lambda e: (ORDER[summary[e]["status"]], e)):
@@ -55,6 +56,7 @@ def build(project: dict, run: dict, results: list[dict], issues: list[dict] | No
         "run": run,
         "equipment": equipment,
         "issues": issues or [],
+        "active_runs": active_runs or [],
     }
 
 
@@ -108,6 +110,19 @@ def html(report: dict, title: str = "Commissioning report") -> str:
                         for i in report["issues"])
         issues = ("<h2>Issues log</h2><table><tr><th>Status</th><th>Issue</th><th>Equipment</th><th>Check</th></tr>"
                   f"{irows}</table>")
+    active = ""
+    if report.get("active_runs"):
+        blocks = []
+        for a in report["active_runs"]:
+            cmds = "".join(f'<tr><td>{escape(str(w.get("at", "")))}</td><td>{escape(str(w.get("action", "")))}</td>'
+                           f'<td>{escape(str(w.get("point", "")))}</td><td>{escape(str(w.get("value", "")))}</td>'
+                           f'<td>{escape(str(w.get("level", "")))}</td></tr>' for w in a.get("writes") or [])
+            res = "; ".join(f'{escape(str(x.get("title")))}: {escape(str(x.get("status")))}' for x in a.get("results") or [])
+            blocks.append(f'<h3>{escape(a["equip_uri"])} - {escape(a["kind"])} {_status(a["status"]) if a["status"] in ORDER else escape(a["status"])}</h3>'
+                          f'<p class="muted">confirmed by {escape(str(a.get("confirmed_by") or "-"))} · {res}</p>'
+                          '<table><tr><th>When</th><th>Action</th><th>Point</th><th>Value</th><th>Priority</th></tr>'
+                          f'{cmds}</table>')
+        active = "<h2>Active tests - everything commanded</h2>" + "".join(blocks)
     window = f'{escape(str(run.get("window_start")))} to {escape(str(run.get("window_end")))}'
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>{escape(title)} - {escape(p["name"])}</title>
@@ -123,6 +138,7 @@ Window {window} · finished {escape(str(run.get("finished_at") or "-"))}</p>
 <h2>Equipment</h2>
 <table><tr><th>Equipment</th><th>Verdict</th><th>Results</th></tr>{"".join(rows)}</table>
 {issues}
+{active}
 <h2>Findings</h2>
 {"".join(details)}
 </body></html>

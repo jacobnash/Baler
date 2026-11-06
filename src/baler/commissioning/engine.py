@@ -104,7 +104,9 @@ def run(store, history: History, scopes: list[Scope], now: datetime, window_h: f
         if r["check_id"] == "ladder":
             histogram[str(r["evidence"]["highest_rung_passed"])] += 1
     summary = {
-        "ladder": {"highest_rung_passed": histogram, "rungs": {"1": "existence", "2": "liveness", "3": "responsiveness"}},
+        "ladder": {"highest_rung_passed": histogram, "rungs": {"1": "existence", "2": "liveness", "3": "responsiveness",
+                                                              "4": "command response: an active test (Cx 9) where writes are allowed; "
+                                                                   "otherwise rung 3's command/status check over history"}},
         "equipment": len(equips),
         "points": len(point_ids),
         "equipment_with_template": len(equips) - len(without_template),

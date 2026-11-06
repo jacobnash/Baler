@@ -33,6 +33,7 @@ from urllib.parse import parse_qs, urlparse
 
 from baler import docs_ui, gateway_auth, tracing
 from baler.commissioning import (
+    active,
     db,
     economizer,
     engine,
@@ -60,7 +61,7 @@ PORT = 8009
 RUN_STATEMENT_TIMEOUT = "10min"
 
 _PROJECT = re.compile(r"/projects/([^/]+)")
-_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest)")
+_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs)")
 _PROJECT_ISSUES = re.compile(r"/projects/([^/]+)/issues/(import|export)")
 _RUN_ISSUES = re.compile(r"/runs/([^/]+)/issues")
 _ISSUE = re.compile(r"/issues/([^/]+)")
@@ -74,6 +75,8 @@ _PROJECT_SPEC = re.compile(r"/projects/([^/]+)/(spec|spec/import|spec/extract|sp
 _SPEC_DOC = re.compile(r"/spec-documents/([^/]+)")
 _SPEC_ITEM = re.compile(r"/spec-items/([^/]+)")
 _MAPPING = re.compile(r"/mappings/([^/]+)")
+_ACTIVE_RUN = re.compile(r"/active-runs/([^/]+)")
+_ACTIVE_RUN_SUB = re.compile(r"/active-runs/([^/]+)/(confirm|abort)")
 _RUN = re.compile(r"/runs/([^/]+)")
 _RUN_REPORT = re.compile(r"/runs/([^/]+)/report")
 
@@ -105,9 +108,11 @@ def _check_settings(settings) -> dict:
 engine_kwargs = runner.engine_kwargs
 
 
-def make_handler(repo, clock=None, worker=None):
+def make_handler(repo, clock=None, worker=None, executor=None):
     now_fn = clock or (lambda: datetime.now(timezone.utc))
     worker = worker or runner.RunWorker(repo, now_fn)
+    # Active tests (Cx 9) need a point_write route; without an executor
+    # (no MQTT commander configured) planning works and confirming is 503.
 
     class CommissioningHandler(BaseAPIHandler):
         TRACER = tracer
@@ -161,6 +166,10 @@ def make_handler(repo, clock=None, worker=None):
                 return "equipment_status", self._equipment_status
             if path == "/procedure-templates" and method == "GET":
                 return "procedure_templates", self._procedure_templates
+            if path == "/active/status" and method == "GET":
+                return "active_status", self._active_status
+            if path == "/active/kill" and method == "POST":
+                return "active_kill", self._active_kill
             m = _PROJECT_SUB.fullmatch(path)
             if m:
                 pid, sub = m.group(1), m.group(2)
@@ -179,6 +188,8 @@ def make_handler(repo, clock=None, worker=None):
                     ("POST", "procedures"): ("create_procedure", self._create_procedure),
                     ("GET", "faults"): ("project_faults", self._project_faults),
                     ("POST", "faults/ingest"): ("ingest_faults", self._ingest_faults),
+                    ("GET", "active-runs"): ("list_active_runs", self._list_active_runs),
+                    ("POST", "active-runs"): ("plan_active_run", self._plan_active_run),
                 }
                 hit = table.get((method, sub))
                 return None if hit is None else (hit[0], lambda span, claims: hit[1](span, claims, pid))
@@ -193,6 +204,8 @@ def make_handler(repo, clock=None, worker=None):
                                    ("GET", "export"): ("export_issues", self._export_issues)}),
                 (_ISSUE_SUB, {("GET", "events"): ("issue_events", self._issue_events),
                               ("POST", "risk"): ("accept_risk", self._accept_risk)}),
+                (_ACTIVE_RUN_SUB, {("POST", "confirm"): ("confirm_active_run", self._confirm_active_run),
+                                   ("POST", "abort"): ("abort_active_run", self._abort_active_run)}),
             ):
                 m = rx.fullmatch(path)
                 if m:
@@ -225,6 +238,7 @@ def make_handler(repo, clock=None, worker=None):
                 (_SPEC_DOC, {"GET": ("get_spec_document", self._get_spec_document)}),
                 (_SPEC_ITEM, {"PATCH": ("patch_spec_item", self._patch_spec_item)}),
                 (_MAPPING, {"DELETE": ("undo_mapping", self._undo_mapping)}),
+                (_ACTIVE_RUN, {"GET": ("get_active_run", self._get_active_run)}),
             ):
                 m = rx.fullmatch(path)
                 if m:
@@ -449,7 +463,9 @@ def make_handler(repo, clock=None, worker=None):
             scope = repo.scope_for(claims)
             results = [r for r in repo.get_results(rid) if scope.allows(r["equip_uri"])]
             issues = [i for i in self._report_issues(project["id"]) if not i.get("equip_uri") or scope.allows(i["equip_uri"])]
-            rep = report.build(db.public_project(project), run, results, issues)
+            active_runs = [db.public_row(a) for a in repo.find_rows("cx_active_runs", project_id=project["id"])
+                           if a["status"] not in ("planned", "cancelled") and scope.allows(a["equip_uri"])]
+            rep = report.build(db.public_project(project), run, results, issues, active_runs)
             if fmt == "json":
                 respond_json(self, 200, rep)
                 return
@@ -1286,6 +1302,162 @@ def make_handler(repo, clock=None, worker=None):
             respond_json(self, 200, {"source": tag, "created": created, "reopened": updated, "resolved": resolved,
                                      "outside_project": outside})
 
+        # ------------------------------------------------ active tests (Cx 9)
+
+        def _require_admin(self, claims: dict) -> bool:
+            """The gateway already requires admin on these routes; the
+            backend checks the verified token too (defense in depth)."""
+            if claims.get("role") != "admin":
+                respond_error(self, 403, "active tests are admin only")
+                return False
+            return True
+
+        def _active_status(self, span, claims) -> None:
+            running = [r for p in repo.list_projects(claims["org_id"]) if self._visible(p, claims)
+                       for r in repo.find_rows("cx_active_runs", project_id=p["id"], status="running")]
+            respond_json(self, 200, {"writes_allowed": active.writes_allowed(), "executor": executor is not None,
+                                     "level": active.CX_LEVEL, "running": [r["id"] for r in running]})
+
+        def _visible_active(self, rid: str, claims: dict) -> tuple[dict, dict] | None:
+            run = repo.get_row("cx_active_runs", rid)
+            project = repo.get_project(run["project_id"]) if run else None
+            if run is None or project is None or not self._visible(project, claims) or not repo.scope_for(claims).allows(run["equip_uri"]):
+                respond_error(self, 404, "no such active run")
+                return None
+            return run, project
+
+        def _list_active_runs(self, span, claims, pid) -> None:
+            if self._project(pid, claims) is None:
+                return
+            scope = repo.scope_for(claims)
+            rows = [db.public_row(r) for r in reversed(repo.find_rows("cx_active_runs", project_id=pid)) if scope.allows(r["equip_uri"])]
+            respond_json(self, 200, rows)
+
+        def _get_active_run(self, span, claims, rid) -> None:
+            hit = self._visible_active(rid, claims)
+            if hit is not None:
+                respond_json(self, 200, db.public_row(hit[0]))
+
+        def _plan_active_run(self, span, claims, pid) -> None:
+            """The dry run: every write listed, nothing commanded."""
+            if not self._require_admin(claims):
+                return
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            if p.get("archived_at"):
+                respond_error(self, 409, "project is archived")
+                return
+            body = self.read_json_body()
+            scopes, _ = self._scopes(p, claims)
+            equips = {e["id"]: e for e in inventory.build(repo.store, scopes)}
+            equip = equips.get(body.get("equip_uri"))
+            if equip is None:
+                raise ValueError("equip_uri must be equipment in this project's inventory")
+            try:
+                start = datetime.fromisoformat(str(body.get("window_start")).replace("Z", "+00:00"))
+                end = datetime.fromisoformat(str(body.get("window_end")).replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError("window_start and window_end are ISO date-times with a time zone") from exc
+            active.check_window(start, end, now_fn())
+            kind = body.get("kind", "command_response")
+            if kind == "command_response":
+                rm = body.get("response_minutes", 2)
+                if isinstance(rm, bool) or not isinstance(rm, (int, float)) or not 0 < rm <= active.MAX_HOLD_MINUTES:
+                    raise ValueError(f"response_minutes must be in (0, {active.MAX_HOLD_MINUTES}]")
+                steps = active.command_response_steps(equip, float(rm))
+                if not steps:
+                    raise ValueError("no command/status pair on this equipment to test")
+                steps = active.validate_steps(steps, equip)
+            elif kind == "custom":
+                steps = active.validate_steps(body.get("steps"), equip)
+            else:
+                raise ValueError("kind is command_response or custom")
+            run = active.new_run(pid, equip["id"], kind, steps, start, end, claims.get("sub"), now_fn())
+            repo.put_rows("cx_active_runs", [run])
+            self._event(pid, "active_run.plan", claims, {"active_run_id": run["id"], "equip_uri": equip["id"], "writes": len(run["plan"])})
+            respond_json(self, 201, {**db.public_row(run), "writes_allowed": active.writes_allowed()})
+
+        def _confirm_active_run(self, span, claims, rid) -> None:
+            """Start it: the switch must be on, the run planned, now inside
+            its window, and the body must repeat the run's id."""
+            if not self._require_admin(claims):
+                return
+            hit = self._visible_active(rid, claims)
+            if hit is None:
+                return
+            run, project = hit
+            body = self.read_json_body()
+            if body.get("confirm") != rid:
+                raise ValueError("confirm by sending {\"confirm\": \"<this run's id>\"} after reading the plan")
+            if not active.writes_allowed():
+                respond_error(self, 403, "active tests are switched off for this deployment (BALER_CX_ALLOW_WRITES=1 enables them)")
+                return
+            if executor is None:
+                respond_error(self, 503, "no point_write route is configured on this server")
+                return
+            if run["status"] != "planned":
+                respond_error(self, 409, f"run is {run['status']}")
+                return
+            now = now_fn()
+            ws = run["window_start"] if isinstance(run["window_start"], datetime) else datetime.fromisoformat(run["window_start"])
+            we = run["window_end"] if isinstance(run["window_end"], datetime) else datetime.fromisoformat(run["window_end"])
+            if not ws <= now < we:
+                respond_error(self, 409, f"outside the scheduled window ({ws.isoformat()} - {we.isoformat()})")
+                return
+            points = sorted({w["point"] for st in run["steps"] for w in st["writes"]} | {e["point"] for st in run["steps"] for e in st["expect"]})
+            with repo.history() as h:
+                latest = h.latest(points)
+            written = sorted({w["point"] for st in run["steps"] for w in st["writes"]})
+            before = {"latest": {u: {"ts": ts.isoformat(), "value": v if isinstance(v, (int, float, str, bool)) else str(v)}
+                                 for u, (ts, v) in latest.items()},
+                      "priority_arrays": {u: repo.point_levels(u) for u in written}, "captured_at": now.isoformat()}
+            repo.update_row("cx_active_runs", rid, {"status": "confirmed", "confirmed_by": claims.get("sub"), "confirmed_at": now,
+                                                    "before": before})
+            self._event(project["id"], "active_run.confirm", claims, {"active_run_id": rid, "writes": len(run["plan"])})
+            executor.start(rid)
+            respond_json(self, 202, db.public_row(repo.get_row("cx_active_runs", rid) or run))
+
+        def _abort_active_run(self, span, claims, rid) -> None:
+            """The kill switch for one run: a running run stops at its next
+            poll and relinquishes; a planned one is cancelled."""
+            hit = self._visible_active(rid, claims)
+            if hit is None:
+                return
+            run, project = hit
+            if run["status"] == "planned":
+                repo.update_row("cx_active_runs", rid, {"status": "cancelled", "finished_at": now_fn()})
+            elif run["status"] in ("confirmed", "running"):
+                repo.update_row("cx_active_runs", rid, {"abort_requested": True})
+            self._event(project["id"], "active_run.abort", claims, {"active_run_id": rid, "was": run["status"]})
+            respond_json(self, 202, db.public_row(repo.get_row("cx_active_runs", rid) or run))
+
+        def _active_kill(self, span, claims) -> None:
+            """Every running active run in the caller's org stops, and
+            every level they hold is relinquished now (admin)."""
+            if not self._require_admin(claims):
+                return
+            stopped = []
+            for p in repo.list_projects(claims["org_id"], include_archived=True):
+                if not self._visible(p, claims):
+                    continue
+                for r in repo.find_rows("cx_active_runs", project_id=p["id"]):
+                    if r["status"] in ("confirmed", "running"):
+                        repo.update_row("cx_active_runs", r["id"], {"abort_requested": True})
+                        stopped.append(r["id"])
+                        self._event(p["id"], "active_run.kill", claims, {"active_run_id": r["id"]})
+            relinquished = []
+            if executor is not None:
+                mine = set(stopped)
+                for point, level, owner, _ in repo.cx_levels():
+                    if owner[len(active.WHO_PREFIX):] in mine:
+                        try:
+                            executor.writer.relinquish(point, owner[len(active.WHO_PREFIX):], level)
+                            relinquished.append(point)
+                        except Exception as exc:  # noqa: BLE001 - reported; the sweeper retries
+                            relinquished.append(f"FAILED {point}: {exc}")
+            respond_json(self, 200, {"aborted": stopped, "relinquished": relinquished})
+
         def _templates(self, span, claims) -> None:
             respond_json(self, 200, [t.as_dict() for t in tpl.load()])
 
@@ -1325,8 +1497,17 @@ def main() -> None:
     # Scheduled procedures and project runs (Cx 6). One process runs the
     # scheduler; a second commissioning_api would double-queue, which the
     # one-active-run indexes turn into a skipped tick, not a duplicate.
-    runner.Scheduler(repo, worker, clock)
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(repo, worker=worker))
+    # Active tests (Cx 9): point_write over MQTT, and the sweeper that
+    # relinquishes any Cx level whose run isn't running.
+    from baler import point_write
+
+    writer = active.Writer(repo, point_write.Commander())
+    executor = active.Executor(repo, writer, clock)
+    for r in repo.find_rows("cx_active_runs", status="running") + repo.find_rows("cx_active_runs", status="confirmed"):
+        repo.update_row("cx_active_runs", r["id"], {"status": "failed", "error": db.INTERRUPTED, "finished_at": now})
+    active.sweep(repo, writer, now)
+    runner.Scheduler(repo, worker, clock, extra=[lambda t: active.sweep(repo, writer, t)])
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(repo, worker=worker, executor=executor))
     print(f"commissioning API listening on {args.host}:{args.port}")
     server.serve_forever()
 

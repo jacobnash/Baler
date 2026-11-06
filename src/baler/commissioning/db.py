@@ -256,6 +256,31 @@ CREATE TABLE IF NOT EXISTS cx_mappings (
     created_at   TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS cx_mappings_project ON cx_mappings (project_id, status);
+
+-- Cx 9 (#45): active tests through point_write (commissioning.active).
+CREATE TABLE IF NOT EXISTS cx_active_runs (
+    id              TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL REFERENCES cx_projects(id),
+    equip_uri       TEXT NOT NULL,
+    kind            TEXT NOT NULL,          -- command_response | custom
+    steps           JSONB NOT NULL,
+    plan            JSONB NOT NULL,         -- the dry run: every write
+    status          TEXT NOT NULL,          -- planned | running | completed | failed | aborted | expired | cancelled
+    window_start    TIMESTAMPTZ NOT NULL,
+    window_end      TIMESTAMPTZ NOT NULL,
+    created_by      TEXT,
+    created_at      TIMESTAMPTZ NOT NULL,
+    confirmed_by    TEXT,
+    confirmed_at    TIMESTAMPTZ,
+    started_at      TIMESTAMPTZ,
+    finished_at     TIMESTAMPTZ,
+    before          JSONB,                  -- latest values and priority arrays before the first write
+    writes          JSONB NOT NULL DEFAULT '[]',  -- every write and relinquish, in order
+    results         JSONB NOT NULL DEFAULT '[]',
+    error           TEXT,
+    abort_requested BOOLEAN NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS cx_active_runs_project ON cx_active_runs (project_id, created_at DESC);
 """
 
 ROW_TABLES: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
@@ -264,6 +289,10 @@ ROW_TABLES: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
     "cx_spec_items": (("id", "project_id", "document_id", "kind", "tag", "name", "equip_tag", "brick_class", "properties",
                        "source", "confidence", "status", "created_by", "created_at", "reviewed_by", "reviewed_at"),
                       frozenset({"properties", "source"})),
+    "cx_active_runs": (("id", "project_id", "equip_uri", "kind", "steps", "plan", "status", "window_start", "window_end",
+                        "created_by", "created_at", "confirmed_by", "confirmed_at", "started_at", "finished_at", "before",
+                        "writes", "results", "error", "abort_requested"),
+                       frozenset({"steps", "plan", "before", "writes", "results"})),
     "cx_mappings": (("id", "project_id", "spec_item_id", "equip_uri", "confidence", "basis", "alternatives", "status",
                      "decided_by", "decided_at", "written_back", "created_at"),
                     frozenset({"basis", "alternatives", "written_back"})),
@@ -309,6 +338,9 @@ def ensure_schema(conn) -> None:
     from baler import faults, record_edit
 
     record_edit.ensure_schema(conn)  # Cx 7 write-back logs to record_edits
+    from baler import point_write
+
+    point_write.ensure_schema(conn)  # Cx 9 records its levels there
     faults.ensure_schema(conn)  # Cx 8 mirrors into the shared faults table
 
 
@@ -373,6 +405,8 @@ class MemoryRepo:
         self._rows: dict[str, dict[str, dict]] = {}
         self.edits: list[dict] = []
         self.faults: list[dict] = []  # the shared faults table (Cx 8)
+        self.levels: dict[tuple[str, int], dict] = {}  # point_write_levels (Cx 9)
+        self.commands: list[dict] = []  # what was sent to the site (Cx 9)
         self._lock = threading.Lock()  # runs are written from the worker thread
 
     def scope_for(self, claims) -> Scope:
@@ -668,6 +702,26 @@ class MemoryRepo:
             want = None if ids is None else {int(i) for i in ids}
             return [dict(f) for f in self.faults if (not open_only or f["ended_at"] is None)
                     and (want is None or f["id"] in want)]
+
+    # ------------------------------------------- point_write (Cx 9)
+
+    def command_point(self, point_uri: str, value, level: int, who: str, user_sub, expires_at, commander=None) -> None:
+        if commander is not None:
+            commander(point_uri, value, level)  # tests: a callable that may raise
+        with self._lock:
+            self.commands.append({"point": point_uri, "value": value, "level": level, "who": who, "expires_at": expires_at})
+            if value is None:
+                self.levels.pop((point_uri, level), None)
+            else:
+                self.levels[(point_uri, level)] = {"val": value, "who": who, "expires_at": expires_at}
+
+    def cx_levels(self) -> list[tuple[str, int, str, datetime | None]]:
+        with self._lock:
+            return [(p, lvl, v["who"], v["expires_at"]) for (p, lvl), v in self.levels.items() if v["who"].startswith("cx:")]
+
+    def point_levels(self, point_uri: str) -> dict:
+        with self._lock:
+            return {str(lvl): {"val": v["val"], "who": v["who"]} for (p, lvl), v in self.levels.items() if p == point_uri}
 
 
 # ------------------------------------------------------------- postgres
@@ -1113,3 +1167,42 @@ class PgRepo:
                                 f" WHERE {where} ORDER BY id", tuple(args)).fetchall()
         keys = ("id", "rule_id", "point_uri", "status", "started_at", "ended_at", "detail", "severity")
         return [dict(zip(keys, r, strict=True)) for r in rows]
+
+    # ------------------------------------------- point_write (Cx 9)
+
+    def _route(self, point_uri: str) -> tuple[str, str]:
+        """The Windrow (site, instance) that owns a point, from its
+        equipment's windrowSite/windrowInstance tags (as haystack_api)."""
+        from baler.store import BRICK, HAYSTACK
+
+        rows = list(self.store.query(
+            f"SELECT ?site ?inst WHERE {{ ?e <{BRICK}hasPoint> <{point_uri}> . ?e <{HAYSTACK}windrowSite> ?site ."
+            f" ?e <{HAYSTACK}windrowInstance> ?inst }} LIMIT 1"))
+        if not rows:
+            raise RuntimeError(f"no command route for {point_uri}: its Windrow instance runs without --site-id")
+        return str(rows[0][0]), str(rows[0][1])
+
+    def command_point(self, point_uri: str, value, level: int, who: str, user_sub, expires_at, commander=None) -> None:
+        """point_write through the owning Windrow, then Baler's record of
+        the level (value None relinquishes). Raises if the site refuses or
+        doesn't answer."""
+        from baler import point_write
+
+        site, instance = self._route(point_uri)
+        if commander is None:
+            raise RuntimeError("no point_write commander configured")
+        commander.point_write(site, instance, point_uri[len("urn:point:"):], value, level)
+        with self.pool.connection() as conn:
+            point_write.record_level(conn, point_uri, level, value, who, user_sub, expires_at)
+
+    def cx_levels(self) -> list[tuple[str, int, str, datetime | None]]:
+        with self.pool.connection() as conn:
+            rows = conn.execute("SELECT point_uri, level, who, expires_at FROM point_write_levels WHERE who LIKE 'cx:%%'").fetchall()
+        return [(p, int(lvl), w, e) for p, lvl, w, e in rows]
+
+    def point_levels(self, point_uri: str) -> dict:
+        from baler import point_write
+
+        with self.pool.connection() as conn:
+            got = point_write.levels(conn, point_uri)
+        return {str(lvl): {"val": v["val"], "who": v["who"]} for lvl, v in got.items()}
