@@ -118,11 +118,13 @@ class Scope:
             return "(" + " || ".join(tests) + ")" if tests else "false"
 
         keyed = f'(STRSTARTS(STR(?{var}), "urn:point:") || STRSTARTS(STR(?{var}), "urn:equip:"))'
+        # a nested Dict value is only reachable from a record already in scope
+        value_node = f'STRSTARTS(STR(?{var}), "urn:baler:dict:")'
         k = f"{var}_k"
         if self.prefixes is not None:
             if not self.prefixes:
                 return "false"
-            return (f"({keyed} && {under(var, self.prefixes)}) || "
+            return (f"{value_node} || ({keyed} && {under(var, self.prefixes)}) || "
                     f'(!{keyed} && STRSTARTS(STR(?{var}), "urn:") && '
                     f"EXISTS {{ ?{var} {_SITE_MEMBER} ?{k} . FILTER({under(k, self.prefixes)}) }})")
         return (f"({keyed} && !{under(var, self.exclude)}) || "

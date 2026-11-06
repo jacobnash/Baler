@@ -103,16 +103,23 @@ def test_ingest_tags_writes_marker_and_valued_triples():
     assert str(equip_rows[0].ref) == "AHU-1"
 
 
-def test_ingest_tags_serializes_nested_dict_and_list_values_as_json():
+def test_ingest_tags_stores_nested_dicts_as_nodes_and_lists_as_json():
+    """A nested Dict is its own node holding typed values (so filter paths
+    can step into it, Baler#10); a plain list is still JSON text."""
     store = Store()
     topic = "test-ingest:nested-tags"
     point_uri = ingest_tags(store, topic, {"geoCoord": {"lat": 37.5, "lng": -122.3}, "enum": ["a", "b"]})
 
     rows = list(store.query(f"""
         PREFIX haystack: <urn:baler:haystack#>
-        SELECT ?v WHERE {{ <{point_uri}> haystack:geoCoord ?v }}
+        SELECT ?lat ?lng WHERE {{ <{point_uri}> haystack:geoCoord ?n . ?n haystack:lat ?lat ; haystack:lng ?lng }}
     """))
-    assert json.loads(str(rows[0].v)) == {"lat": 37.5, "lng": -122.3}
+    assert [(float(r.lat), float(r.lng)) for r in rows] == [(37.5, -122.3)]
+    rows = list(store.query(f"""
+        PREFIX haystack: <urn:baler:haystack#>
+        SELECT ?v WHERE {{ <{point_uri}> haystack:enum ?v }}
+    """))
+    assert json.loads(str(rows[0].v)) == ["a", "b"]
 
 
 @pytest.mark.integration

@@ -4,13 +4,14 @@ MQTT sources all land here through the same envelope - see
 docs/adding-a-new-source.md in Windrow for the wire contract this assumes.
 """
 
+import hashlib
 import json
 from datetime import datetime, timezone
 
 from rdflib import OWL, RDF, XSD, Literal, URIRef
 
 from baler import timeseries, tracing
-from baler.store import BRICK, HAYSTACK, HUNIT, TD
+from baler.store import BRICK, DICT_NS, HAYSTACK, HTZ, HUNIT, TD
 
 tracer = tracing.get_tracer(__name__)
 
@@ -64,14 +65,24 @@ def _write_tags(store, uri: URIRef, tags: dict) -> None:
     always fall back to the raw tags even after a rule changes. Shared by
     ingest_tags (points) and ingest_equip_tags (equip/site recs) - tags are
     tags regardless of which kind of entity they're describing."""
-    triples = []
-    for tag, value in tags.items():
-        if value is True:
-            triples.append((uri, HAYSTACK.hasTag, Literal(tag)))
-        else:
-            triples.extend((uri, p, o) for p, o in _tag_triples(tag, value))
+    triples: list = []
+    _dict_triples(uri, tags, triples)
 
     store.add_many(triples)  # one round trip for every tag instead of one per tag
+
+
+def _dict_triples(subject, tags: dict, out: list) -> None:
+    """A record's (or nested Dict's) tags as triples on `subject`."""
+    for tag, value in tags.items():
+        if value is True:
+            out.append((subject, HAYSTACK.hasTag, Literal(tag)))
+        elif isinstance(value, dict):
+            # a nested Dict: its own node, so `ref->thru` can step into it
+            node = URIRef(DICT_NS + hashlib.sha1(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest())
+            out.append((subject, HAYSTACK[tag], node))
+            _dict_triples(node, value, out)
+        else:
+            out.extend((subject, p, o) for p, o in _tag_triples(tag, value))
 
 
 def _hay_type(value) -> str | None:
@@ -87,9 +98,11 @@ def _tag_triples(tag: str, value):
       - Number: an xsd:double, plus HUNIT:<tag> holding its unit if any
       - Ref: a HAYSTACK.Ref-typed literal of the id; a *list* of Refs is one
         triple per Ref (so `ref==@a` and `ref->dis` check every element)
-      - date/time/dateTime: xsd typed
-      - other dicts/lists: JSON text (rdflib would otherwise store Python
-        repr, which isn't valid JSON), as before
+      - date/time/dateTime: xsd typed; a dateTime also gets HTZ:<tag> with
+        its Haystack timezone name
+      - nested dicts: a node of their own (see _dict_triples)
+      - other lists: JSON text (rdflib would otherwise store Python repr,
+        which isn't valid JSON), as before
     Plain JSON values (MQTT tags, haystack_puller) keep their old shape."""
     kind = _hay_type(value)
     if kind == "Number":
@@ -105,6 +118,10 @@ def _tag_triples(tag: str, value):
         return [(HAYSTACK[tag], Literal(str(value.val), datatype=XSD.anyURI))]
     if kind is not None:  # Symbol, XStr, Coord: their text
         return [(HAYSTACK[tag], Literal(str(getattr(value, "val", value))))]
+    if isinstance(value, datetime) and getattr(value.tzinfo, "key", None):
+        key = value.tzinfo.key  # type: ignore[union-attr]
+        name = "UTC" if key in ("UTC", "Etc/UTC") else key.split("/")[-1]
+        return [(HAYSTACK[tag], Literal(value)), (HTZ[tag], Literal(name))]
     if isinstance(value, (dict, list)):
         return [(HAYSTACK[tag], Literal(json.dumps(value, default=str)))]
     return [(HAYSTACK[tag], Literal(value))]

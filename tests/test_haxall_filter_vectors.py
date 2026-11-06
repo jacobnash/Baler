@@ -27,11 +27,7 @@ from baler.store import Store
 V = vectors.load("haxall/testHaystack-4.0.6")
 
 # case id -> why Baler differs from the reference today
-KNOWN_GAPS: dict[str, str] = {
-    'FilterTest.testInclude:ref->thru': 'nested Dict values are stored as JSON text, so paths into them fail (Baler#10)',
-    'FilterTest.testInclude:ref->thru=="e"': 'nested Dict values are stored as JSON text, so paths into them fail (Baler#10)',
-    'FilterTest.testIncludeDateTime:ts->tz == "New_York"': 'DateTime tags are stored as xsd:dateTime, which keeps the offset but not the Haystack tz name',
-}
+KNOWN_GAPS: dict[str, str] = {}
 
 
 def _store_for(records):

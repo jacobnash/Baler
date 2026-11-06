@@ -124,7 +124,8 @@ class NoMatchError(HisQueryError):
 
 _TOKEN_RE = re.compile(
     r"""
-      (?P<DATE>\d{4}-\d{2}-\d{2})
+      (?P<DATETIME>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})(?:[ ]+[A-Z][A-Za-z0-9_+\-/]*)?)
+    | (?P<DATE>\d{4}-\d{2}-\d{2})
     | (?P<MONTH>\d{4}-\d{2})(?![\d-])
     | (?P<TIME>\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)
     | (?P<NUMBER>-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?P<UNIT>[A-Za-z°%$£€_/\u0080-\uffff][A-Za-z0-9°%$£€_/\u0080-\uffff]*)?
@@ -138,6 +139,7 @@ _TOKEN_RE = re.compile(
     | (?P<OP>==|!=|<=|>=|<|>)
     | (?P<PUNCT>[().,])
     | (?P<NAME>[A-Za-z_][A-Za-z0-9_]*)
+    | (?P<COMMENT>//[^\n]*)
     | (?P<WS>\s+)
     """,
     re.VERBOSE,
@@ -163,7 +165,7 @@ def tokenize(source: str) -> list[Token]:
             raise HisQueryError(f"unexpected character {source[i]!r} at position {i}")
         i = m.end()
         kind = m.lastgroup
-        if kind == "WS":
+        if kind in ("WS", "COMMENT"):
             continue
         if kind == "UNIT":
             # NUMBER's optional unit suffix - lastgroup reports the last
@@ -193,6 +195,15 @@ class Num:
 
     val: float
     unit: str | None = None
+
+
+@dataclass(frozen=True)
+class DateTimeLit:
+    """`2020-09-01T01:00:00-04:00 New_York`: compares by instant; `==` also
+    needs the same Haystack timezone where the value has one stored."""
+
+    iso: str  # with offset (Z kept as +00:00)
+    tz: str | None
 
 
 @dataclass(frozen=True)
@@ -437,6 +448,10 @@ class Parser:
         tok = self._advance()
         if tok.kind == "STRING":
             return _unescape_string(tok.value[1:-1])
+        if tok.kind == "DATETIME":
+            iso, _, tz = tok.value.partition(" ")
+            iso = iso.replace("Z", "+00:00")
+            return DateTimeLit(iso, tz.strip() or None)
         if tok.kind == "URI":
             return UriLit(re.sub(r"\\(.)", r"\1", tok.value[1:-1]))
         if tok.kind == "NUMBER":
@@ -479,6 +494,7 @@ def parse_query(source: str) -> Query:
 
 PREFIXES = """PREFIX haystack: <urn:baler:haystack#>
 PREFIX hunit: <urn:baler:haystack-unit#>
+PREFIX htz: <urn:baler:haystack-tz#>
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 PREFIX brick: <https://brickschema.org/schema/Brick#>
 PREFIX proj: <urn:baler:proj#>
@@ -894,6 +910,14 @@ class _Compiler:
             return self._flag(f"?s haystack:{node.name} ?{v} . FILTER({typed} && STR(?{v}) {op} {_sparql_string(val.text)})")
         if isinstance(val, bool):
             return self._flag(f"?s haystack:{node.name} ?{v} . FILTER(DATATYPE(?{v}) = xsd:boolean && ?{v} {op} {_sparql_literal(val)})")
+        if isinstance(val, DateTimeLit):
+            cmp = f"?{v} {op} {_sparql_string(val.iso)}^^xsd:dateTime"
+            tz_ok = ""
+            if node.op == "==" and val.tz:
+                z = self._var()
+                tz_ok = (f" && (NOT EXISTS {{ ?s htz:{node.name} ?{z} }} || "
+                         f"EXISTS {{ ?s htz:{node.name} {_sparql_string(val.tz)} }})")
+            return self._flag(f"?s haystack:{node.name} ?{v} . FILTER(DATATYPE(?{v}) = xsd:dateTime && {cmp}{tz_ok})")
         if isinstance(val, UriLit):
             # only Uri values (stored typed xsd:anyURI), never a Str with the same text
             return self._flag(f"?s haystack:{node.name} ?{v} . FILTER(DATATYPE(?{v}) = xsd:anyURI && STR(?{v}) {op} {_sparql_string(val.text)})")
@@ -953,6 +977,15 @@ class _Compiler:
             op = _SPARQL_OPS[node.leaf.op]
             return self._flag(f"?s haystack:{node.hops[0]} ?{dt} . FILTER(DATATYPE(?{dt}) = xsd:dateTime && "
                               f"SUBSTR(STR(?{dt}), {start}, {size}) {op} {_sparql_string(node.leaf.value.text)})")
+        if len(node.hops) == 1 and isinstance(node.leaf, (Cmp, Has)) and node.leaf.name == "tz":
+            # ts->tz: a DateTime's Haystack timezone name, kept next to it
+            z = self._var()
+            if isinstance(node.leaf, Has):
+                return self._flag(f"?s htz:{node.hops[0]} ?{z}")
+            if not isinstance(node.leaf.value, str):
+                return "false"
+            op = _SPARQL_OPS[node.leaf.op]
+            return self._flag(f"?s htz:{node.hops[0]} ?{z} . FILTER(STR(?{z}) {op} {_sparql_string(node.leaf.value)})")
         end = self._var()
         inner = _Compiler(self.graph, prefix=f"{end}_")
         rebind = lambda text: re.sub(r"\?s\b", f"?{end}", text)
@@ -1008,7 +1041,8 @@ def compile_filter(node, graph: GraphVocab | None = None, scope=None) -> str:
     return (
         PREFIXES
         + "SELECT DISTINCT ?s WHERE {\n"
-        + "  { SELECT DISTINCT ?s WHERE { ?s ?p ?o . FILTER(isIRI(?s)) } }\n"
+        # nested Dict nodes (urn:baler:dict:) are values, never records
+        + "  { SELECT DISTINCT ?s WHERE { ?s ?p ?o . FILTER(isIRI(?s) && !STRSTARTS(STR(?s), \"urn:baler:dict:\")) } }\n"
         + (flags + "\n" if flags else "")
         + f"  FILTER({body})\n"
         + "}"

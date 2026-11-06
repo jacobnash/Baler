@@ -29,6 +29,12 @@ HAYSTACK = Namespace("urn:baler:haystack#")
 # The unit of a Number-valued tag: <entity> HUNIT:<tag> "°F", next to the
 # HAYSTACK:<tag> number itself (a literal can't carry a unit).
 HUNIT = Namespace("urn:baler:haystack-unit#")
+# A DateTime tag's Haystack timezone name (`New_York`): xsd:dateTime keeps
+# the offset only, and `ts->tz == "New_York"` needs the name (Baler#9).
+HTZ = Namespace("urn:baler:haystack-tz#")
+# A nested Dict tag value is a node of its own, content-addressed so the
+# same value written twice is the same triples (Baler#10).
+DICT_NS = "urn:baler:dict:"
 
 # Per-deployment extension namespace for Haystack concepts that have no
 # Brick equivalent - mapping.py falls back to this (subClassOf the nearest

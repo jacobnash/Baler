@@ -79,6 +79,8 @@ def _typed(v):
         return v
     if isinstance(v, list) and v and all(isinstance(x, oh.Ref) for x in v):
         return v
+    if isinstance(v, dict):  # a nested Dict keeps its values typed too (Baler#10)
+        return {k: t for k, x in v.items() if (t := _typed(x)) is not None}
     return plain(v)
 
 

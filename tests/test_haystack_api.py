@@ -683,3 +683,31 @@ def test_uri_literals_compare_only_with_uri_values():
     recs = ha.build_records(store, None, [str(u) for u in hisquery.match_entities(store, hisquery.parse_query("site").filter)])
     links = {u.rsplit(":", 1)[1]: r["link"] for u, r in recs.items()}
     assert links["a"] == oh.Uri("http://x/a") and links["b"] == "http://x/a"
+
+
+def test_nested_dicts_and_datetime_zones_round_trip():
+    """Baler#10/#9: a nested Dict is stored as its own node (paths step into
+    it, /api rebuilds it typed), and a DateTime keeps its Haystack zone."""
+    from baler.haystack_import import _row
+    from baler.ingest import ingest_haystack_equip_tags
+
+    store = Store()
+    rec = oh.from_hayson({
+        "id": {"_kind": "ref", "val": "e"}, "site": {"_kind": "marker"},
+        "ts": {"_kind": "dateTime", "val": "2020-09-01T01:00:00-04:00", "tz": "New_York"},
+        "ref": {"thru": "e", "n": {"_kind": "number", "val": 3, "unit": "kW"}, "m": {"_kind": "marker"}, "deep": {"x": 1}},
+    })
+    uri = str(ingest_haystack_equip_tags(store, "e", _row(rec)))
+    out = ha.build_records(store, None, [uri])[uri]
+    assert out["ref"] == {"thru": "e", "n": oh.Number(3, "kW"), "m": oh.MARKER, "deep": {"x": oh.Number(1)}}
+    assert out["ts"].tzinfo.key == "America/New_York"
+
+    def ids(flt):
+        return hisquery.match_entities(store, hisquery.parse_query(flt).filter)
+
+    assert ids('ref->thru == "e"') == [uri] and ids("ref->m") == [uri] and ids("ref->n > 2kW") == [uri]
+    assert ids('ts->tz == "New_York"') == [uri]
+    assert ids("ts == 2020-09-01T01:00:00-04:00 New_York") == [uri]
+    assert ids("ts == 2020-09-01T05:00:00Z UTC") == []  # same instant, other zone: not equal
+    assert ids("ts < 2020-09-01T06:00:00Z UTC // comments are fine") == [uri]
+    assert not any(u.startswith("urn:baler:dict:") for u in ids("thru or m"))  # dict nodes aren't records

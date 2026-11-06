@@ -180,7 +180,11 @@ same unit**, as in Haystack: `temp > 72°F` matches `75°F` but not a unitless `
 `temp > 72` matches only unitless values. There's no unit conversion (`2min` is not `120s`).
 A bare name matches a tag with any value, not only markers: `dis` matches every record with a
 `dis`. Dates and times compare as dates and times (`installed < 2020-01-01`, `ts->time >=
-08:00`), and `^hot-water` is shorthand for `hot and water`.
+08:00`), and `^hot-water` is shorthand for `hot and water`. DateTimes compare by instant
+(`ts > 2020-09-01T05:00:00Z UTC`); `==` also needs the same Haystack timezone, and `ts->tz ==
+"New_York"` tests the zone itself. Uri literals (`` link == `http://x/a` ``) compare only with Uri
+values. Paths step into nested Dicts as well as follow Refs (`ref->thru == "e"`), and `//` starts a
+comment.
 
 These rules are checked against haxall's own filter test cases on every build
 (`tests/test_haxall_filter_vectors.py`, run on both rdflib and Oxigraph).

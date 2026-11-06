@@ -62,6 +62,8 @@ HIS_LIMIT = hisquery.MAX_LIMIT
 
 HAYSTACK_NS = "urn:baler:haystack#"
 HUNIT_NS = "urn:baler:haystack-unit#"
+HTZ_NS = "urn:baler:haystack-tz#"
+DICT_NS = "urn:baler:dict:"
 XSD = "http://www.w3.org/2001/XMLSchema#"
 BRICK_NS = hisquery.BRICK_NS
 TD_NS = "urn:baler:td#"
@@ -196,7 +198,7 @@ def _literal(value, datatype: str | None = None):
     return str(value)
 
 
-def build_records(store, ts_conn, uris: list[str]) -> dict[str, dict]:
+def build_records(store, ts_conn, uris: list[str], values_only: bool = False) -> dict[str, dict]:
     """One SPARQL round trip for every triple of every requested entity,
     plus one SQL round trip for the newest sample of every point."""
     if not uris:
@@ -212,6 +214,8 @@ def build_records(store, ts_conn, uris: list[str]) -> dict[str, dict]:
     classes: dict[str, list[str]] = {}
     stored_site: dict[str, object] = {}  # a siteRef tag (Haystack imports), used when the graph has none
     units: dict[str, dict[str, str]] = {}
+    tzs: dict[str, dict[str, str]] = {}
+    dicts: dict[str, dict[str, str]] = {}  # entity -> tag -> nested Dict node
     for row in rows:
         s, p, o = str(row.s), str(row.p), row.o
         is_iri = getattr(row, "iri", False)
@@ -219,6 +223,10 @@ def build_records(store, ts_conn, uris: list[str]) -> dict[str, dict]:
         rec = recs.setdefault(s, {})
         if p.startswith(HUNIT_NS):
             units.setdefault(s, {})[p[len(HUNIT_NS):]] = str(o)
+        elif p.startswith(HTZ_NS):
+            tzs.setdefault(s, {})[p[len(HTZ_NS):]] = str(o)
+        elif p.startswith(HAYSTACK_NS) and is_iri and str(o).startswith(DICT_NS):
+            dicts.setdefault(s, {})[p[len(HAYSTACK_NS):]] = str(o)
         elif p == HAYSTACK_NS + "hasTag":
             rec[str(o)] = oh.MARKER
         elif p.startswith(HAYSTACK_NS) and not is_iri:
@@ -248,12 +256,24 @@ def build_records(store, ts_conn, uris: list[str]) -> dict[str, dict]:
             # this API instead of querying the graph directly.
             rec.setdefault(_BRICK_LINK_TAGS[p], []).append(oh.Ref(uri_to_ref(str(o))))
 
-    sites = _site_of(store, uris)
     for s, by_tag in units.items():
         for tag, unit in by_tag.items():
             v = recs.get(s, {}).get(tag)
             if isinstance(v, oh.Number):
                 recs[s][tag] = oh.Number(v.val, unit)
+    for s, by_tag in tzs.items():  # DateTimes back in their own Haystack timezone
+        for tag, name in by_tag.items():
+            v = recs.get(s, {}).get(tag)
+            if isinstance(v, datetime):
+                recs[s][tag] = v.astimezone(oh.haystack_tz(name))
+    if dicts:  # nested Dicts, rebuilt from their nodes (recursively)
+        nested = build_records(store, None, sorted({n for d in dicts.values() for n in d.values()}), values_only=True)
+        for s, by_tag in dicts.items():
+            for tag, node in by_tag.items():
+                recs.setdefault(s, {})[tag] = nested.get(node, {})
+    if values_only:
+        return recs
+    sites = _site_of(store, uris)
 
     point_uris = [u for u in uris if _kind_of(u) == "point"]
     latest = read_latest_many(ts_conn, point_uris) if ts_conn is not None else {}
