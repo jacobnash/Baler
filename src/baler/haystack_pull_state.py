@@ -8,6 +8,8 @@ differently.
 
 import psycopg
 
+from baler import ddl
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS haystack_pull_checkpoint (
     point_uri      TEXT NOT NULL PRIMARY KEY,
@@ -17,7 +19,7 @@ CREATE TABLE IF NOT EXISTS haystack_pull_checkpoint (
 
 
 def ensure_schema(conn: psycopg.Connection) -> None:
-    conn.execute(SCHEMA)
+    ddl.run(conn, SCHEMA)
 
 
 def get_checkpoint(conn: psycopg.Connection, point_uri: str) -> float | None:

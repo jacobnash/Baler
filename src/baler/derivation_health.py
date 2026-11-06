@@ -12,6 +12,7 @@ human clears it via enable_target().
 
 import psycopg
 
+from baler import ddl
 from baler.schemas import TargetHealth
 
 SCHEMA = """
@@ -27,7 +28,7 @@ CREATE TABLE IF NOT EXISTS derivation_target_health (
 
 
 def ensure_schema(conn: psycopg.Connection) -> None:
-    conn.execute(SCHEMA)
+    ddl.run(conn, SCHEMA)
 
 
 def record_target_failure(conn: psycopg.Connection, derivation_id: str, target_uri: str, error: str, disable_threshold: int = 5) -> bool:

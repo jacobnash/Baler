@@ -8,6 +8,8 @@ point_uri since one query pulls every point for a source at once.
 
 import psycopg
 
+from baler import ddl
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sql_pull_checkpoint (
     source_id      TEXT NOT NULL PRIMARY KEY,
@@ -17,7 +19,7 @@ CREATE TABLE IF NOT EXISTS sql_pull_checkpoint (
 
 
 def ensure_schema(conn: psycopg.Connection) -> None:
-    conn.execute(SCHEMA)
+    ddl.run(conn, SCHEMA)
 
 
 def get_checkpoint(conn: psycopg.Connection, source_id: str) -> float | None:

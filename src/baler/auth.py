@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 import jwt as pyjwt
 import psycopg
 
-from baler import json_store, scope
+from baler import ddl, json_store, scope
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS orgs (
@@ -72,8 +72,7 @@ _PBKDF2_ITERATIONS = 600_000
 
 
 def ensure_schema(conn: psycopg.Connection) -> None:
-    conn.execute(SCHEMA)
-    scope.ensure_schema(conn)
+    ddl.run(conn, SCHEMA, scope.SCHEMA)
 
 
 # --- passwords ---

@@ -13,6 +13,7 @@ from datetime import datetime
 
 import psycopg
 
+from baler import ddl
 from baler.schemas import WebhookHealth
 
 SCHEMA = """
@@ -47,7 +48,7 @@ CREATE TABLE IF NOT EXISTS webhook_health (
 
 
 def ensure_schema(conn: psycopg.Connection) -> None:
-    conn.execute(SCHEMA)
+    ddl.run(conn, SCHEMA)
 
 
 def open_fault(

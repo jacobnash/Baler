@@ -28,6 +28,8 @@ from dataclasses import dataclass
 
 import jwt as pyjwt
 
+from baler import ddl
+
 SCHEMA = "ALTER TABLE sites ADD COLUMN IF NOT EXISTS topic_prefixes TEXT[] NOT NULL DEFAULT '{}'"
 
 _KEYED_PREFIXES = ("urn:point:", "urn:equip:")
@@ -35,7 +37,7 @@ _BEARER = re.compile(r"^bearer\s+(?:authToken=)?([^\s,]+)\s*$", re.IGNORECASE)
 
 
 def ensure_schema(conn) -> None:
-    conn.execute(SCHEMA)
+    ddl.run(conn, SCHEMA)
 
 
 def entity_key(uri: str) -> str | None:

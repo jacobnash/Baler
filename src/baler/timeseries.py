@@ -12,6 +12,8 @@ from datetime import datetime
 import psycopg
 from psycopg_pool import ConnectionPool
 
+from baler import ddl
+
 DEFAULT_DSN = os.environ.get(
     "BALER_PG_DSN", "postgresql://baler:baler@localhost:5433/baler"
 )
@@ -33,14 +35,14 @@ CREATE TABLE IF NOT EXISTS point_history (
 def _setup(conn: psycopg.Connection) -> None:
     """Runs on every fresh connection, pooled or not - idempotent, same as
     CREATE TABLE IF NOT EXISTS."""
-    conn.execute(SCHEMA)
-    # We run the TimescaleDB image specifically for this - a plain
+    # The hypertable is why we run the TimescaleDB image - a plain
     # CREATE TABLE gets none of its time-based chunking (faster inserts
     # and time-range reads at volume as the table grows past what one
     # unpartitioned btree handles well). migrate_data converts any rows
     # that already exist under the plain-table schema; idempotent like
-    # the CREATE TABLE above.
-    conn.execute("SELECT create_hypertable('point_history', 'ts', if_not_exists => TRUE, migrate_data => TRUE)")
+    # the CREATE TABLE. Under ddl's lock: every service runs this on
+    # every new connection.
+    ddl.run(conn, SCHEMA, "SELECT create_hypertable('point_history', 'ts', if_not_exists => TRUE, migrate_data => TRUE)")
     # Real tradeoff, taken deliberately: every INSERT otherwise waits on a
     # full WAL fsync before returning. Scoped to this connection only (a
     # session-level SET, not a postgresql.conf edit) - other clients

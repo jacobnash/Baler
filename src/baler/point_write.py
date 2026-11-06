@@ -28,6 +28,8 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+from baler import ddl
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS point_write_levels (
     point_uri  TEXT NOT NULL,
@@ -50,7 +52,7 @@ class CommandError(RuntimeError):
 
 
 def ensure_schema(conn) -> None:
-    conn.execute(SCHEMA)
+    ddl.run(conn, SCHEMA)
 
 
 def record_level(conn, point_uri: str, level: int, value, who: str, user_sub: str | None) -> None:
