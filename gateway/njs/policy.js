@@ -82,8 +82,8 @@ const ROUTES = [
   // /api/{project}/{op} layout (and Haxall's flat /api/{op}). Ops take GET
   // (zinc query params) or POST (a grid body) interchangeably per the spec.
   // Read-type ops are viewer; anything that writes data is operator.
-  ["GET",    /^\/api\/(?:[^/]+\/)?(about|ops|formats|read|nav|hisRead|watchSub|watchUnsub|watchPoll|close)$/, "haystack", "viewer"],
-  ["POST",   /^\/api\/(?:[^/]+\/)?(about|ops|formats|read|nav|hisRead|watchSub|watchUnsub|watchPoll|close)$/, "haystack", "viewer"],
+  ["GET",    /^\/api\/(?:[^/]+\/)?(about|ops|formats|read|nav|hisRead|watchSub|watchUnsub|watchPoll|close|defs|libs|filetypes)$/, "haystack", "viewer"],
+  ["POST",   /^\/api\/(?:[^/]+\/)?(about|ops|formats|read|nav|hisRead|watchSub|watchUnsub|watchPoll|close|defs|libs|filetypes)$/, "haystack", "viewer"],
   ["POST",   /^\/api\/(?:[^/]+\/)?(hisWrite|pointWrite|invokeAction)$/,                                         "haystack", "operator"],
 
   // public on every service - no token required

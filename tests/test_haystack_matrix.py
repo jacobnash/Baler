@@ -43,7 +43,7 @@ except ImportError:
 HAXALL_API = os.environ.get("HAXALL_API", "")
 HAXALL_USER = os.environ.get("HAXALL_SU_USERNAME", "su")
 HAXALL_PASS = os.environ.get("HAXALL_SU_PASSWORD", "")
-OPS = ["about", "read", "readById", "nav", "hisWrite+Read", "watch", "pointWrite"]
+OPS = ["about", "read", "readById", "nav", "hisWrite+Read", "watch", "pointWrite", "defs"]
 NY = oh.haystack_tz("New_York")
 
 
@@ -91,6 +91,9 @@ class OpenhayClient:
         v = self.c.point_write_array(ref).rows[level - 1].get("val")
         return v.val if isinstance(v, oh.Number) else v
 
+    def defs(self, op, flt=None):
+        return [r["def"].val for r in self.c.defs(op, flt)]
+
 
 class PhableClient:
     def __init__(self, base, user, pw, fmt):
@@ -112,6 +115,7 @@ class PhableClient:
 
     nav = None  # phable has no nav
     watch = None  # nor watches
+    defs = None  # nor the defs/libs ops
 
     def his_write(self, ref, rows):
         self.c.his_write_by_id(self._ref(ref), [{"ts": ts, "val": phable.Number(v)} for ts, v in rows])
@@ -171,7 +175,14 @@ def _run_ops(client, marker, dat, sp, day):
     cell("nav", client.nav and (lambda: client.nav()))
     cell("hisWrite+Read", _his)
     cell("watch", client.watch and _watch)
+    def _defs():
+        # A server may add libs of its own (Haxall does); the standard ones must be there.
+        assert {"lib:ph", "lib:phScience", "lib:phIoT", "lib:phIct"} <= set(client.defs("libs"))
+        assert client.defs("defs", "def==^site") == ["site"]
+        assert {"filetype:zinc", "filetype:json"} <= set(client.defs("filetypes"))
+
     cell("pointWrite", _pw)
+    cell("defs", client.defs and _defs)
     return cells
 
 

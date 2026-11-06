@@ -75,7 +75,7 @@ check("no two rows share an identical (method, source) pair", () => {
 });
 
 check("haystack routes: both URL layouts, reads are viewer, writes are operator", () => {
-    for (const uri of ["/api/demo/read", "/api/read", "/api/site-1/hisRead"]) {
+    for (const uri of ["/api/demo/read", "/api/read", "/api/site-1/hisRead", "/api/demo/defs", "/api/libs", "/api/demo/filetypes"]) {
         assert.equal(policy.resolveRoute("GET", uri).minRole, "viewer", uri);
         assert.equal(policy.resolveRoute("POST", uri).minRole, "viewer", uri);
     }

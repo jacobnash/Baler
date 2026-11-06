@@ -321,6 +321,17 @@ def test_http_post_json3_answers_json3(http):
     assert '"m:"' in body and oh.sniff(body) == "json3"
 
 
+def test_http_defs_libs_filetypes(http):
+    libs = oh.decode_grid(_req(f"{http}/api/demo/libs")[2])
+    assert sorted(r["def"].val for r in libs) == ["lib:ph", "lib:phIct", "lib:phIoT", "lib:phScience"]
+    site = oh.decode_grid(_req(f"{http}/api/defs?filter=def%3D%3D%5Esite")[2])
+    assert [r["def"] for r in site] == [oh.Symbol("site")]
+    assert len(oh.decode_grid(_req(f"{http}/api/demo/filetypes?limit=2")[2])) == 2
+    assert oh.decode_grid(_req(f"{http}/api/defs?filter=def%20%3D%3D")[2]).is_error
+    ops = {r["name"] for r in oh.decode_grid(_req(f"{http}/api/ops")[2])}
+    assert {"defs", "libs", "filetypes"} <= ops
+
+
 def test_http_flat_layout_and_error_grid(http):
     _, _, body = _req(f"{http}/api/read?filter=point%20and%20(")
     assert oh.decode_grid(body).is_error

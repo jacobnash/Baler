@@ -134,7 +134,7 @@ components:
       required: true
       schema:
         type: string
-        enum: [about, ops, formats, read, nav, hisRead, hisWrite, pointWrite, watchSub, watchUnsub, watchPoll, invokeAction, close]
+        enum: [about, ops, formats, read, nav, hisRead, hisWrite, pointWrite, watchSub, watchUnsub, watchPoll, invokeAction, close, defs, libs, filetypes]
   responses:
     Grid:
       description: A Haystack grid. Error grids have `err` in their meta.

@@ -83,10 +83,14 @@ OPS = [
     ("watchUnsub", "Unsubscribe from watch"),
     ("watchPoll", "Poll watch for changes"),
     ("close", "Close the current session"),
+    ("defs", "Read def records from the Haystack 4 namespace"),
+    ("libs", "Read lib def records"),
+    ("filetypes", "Read filetype def records"),
 ]
+DEFS_OPS = {"defs", "libs", "filetypes"}
 WRITE_OPS = {"hisWrite", "pointWrite", "invokeAction"}
 # Ops that return no point/equip data, so need no site scope lookup.
-_DATA_FREE_OPS = {"about", "ops", "formats", "close", "watchUnsub"}
+_DATA_FREE_OPS = {"about", "ops", "formats", "close", "watchUnsub"} | DEFS_OPS
 
 
 class OpError(Exception):
@@ -553,6 +557,15 @@ def dispatch(backend: Backend, op: str, req: oh.Grid, scope: Scope = EVERYTHING,
             {"mime": "text/trio", "receive": oh.MARKER, "send": oh.MARKER},
             {"mime": "text/csv", "send": oh.MARKER},
         ])
+    if op in DEFS_OPS:
+        # The standard Haystack 4 namespace (openhay bundles the official
+        # defs). Baler's own Brick/PROJ classes aren't defs.
+        limit = row.get("limit")
+        try:
+            return oh.defs(op, str(row["filter"]) if row.get("filter") else None,
+                           int(limit.val) if isinstance(limit, oh.Number) else None)
+        except ValueError as exc:
+            raise OpError(str(exc)) from exc
     if op == "read":
         if "filter" in row:
             limit = row.get("limit")
