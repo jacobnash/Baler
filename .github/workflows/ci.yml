@@ -3,6 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+    # Plans and notes only: no CI run, so no redeploy of the nash-srv demo
+    # (deploy.yml runs off a finished CI run).
+    paths-ignore: ["todo/**"]
   pull_request:
 
 jobs:

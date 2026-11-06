@@ -530,3 +530,23 @@ def test_ops_are_op_defs_for_served_ops(backend):
     assert all(n[len("op:"):] in {o for o, _ in ha.OPS} | {"pointWrite", "invokeAction"} for n in names)
     about = ha.dispatch(backend, "about", oh.Grid()).rows[0]
     assert about["moduleName"] and about["moduleVersion"]
+
+
+def test_his_write_refuses_a_different_unit(backend):
+    ref = oh.Ref(ha.uri_to_ref(DAT))  # DAT's unit is °F
+    with pytest.raises(ha.OpError, match="doesn't match"):
+        backend.his_write(ref, [{"ts": T0 + timedelta(hours=4), "val": oh.Number(20.0, "°C")}])
+    backend.his_write(ref, [{"ts": T0 + timedelta(hours=4), "val": oh.Number(70.0, "°F")}])
+
+
+def test_defs_limit_marks_incomplete_and_filetypes_are_what_we_serve(backend):
+    g = ha.dispatch(backend, "defs", oh.Grid.from_rows([{"limit": oh.Number(3)}]))
+    assert len(g.rows) == 3 and g.meta["limit"] == oh.Number(3) and "incomplete" in g.meta
+    names = {r["def"].val for r in ha.dispatch(backend, "filetypes", oh.Grid()).rows}
+    assert names == {"filetype:zinc", "filetype:json", "filetype:trio", "filetype:csv"}
+
+
+def test_http_unsupported_accept_is_406(http):
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _req(f"{http}/api/demo/about", headers={"Accept": "text/turtle"})
+    assert exc.value.code == 406

@@ -85,6 +85,10 @@ services:
   postgres:
     image: timescale/timescaledb:latest-pg16
     command: postgres -c log_statement=all
+    # Docker's default 64 MB /dev/shm is too small for Postgres parallel
+    # queries over point_history (nash-srv hit "could not resize shared
+    # memory segment"); the host disk was fine.
+    shm_size: 512mb
     environment:
       POSTGRES_USER: ${BALER_PG_USER:-baler}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-${BALER_PG_USER:-baler}}

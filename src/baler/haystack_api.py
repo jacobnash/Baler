@@ -90,6 +90,8 @@ OPS = [
     ("filetypes", "Read filetype def records"),
 ]
 DEFS_OPS = {"defs", "libs", "filetypes"}
+_FILETYPES_SERVED = {"filetype:zinc", "filetype:json", "filetype:trio", "filetype:csv"}
+_SERVED_MIMES = ("text/zinc", "application/json", "text/trio", "text/csv", "text/plain", "*/*", "text/*", "application/*")
 WRITE_OPS = {"hisWrite", "pointWrite", "invokeAction"}
 # Ops that return no point/equip data, so need no site scope lookup.
 _DATA_FREE_OPS = {"about", "ops", "formats", "close", "watchUnsub"} | DEFS_OPS
@@ -501,11 +503,17 @@ class Backend:
         if _kind_of(uri) != "point":
             raise OpError(f"hisWrite target is not a point: @{ref.id}")
         with self._conn() as conn:
+            rec = build_records(self.store, conn, [uri]).get(uri, {})
+            cur = rec.get("curVal")
+            point_unit = rec.get("unit") or (cur.unit if isinstance(cur, oh.Number) else None)
             for row in rows:
                 ts, val = row.get("ts"), row.get("val")
                 if not isinstance(ts, datetime):
                     raise OpError("hisWrite row missing ts")
                 unit = val.unit if isinstance(val, oh.Number) else None
+                if unit and point_unit and unit != point_unit:
+                    # As haxall does: no silent conversion, no mixed units
+                    raise OpError(f"unit {unit} doesn't match the point's unit {point_unit}")
                 if isinstance(val, oh.Number):
                     val = val.val
                 elif val is not None and not isinstance(val, (bool, int, float, str)):
@@ -696,11 +704,20 @@ def dispatch(backend: Backend, op: str, req: oh.Grid, scope: Scope = EVERYTHING,
         # The standard Haystack 4 namespace (openhay bundles the official
         # defs). Baler's own Brick/PROJ classes aren't defs.
         limit = row.get("limit")
+        n = int(limit.val) if isinstance(limit, oh.Number) else None
         try:
-            return oh.defs(op, str(row["filter"]) if row.get("filter") else None,
-                           int(limit.val) if isinstance(limit, oh.Number) else None)
+            full = oh.defs(op, str(row["filter"]) if row.get("filter") else None)
         except ValueError as exc:
             raise OpError(str(exc)) from exc
+        rows = full.rows
+        if op == "filetypes":
+            # only what this server actually reads/writes (no RDF export yet)
+            rows = [r for r in rows if str(getattr(r.get("def"), "val", "")) in _FILETYPES_SERVED]
+        meta = dict(full.meta)
+        if n is not None and len(rows) > n:
+            rows = rows[:n]
+            meta.update(incomplete=f"limit of {n} reached", limit=oh.Number(n))
+        return oh.Grid(meta=meta, cols=full.cols, rows=rows)
     if op == "read":
         if "filter" in row:
             limit = row.get("limit")
@@ -968,7 +985,11 @@ def make_handler(backend: Backend, login: ScramLogin | None):
                     span.set_attribute("error", str(exc))
                     grid = err_grid(f"bad request: {exc}")
                 flavor = req_fmt if req_fmt in ("json3", "hayson") else "hayson"
-                fmt = oh.negotiate(self.headers.get("Accept"), flavor)
+                accept = self.headers.get("Accept")
+                if accept and not any(m in accept.lower() for m in _SERVED_MIMES):
+                    self._send(406, f"can't produce {accept}; try text/zinc or application/json\n".encode())
+                    return
+                fmt = oh.negotiate(accept, flavor)
                 try:
                     out = oh.encode_grid(grid, fmt).encode("utf-8")
                 except ValueError as exc:
