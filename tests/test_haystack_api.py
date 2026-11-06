@@ -550,3 +550,19 @@ def test_http_unsupported_accept_is_406(http):
     with pytest.raises(urllib.error.HTTPError) as exc:
         _req(f"{http}/api/demo/about", headers={"Accept": "text/turtle"})
     assert exc.value.code == 406
+
+
+def test_brick_location_links_come_back_as_ref_lists():
+    """The UI tree (ui/app.js) walks Site > Building > Floor > Zone and
+    feeds from these, through /api instead of the graph (Baler#12)."""
+    store = Store()
+    g = store.graph
+    site, bld = URIRef("urn:location:site-1"), URIRef("urn:location:site/b1")
+    ahu = URIRef("urn:equip:windrow/ahu-1")
+    g.add((site, RDF.type, BRICK.Site))
+    g.add((site, BRICK.hasPart, bld))
+    g.add((ahu, BRICK.feeds, bld))
+    recs = ha.build_records(store, None, [str(site), str(ahu)])
+    assert recs[str(site)]["brickClass"] == "Site"
+    assert recs[str(site)]["brickHasPart"] == [oh.Ref(ha.uri_to_ref(str(bld)))]
+    assert recs[str(ahu)]["brickFeeds"] == [oh.Ref(ha.uri_to_ref(str(bld)))]

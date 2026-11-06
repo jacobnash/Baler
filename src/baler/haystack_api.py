@@ -90,6 +90,7 @@ OPS = [
     ("filetypes", "Read filetype def records"),
 ]
 DEFS_OPS = {"defs", "libs", "filetypes"}
+_BRICK_LINK_TAGS = {BRICK_NS + "hasPart": "brickHasPart", BRICK_NS + "feeds": "brickFeeds"}
 _FILETYPES_SERVED = {"filetype:zinc", "filetype:json", "filetype:trio", "filetype:csv"}
 _SERVED_MIMES = ("text/zinc", "application/json", "text/trio", "text/csv", "text/plain", "*/*", "text/*", "application/*")
 WRITE_OPS = {"hisWrite", "pointWrite", "invokeAction"}
@@ -235,6 +236,12 @@ def build_records(store, ts_conn, uris: list[str]) -> dict[str, dict]:
                 classes.setdefault(s, []).append(o)
         elif p == BRICK_NS + "isPointOf":
             rec["equipRef"] = oh.Ref(uri_to_ref(str(o)))
+        elif p in _BRICK_LINK_TAGS and is_iri:
+            # Brick containment/feeds, as Ref lists: not standard Haystack
+            # tags (clients ignore them), but they let a client - the UI's
+            # tree - walk Site > Building > Floor > Zone and feeds through
+            # this API instead of querying the graph directly.
+            rec.setdefault(_BRICK_LINK_TAGS[p], []).append(oh.Ref(uri_to_ref(str(o))))
 
     for s, by_tag in units.items():
         for tag, unit in by_tag.items():

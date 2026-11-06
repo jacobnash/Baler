@@ -1,100 +1,110 @@
-// No build step, no framework - direct SPARQL to Oxigraph (CORS-open,
-// see docker-compose.yml's `--cors` flag) for the equipment/point tree,
-// and fetch() against ingest_api.py's GET /history for chart data (also
-// CORS-open already, via its end_headers() override).
+// No build step, no framework. The equipment/point tree reads the Haystack
+// API (haystack_api.py) through the gateway, so it needs the same login as
+// every other page and only shows the caller's own sites; chart data comes
+// from ingest_api.py's GET /history, also through the gateway.
 const params = new URLSearchParams(location.search);
-const OXIGRAPH_URL = params.get("oxigraph") || "http://localhost:7878/query";
 // Relative by default so this works as served by the gateway at /ui/ (same
-// origin, so /ingest/... proxies through it - see gateway/nginx.conf).
-// Override with ?ingest=... when serving ui/ standalone (ui_server.py).
+// origin - see gateway/nginx.conf). Override with ?api=... / ?ingest=...
+// when serving ui/ standalone (ui_server.py).
+const HAYSTACK_API_URL = params.get("api") || "/api";
 const INGEST_API_URL = params.get("ingest") || "/ingest";
-
-const BRICK = "https://brickschema.org/schema/Brick#";
-const TD = "urn:baler:td#";
-const HAYSTACK = "urn:baler:haystack#";
 
 const statusEl = document.getElementById("status");
 const treeEl = document.getElementById("tree");
 const detailEl = document.getElementById("detail");
 
-// Gateway auth (see gateway/njs/policy.js, ui/auth.js) - only routes
-// proxied through the gateway need a Bearer token; the direct-to-Oxigraph
-// SPARQL calls below are unauthenticated (CORS-open, see
-// docker-compose.yml's `--cors` flag) and untouched by any of this.
+// Tags the tree shows structurally (or that are bookkeeping), not in a
+// point's tag list.
+const STRUCTURAL_TAGS = new Set(["id", "dis", "equipRef", "siteRef", "brickClass", "brickHasPart", "brickFeeds", "tz", "mod"]);
 
-async function sparql(query) {
-  const res = await fetch(OXIGRAPH_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/sparql-query", Accept: "application/sparql-results+json" },
-    body: query,
-  });
-  if (!res.ok) throw new Error(`SPARQL query failed: ${res.status}`);
-  const body = await res.json();
-  return body.results.bindings;
+class SessionExpired extends Error {}
+
+// GET /api/read?filter=... -> the grid's rows (Hayson, the API's JSON default).
+async function haystackRead(filter) {
+  const url = `${HAYSTACK_API_URL}/read?filter=${encodeURIComponent(filter)}`;
+  const res = await fetch(url, { headers: { ...authHeaders(), Accept: "application/json" } });
+  if (res.status === 401) {
+    handleUnauthorized();
+    throw new SessionExpired("session expired");
+  }
+  if (!res.ok) throw new Error(`read failed: ${res.status}`);
+  const grid = await res.json();
+  if (grid.meta && grid.meta.err) throw new Error(grid.meta.dis || "read failed");
+  return grid.rows || [];
 }
 
+// Ref ids are entity URIs with everything outside Haystack's ref charset
+// escaped byte-wise as ~XX (haystack_api.uri_to_ref); this undoes that.
+function refToUri(id) {
+  const bytes = [];
+  for (let i = 0; i < id.length; i++) {
+    const hex = id[i] === "~" ? id.slice(i + 1, i + 3) : "";
+    if (/^[0-9A-Fa-f]{2}$/.test(hex)) {
+      bytes.push(parseInt(hex, 16));
+      i += 2;
+    } else {
+      bytes.push(...new TextEncoder().encode(id[i]));
+    }
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes));
+}
+
+const refId = (v) => (v && v._kind === "ref" ? v.val : null);
+const refList = (v) => (Array.isArray(v) ? v : v ? [v] : []).map(refId).filter(Boolean);
+
 function localName(uri) {
-  // urn:location:site-1 has no "/" or "#" at all - only colons - so those
-  // two alone left the whole URI un-trimmed for location URIs. ":" is a
-  // safe third separator here: every other URI scheme in this app
-  // (urn:point:.../..., urn:equip:.../..., https://.../...#...) always has
-  // a later "/" or "#" that still wins the max().
+  // urn:location:site-1 has no "/" or "#" at all - only colons - so ":" is
+  // a third separator; every other URI here has a later "/" or "#".
   const i = Math.max(uri.lastIndexOf("#"), uri.lastIndexOf("/"), uri.lastIndexOf(":"));
   return uri.slice(i + 1);
 }
 
+// A record -> what the tree needs. `uri` keys history and the his.html link.
+function entity(rec) {
+  const id = refId(rec.id);
+  const uri = refToUri(id);
+  return {
+    id,
+    uri,
+    dis: typeof rec.dis === "string" ? rec.dis : localName(uri),
+    brickClass: typeof rec.brickClass === "string" ? rec.brickClass : null,
+    hasPart: refList(rec.brickHasPart),
+    feeds: refList(rec.brickFeeds),
+    rec,
+  };
+}
+
 async function loadEquipment() {
-  const rows = await sparql(`
-    PREFIX brick: <${BRICK}>
-    SELECT DISTINCT ?equip ?type WHERE {
-      ?equip brick:hasPoint ?p .
-      OPTIONAL { ?equip a ?type }
-    }
-  `);
-  const byEquip = new Map();
-  for (const row of rows) {
-    const equip = row.equip.value;
-    const type = row.type ? localName(row.type.value) : null;
-    if (!byEquip.has(equip)) byEquip.set(equip, new Set());
-    if (type) byEquip.get(equip).add(type);
-  }
-
+  const equips = (await haystackRead("equip")).map(entity);
   const byType = new Map();
-  for (const [equip, types] of byEquip) {
-    const label = types.size ? [...types].sort().join(", ") : "Unclassified";
+  for (const e of equips) {
+    const label = e.brickClass || "Unclassified";
     if (!byType.has(label)) byType.set(label, []);
-    byType.get(label).push(equip);
+    byType.get(label).push(e);
   }
-  return byType;
+  return { byType, equips };
 }
 
-async function loadPoints(equipUri) {
-  const rows = await sparql(`
-    PREFIX brick: <${BRICK}>
-    PREFIX td: <${TD}>
-    SELECT ?point ?type ?topic WHERE {
-      <${equipUri}> brick:hasPoint ?point .
-      OPTIONAL { ?point a ?type }
-      OPTIONAL { ?point td:sourceTopic ?topic }
-    }
-  `);
-  const byPoint = new Map();
-  for (const row of rows) {
-    const point = row.point.value;
-    if (!byPoint.has(point)) {
-      byPoint.set(point, { uri: point, topic: row.topic ? row.topic.value : null, types: new Set() });
-    }
-    if (row.type) byPoint.get(point).types.add(localName(row.type.value));
-  }
-  return [...byPoint.values()].sort((a, b) => (a.topic || a.uri).localeCompare(b.topic || b.uri));
+async function loadPoints(equip) {
+  const rows = await haystackRead(`point and equipRef==@${equip.id}`);
+  return rows.map(entity).sort((a, b) => a.uri.localeCompare(b.uri));
 }
 
-async function loadTags(pointUri) {
-  const rows = await sparql(`
-    PREFIX haystack: <${HAYSTACK}>
-    SELECT ?tag WHERE { <${pointUri}> haystack:hasTag ?tag }
-  `);
-  return rows.map((r) => r.tag.value).sort();
+function tagText(name, val) {
+  if (val && typeof val === "object" && !Array.isArray(val)) {
+    if (val._kind === "marker") return name;
+    if (val._kind === "number") return `${name}: ${val.val}${val.unit || ""}`;
+    if (val._kind === "ref") return `${name}: @${val.dis || refToUri(val.val)}`;
+    if ("val" in val) return `${name}: ${val.val}`;
+  }
+  return `${name}: ${typeof val === "object" ? JSON.stringify(val) : val}`;
+}
+
+function pointTags(rec) {
+  return Object.keys(rec)
+    .filter((k) => !STRUCTURAL_TAGS.has(k))
+    .sort()
+    .map((k) => tagText(k, rec[k]));
 }
 
 async function loadHistory(topic) {
@@ -102,7 +112,7 @@ async function loadHistory(topic) {
   const res = await fetch(url, { headers: authHeaders() });
   if (res.status === 401) {
     handleUnauthorized();
-    throw new Error("session expired");
+    throw new SessionExpired("session expired");
   }
   if (!res.ok) throw new Error(`history fetch failed: ${res.status}`);
   return res.json(); // [{ts, value}, ...]
@@ -126,11 +136,11 @@ function hisLink(uri, text = "📈") {
   return a;
 }
 
-function buildEquipNode(equipUri, label) {
+function buildEquipNode(equip, label) {
   const equipDetails = document.createElement("details");
   const equipSummary = document.createElement("summary");
   equipSummary.textContent = `${label} `;
-  equipSummary.appendChild(hisLink(equipUri));
+  equipSummary.appendChild(hisLink(equip.uri));
   equipDetails.appendChild(equipSummary);
 
   const pointList = document.createElement("ul");
@@ -140,12 +150,19 @@ function buildEquipNode(equipUri, label) {
     async () => {
       if (!equipDetails.open || pointList.dataset.loaded) return;
       pointList.dataset.loaded = "1";
-      const points = await loadPoints(equipUri);
+      let points;
+      try {
+        points = await loadPoints(equip);
+      } catch (err) {
+        pointList.dataset.loaded = "";
+        pointList.textContent = `failed to load points: ${err.message}`;
+        return;
+      }
+      if (!points.length) pointList.textContent = "no points";
       for (const point of points) {
         const li = document.createElement("li");
         const btn = document.createElement("button");
-        const pointLabel = point.topic ? point.topic.split("/").pop() : localName(point.uri);
-        btn.textContent = point.types.size ? `${pointLabel} — ${[...point.types].join(", ")}` : pointLabel;
+        btn.textContent = point.brickClass ? `${point.dis} — ${point.brickClass}` : point.dis;
         btn.addEventListener("click", () => selectPoint(point, btn));
         li.appendChild(btn);
         pointList.appendChild(li);
@@ -158,15 +175,15 @@ function buildEquipNode(equipUri, label) {
 
 function renderTree(byType) {
   treeEl.innerHTML = "";
-  for (const [typeLabel, equipUris] of [...byType.entries()].sort()) {
+  for (const [typeLabel, equips] of [...byType.entries()].sort()) {
     const details = document.createElement("details");
     details.open = false;
     const summary = document.createElement("summary");
-    summary.textContent = `${typeLabel} (${equipUris.length})`;
+    summary.textContent = `${typeLabel} (${equips.length})`;
     details.appendChild(summary);
 
-    for (const equipUri of equipUris.sort()) {
-      details.appendChild(buildEquipNode(equipUri, localName(equipUri).replace(/^windrow\//, "")));
+    for (const equip of equips.sort((a, b) => a.uri.localeCompare(b.uri))) {
+      details.appendChild(buildEquipNode(equip, equip.dis));
     }
     treeEl.appendChild(details);
   }
@@ -178,99 +195,64 @@ function renderTree(byType) {
 // seed_spatial_hierarchy for how this gets built. Central-plant equipment
 // (chillers, boilers, pumps, meters) isn't zone-specific, so it's listed
 // directly under its Building instead of forcing it into a fake zone.
-async function loadHasPart(uri) {
-  const rows = await sparql(`
-    PREFIX brick: <${BRICK}>
-    SELECT ?child ?type WHERE {
-      <${uri}> brick:hasPart ?child .
-      OPTIONAL { ?child a ?type }
+// One read for every location; the hasPart/feeds links come back as Ref
+// lists on each record (haystack_api.build_records), so the tree is built
+// client-side with no further round trips. Locations aren't owned by a
+// site's topic prefix, so a site-scoped login sees none and gets only the
+// by-class tree.
+async function renderLocationSection(equips) {
+  const locations = (await haystackRead("Site or Building or Floor or Zone")).map(entity);
+  const sites = locations.filter((l) => l.brickClass === "Site");
+  if (!sites.length) return null;
+  const byId = new Map([...locations, ...equips].map((e) => [e.id, e]));
+  const fedBy = new Map(); // location id -> equips feeding it
+  for (const e of equips) {
+    for (const target of e.feeds) {
+      if (!fedBy.has(target)) fedBy.set(target, []);
+      fedBy.get(target).push(e);
     }
-  `);
-  const byChild = new Map();
-  for (const row of rows) {
-    const child = row.child.value;
-    if (!byChild.has(child)) byChild.set(child, new Set());
-    if (row.type) byChild.get(child).add(localName(row.type.value));
   }
-  return [...byChild.entries()].map(([uri, types]) => ({ uri, types }));
-}
+  const parts = (e, cls) => e.hasPart.map((id) => byId.get(id)).filter((c) => c && (!cls || c.brickClass === cls));
+  const node = (label) => {
+    const d = document.createElement("details");
+    d.appendChild(Object.assign(document.createElement("summary"), { textContent: label }));
+    return d;
+  };
+  const li = (child) => {
+    const el = document.createElement("li");
+    el.appendChild(child);
+    return el;
+  };
 
-async function loadFeeds(uri) {
-  const rows = await sparql(`
-    PREFIX brick: <${BRICK}>
-    SELECT ?equip WHERE { ?equip brick:feeds <${uri}> }
-  `);
-  return rows.map((r) => r.equip.value);
-}
-
-async function renderLocationSection() {
-  const siteRows = await sparql(`PREFIX brick: <${BRICK}> SELECT ?site WHERE { ?site a brick:Site }`);
-  if (!siteRows.length) return null;
-
-  const root = document.createElement("details");
-  const rootSummary = document.createElement("summary");
-  rootSummary.textContent = "📍 Site";
-  root.appendChild(rootSummary);
-
-  for (const siteRow of siteRows) {
-    const siteUri = siteRow.site.value;
-    const siteNode = document.createElement("details");
-    siteNode.appendChild(Object.assign(document.createElement("summary"), { textContent: localName(siteUri) }));
+  const root = node("📍 Site");
+  for (const site of sites) {
+    const siteNode = node(site.dis);
     const siteList = document.createElement("ul");
-
-    for (const child of await loadHasPart(siteUri)) {
-      if (!child.types.has("Building")) continue;
-      const buildingLi = document.createElement("li");
-      const buildingNode = document.createElement("details");
-      buildingNode.appendChild(
-        Object.assign(document.createElement("summary"), { textContent: localName(child.uri).replace(/^site\//, "") }),
-      );
+    for (const building of parts(site, "Building")) {
+      const buildingNode = node(building.dis.replace(/^site\//, ""));
       const buildingList = document.createElement("ul");
-
-      for (const bChild of await loadHasPart(child.uri)) {
-        if (bChild.types.has("Floor")) {
-          const floorLi = document.createElement("li");
-          const floorNode = document.createElement("details");
-          const ahuUris = await loadFeeds(bChild.uri);
-          floorNode.appendChild(
-            Object.assign(document.createElement("summary"), {
-              textContent: `${localName(bChild.uri)} (fed by ${ahuUris.map(localName).join(", ") || "?"})`,
-            }),
-          );
+      for (const child of parts(building)) {
+        if (child.brickClass === "Floor") {
+          const ahus = fedBy.get(child.id) || [];
+          const floorNode = node(`${child.dis} (fed by ${ahus.map((e) => e.dis).join(", ") || "?"})`);
           const floorList = document.createElement("ul");
-          for (const ahuUri of ahuUris) {
-            const ahuLi = document.createElement("li");
-            ahuLi.appendChild(buildEquipNode(ahuUri, `${localName(ahuUri)} (AHU)`));
-            floorList.appendChild(ahuLi);
-          }
-          for (const zone of await loadHasPart(bChild.uri)) {
-            if (!zone.types.has("Zone")) continue;
-            const zoneLi = document.createElement("li");
-            const zoneNode = document.createElement("details");
-            zoneNode.appendChild(Object.assign(document.createElement("summary"), { textContent: localName(zone.uri) }));
+          for (const ahu of ahus) floorList.appendChild(li(buildEquipNode(ahu, `${ahu.dis} (AHU)`)));
+          for (const zone of parts(child, "Zone")) {
+            const zoneNode = node(zone.dis);
             const zoneList = document.createElement("ul");
-            for (const vavUri of await loadFeeds(zone.uri)) {
-              const li = document.createElement("li");
-              li.appendChild(buildEquipNode(vavUri, `${localName(vavUri)} (VAV)`));
-              zoneList.appendChild(li);
-            }
+            for (const vav of fedBy.get(zone.id) || []) zoneList.appendChild(li(buildEquipNode(vav, `${vav.dis} (VAV)`)));
             zoneNode.appendChild(zoneList);
-            zoneLi.appendChild(zoneNode);
-            floorList.appendChild(zoneLi);
+            floorList.appendChild(li(zoneNode));
           }
           floorNode.appendChild(floorList);
-          floorLi.appendChild(floorNode);
-          buildingList.appendChild(floorLi);
-        } else {
-          const li = document.createElement("li");
-          const label = `${localName(bChild.uri).replace(/^windrow\//, "")}${bChild.types.size ? ` (${[...bChild.types].join(", ")})` : ""}`;
-          li.appendChild(buildEquipNode(bChild.uri, label));
-          buildingList.appendChild(li);
+          buildingList.appendChild(li(floorNode));
+        } else if (child.rec.equip) {
+          const label = child.brickClass ? `${child.dis} (${child.brickClass})` : child.dis;
+          buildingList.appendChild(li(buildEquipNode(child, label)));
         }
       }
       buildingNode.appendChild(buildingList);
-      buildingLi.appendChild(buildingNode);
-      siteList.appendChild(buildingLi);
+      siteList.appendChild(li(buildingNode));
     }
     siteNode.appendChild(siteList);
     root.appendChild(siteNode);
@@ -291,7 +273,9 @@ async function selectPoint(point, btn) {
   btn.classList.add("selected");
   selectedButton = btn;
 
-  detailEl.innerHTML = `<h2>${point.topic || localName(point.uri)}</h2><p class="hint">loading…</p>`;
+  detailEl.innerHTML = "";
+  detailEl.appendChild(Object.assign(document.createElement("h2"), { textContent: point.dis }));
+  detailEl.appendChild(Object.assign(document.createElement("p"), { className: "hint", textContent: "loading…" }));
 
   // /history?point=X reconstructs urn:point:X server-side (see
   // ingest.topic_to_point_uri) - that works identically for a raw
@@ -302,19 +286,17 @@ async function selectPoint(point, btn) {
   // kind of point this is.
   const historyKey = point.uri.startsWith("urn:point:") ? point.uri.slice("urn:point:".length) : null;
 
-  const [tags, history] = await Promise.all([
-    loadTags(point.uri),
-    historyKey ? loadHistory(historyKey).catch(() => []) : Promise.resolve([]),
-  ]);
+  const tags = pointTags(point.rec);
+  const history = historyKey ? await loadHistory(historyKey).catch(() => []) : [];
 
   detailEl.innerHTML = "";
   const h2 = document.createElement("h2");
-  h2.textContent = point.topic || localName(point.uri);
+  h2.textContent = point.dis;
   detailEl.appendChild(h2);
 
-  if (point.types.size) {
+  if (point.brickClass) {
     const p = document.createElement("p");
-    p.textContent = `Brick class: ${[...point.types].join(", ")}`;
+    p.textContent = `Brick class: ${point.brickClass}`;
     detailEl.appendChild(p);
   }
   const queryP = document.createElement("p");
@@ -384,18 +366,15 @@ function renderHistoryInto(container, history) {
 
 async function init() {
   try {
-    const byType = await loadEquipment();
-    if (byType.size === 0) {
-      statusEl.textContent = "connected, but no equipment ingested yet";
-    } else {
-      statusEl.textContent = `${byType.size} equipment classes`;
-    }
+    const { byType, equips } = await loadEquipment();
+    statusEl.textContent = byType.size === 0 ? "connected, but no equipment visible yet" : `${byType.size} equipment classes`;
     renderTree(byType);
 
-    const locationSection = await renderLocationSection();
+    const locationSection = await renderLocationSection(equips);
     if (locationSection) treeEl.insertBefore(locationSection, treeEl.firstChild);
   } catch (err) {
-    statusEl.textContent = `failed to reach Oxigraph at ${OXIGRAPH_URL}: ${err.message}`;
+    if (err instanceof SessionExpired) return;
+    statusEl.textContent = `failed to load from the Haystack API at ${HAYSTACK_API_URL}: ${err.message}`;
   }
 }
 
