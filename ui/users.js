@@ -96,7 +96,7 @@ function siteName(id) {
 }
 
 function adminCount() {
-  return usersState.users.filter((u) => u.role === "admin").length;
+  return usersState.users.filter((u) => u.role === "admin" && !u.disabled).length;
 }
 
 function renderUsers() {
@@ -105,11 +105,15 @@ function renderUsers() {
   for (const user of usersState.users) {
     const tr = document.createElement("tr");
     const isMe = user.id === usersState.me.sub;
-    const lastAdmin = user.role === "admin" && adminCount() <= 1;
+    const lastAdmin = user.role === "admin" && !user.disabled && adminCount() <= 1;
 
     const email = document.createElement("td");
     email.textContent = user.email;
     if (isMe) email.append(" ", badge("you", ""));
+    if (user.disabled) {
+      email.append(" ", badge("disabled", "user-disabled"));
+      tr.className = "user-disabled-row";
+    }
     const role = document.createElement("td");
     role.appendChild(badge(user.role, `role-${user.role}`));
     const sites = document.createElement("td");
@@ -129,12 +133,20 @@ function renderUsers() {
     del.disabled = isMe || lastAdmin;
     del.title = isMe ? "You can't delete your own account" : lastAdmin ? "The organization's last admin" : "";
     del.addEventListener("click", () => confirmDelete(user));
-    actions.append(edit, reset, del);
+    const toggle = Object.assign(document.createElement("button"), {
+      type: "button", textContent: user.disabled ? "Enable" : "Disable",
+    });
+    toggle.disabled = !user.disabled && (isMe || lastAdmin);
+    toggle.title = isMe ? "You can't disable your own account" : lastAdmin && !user.disabled ? "The organization's last admin" : "";
+    toggle.addEventListener("click", () => (user.disabled ? setDisabled(user, false) : confirmDisable(user)));
+    actions.append(edit, reset, toggle, del);
 
     tr.append(email, role, sites, added, actions);
     body.appendChild(tr);
   }
-  $("users-status").textContent = `${usersState.users.length} users, ${adminCount()} admin${adminCount() === 1 ? "" : "s"}`;
+  const off = usersState.users.filter((u) => u.disabled).length;
+  $("users-status").textContent = `${usersState.users.length} users, ${adminCount()} active admin${adminCount() === 1 ? "" : "s"}` +
+    (off ? `, ${off} disabled` : "");
 }
 
 async function loadUsers() {
@@ -226,6 +238,22 @@ function confirmDelete(user) {
   openConfirm(`Delete ${user.email}?`, "They're signed out everywhere and can't sign in again. This can't be undone.",
     user.email, async () => {
       await authApi("DELETE", `/users/${encodeURIComponent(user.id)}`);
+    });
+}
+
+async function setDisabled(user, disabled) {
+  try {
+    await authApi("PATCH", `/users/${encodeURIComponent(user.id)}`, { disabled });
+    await loadUsers();
+  } catch (err) {
+    $("users-status").textContent = err.message;
+  }
+}
+
+function confirmDisable(user) {
+  openConfirm(`Disable ${user.email}?`, "They're signed out everywhere and can't sign in until you enable them again. Nothing is deleted.",
+    null, async () => {
+      await authApi("PATCH", `/users/${encodeURIComponent(user.id)}`, { disabled: true });
     });
 }
 

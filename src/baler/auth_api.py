@@ -375,14 +375,18 @@ def make_handler(ts_pool):
                 return
             span.set_attribute("target_user_id", user_id)
             body = self.read_json_body()
-            if "role" not in body and "site_ids" not in body:
-                raise ValueError("nothing to change: send role and/or site_ids")
+            if not {"role", "site_ids", "disabled"} & body.keys():
+                raise ValueError("nothing to change: send role, site_ids and/or disabled")
             if user_id == caller["sub"] and body.get("role", caller["role"]) != caller["role"]:
                 _respond_error(self, 400, "you can't change your own role")
                 return
+            if user_id == caller["sub"] and body.get("disabled"):
+                _respond_error(self, 400, "you can't disable your own account")
+                return
             try:
                 with ts_pool.connection() as conn:
-                    user = auth.update_user(conn, caller["org_id"], user_id, body.get("role"), body.get("site_ids"))
+                    user = auth.update_user(conn, caller["org_id"], user_id, body.get("role"), body.get("site_ids"),
+                                            body.get("disabled"))
             except auth.LastAdmin as exc:
                 _respond_error(self, 409, str(exc))
                 return

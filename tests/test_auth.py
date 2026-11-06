@@ -275,3 +275,19 @@ def test_update_user_role_sites_and_last_admin_guard(conn):
     assert delete_user(conn, org["id"], org["admin_user_id"]) is True  # another admin remains
     conn.execute("DELETE FROM user_sites WHERE user_id = %s", (user["id"],))
     conn.execute("DELETE FROM revoked_tokens WHERE jti LIKE 'user:%'")
+
+
+@pytest.mark.integration
+def test_disable_blocks_login_and_guards_last_admin(conn):
+    from baler.auth import LastAdmin, list_users, update_user
+
+    org = create_org(conn, "Test Org Dis", "admin-dis@test-auth.invalid", "pw")
+    user = create_user(conn, org["id"], "off@test-auth.invalid", "pw", "viewer")
+    assert update_user(conn, org["id"], user["id"], disabled=True)["disabled"] is True
+    assert get_user_by_email(conn, "off@test-auth.invalid") is None  # login sees no such user
+    assert {u["email"]: u["disabled"] for u in list_users(conn, org["id"])}["off@test-auth.invalid"] is True
+    assert update_user(conn, org["id"], user["id"], disabled=False)["disabled"] is False
+    assert get_user_by_email(conn, "off@test-auth.invalid") is not None
+    with pytest.raises(LastAdmin):
+        update_user(conn, org["id"], org["admin_user_id"], disabled=True)
+    conn.execute("DELETE FROM revoked_tokens WHERE jti LIKE 'user:%'")

@@ -64,6 +64,9 @@ CREATE TABLE IF NOT EXISTS revoked_tokens (
 -- Set for revoked *session* tokens (Haystack close), so the denylist can
 -- drop them once they'd have expired anyway. NULL = keep (API keys).
 ALTER TABLE revoked_tokens ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+-- Set while a user is disabled (Baler#17): they can't log in, by password
+-- or Haystack SCRAM, until an admin enables them again.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ;
 """
 
 SESSION_TTL_SECONDS = 12 * 3600
@@ -273,15 +276,21 @@ def list_sites(conn: psycopg.Connection, org_id: str) -> list[dict]:
 
 
 def _admin_count(conn: psycopg.Connection, org_id: str) -> int:
-    row = conn.execute("SELECT count(*) FROM users WHERE org_id = %s AND role = 'admin'", (org_id,)).fetchone()
+    row = conn.execute(
+        "SELECT count(*) FROM users WHERE org_id = %s AND role = 'admin' AND disabled_at IS NULL", (org_id,)
+    ).fetchone()
     return int(row[0]) if row else 0
 
 
 def update_user(conn: psycopg.Connection, org_id: str, user_id: str,
-                role: str | None = None, site_ids: list[str] | None = None) -> dict | None:
+                role: str | None = None, site_ids: list[str] | None = None,
+                disabled: bool | None = None) -> dict | None:
     """Change a user's role and/or the sites they're limited to (empty =
-    the whole org). Both live in their session tokens, so their sessions
-    end. None when there's no such user in the org."""
+    the whole org), or disable/enable them. Role and sites live in their
+    session tokens, so their sessions end (as they do on disable). None
+    when there's no such user in the org."""
+    if disabled is not None and not isinstance(disabled, bool):
+        raise ValueError("disabled must be true or false")
     if role is not None:
         _check_role(role)
     if site_ids is not None:
@@ -292,11 +301,21 @@ def update_user(conn: psycopg.Connection, org_id: str, user_id: str,
         if unknown:
             raise ValueError(f"no such site in your org: {', '.join(unknown)}")
     with conn.transaction():
-        row = conn.execute("SELECT role FROM users WHERE id = %s AND org_id = %s FOR UPDATE", (user_id, org_id)).fetchone()
+        row = conn.execute(
+            "SELECT role, disabled_at FROM users WHERE id = %s AND org_id = %s FOR UPDATE", (user_id, org_id)
+        ).fetchone()
         if not row:
             return None
-        if role is not None and row[0] == "admin" and role != "admin" and _admin_count(conn, org_id) <= 1:
+        active_admin = row[0] == "admin" and row[1] is None
+        if role is not None and active_admin and role != "admin" and _admin_count(conn, org_id) <= 1:
             raise LastAdmin("the org's last admin can't be demoted")
+        if disabled and active_admin and _admin_count(conn, org_id) <= 1:
+            raise LastAdmin("the org's last admin can't be disabled")
+        if disabled is not None:
+            conn.execute(
+                "UPDATE users SET disabled_at = CASE WHEN %s THEN COALESCE(disabled_at, now()) END WHERE id = %s",
+                (disabled, user_id),
+            )
         if role is not None:
             conn.execute("UPDATE users SET role = %s WHERE id = %s", (role, user_id))
         if site_ids is not None:
@@ -304,12 +323,16 @@ def update_user(conn: psycopg.Connection, org_id: str, user_id: str,
             for sid in sorted(set(site_ids)):
                 conn.execute("INSERT INTO user_sites (user_id, site_id) VALUES (%s, %s)", (user_id, sid))
         end_user_sessions(conn, user_id)
-    return {"id": user_id, "role": role or row[0], "site_ids": user_site_ids(conn, user_id)}
+    now_disabled = row[1] is not None if disabled is None else disabled
+    return {"id": user_id, "role": role or row[0], "site_ids": user_site_ids(conn, user_id), "disabled": now_disabled}
 
 
 def get_user_by_email(conn: psycopg.Connection, email: str) -> dict | None:
     row = conn.execute(
-        "SELECT id, org_id, email, password_hash, role FROM users WHERE lower(email) = %s", (normalize_email(email),)
+        # a disabled user is no user at login (password or SCRAM): the same
+        # answer as a wrong password, so disabling reveals nothing
+        "SELECT id, org_id, email, password_hash, role FROM users WHERE lower(email) = %s AND disabled_at IS NULL",
+        (normalize_email(email),)
     ).fetchone()
     if not row:
         return None
@@ -319,13 +342,14 @@ def get_user_by_email(conn: psycopg.Connection, email: str) -> dict | None:
 def list_users(conn: psycopg.Connection, org_id: str) -> list[dict]:
     rows = conn.execute(
         """SELECT u.id, u.email, u.role, u.created_at,
-                  COALESCE(array_agg(us.site_id) FILTER (WHERE us.site_id IS NOT NULL), '{}')
+                  COALESCE(array_agg(us.site_id) FILTER (WHERE us.site_id IS NOT NULL), '{}'),
+                  u.disabled_at IS NOT NULL
            FROM users u LEFT JOIN user_sites us ON us.user_id = u.id
            WHERE u.org_id = %s GROUP BY u.id ORDER BY u.email""",
         (org_id,),
     ).fetchall()
-    return [{"id": r[0], "email": r[1], "role": r[2], "created_at": r[3].isoformat(), "site_ids": list(r[4])}
-            for r in rows]
+    return [{"id": r[0], "email": r[1], "role": r[2], "created_at": r[3].isoformat(), "site_ids": list(r[4]),
+             "disabled": bool(r[5])} for r in rows]
 
 
 # Sessions are stateless JWTs, so ending a user's sessions (deleted, or
