@@ -22,7 +22,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from baler import his_checks, json_store, mqtt_util, tracing
+from baler import heartbeat, his_checks, json_store, mqtt_util, tracing
 from baler.faults import (
     close_fault,
     close_orphaned_faults,
@@ -275,6 +275,7 @@ def main() -> None:
     # connection_manager.py's one-session-per-worker rule on the Windrow side.
     fault_conn_cur = connect()
     ensure_schema(fault_conn_cur)
+    heartbeat.ensure_schema(fault_conn_cur)
     fault_conn_his = connect()
     ts_conn = connect()
     store = RemoteStore()  # same instance backs both Cur-mode roster resolution and the His-mode sweep below
@@ -300,6 +301,7 @@ def main() -> None:
     try:
         while True:
             evaluate_his_rules(ts_conn, fault_conn_his, rule_cache.get(), args.webhooks_file, store=store)
+            heartbeat.beat(fault_conn_his, "fault_detector", {"interval_seconds": args.his_interval})
             time.sleep(args.his_interval)
     finally:
         client.loop_stop()

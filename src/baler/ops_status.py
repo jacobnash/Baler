@@ -19,7 +19,7 @@ from typing import Any
 
 import psycopg
 
-from baler import timeseries
+from baler import heartbeat, timeseries
 
 COMPONENTS: list[dict[str, Any]] = [
     {
@@ -198,6 +198,9 @@ def _building_signals(scope=None) -> dict[str, Any]:
                     conn, "SELECT target_uri FROM derivation_target_health WHERE disabled = TRUE", scope)
             except psycopg.Error:
                 conn.rollback()
+            out["heartbeats"] = {s: t.astimezone(timezone.utc).isoformat()
+                                 for s, t in heartbeat.latest(conn).items()}
+            conn.rollback()  # latest() may have hit a missing table
             try:
                 org_row = conn.execute("SELECT COUNT(*) FROM orgs").fetchone()
                 out["org_count"] = int(org_row[0]) if org_row else 0
@@ -221,20 +224,42 @@ def _infer_ingest(building: dict[str, Any], *, platform_ok: bool) -> tuple[str, 
     return "ok", f"last ingest {int(age)}s ago"
 
 
+# A daemon is down once its heartbeat is this stale: fault_detector beats
+# every His sweep (30 s by default), derivation_engine every tick (5 s).
+HEARTBEAT_STALE_SECONDS = int(os.environ.get("OPS_HEARTBEAT_STALE_SECONDS", "180"))
+
+
+def _heartbeat_state(building: dict[str, Any], service: str) -> tuple[str, str] | None:
+    """("down", why) when the daemon's heartbeat is missing or stale."""
+    beat = (building.get("heartbeats") or {}).get(service)
+    if beat is None:
+        return "down", "no heartbeat - is the service running?"
+    age = (datetime.now(timezone.utc) - datetime.fromisoformat(beat)).total_seconds()
+    if age > HEARTBEAT_STALE_SECONDS:
+        return "down", f"last heartbeat {int(age)}s ago"
+    return None
+
+
 def _infer_faults(building: dict[str, Any], *, platform_ok: bool) -> tuple[str, str | None]:
     if not platform_ok:
         return "down", "historian unreachable"
+    stale = _heartbeat_state(building, "fault_detector")
+    if stale:
+        return stale
     n = building.get("open_faults", 0)
-    return "ok", f"{n} open fault(s); detector heartbeat not wired yet"
+    return "ok", f"running; {n} open fault(s)"
 
 
 def _infer_derivations(building: dict[str, Any], *, platform_ok: bool) -> tuple[str, str | None]:
     if not platform_ok:
         return "down", "historian unreachable"
+    stale = _heartbeat_state(building, "derivation_engine")
+    if stale:
+        return stale
     disabled = building.get("disabled_derivation_targets", 0)
     if disabled:
         return "degraded", f"{disabled} target(s) auto-disabled"
-    return "ok", "no disabled targets; engine heartbeat not wired yet"
+    return "ok", "running; no disabled targets"
 
 
 def _probe_one(

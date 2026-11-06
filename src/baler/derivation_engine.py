@@ -37,6 +37,7 @@ from rdflib import URIRef
 
 from baler import (
     derivation_health,
+    heartbeat,
     json_store,
     mqtt_util,
     sandbox,
@@ -389,6 +390,7 @@ def main() -> None:
     fault_conn = timeseries.connect(args.dsn)
     health_conn = timeseries.connect(args.dsn)
     derivation_health.ensure_schema(health_conn)
+    heartbeat.ensure_schema(health_conn)
 
     cache = json_store.RuleCache(args.derivations_file)
     global _rules
@@ -420,6 +422,7 @@ def main() -> None:
                 for d in derivations:
                     if d["id"] in due_ids:
                         next_run[d["id"]] = now + timedelta(seconds=d.get("interval_seconds") or args.tick_seconds)
+            heartbeat.beat(health_conn, "derivation_engine", {"tick_seconds": args.tick_seconds})
             time.sleep(args.tick_seconds)
     finally:
         client.loop_stop()

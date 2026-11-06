@@ -27,10 +27,27 @@ def test_infer_ingest_ok_when_recent():
 
 def test_infer_derivations_degraded_when_targets_disabled():
     state, detail = ops_status._infer_derivations(
-        {"disabled_derivation_targets": 2}, platform_ok=True
+        {"disabled_derivation_targets": 2, "heartbeats": {"derivation_engine": _now()}}, platform_ok=True
     )
     assert state == "degraded"
     assert "2" in detail
+
+
+def _now(seconds_ago: int = 0) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat()
+
+
+def test_daemons_are_down_without_a_fresh_heartbeat():
+    """Was "heartbeat not wired yet" - always ok, even with the daemon dead."""
+    assert ops_status._infer_faults({}, platform_ok=True)[0] == "down"
+    stale = {"heartbeats": {"fault_detector": _now(600), "derivation_engine": _now(600)}}
+    assert ops_status._infer_faults(stale, platform_ok=True) == ("down", "last heartbeat 600s ago")
+    assert ops_status._infer_derivations(stale, platform_ok=True)[0] == "down"
+    fresh = {"open_faults": 3, "heartbeats": {"fault_detector": _now(20), "derivation_engine": _now(2)}}
+    assert ops_status._infer_faults(fresh, platform_ok=True) == ("ok", "running; 3 open fault(s)")
+    assert ops_status._infer_derivations(fresh, platform_ok=True)[0] == "ok"
 
 
 @patch("baler.ops_status._building_signals")
