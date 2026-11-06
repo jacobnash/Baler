@@ -64,6 +64,7 @@ Records come from the same entity graph everything else reads:
 | `point` / `equip` | the kind of URI |
 | `equipRef` | `brick:isPointOf` in the graph, not the original source's ref, so it always resolves here |
 | `brickClass` | the Brick class mapping assigned |
+| `spec` | the most specific `ph` Xeto spec the record fits (`@ph::Ahu`, `@ph.points::ZoneAirTempSensor`): from its own markers plus those its Brick class implies, so Brick-only records are typed for Xeto clients too. A stored `spec` (Haystack 4 import) is kept as-is. |
 | `curVal`, `unit`, `his`, `mod` | the newest sample in the historian |
 
 Filters work exactly like the [Query page](/his-query): a name matches as a Haystack marker,

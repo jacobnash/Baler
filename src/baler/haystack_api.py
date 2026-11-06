@@ -39,6 +39,7 @@ Haystack 4 defs/libs ops.
 from __future__ import annotations
 
 import argparse
+import functools
 import os
 import threading
 import time as _time
@@ -48,7 +49,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 import openhay as oh
 
-from baler import auth, gateway_auth, hisquery, timeseries, tracing
+from baler import auth, brick_vocab, gateway_auth, hisquery, timeseries, tracing
 from baler import point_write as pw
 from baler.http_handler_base import BaseAPIHandler
 from baler.scope import EVERYTHING, Scope, claims_from_header, scope_for
@@ -323,8 +324,59 @@ def build_records(store, ts_conn, uris: list[str], values_only: bool = False) ->
             if uri in first:
                 rec["hisStart"] = first[uri]
         rec.setdefault("tz", DEFAULT_TZ)
+        if "spec" not in rec:  # a stored spec (a Haystack 4 import) wins
+            spec = best_spec(rec)
+            if spec:
+                rec["spec"] = oh.Ref(spec)
         out[uri] = rec
     return out
+
+
+@functools.lru_cache(maxsize=1)
+def _specs_by_size() -> list[tuple[str, frozenset[str]]]:
+    """ph Xeto specs, most required markers first (ties by name), so the
+    first one a record fits is the most specific."""
+    specs = hisquery._xeto_specs()
+    # Specs that differ only in non-marker slots (BoolPoint, NumberPoint and
+    # Point all need just `point`) can't be told apart by markers: keep the
+    # base one, the shortest name.
+    base: dict[frozenset[str], str] = {}
+    for q, m in sorted(specs.items(), key=lambda qm: (len(qm[0].split("::")[-1]), qm[0])):
+        base.setdefault(frozenset(m), q)
+    return sorted(((q, m) for m, q in base.items()), key=lambda qm: (-len(qm[1]), qm[0]))
+
+
+@functools.lru_cache(maxsize=1)
+def _markers_of_brick_class() -> dict[str, frozenset[str]]:
+    """Brick class -> the Haystack markers the mapping rules mint it from
+    (rules/haystack_*_to_brick.yaml reversed): what a Brick-only record would
+    carry as Haystack tags."""
+    from baler import mapping
+
+    out: dict[str, frozenset[str]] = {}
+    for path in (mapping.DEFAULT_RULES_PATH, mapping.DEFAULT_RULES_PATH.replace("haystack_to_brick", "haystack_equip_to_brick")):
+        try:
+            rules = mapping.load_rules(path)
+        except FileNotFoundError:
+            continue
+        for rule in rules:
+            # the class, its aliases (brick:AHU) and subclasses (Rooftop_Unit)
+            vocab = brick_vocab.load()
+            for cls in vocab.descendants(rule["brick_class"]) or {rule["brick_class"]}:
+                out.setdefault(cls, frozenset(rule["tags"]))
+    return out
+
+
+def best_spec(rec: dict) -> str | None:
+    """The most specific ph Xeto spec the record fits (Baler#22): its own
+    markers, plus those its Brick class implies."""
+    markers = {k for k, v in rec.items() if v is oh.MARKER}
+    cls = rec.get("brickClass")
+    if isinstance(cls, str):
+        markers |= _markers_of_brick_class().get(cls, frozenset())
+    if not markers:
+        return None
+    return next((q for q, need in _specs_by_size() if need <= markers), None)
 
 
 def _site_of(store, uris: list[str]) -> dict[str, str]:

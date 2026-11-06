@@ -711,3 +711,14 @@ def test_nested_dicts_and_datetime_zones_round_trip():
     assert ids("ts == 2020-09-01T05:00:00Z UTC") == []  # same instant, other zone: not equal
     assert ids("ts < 2020-09-01T06:00:00Z UTC // comments are fine") == [uri]
     assert not any(u.startswith("urn:baler:dict:") for u in ids("thru or m"))  # dict nodes aren't records
+
+
+def test_records_advertise_the_xeto_spec_they_fit():
+    """Baler#22: the most specific ph spec, from the record's markers plus
+    the markers its Brick class implies (aliases and subclasses included)."""
+    m = oh.MARKER
+    assert ha.best_spec({"equip": m, "ahu": m}) == "ph::Ahu"
+    assert ha.best_spec({"equip": m, "brickClass": "AHU"}) == "ph::Ahu"  # Brick alias, no ahu marker
+    assert ha.best_spec({"point": m, "brickClass": "Zone_Air_Temperature_Sensor"}) == "ph.points::ZoneAirTempSensor"
+    assert ha.best_spec({"point": m}) == "ph::Point"  # not BoolPoint: same markers, base spec wins
+    assert ha.best_spec({"dis": "x"}) is None
