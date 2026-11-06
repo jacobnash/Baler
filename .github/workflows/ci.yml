@@ -77,3 +77,44 @@ jobs:
       - run: pytest -m "integration or not integration" --cov=baler --cov-report=term-missing
       - if: always()
         run: docker compose logs
+
+  # Haystack conformance matrix: Baler's /api and Haxall (the open-source
+  # reference server) side by side, with openhay and phable as clients.
+  # Baler cells and openhay-vs-Haxall cells are gated; the full table lands
+  # in the job summary.
+  haxall-matrix:
+    runs-on: ubuntu-latest
+    env:
+      BALER_JWT_SECRET: ci-only-jwt-secret-needs-32-bytes-minimum
+      BALER_GATEWAY_SECRET: ci-only-gateway-secret-value
+      MQTT_USERNAME: baler
+      MQTT_PASSWORD: ci-only-mqtt-password
+      MATRIX_REQUIRED: "1"
+      HAXALL_API: http://localhost:8280/api/sys
+      HAXALL_SU_USERNAME: su
+      HAXALL_SU_PASSWORD: ci-only-haxall-password
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true  # windrow/docker/haxall.Dockerfile builds the Haxall image
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev,validate,haystack]"
+      - run: docker build -t haxall:ci -f windrow/docker/haxall.Dockerfile windrow/docker
+      - run: >-
+          docker run -d --name haxall -p 8280:8080 haxall:ci sh -c
+          "bin/hx init -headless -suUser su -suPass $HAXALL_SU_PASSWORD -httpPort 8080 /haxall/var/ci && bin/hx run /haxall/var/ci"
+      - run: docker compose up -d --build --wait
+      - name: Wait for Haxall
+        run: |
+          for i in $(seq 1 90); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8280/api/sys/about || true)
+            [ "$code" != "000" ] && exit 0
+            sleep 2
+          done
+          docker logs haxall; exit 1
+      - run: pytest tests/test_haystack_matrix.py -m integration -s -ra
+      - if: failure()
+        run: docker logs haxall | tail -50; docker compose logs | tail -200
+

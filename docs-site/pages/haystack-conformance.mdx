@@ -1,0 +1,51 @@
+---
+title: Haystack conformance
+---
+
+"Works with standard Haystack tooling" is checked on every push, not claimed. CI's `haxall-matrix`
+job runs every Haystack op, in every wire format, against **Baler's `/api`** and against
+**Haxall**, the open-source reference server, using two independent clients:
+
+- [openhay](https://github.com/jacobnash/openhay), our library.
+- [phable](https://pypi.org/project/phable/), a client we didn't write. It doesn't share our assumptions,
+  which makes it good at catching mismatches. It found four in openhay's first version.
+
+The full, current table is in the job summary of each CI run
+(`tests/test_haystack_matrix.py`). **Every Baler cell must pass**, and so must openhay against
+Haxall, or CI fails.
+
+## Ops checked
+
+| op | what passing means |
+|---|---|
+| about | SCRAM login succeeds and `about` returns the server's product name |
+| read | a filter returns the seeded points |
+| readById | `read` by id returns that record |
+| nav | `nav` returns a grid |
+| hisWrite+Read | two samples written with `hisWrite` come back from `hisRead` for that day |
+| watch | `watchSub` returns the point, then `watchPoll` and `watchUnsub` succeed |
+| pointWrite | a write at level 8 shows up in the priority array, then relinquishes. For Baler this goes gateway → `haystack_api` → broker → the owning site; the test plays the site |
+
+## Reference results: Haxall 4.0.6
+
+| client | format | about | read | readById | nav | hisWrite+Read | watch | pointWrite |
+|---|---|---|---|---|---|---|---|---|
+| openhay | zinc | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| openhay | json3 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| openhay | hayson | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| phable | zinc | ✅ | ✅ | ✅ | — | ✅ | — | ✅ |
+| phable | json | ✅ | ✅ | ✅ | — | ✅ | — | ✅ |
+
+- **json3 on Haxall:** Haxall 4 rejects Haystack 3 JSON request bodies (HTTP 400), so it isn't gated.
+  Baler accepts all three formats, so older Haystack 3 clients work against Baler.
+- **— means the client has no such op.** phable has no `nav` or watches.
+- **Haxall setup:** the job enables the `ph`, `hx.point` and `hx.conn` libraries, in that order, so
+  history, writable points and watches exist.
+
+## Adding targets
+
+The matrix takes targets by env (`MATRIX_TARGETS`). Next to come:
+
+- **nhaystack:** a Niagara station in Tridium's containerized Niagara.
+- **SkySpark:** opt-in only, on the licensed machine and never in public CI. The licence ties
+  SkySpark to one designated system.
