@@ -107,6 +107,9 @@ class FakeTS:
     def labels(self, conn, uris):
         return {}
 
+    def first(self, conn, uris):
+        return {u: self.rows[u][0][0] for u in uris if self.rows.get(u)}
+
     def range_many(self, conn, uris, start, end, limit):
         return {u: ([r for r in self.rows.get(u, []) if start <= r[0] < end], False) for u in uris}
 
@@ -119,6 +122,7 @@ class FakeTS:
 def backend(store, monkeypatch):
     ts = FakeTS()
     monkeypatch.setattr(ha, "read_latest_many", ts.latest)
+    monkeypatch.setattr(ha, "read_first_ts_many", ts.first)
     monkeypatch.setattr(ha.timeseries, "read_point_labels", ts.labels)
     monkeypatch.setattr(ha.timeseries, "read_range_many", ts.range_many)
     monkeypatch.setattr(ha.timeseries, "write_point_value", ts.write)
@@ -147,6 +151,7 @@ def test_read_filter_builds_haystack_records(backend):
     assert r["point"] is oh.MARKER and r["his"] is oh.MARKER and r["temp"] is oh.MARKER
     assert r["equipRef"] == oh.Ref(ha.uri_to_ref(AHU))  # from the graph, not the stale source id
     assert r["curVal"] == oh.Number(55.5, "°F") and r["kind"] == "Number"
+    assert r["hisStart"] == T0 and r["hisEnd"] == T0 + timedelta(minutes=5)  # history extent, like Haxall
     assert r["brickClass"] == "Supply_Air_Temperature_Sensor"
 
 
@@ -500,6 +505,7 @@ def test_records_keep_haystack_types_from_an_import(tmp_path, monkeypatch):
     store = Store()
     ts = FakeTS()
     monkeypatch.setattr(ha, "read_latest_many", ts.latest)
+    monkeypatch.setattr(ha, "read_first_ts_many", ts.first)
     monkeypatch.setattr(ha.timeseries, "read_point_labels", ts.labels)
     (tmp_path / "r.zinc").write_text(
         'ver:"3.0"\nid,dis,equip,ahu,area,since,feeds\n'
@@ -590,6 +596,7 @@ def test_live_tags_filter_on_point_history(monkeypatch):
     now = datetime.now(timezone.utc)
     latest = {str(hot): (now, 80.0), str(cold): (now, 55.0)}  # idle: no history
     monkeypatch.setattr(ha, "read_latest_many", lambda conn, uris: {u: latest[u] for u in uris if u in latest})
+    monkeypatch.setattr(ha, "read_first_ts_many", lambda conn, uris: {u: latest[u][0] for u in uris if u in latest})
     monkeypatch.setattr(ha.timeseries, "read_point_labels", lambda conn, uris: {u: ("°F", None) for u in uris})
 
     class Pool:

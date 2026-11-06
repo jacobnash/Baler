@@ -253,7 +253,9 @@ def build_records(store, ts_conn, uris: list[str]) -> dict[str, dict]:
             if isinstance(v, oh.Number):
                 recs[s][tag] = oh.Number(v.val, unit)
 
-    latest = read_latest_many(ts_conn, [u for u in uris if _kind_of(u) == "point"]) if ts_conn is not None else {}
+    point_uris = [u for u in uris if _kind_of(u) == "point"]
+    latest = read_latest_many(ts_conn, point_uris) if ts_conn is not None else {}
+    first = read_first_ts_many(ts_conn, list(latest)) if latest else {}
     labels = timeseries.read_point_labels(ts_conn, list(latest)) if latest else {}
     out = {}
     for uri in uris:
@@ -293,6 +295,11 @@ def build_records(store, ts_conn, uris: list[str]) -> dict[str, dict]:
             rec["his"] = oh.MARKER
             rec["curStatus"] = "ok"
             rec["mod"] = ts
+            # history extent, as Haxall shows it (no hisSize: a count over
+            # every row is the scan these probes exist to avoid)
+            rec["hisEnd"] = ts
+            if uri in first:
+                rec["hisStart"] = first[uri]
         rec.setdefault("tz", DEFAULT_TZ)
         out[uri] = rec
     return out
@@ -311,6 +318,22 @@ def _site_of(store, uris: list[str]) -> dict[str, str]:
     for r in rows:
         out.setdefault(str(r.e), str(r.site))
     return out
+
+
+def read_first_ts_many(conn, point_uris: list[str]) -> dict[str, datetime]:
+    """Each point's oldest sample time: one forward primary-key probe each."""
+    if not point_uris:
+        return {}
+    cur = conn.execute(
+        """
+        SELECT u.uri, h.ts FROM unnest(%s::text[]) AS u(uri)
+        CROSS JOIN LATERAL (
+            SELECT ts FROM point_history WHERE point_uri = u.uri ORDER BY ts LIMIT 1
+        ) h
+        """,
+        (point_uris,),
+    )
+    return dict(cur.fetchall())
 
 
 def read_latest_many(conn, point_uris: list[str]) -> dict[str, tuple[datetime, object]]:
