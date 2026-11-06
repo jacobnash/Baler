@@ -39,9 +39,9 @@ def assert_matches_schema(instance, schema: dict, spec: dict) -> None:
 # integration test, sites it created keep no prefixes, with a warning naming
 # the test, so a leak can't spread.
 
-import warnings  # noqa: E402
+import warnings
 
-import pytest  # noqa: E402
+import pytest
 
 
 def _site_ids(conn) -> set[str] | None:
@@ -80,6 +80,6 @@ def _no_leaked_site_prefixes(request):
                         "cleared them so later tests aren't scoped (clean up in the test's teardown)",
                         stacklevel=1,
                     )
-        except Exception:  # noqa: BLE001 - the guard must never fail a test itself
-            pass
+        except Exception as exc:  # noqa: BLE001 - the guard must never fail a test itself
+            warnings.warn(f"site-prefix guard skipped: {exc!r}", stacklevel=1)
         conn.close()
