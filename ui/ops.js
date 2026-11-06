@@ -19,8 +19,9 @@ function escapeHtml(s) {
 
 function cardHtml(c) {
   const detail = c.detail ? `<div class="detail">${escapeHtml(c.detail)}</div>` : "";
+  const label = c.href ? `<a href="${escapeHtml(c.href)}">${escapeHtml(c.label)}</a>` : escapeHtml(c.label);
   return `<div class="ops-card state-${c.state}">
-    <div class="label">${escapeHtml(c.label)}</div>
+    <div class="label">${label}</div>
     ${detail}
     <div class="state">${escapeHtml(c.state)}</div>
   </div>`;
@@ -32,30 +33,10 @@ function summaryLabel(summary, attentionCount) {
   return `System: Needs attention (${attentionCount})`;
 }
 
+// The Building cards' states come from ops_status.building_cards - the
+// same judgement that feeds Needs attention and the chip (Baler#64).
 function renderBuilding(building) {
-  const items = [
-    {
-      label: "Last ingest",
-      state: building.last_ingest_at ? "ok" : "quiet",
-      detail: building.last_ingest_at || "none yet",
-    },
-    {
-      label: "Points (last hour)",
-      state: building.points_seen_last_hour > 0 ? "ok" : "quiet",
-      detail: String(building.points_seen_last_hour),
-    },
-    {
-      label: "Open faults",
-      state: building.open_faults > 0 ? "degraded" : "ok",
-      detail: String(building.open_faults),
-    },
-    {
-      label: "Disabled analysis targets",
-      state: building.disabled_derivation_targets > 0 ? "degraded" : "ok",
-      detail: String(building.disabled_derivation_targets),
-    },
-  ];
-  buildingEl.innerHTML = items.map(cardHtml).join("");
+  buildingEl.innerHTML = (building.cards || []).map(cardHtml).join("");
 }
 
 async function refresh() {

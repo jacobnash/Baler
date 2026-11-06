@@ -61,6 +61,10 @@ def test_get_status_matches_documented_schema(live_server, spec):
             "open_faults": 0,
             "disabled_derivation_targets": 0,
             "needs_first_org": True,
+            "cards": [
+                {"id": "open_faults", "label": "Open faults", "layer": "building", "service": "building",
+                 "state": "ok", "detail": "0", "href": "alarms.html"},
+            ],
         },
         "platform": [
             {

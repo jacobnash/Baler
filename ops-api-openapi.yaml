@@ -200,10 +200,13 @@ components:
       properties:
         id: { type: string }
         label: { type: string }
-        layer: { type: string, enum: [platform, jobs, tools] }
+        layer: { type: string, enum: [platform, jobs, tools, building] }
         service: { type: string }
         state: { type: string, enum: [ok, quiet, degraded, down] }
         detail: { type: ["string", "null"] }
+        href:
+          type: string
+          description: A page to go to about this card (building cards only).
     OpsStatus:
       type: object
       required: [summary, generated_at, building, platform, jobs, tools, attention, first_actions]
@@ -212,7 +215,7 @@ components:
         generated_at: { type: string, format: date-time }
         building:
           type: object
-          required: [points_seen_last_hour, open_faults, disabled_derivation_targets, needs_first_org]
+          required: [points_seen_last_hour, open_faults, disabled_derivation_targets, needs_first_org, cards]
           properties:
             last_ingest_at:
               type: ["string", "null"]
@@ -221,6 +224,12 @@ components:
             open_faults: { type: integer }
             disabled_derivation_targets: { type: integer }
             needs_first_org: { type: boolean }
+            cards:
+              type: array
+              description: >-
+                The Building row, judged server-side. A card that isn't ok also
+                appears in `attention` and counts toward `summary`.
+              items: { $ref: "#/components/schemas/ComponentState" }
         platform:
           type: array
           items: { $ref: "#/components/schemas/ComponentState" }

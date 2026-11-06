@@ -61,3 +61,59 @@ def test_collect_status_shape(mock_probe, mock_building):
     assert {c["id"] for c in doc["platform"]} >= {"historian", "live_bus", "sign_in"}
     assert {c["id"] for c in doc["jobs"]} >= {"ingest_listener", "fault_detector"}
     assert len(doc["first_actions"]) >= 2
+
+
+def test_building_cards_judge_faults_and_disabled_targets():
+    cards = {c["id"]: c for c in ops_status.building_cards({
+        "last_ingest_at": "2026-11-06T21:00:00+00:00", "points_seen_last_hour": 12,
+        "open_faults": 91, "disabled_derivation_targets": 0,
+    })}
+    assert cards["open_faults"]["state"] == "degraded"
+    assert cards["open_faults"]["detail"] == "91"
+    assert cards["open_faults"]["href"] == "alarms.html"
+    assert cards["disabled_targets"]["state"] == "ok"
+    assert cards["last_ingest"]["state"] == "ok"
+    assert cards["points_last_hour"]["state"] == "ok"
+    assert all(c["layer"] == "building" for c in cards.values())
+
+
+@patch("baler.ops_status._building_signals")
+@patch("baler.ops_status._probe_one")
+def test_open_faults_are_not_all_green(mock_probe, mock_building):
+    """Baler#64: a DEGRADED Building card shows under Needs attention and
+    the summary isn't ok, even with every service healthy."""
+    mock_building.return_value = {
+        "last_ingest_at": datetime.now(timezone.utc).isoformat(),
+        "points_seen_last_hour": 40,
+        "open_faults": 91,
+        "disabled_derivation_targets": 0,
+        "org_count": 1,
+    }
+    mock_probe.side_effect = lambda comp, building, platform_states: {
+        "id": comp["id"], "label": comp["label"], "layer": comp["layer"],
+        "service": comp["service"], "state": "ok", "detail": None,
+    }
+    doc = ops_status.collect_status()
+    assert doc["summary"] == "degraded"
+    assert [c["id"] for c in doc["attention"]] == ["open_faults"]
+    card = next(c for c in doc["building"]["cards"] if c["id"] == "open_faults")
+    assert card["state"] == "degraded"
+
+
+@patch("baler.ops_status._building_signals")
+@patch("baler.ops_status._probe_one")
+def test_healthy_building_is_all_green(mock_probe, mock_building):
+    mock_building.return_value = {
+        "last_ingest_at": datetime.now(timezone.utc).isoformat(),
+        "points_seen_last_hour": 40,
+        "open_faults": 0,
+        "disabled_derivation_targets": 0,
+        "org_count": 1,
+    }
+    mock_probe.side_effect = lambda comp, building, platform_states: {
+        "id": comp["id"], "label": comp["label"], "layer": comp["layer"],
+        "service": comp["service"], "state": "ok", "detail": None,
+    }
+    doc = ops_status.collect_status()
+    assert doc["summary"] == "ok"
+    assert doc["attention"] == []

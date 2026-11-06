@@ -267,6 +267,30 @@ def _probe_one(
     }
 
 
+def building_cards(building: dict[str, Any]) -> list[dict[str, Any]]:
+    """The Building row's cards, judged here rather than in the page
+    (Baler#64): the same states feed the cards, Needs attention and the
+    summary chip, so the page can't show a DEGRADED card under "All green"."""
+
+    def card(id_: str, label: str, state: str, detail: str, href: str | None = None) -> dict[str, Any]:
+        out = {"id": id_, "label": label, "layer": "building", "service": "building", "state": state, "detail": detail}
+        if href:
+            out["href"] = href
+        return out
+
+    last = building.get("last_ingest_at")
+    seen = int(building.get("points_seen_last_hour") or 0)
+    faults = int(building.get("open_faults") or 0)
+    disabled = int(building.get("disabled_derivation_targets") or 0)
+    return [
+        card("last_ingest", "Last ingest", "ok" if last else "quiet", last or "none yet"),
+        card("points_last_hour", "Points (last hour)", "ok" if seen > 0 else "quiet", str(seen)),
+        card("open_faults", "Open faults", "degraded" if faults else "ok", str(faults), "alarms.html"),
+        card("disabled_targets", "Disabled analysis targets", "degraded" if disabled else "ok", str(disabled),
+             "derivations.html"),
+    ]
+
+
 def _rank_summary(states: list[str]) -> str:
     if any(s == "down" for s in states):
         return "down"
@@ -295,8 +319,14 @@ def collect_status() -> dict[str, Any]:
         results[comp["id"]] = _probe_one(comp, building, platform_states)
 
     ordered = [results[c["id"]] for c in COMPONENTS]
-    summary = _rank_summary([c["state"] for c in ordered if c["layer"] != "tools"])
-    attention = [c for c in ordered if c["state"] != "ok"]
+    cards = building_cards(building)
+    # A degraded Building card counts toward the summary and Needs attention
+    # like any service: open faults are something to attend to, not "All
+    # green". A quiet one (no data yet) doesn't: the Ingest listener card
+    # already says that, from the same timestamps.
+    flagged = [c for c in cards if c["state"] in ("degraded", "down")]
+    summary = _rank_summary([c["state"] for c in ordered + flagged if c["layer"] != "tools"])
+    attention = [c for c in ordered if c["state"] != "ok"] + flagged
 
     return {
         "summary": summary,
@@ -307,6 +337,7 @@ def collect_status() -> dict[str, Any]:
             "open_faults": building.get("open_faults", 0),
             "disabled_derivation_targets": building.get("disabled_derivation_targets", 0),
             "needs_first_org": building.get("org_count", 0) == 0,
+            "cards": cards,
         },
         "platform": [c for c in ordered if c["layer"] == "platform"],
         "jobs": [c for c in ordered if c["layer"] == "jobs"],
