@@ -969,7 +969,13 @@ def make_handler(backend: Backend, login: ScramLogin | None):
                     grid = err_grid(f"bad request: {exc}")
                 flavor = req_fmt if req_fmt in ("json3", "hayson") else "hayson"
                 fmt = oh.negotiate(self.headers.get("Accept"), flavor)
-                out = oh.encode_grid(grid, fmt).encode("utf-8")
+                try:
+                    out = oh.encode_grid(grid, fmt).encode("utf-8")
+                except ValueError as exc:
+                    # One unencodable value must not drop the connection
+                    # (a client sees a reset, not an error): say what failed.
+                    span.set_attribute("error", f"encode: {exc}")
+                    out = oh.encode_grid(err_grid(f"could not encode the response: {exc}"), fmt).encode("utf-8")
                 self._send(200, out, f"{oh.mime(fmt)}; charset=utf-8", extra)
 
     return HaystackHandler
