@@ -1,0 +1,4225 @@
+{
+ "source": {
+  "repo": "https://github.com/Project-Haystack/xeto",
+  "commit": "e4c4096152738893ea35bb7b2b335b2d01fe2a9a",
+  "libs": [
+   "ph",
+   "ph.points",
+   "ph.points.x",
+   "ph.equips.x"
+  ],
+  "license": "AFL-3.0",
+  "generator": "tools/xeto_specs.py"
+ },
+ "specs": {
+  "ph.equips.x::ChilledWaterMeter": [
+   "chilled",
+   "equip",
+   "flow",
+   "meter",
+   "water"
+  ],
+  "ph.equips.x::ChilledWaterPump": [
+   "equip",
+   "pump"
+  ],
+  "ph.equips.x::ColdDeckDischargeDuct": [
+   "coldDeck",
+   "discharge",
+   "duct",
+   "equip"
+  ],
+  "ph.equips.x::CondenserWaterPump": [
+   "equip",
+   "pump"
+  ],
+  "ph.equips.x::CoolingOnlyVav": [
+   "coolingOnly",
+   "equip",
+   "vav"
+  ],
+  "ph.equips.x::DischargeDuct": [
+   "discharge",
+   "duct",
+   "equip"
+  ],
+  "ph.equips.x::DomesticWaterMeter": [
+   "domestic",
+   "equip",
+   "flow",
+   "meter",
+   "water"
+  ],
+  "ph.equips.x::EconomizerDuct": [
+   "duct",
+   "economizer",
+   "equip"
+  ],
+  "ph.equips.x::ExhaustDuct": [
+   "duct",
+   "equip",
+   "exhaust"
+  ],
+  "ph.equips.x::FlueDuct": [
+   "duct",
+   "equip",
+   "flue"
+  ],
+  "ph.equips.x::HotDeckDischargeDuct": [
+   "discharge",
+   "duct",
+   "equip",
+   "hotDeck"
+  ],
+  "ph.equips.x::HotWaterMeter": [
+   "equip",
+   "flow",
+   "hot",
+   "meter",
+   "water"
+  ],
+  "ph.equips.x::HotWaterPump": [
+   "equip",
+   "pump"
+  ],
+  "ph.equips.x::InletDuct": [
+   "duct",
+   "equip",
+   "inlet"
+  ],
+  "ph.equips.x::MixedDuct": [
+   "duct",
+   "equip",
+   "mixed"
+  ],
+  "ph.equips.x::NaturalGasMeter": [
+   "equip",
+   "flow",
+   "meter",
+   "naturalGas"
+  ],
+  "ph.equips.x::NeutralDeckDischargeDuct": [
+   "discharge",
+   "duct",
+   "equip",
+   "neutralDeck"
+  ],
+  "ph.equips.x::OutsideDuct": [
+   "duct",
+   "equip",
+   "outside"
+  ],
+  "ph.equips.x::ReheatVav": [
+   "equip",
+   "hotWaterHeating",
+   "vav"
+  ],
+  "ph.equips.x::ReturnDuct": [
+   "duct",
+   "equip",
+   "return"
+  ],
+  "ph.equips.x::SteamMeter": [
+   "equip",
+   "flow",
+   "meter",
+   "steam"
+  ],
+  "ph.equips.x::VavZoneAhu": [
+   "ahu",
+   "equip",
+   "vavZone"
+  ],
+  "ph.equips.x::VentilationDuct": [
+   "duct",
+   "equip",
+   "ventilation"
+  ],
+  "ph.equips.x::WaterMeter": [
+   "equip",
+   "flow",
+   "meter",
+   "water"
+  ],
+  "ph.points.x::ChilledWaterEnteringPressureSensor": [
+   "point",
+   "pressure",
+   "sensor",
+   "water"
+  ],
+  "ph.points.x::ChilledWaterEnteringPressureSp": [
+   "point",
+   "pressure",
+   "sp",
+   "water"
+  ],
+  "ph.points.x::ChilledWaterEnteringTempSensor": [
+   "point",
+   "sensor",
+   "temp",
+   "water"
+  ],
+  "ph.points.x::ChilledWaterFlowSensor": [
+   "chilled",
+   "flow",
+   "point",
+   "sensor",
+   "volume",
+   "water"
+  ],
+  "ph.points.x::ChilledWaterFlowSp": [
+   "chilled",
+   "flow",
+   "point",
+   "sp",
+   "volume",
+   "water"
+  ],
+  "ph.points.x::ChilledWaterLeavingPressureSensor": [
+   "point",
+   "pressure",
+   "sensor",
+   "water"
+  ],
+  "ph.points.x::ChilledWaterLeavingPressureSp": [
+   "point",
+   "pressure",
+   "sp",
+   "water"
+  ],
+  "ph.points.x::ChilledWaterLeavingTempSensor": [
+   "point",
+   "sensor",
+   "temp",
+   "water"
+  ],
+  "ph.points.x::ChilledWaterLeavingTempSp": [
+   "point",
+   "sp",
+   "temp",
+   "water"
+  ],
+  "ph.points.x::ChilledWaterValveModulatingCmd": [
+   "actuator",
+   "chilled",
+   "cmd",
+   "modulating",
+   "point",
+   "valve",
+   "water"
+  ],
+  "ph.points.x::ChilledWaterValveModulatingSensor": [
+   "actuator",
+   "chilled",
+   "modulating",
+   "point",
+   "sensor",
+   "valve",
+   "water"
+  ],
+  "ph.points.x::ChilledWaterValveOpenCmd": [
+   "actuator",
+   "chilled",
+   "cmd",
+   "open",
+   "point",
+   "valve",
+   "water"
+  ],
+  "ph.points.x::ChilledWaterValveOpenSensor": [
+   "actuator",
+   "chilled",
+   "open",
+   "point",
+   "sensor",
+   "valve",
+   "water"
+  ],
+  "ph.points.x::ColdDeckDischargeAirDamperModulatingCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "coldDeck",
+   "damper",
+   "discharge",
+   "modulating",
+   "point"
+  ],
+  "ph.points.x::ColdDeckDischargeAirDamperModulatingSensor": [
+   "actuator",
+   "air",
+   "coldDeck",
+   "damper",
+   "discharge",
+   "modulating",
+   "point",
+   "sensor"
+  ],
+  "ph.points.x::ColdDeckDischargeAirDamperOpenCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "coldDeck",
+   "damper",
+   "discharge",
+   "open",
+   "point"
+  ],
+  "ph.points.x::ColdDeckDischargeAirDamperOpenSensor": [
+   "actuator",
+   "air",
+   "coldDeck",
+   "damper",
+   "discharge",
+   "open",
+   "point",
+   "sensor"
+  ],
+  "ph.points.x::ColdDeckDischargeAirFlowSensor": [
+   "air",
+   "coldDeck",
+   "discharge",
+   "flow",
+   "point",
+   "sensor",
+   "volume"
+  ],
+  "ph.points.x::ColdDeckDischargeAirFlowSp": [
+   "air",
+   "coldDeck",
+   "discharge",
+   "flow",
+   "point",
+   "sp",
+   "volume"
+  ],
+  "ph.points.x::CondenserWaterEnteringTempSensor": [
+   "point",
+   "sensor",
+   "temp",
+   "water"
+  ],
+  "ph.points.x::CondenserWaterLeavingTempSensor": [
+   "point",
+   "sensor",
+   "temp",
+   "water"
+  ],
+  "ph.points.x::CondenserWaterLeavingTempSp": [
+   "point",
+   "sp",
+   "temp",
+   "water"
+  ],
+  "ph.points.x::DischargeAirDamperModulatingCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "discharge",
+   "modulating",
+   "point"
+  ],
+  "ph.points.x::DischargeAirDamperModulatingSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "discharge",
+   "modulating",
+   "point",
+   "sensor"
+  ],
+  "ph.points.x::DischargeAirDamperOpenCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "discharge",
+   "open",
+   "point"
+  ],
+  "ph.points.x::DischargeAirDamperOpenSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "discharge",
+   "open",
+   "point",
+   "sensor"
+  ],
+  "ph.points.x::DischargeAirFlowSensor": [
+   "air",
+   "discharge",
+   "flow",
+   "point",
+   "sensor",
+   "volume"
+  ],
+  "ph.points.x::DischargeAirFlowSp": [
+   "air",
+   "discharge",
+   "flow",
+   "point",
+   "sp",
+   "volume"
+  ],
+  "ph.points.x::DischargeAirHumiditySensor": [
+   "air",
+   "discharge",
+   "humidity",
+   "point",
+   "sensor"
+  ],
+  "ph.points.x::DischargeAirHumiditySp": [
+   "air",
+   "discharge",
+   "humidity",
+   "point",
+   "sp"
+  ],
+  "ph.points.x::DischargeAirPressureSensor": [
+   "air",
+   "discharge",
+   "point",
+   "pressure",
+   "sensor"
+  ],
+  "ph.points.x::DischargeAirPressureSp": [
+   "air",
+   "discharge",
+   "point",
+   "pressure",
+   "sp"
+  ],
+  "ph.points.x::DischargeAirTempSensor": [
+   "air",
+   "discharge",
+   "point",
+   "sensor",
+   "temp"
+  ],
+  "ph.points.x::DischargeAirTempSp": [
+   "air",
+   "discharge",
+   "point",
+   "sp",
+   "temp"
+  ],
+  "ph.points.x::DischargeFanEnableCmd": [
+   "air",
+   "cmd",
+   "discharge",
+   "enable",
+   "fan",
+   "point"
+  ],
+  "ph.points.x::DischargeFanRunCmd": [
+   "air",
+   "cmd",
+   "discharge",
+   "fan",
+   "motor",
+   "point",
+   "run"
+  ],
+  "ph.points.x::DischargeFanRunSensor": [
+   "air",
+   "discharge",
+   "fan",
+   "motor",
+   "point",
+   "run",
+   "sensor"
+  ],
+  "ph.points.x::DischargeFanSpeedEnumCmd": [
+   "air",
+   "cmd",
+   "discharge",
+   "fan",
+   "motor",
+   "point",
+   "speed"
+  ],
+  "ph.points.x::DischargeFanSpeedEnumSensor": [
+   "air",
+   "discharge",
+   "fan",
+   "motor",
+   "point",
+   "sensor",
+   "speed"
+  ],
+  "ph.points.x::DischargeFanSpeedModulatingCmd": [
+   "air",
+   "cmd",
+   "discharge",
+   "fan",
+   "modulating",
+   "motor",
+   "point",
+   "speed"
+  ],
+  "ph.points.x::DischargeFanSpeedModulatingSensor": [
+   "air",
+   "discharge",
+   "fan",
+   "modulating",
+   "motor",
+   "point",
+   "sensor",
+   "speed"
+  ],
+  "ph.points.x::DomesticWaterFlowSensor": [
+   "domestic",
+   "flow",
+   "point",
+   "sensor",
+   "volume",
+   "water"
+  ],
+  "ph.points.x::DomesticWaterFlowSp": [
+   "domestic",
+   "flow",
+   "point",
+   "sp",
+   "volume",
+   "water"
+  ],
+  "ph.points.x::DomesticWaterVolumeSensor": [
+   "domestic",
+   "point",
+   "sensor",
+   "volume",
+   "water"
+  ],
+  "ph.points.x::DomesticWaterVolumeSp": [
+   "domestic",
+   "point",
+   "sp",
+   "volume",
+   "water"
+  ],
+  "ph.points.x::EconomizerAirDamperModulatingCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "economizer",
+   "modulating",
+   "point"
+  ],
+  "ph.points.x::EconomizerAirDamperModulatingSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "economizer",
+   "modulating",
+   "point",
+   "sensor"
+  ],
+  "ph.points.x::EconomizerAirDamperOpenCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "economizer",
+   "open",
+   "point"
+  ],
+  "ph.points.x::EconomizerAirDamperOpenSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "economizer",
+   "open",
+   "point",
+   "sensor"
+  ],
+  "ph.points.x::EconomizerAirFlowSensor": [
+   "air",
+   "economizer",
+   "flow",
+   "point",
+   "sensor",
+   "volume"
+  ],
+  "ph.points.x::EconomizerAirFlowSp": [
+   "air",
+   "economizer",
+   "flow",
+   "point",
+   "sp",
+   "volume"
+  ],
+  "ph.points.x::EconomizerAirTempSensor": [
+   "air",
+   "economizer",
+   "point",
+   "sensor",
+   "temp"
+  ],
+  "ph.points.x::ElecCableTempSensor": [
+   "cable",
+   "elec",
+   "point",
+   "sensor",
+   "surface",
+   "temp"
+  ],
+  "ph.points.x::EvseCableTempSensor": [
+   "cable",
+   "elec",
+   "evse",
+   "point",
+   "sensor",
+   "surface",
+   "temp"
+  ],
+  "ph.points.x::EvseConnectorTempSensor": [
+   "evseConnector",
+   "point",
+   "sensor",
+   "surface",
+   "temp"
+  ],
+  "ph.points.x::ExhaustAirDamperModulatingCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "exhaust",
+   "modulating",
+   "point"
+  ],
+  "ph.points.x::ExhaustAirDamperModulatingSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "exhaust",
+   "modulating",
+   "point",
+   "sensor"
+  ],
+  "ph.points.x::ExhaustAirDamperOpenCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "exhaust",
+   "open",
+   "point"
+  ],
+  "ph.points.x::ExhaustAirDamperOpenSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "exhaust",
+   "open",
+   "point",
+   "sensor"
+  ],
+  "ph.points.x::ExhaustAirFlowSensor": [
+   "air",
+   "exhaust",
+   "flow",
+   "point",
+   "sensor",
+   "volume"
+  ],
+  "ph.points.x::ExhaustAirFlowSp": [
+   "air",
+   "exhaust",
+   "flow",
+   "point",
+   "sp",
+   "volume"
+  ],
+  "ph.points.x::HeatsinkTempSensor": [
+   "heatsink",
+   "point",
+   "sensor",
+   "surface",
+   "temp"
+  ],
+  "ph.points.x::HotDeckDischargeAirDamperModulatingCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "discharge",
+   "hotDeck",
+   "modulating",
+   "point"
+  ],
+  "ph.points.x::HotDeckDischargeAirDamperModulatingSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "discharge",
+   "hotDeck",
+   "modulating",
+   "point",
+   "sensor"
+  ],
+  "ph.points.x::HotDeckDischargeAirDamperOpenCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "discharge",
+   "hotDeck",
+   "open",
+   "point"
+  ],
+  "ph.points.x::HotDeckDischargeAirDamperOpenSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "discharge",
+   "hotDeck",
+   "open",
+   "point",
+   "sensor"
+  ],
+  "ph.points.x::HotDeckDischargeAirFlowSensor": [
+   "air",
+   "discharge",
+   "flow",
+   "hotDeck",
+   "point",
+   "sensor",
+   "volume"
+  ],
+  "ph.points.x::HotDeckDischargeAirFlowSp": [
+   "air",
+   "discharge",
+   "flow",
+   "hotDeck",
+   "point",
+   "sp",
+   "volume"
+  ],
+  "ph.points.x::HotWaterEnteringPressureSensor": [
+   "point",
+   "pressure",
+   "sensor",
+   "water"
+  ],
+  "ph.points.x::HotWaterEnteringPressureSp": [
+   "point",
+   "pressure",
+   "sp",
+   "water"
+  ],
+  "ph.points.x::HotWaterEnteringTempSensor": [
+   "point",
+   "sensor",
+   "temp",
+   "water"
+  ],
+  "ph.points.x::HotWaterFlowSensor": [
+   "flow",
+   "hot",
+   "point",
+   "sensor",
+   "volume",
+   "water"
+  ],
+  "ph.points.x::HotWaterFlowSp": [
+   "flow",
+   "hot",
+   "point",
+   "sp",
+   "volume",
+   "water"
+  ],
+  "ph.points.x::HotWaterLeavingPressureSensor": [
+   "point",
+   "pressure",
+   "sensor",
+   "water"
+  ],
+  "ph.points.x::HotWaterLeavingPressureSp": [
+   "point",
+   "pressure",
+   "sp",
+   "water"
+  ],
+  "ph.points.x::HotWaterLeavingTempSensor": [
+   "point",
+   "sensor",
+   "temp",
+   "water"
+  ],
+  "ph.points.x::HotWaterLeavingTempSp": [
+   "point",
+   "sp",
+   "temp",
+   "water"
+  ],
+  "ph.points.x::HotWaterValveModulatingCmd": [
+   "actuator",
+   "cmd",
+   "hot",
+   "modulating",
+   "point",
+   "valve",
+   "water"
+  ],
+  "ph.points.x::HotWaterValveModulatingSensor": [
+   "actuator",
+   "hot",
+   "modulating",
+   "point",
+   "sensor",
+   "valve",
+   "water"
+  ],
+  "ph.points.x::HotWaterValveOpenCmd": [
+   "actuator",
+   "cmd",
+   "hot",
+   "open",
+   "point",
+   "valve",
+   "water"
+  ],
+  "ph.points.x::HotWaterValveOpenSensor": [
+   "actuator",
+   "hot",
+   "open",
+   "point",
+   "sensor",
+   "valve",
+   "water"
+  ],
+  "ph.points.x::InletAirFlowSensor": [
+   "air",
+   "flow",
+   "inlet",
+   "point",
+   "sensor",
+   "volume"
+  ],
+  "ph.points.x::InletAirFlowSp": [
+   "air",
+   "flow",
+   "inlet",
+   "point",
+   "sp",
+   "volume"
+  ],
+  "ph.points.x::InletAirTempSensor": [
+   "air",
+   "inlet",
+   "point",
+   "sensor",
+   "temp"
+  ],
+  "ph.points.x::InletAirTempSp": [
+   "air",
+   "inlet",
+   "point",
+   "sp",
+   "temp"
+  ],
+  "ph.points.x::MixedAirDamperModulatingCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "mixed",
+   "modulating",
+   "point"
+  ],
+  "ph.points.x::MixedAirDamperModulatingSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "mixed",
+   "modulating",
+   "point",
+   "sensor"
+  ],
+  "ph.points.x::MixedAirDamperOpenCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "mixed",
+   "open",
+   "point"
+  ],
+  "ph.points.x::MixedAirDamperOpenSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "mixed",
+   "open",
+   "point",
+   "sensor"
+  ],
+  "ph.points.x::MixedAirTempSensor": [
+   "air",
+   "mixed",
+   "point",
+   "sensor",
+   "temp"
+  ],
+  "ph.points.x::MixedAirTempSp": [
+   "air",
+   "mixed",
+   "point",
+   "sp",
+   "temp"
+  ],
+  "ph.points.x::MotorBearingTempSensor": [
+   "bearing",
+   "motor",
+   "point",
+   "sensor",
+   "surface",
+   "temp"
+  ],
+  "ph.points.x::MotorTempSensor": [
+   "motor",
+   "point",
+   "sensor",
+   "surface",
+   "temp"
+  ],
+  "ph.points.x::MotorWindingTempSensor": [
+   "motor",
+   "point",
+   "sensor",
+   "surface",
+   "temp",
+   "winding"
+  ],
+  "ph.points.x::NaturalGasEnergySensor": [
+   "energy",
+   "naturalGas",
+   "point",
+   "sensor"
+  ],
+  "ph.points.x::NaturalGasEnergySp": [
+   "energy",
+   "naturalGas",
+   "point",
+   "sp"
+  ],
+  "ph.points.x::NaturalGasFlowSensor": [
+   "flow",
+   "naturalGas",
+   "point",
+   "sensor",
+   "volume"
+  ],
+  "ph.points.x::NaturalGasFlowSp": [
+   "flow",
+   "naturalGas",
+   "point",
+   "sp",
+   "volume"
+  ],
+  "ph.points.x::NaturalGasVolumeSensor": [
+   "naturalGas",
+   "point",
+   "sensor",
+   "volume"
+  ],
+  "ph.points.x::NaturalGasVolumeSp": [
+   "naturalGas",
+   "point",
+   "sp",
+   "volume"
+  ],
+  "ph.points.x::OutsideAirDamperModulatingCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "modulating",
+   "outside",
+   "point"
+  ],
+  "ph.points.x::OutsideAirDamperModulatingSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "modulating",
+   "outside",
+   "point",
+   "sensor"
+  ],
+  "ph.points.x::OutsideAirDamperOpenCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "open",
+   "outside",
+   "point"
+  ],
+  "ph.points.x::OutsideAirDamperOpenSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "open",
+   "outside",
+   "point",
+   "sensor"
+  ],
+  "ph.points.x::OutsideAirFlowSensor": [
+   "air",
+   "flow",
+   "outside",
+   "point",
+   "sensor",
+   "volume"
+  ],
+  "ph.points.x::OutsideAirFlowSp": [
+   "air",
+   "flow",
+   "outside",
+   "point",
+   "sp",
+   "volume"
+  ],
+  "ph.points.x::OutsideAirHumiditySensor": [
+   "air",
+   "humidity",
+   "outside",
+   "point",
+   "sensor"
+  ],
+  "ph.points.x::OutsideAirHumiditySp": [
+   "air",
+   "humidity",
+   "outside",
+   "point",
+   "sp"
+  ],
+  "ph.points.x::OutsideAirTempSensor": [
+   "air",
+   "outside",
+   "point",
+   "sensor",
+   "temp"
+  ],
+  "ph.points.x::ReturnAirDamperModulatingCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "modulating",
+   "point",
+   "return"
+  ],
+  "ph.points.x::ReturnAirDamperModulatingSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "modulating",
+   "point",
+   "return",
+   "sensor"
+  ],
+  "ph.points.x::ReturnAirDamperOpenCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "open",
+   "point",
+   "return"
+  ],
+  "ph.points.x::ReturnAirDamperOpenSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "open",
+   "point",
+   "return",
+   "sensor"
+  ],
+  "ph.points.x::ReturnAirFlowSensor": [
+   "air",
+   "flow",
+   "point",
+   "return",
+   "sensor",
+   "volume"
+  ],
+  "ph.points.x::ReturnAirFlowSp": [
+   "air",
+   "flow",
+   "point",
+   "return",
+   "sp",
+   "volume"
+  ],
+  "ph.points.x::ReturnAirPressureSensor": [
+   "air",
+   "point",
+   "pressure",
+   "return",
+   "sensor"
+  ],
+  "ph.points.x::ReturnAirPressureSp": [
+   "air",
+   "point",
+   "pressure",
+   "return",
+   "sp"
+  ],
+  "ph.points.x::ReturnAirTempSensor": [
+   "air",
+   "point",
+   "return",
+   "sensor",
+   "temp"
+  ],
+  "ph.points.x::ReturnAirTempSp": [
+   "air",
+   "point",
+   "return",
+   "sp",
+   "temp"
+  ],
+  "ph.points.x::ReturnFanEnableCmd": [
+   "air",
+   "cmd",
+   "enable",
+   "fan",
+   "point",
+   "return"
+  ],
+  "ph.points.x::ReturnFanRunCmd": [
+   "air",
+   "cmd",
+   "fan",
+   "motor",
+   "point",
+   "return",
+   "run"
+  ],
+  "ph.points.x::ReturnFanRunSensor": [
+   "air",
+   "fan",
+   "motor",
+   "point",
+   "return",
+   "run",
+   "sensor"
+  ],
+  "ph.points.x::ReturnFanSpeedEnumCmd": [
+   "air",
+   "cmd",
+   "fan",
+   "motor",
+   "point",
+   "return",
+   "speed"
+  ],
+  "ph.points.x::ReturnFanSpeedEnumSensor": [
+   "air",
+   "fan",
+   "motor",
+   "point",
+   "return",
+   "sensor",
+   "speed"
+  ],
+  "ph.points.x::ReturnFanSpeedModulatingCmd": [
+   "air",
+   "cmd",
+   "fan",
+   "modulating",
+   "motor",
+   "point",
+   "return",
+   "speed"
+  ],
+  "ph.points.x::ReturnFanSpeedModulatingSensor": [
+   "air",
+   "fan",
+   "modulating",
+   "motor",
+   "point",
+   "return",
+   "sensor",
+   "speed"
+  ],
+  "ph.points.x::VentilationAirDamperModulatingCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "modulating",
+   "point",
+   "ventilation"
+  ],
+  "ph.points.x::VentilationAirDamperModulatingSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "modulating",
+   "point",
+   "sensor",
+   "ventilation"
+  ],
+  "ph.points.x::VentilationAirDamperOpenCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "open",
+   "point",
+   "ventilation"
+  ],
+  "ph.points.x::VentilationAirDamperOpenSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "open",
+   "point",
+   "sensor",
+   "ventilation"
+  ],
+  "ph.points.x::VentilationAirFlowSensor": [
+   "air",
+   "flow",
+   "point",
+   "sensor",
+   "ventilation",
+   "volume"
+  ],
+  "ph.points.x::VentilationAirFlowSp": [
+   "air",
+   "flow",
+   "point",
+   "sp",
+   "ventilation",
+   "volume"
+  ],
+  "ph.points.x::VentilationAirTempSensor": [
+   "air",
+   "point",
+   "sensor",
+   "temp",
+   "ventilation"
+  ],
+  "ph.points.x::ZoneAirTempCoolingSp": [
+   "air",
+   "cooling",
+   "point",
+   "sp",
+   "temp",
+   "zone"
+  ],
+  "ph.points.x::ZoneAirTempEffectiveSp": [
+   "air",
+   "effective",
+   "point",
+   "sp",
+   "temp",
+   "zone"
+  ],
+  "ph.points.x::ZoneAirTempHeatingSp": [
+   "air",
+   "heating",
+   "point",
+   "sp",
+   "temp",
+   "zone"
+  ],
+  "ph.points.x::ZoneAirTempOccCoolingSp": [
+   "air",
+   "cooling",
+   "occ",
+   "point",
+   "sp",
+   "temp",
+   "zone"
+  ],
+  "ph.points.x::ZoneAirTempOccHeatingSp": [
+   "air",
+   "heating",
+   "occ",
+   "point",
+   "sp",
+   "temp",
+   "zone"
+  ],
+  "ph.points.x::ZoneAirTempStandbyCoolingSp": [
+   "air",
+   "cooling",
+   "point",
+   "sp",
+   "standby",
+   "temp",
+   "zone"
+  ],
+  "ph.points.x::ZoneAirTempStandbyHeatingSp": [
+   "air",
+   "heating",
+   "point",
+   "sp",
+   "standby",
+   "temp",
+   "zone"
+  ],
+  "ph.points.x::ZoneAirTempUnoccCoolingSp": [
+   "air",
+   "cooling",
+   "point",
+   "sp",
+   "temp",
+   "unocc",
+   "zone"
+  ],
+  "ph.points.x::ZoneAirTempUnoccHeatingSp": [
+   "air",
+   "heating",
+   "point",
+   "sp",
+   "temp",
+   "unocc",
+   "zone"
+  ],
+  "ph.points::ActuatorModulatingCmd": [
+   "actuator",
+   "cmd",
+   "modulating",
+   "point"
+  ],
+  "ph.points::ActuatorModulatingSensor": [
+   "actuator",
+   "modulating",
+   "point",
+   "sensor"
+  ],
+  "ph.points::ActuatorOpenCmd": [
+   "actuator",
+   "cmd",
+   "open",
+   "point"
+  ],
+  "ph.points::ActuatorOpenSensor": [
+   "actuator",
+   "open",
+   "point",
+   "sensor"
+  ],
+  "ph.points::AirFlowSensor": [
+   "air",
+   "flow",
+   "point",
+   "sensor",
+   "volume"
+  ],
+  "ph.points::AirFlowSp": [
+   "air",
+   "flow",
+   "point",
+   "sp",
+   "volume"
+  ],
+  "ph.points::AirHumidityPoint": [
+   "air",
+   "humidity",
+   "point"
+  ],
+  "ph.points::AirHumiditySensor": [
+   "air",
+   "humidity",
+   "point",
+   "sensor"
+  ],
+  "ph.points::AirHumiditySp": [
+   "air",
+   "humidity",
+   "point",
+   "sp"
+  ],
+  "ph.points::AirPressureSensor": [
+   "air",
+   "point",
+   "pressure",
+   "sensor"
+  ],
+  "ph.points::AirPressureSp": [
+   "air",
+   "point",
+   "pressure",
+   "sp"
+  ],
+  "ph.points::AirTempSensor": [
+   "air",
+   "point",
+   "sensor",
+   "temp"
+  ],
+  "ph.points::AirTempSp": [
+   "air",
+   "point",
+   "sp",
+   "temp"
+  ],
+  "ph.points::AlarmSensor": [
+   "alarm",
+   "point",
+   "sensor"
+  ],
+  "ph.points::Co2Point": [
+   "air",
+   "co2",
+   "concentration",
+   "point"
+  ],
+  "ph.points::Co2Sensor": [
+   "air",
+   "co2",
+   "concentration",
+   "point",
+   "sensor"
+  ],
+  "ph.points::Co2Sp": [
+   "air",
+   "co2",
+   "concentration",
+   "point",
+   "sp"
+  ],
+  "ph.points::CoolEnableCmd": [
+   "cmd",
+   "cool",
+   "enable",
+   "point"
+  ],
+  "ph.points::CoolModulatingCmd": [
+   "cmd",
+   "cool",
+   "modulating",
+   "point"
+  ],
+  "ph.points::CoolModulatingSensor": [
+   "cool",
+   "modulating",
+   "point",
+   "sensor"
+  ],
+  "ph.points::CoolRunCmd": [
+   "cmd",
+   "cool",
+   "point",
+   "run"
+  ],
+  "ph.points::CoolRunSensor": [
+   "cool",
+   "point",
+   "run",
+   "sensor"
+  ],
+  "ph.points::DamperModulatingCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "modulating",
+   "point"
+  ],
+  "ph.points::DamperModulatingSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "modulating",
+   "point",
+   "sensor"
+  ],
+  "ph.points::DamperOpenCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "open",
+   "point"
+  ],
+  "ph.points::DamperOpenSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "open",
+   "point",
+   "sensor"
+  ],
+  "ph.points::DessicantDehumidifierCmd": [
+   "dessicantDehumidifier",
+   "point"
+  ],
+  "ph.points::DoorOpenSensor": [
+   "door",
+   "open",
+   "point",
+   "sensor"
+  ],
+  "ph.points::DuctAirDamperModulatingCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "modulating",
+   "point"
+  ],
+  "ph.points::DuctAirDamperModulatingSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "modulating",
+   "point",
+   "sensor"
+  ],
+  "ph.points::DuctAirDamperOpenCmd": [
+   "actuator",
+   "air",
+   "cmd",
+   "damper",
+   "open",
+   "point"
+  ],
+  "ph.points::DuctAirDamperOpenSensor": [
+   "actuator",
+   "air",
+   "damper",
+   "open",
+   "point",
+   "sensor"
+  ],
+  "ph.points::DuctAirFlowSensor": [
+   "air",
+   "flow",
+   "point",
+   "sensor",
+   "volume"
+  ],
+  "ph.points::DuctAirFlowSp": [
+   "air",
+   "flow",
+   "point",
+   "sp",
+   "volume"
+  ],
+  "ph.points::DuctAirHumiditySensor": [
+   "air",
+   "humidity",
+   "point",
+   "sensor"
+  ],
+  "ph.points::DuctAirHumiditySp": [
+   "air",
+   "humidity",
+   "point",
+   "sp"
+  ],
+  "ph.points::DuctAirPressureSensor": [
+   "air",
+   "point",
+   "pressure",
+   "sensor"
+  ],
+  "ph.points::DuctAirPressureSp": [
+   "air",
+   "point",
+   "pressure",
+   "sp"
+  ],
+  "ph.points::DuctAirTempSensor": [
+   "air",
+   "point",
+   "sensor",
+   "temp"
+  ],
+  "ph.points::DuctAirTempSp": [
+   "air",
+   "point",
+   "sp",
+   "temp"
+  ],
+  "ph.points::DuctFanEnableCmd": [
+   "air",
+   "cmd",
+   "enable",
+   "fan",
+   "point"
+  ],
+  "ph.points::DuctFanPoint": [
+   "air",
+   "fan",
+   "point"
+  ],
+  "ph.points::DuctFanRunCmd": [
+   "air",
+   "cmd",
+   "fan",
+   "motor",
+   "point",
+   "run"
+  ],
+  "ph.points::DuctFanRunSensor": [
+   "air",
+   "fan",
+   "motor",
+   "point",
+   "run",
+   "sensor"
+  ],
+  "ph.points::DuctFanSpeedEnumCmd": [
+   "air",
+   "cmd",
+   "fan",
+   "motor",
+   "point",
+   "speed"
+  ],
+  "ph.points::DuctFanSpeedEnumSensor": [
+   "air",
+   "fan",
+   "motor",
+   "point",
+   "sensor",
+   "speed"
+  ],
+  "ph.points::DuctFanSpeedModulatingCmd": [
+   "air",
+   "cmd",
+   "fan",
+   "modulating",
+   "motor",
+   "point",
+   "speed"
+  ],
+  "ph.points::DuctFanSpeedModulatingSensor": [
+   "air",
+   "fan",
+   "modulating",
+   "motor",
+   "point",
+   "sensor",
+   "speed"
+  ],
+  "ph.points::EnableCmd": [
+   "cmd",
+   "enable",
+   "point"
+  ],
+  "ph.points::EnablePoint": [
+   "enable",
+   "point"
+  ],
+  "ph.points::EnclosureAirTempSensor": [
+   "air",
+   "enclosure",
+   "point",
+   "sensor",
+   "temp"
+  ],
+  "ph.points::EvseConnectorStatusEnum": [
+   "available",
+   "fault",
+   "occupied",
+   "reserved",
+   "unavailable"
+  ],
+  "ph.points::EvseConnectorStatusSensor": [
+   "evseConnector",
+   "point",
+   "sensor"
+  ],
+  "ph.points::EvsePortChargingStatusEnum": [
+   "charging",
+   "connected",
+   "notConnected",
+   "suspendedEv",
+   "suspendedEvse"
+  ],
+  "ph.points::EvsePortChargingStatusSensor": [
+   "evse",
+   "point",
+   "port",
+   "sensor"
+  ],
+  "ph.points::FanEnableCmd": [
+   "air",
+   "cmd",
+   "enable",
+   "fan",
+   "point"
+  ],
+  "ph.points::FanPoint": [
+   "air",
+   "fan",
+   "point"
+  ],
+  "ph.points::FanRunCmd": [
+   "air",
+   "cmd",
+   "fan",
+   "motor",
+   "point",
+   "run"
+  ],
+  "ph.points::FanRunSensor": [
+   "air",
+   "fan",
+   "motor",
+   "point",
+   "run",
+   "sensor"
+  ],
+  "ph.points::FanSpeedEnumCmd": [
+   "air",
+   "cmd",
+   "fan",
+   "motor",
+   "point",
+   "speed"
+  ],
+  "ph.points::FanSpeedEnumSensor": [
+   "air",
+   "fan",
+   "motor",
+   "point",
+   "sensor",
+   "speed"
+  ],
+  "ph.points::FanSpeedModulatingCmd": [
+   "air",
+   "cmd",
+   "fan",
+   "modulating",
+   "motor",
+   "point",
+   "speed"
+  ],
+  "ph.points::FanSpeedModulatingSensor": [
+   "air",
+   "fan",
+   "modulating",
+   "motor",
+   "point",
+   "sensor",
+   "speed"
+  ],
+  "ph.points::FluidEnergyPoint": [
+   "energy",
+   "point"
+  ],
+  "ph.points::FluidEnergySensor": [
+   "energy",
+   "point",
+   "sensor"
+  ],
+  "ph.points::FluidEnergySp": [
+   "energy",
+   "point",
+   "sp"
+  ],
+  "ph.points::FluidFlowPoint": [
+   "flow",
+   "point"
+  ],
+  "ph.points::FluidMassFlowPoint": [
+   "flow",
+   "mass",
+   "point"
+  ],
+  "ph.points::FluidMassFlowSensor": [
+   "flow",
+   "mass",
+   "point",
+   "sensor"
+  ],
+  "ph.points::FluidMassFlowSp": [
+   "flow",
+   "mass",
+   "point",
+   "sp"
+  ],
+  "ph.points::FluidPressurePoint": [
+   "point",
+   "pressure"
+  ],
+  "ph.points::FluidPressureSensor": [
+   "point",
+   "pressure",
+   "sensor"
+  ],
+  "ph.points::FluidPressureSp": [
+   "point",
+   "pressure",
+   "sp"
+  ],
+  "ph.points::FluidTempPoint": [
+   "point",
+   "temp"
+  ],
+  "ph.points::FluidTempSensor": [
+   "point",
+   "sensor",
+   "temp"
+  ],
+  "ph.points::FluidTempSp": [
+   "point",
+   "sp",
+   "temp"
+  ],
+  "ph.points::FluidVolumePoint": [
+   "point",
+   "volume"
+  ],
+  "ph.points::FluidVolumeSensor": [
+   "point",
+   "sensor",
+   "volume"
+  ],
+  "ph.points::FluidVolumeSp": [
+   "point",
+   "sp",
+   "volume"
+  ],
+  "ph.points::FluidVolumetricFlowPoint": [
+   "flow",
+   "point",
+   "volume"
+  ],
+  "ph.points::FluidVolumetricFlowSensor": [
+   "flow",
+   "point",
+   "sensor",
+   "volume"
+  ],
+  "ph.points::FluidVolumetricFlowSp": [
+   "flow",
+   "point",
+   "sp",
+   "volume"
+  ],
+  "ph.points::HeatEnableCmd": [
+   "cmd",
+   "enable",
+   "heat",
+   "point"
+  ],
+  "ph.points::HeatModulatingCmd": [
+   "cmd",
+   "heat",
+   "modulating",
+   "point"
+  ],
+  "ph.points::HeatModulatingSensor": [
+   "heat",
+   "modulating",
+   "point",
+   "sensor"
+  ],
+  "ph.points::HeatRunCmd": [
+   "cmd",
+   "heat",
+   "point",
+   "run"
+  ],
+  "ph.points::HeatRunSensor": [
+   "heat",
+   "point",
+   "run",
+   "sensor"
+  ],
+  "ph.points::MechFreqSensor": [
+   "point",
+   "sensor"
+  ],
+  "ph.points::MechRotationalDirectionCmd": [
+   "cmd",
+   "direction",
+   "mech",
+   "point",
+   "rotational"
+  ],
+  "ph.points::MechRotationalDirectionPoint": [
+   "direction",
+   "mech",
+   "point",
+   "rotational"
+  ],
+  "ph.points::MechRotationalDirectionSensor": [
+   "direction",
+   "mech",
+   "point",
+   "rotational",
+   "sensor"
+  ],
+  "ph.points::MechRotationalFreqSensor": [
+   "point",
+   "rotational",
+   "sensor"
+  ],
+  "ph.points::ModulatingCmd": [
+   "cmd",
+   "modulating",
+   "point"
+  ],
+  "ph.points::ModulatingPoint": [
+   "modulating",
+   "point"
+  ],
+  "ph.points::ModulatingSensor": [
+   "modulating",
+   "point",
+   "sensor"
+  ],
+  "ph.points::MotorEnableCmd": [
+   "cmd",
+   "enable",
+   "point"
+  ],
+  "ph.points::MotorMechRotationalDirectionCmd": [
+   "cmd",
+   "direction",
+   "mech",
+   "motor",
+   "point",
+   "rotational"
+  ],
+  "ph.points::MotorMechRotationalDirectionSensor": [
+   "direction",
+   "mech",
+   "motor",
+   "point",
+   "rotational",
+   "sensor"
+  ],
+  "ph.points::MotorMechRotationalFreqSensor": [
+   "motor",
+   "point",
+   "rotational",
+   "sensor"
+  ],
+  "ph.points::MotorRunCmd": [
+   "cmd",
+   "motor",
+   "point",
+   "run"
+  ],
+  "ph.points::MotorRunSensor": [
+   "motor",
+   "point",
+   "run",
+   "sensor"
+  ],
+  "ph.points::MotorSpeedEnumCmd": [
+   "cmd",
+   "motor",
+   "point",
+   "speed"
+  ],
+  "ph.points::MotorSpeedEnumPoint": [
+   "motor",
+   "point",
+   "speed"
+  ],
+  "ph.points::MotorSpeedEnumSensor": [
+   "motor",
+   "point",
+   "sensor",
+   "speed"
+  ],
+  "ph.points::MotorSpeedModulatingCmd": [
+   "cmd",
+   "modulating",
+   "motor",
+   "point",
+   "speed"
+  ],
+  "ph.points::MotorSpeedModulatingSensor": [
+   "modulating",
+   "motor",
+   "point",
+   "sensor",
+   "speed"
+  ],
+  "ph.points::OccupancyPoint": [
+   "occupancy",
+   "point"
+  ],
+  "ph.points::OccupancySensor": [
+   "occupancy",
+   "point",
+   "sensor"
+  ],
+  "ph.points::OccupiedPoint": [
+   "occupied",
+   "point"
+  ],
+  "ph.points::OccupiedSensor": [
+   "occupied",
+   "point",
+   "sensor"
+  ],
+  "ph.points::OccupiedSp": [
+   "occupied",
+   "point",
+   "sp"
+  ],
+  "ph.points::OpenCmd": [
+   "cmd",
+   "open",
+   "point"
+  ],
+  "ph.points::OpenPoint": [
+   "open",
+   "point"
+  ],
+  "ph.points::OpenSensor": [
+   "open",
+   "point",
+   "sensor"
+  ],
+  "ph.points::ParkingBayOccupiedSensor": [
+   "occupied",
+   "parkingBay",
+   "point",
+   "sensor"
+  ],
+  "ph.points::PipeWaterFlowSensor": [
+   "flow",
+   "point",
+   "sensor",
+   "volume",
+   "water"
+  ],
+  "ph.points::PipeWaterFlowSp": [
+   "flow",
+   "point",
+   "sp",
+   "volume",
+   "water"
+  ],
+  "ph.points::PipeWaterPressureSensor": [
+   "point",
+   "pressure",
+   "sensor",
+   "water"
+  ],
+  "ph.points::PipeWaterPressureSp": [
+   "point",
+   "pressure",
+   "sp",
+   "water"
+  ],
+  "ph.points::PipeWaterTempSensor": [
+   "point",
+   "sensor",
+   "temp",
+   "water"
+  ],
+  "ph.points::PipeWaterTempSp": [
+   "point",
+   "sp",
+   "temp",
+   "water"
+  ],
+  "ph.points::RefrigMassFlowSensor": [
+   "flow",
+   "mass",
+   "point",
+   "refrig",
+   "sensor"
+  ],
+  "ph.points::RefrigMassFlowSp": [
+   "flow",
+   "mass",
+   "point",
+   "refrig",
+   "sp"
+  ],
+  "ph.points::RefrigPressureSensor": [
+   "point",
+   "pressure",
+   "refrig",
+   "sensor"
+  ],
+  "ph.points::RefrigPressureSp": [
+   "point",
+   "pressure",
+   "refrig",
+   "sp"
+  ],
+  "ph.points::RefrigTempSensor": [
+   "point",
+   "refrig",
+   "sensor",
+   "temp"
+  ],
+  "ph.points::RefrigTempSp": [
+   "point",
+   "refrig",
+   "sp",
+   "temp"
+  ],
+  "ph.points::RunCmd": [
+   "cmd",
+   "point",
+   "run"
+  ],
+  "ph.points::RunPoint": [
+   "point",
+   "run"
+  ],
+  "ph.points::RunSensor": [
+   "point",
+   "run",
+   "sensor"
+  ],
+  "ph.points::RuntimeSensor": [
+   "point",
+   "runtime",
+   "sensor"
+  ],
+  "ph.points::SteamMassFlowSensor": [
+   "flow",
+   "mass",
+   "point",
+   "sensor",
+   "steam"
+  ],
+  "ph.points::SteamMassFlowSp": [
+   "flow",
+   "mass",
+   "point",
+   "sp",
+   "steam"
+  ],
+  "ph.points::SteamPressureSensor": [
+   "point",
+   "pressure",
+   "sensor",
+   "steam"
+  ],
+  "ph.points::SteamPressureSp": [
+   "point",
+   "pressure",
+   "sp",
+   "steam"
+  ],
+  "ph.points::SteamTempSensor": [
+   "point",
+   "sensor",
+   "steam",
+   "temp"
+  ],
+  "ph.points::SteamTempSp": [
+   "point",
+   "sp",
+   "steam",
+   "temp"
+  ],
+  "ph.points::SurfaceTempPoint": [
+   "point",
+   "surface",
+   "temp"
+  ],
+  "ph.points::SurfaceTempSensor": [
+   "point",
+   "sensor",
+   "surface",
+   "temp"
+  ],
+  "ph.points::ValveModulatingCmd": [
+   "actuator",
+   "cmd",
+   "modulating",
+   "point",
+   "valve"
+  ],
+  "ph.points::ValveModulatingSensor": [
+   "actuator",
+   "modulating",
+   "point",
+   "sensor",
+   "valve"
+  ],
+  "ph.points::ValveOpenCmd": [
+   "actuator",
+   "cmd",
+   "open",
+   "point",
+   "valve"
+  ],
+  "ph.points::ValveOpenSensor": [
+   "actuator",
+   "open",
+   "point",
+   "sensor",
+   "valve"
+  ],
+  "ph.points::WaterFlowSensor": [
+   "flow",
+   "point",
+   "sensor",
+   "volume",
+   "water"
+  ],
+  "ph.points::WaterFlowSp": [
+   "flow",
+   "point",
+   "sp",
+   "volume",
+   "water"
+  ],
+  "ph.points::WaterPressureSensor": [
+   "point",
+   "pressure",
+   "sensor",
+   "water"
+  ],
+  "ph.points::WaterPressureSp": [
+   "point",
+   "pressure",
+   "sp",
+   "water"
+  ],
+  "ph.points::WaterTempSensor": [
+   "point",
+   "sensor",
+   "temp",
+   "water"
+  ],
+  "ph.points::WaterTempSp": [
+   "point",
+   "sp",
+   "temp",
+   "water"
+  ],
+  "ph.points::WaterValveModulatingCmd": [
+   "actuator",
+   "cmd",
+   "modulating",
+   "point",
+   "valve",
+   "water"
+  ],
+  "ph.points::WaterValveModulatingSensor": [
+   "actuator",
+   "modulating",
+   "point",
+   "sensor",
+   "valve",
+   "water"
+  ],
+  "ph.points::WaterValveOpenCmd": [
+   "actuator",
+   "cmd",
+   "open",
+   "point",
+   "valve",
+   "water"
+  ],
+  "ph.points::WaterValveOpenSensor": [
+   "actuator",
+   "open",
+   "point",
+   "sensor",
+   "valve",
+   "water"
+  ],
+  "ph.points::WaterVolumePoint": [
+   "point",
+   "volume",
+   "water"
+  ],
+  "ph.points::WaterVolumeSensor": [
+   "point",
+   "sensor",
+   "volume",
+   "water"
+  ],
+  "ph.points::WaterVolumeSp": [
+   "point",
+   "sp",
+   "volume",
+   "water"
+  ],
+  "ph.points::WeatherAtmosphericPressurePoint": [
+   "atmospheric",
+   "point",
+   "pressure",
+   "weather"
+  ],
+  "ph.points::WeatherCloudagePoint": [
+   "cloudage",
+   "point",
+   "weather"
+  ],
+  "ph.points::WeatherCondPoint": [
+   "point",
+   "weather",
+   "weatherCond"
+  ],
+  "ph.points::WeatherDaytimePoint": [
+   "daytime",
+   "point",
+   "weather"
+  ],
+  "ph.points::WeatherDewPointPoint": [
+   "dewPoint",
+   "point",
+   "weather"
+  ],
+  "ph.points::WeatherEnthalpyPoint": [
+   "enthalpy",
+   "point",
+   "weather"
+  ],
+  "ph.points::WeatherFeelsLikePoint": [
+   "feelsLike",
+   "point",
+   "weather"
+  ],
+  "ph.points::WeatherHumidityPoint": [
+   "humidity",
+   "point",
+   "weather"
+  ],
+  "ph.points::WeatherNumberPoint": [
+   "point",
+   "weather"
+  ],
+  "ph.points::WeatherPrecipitationPoint": [
+   "point",
+   "precipitation",
+   "weather"
+  ],
+  "ph.points::WeatherSolarIrradiancePoint": [
+   "irradiance",
+   "point",
+   "solar",
+   "weather"
+  ],
+  "ph.points::WeatherTempPoint": [
+   "point",
+   "temp",
+   "weather"
+  ],
+  "ph.points::WeatherVisibilityPoint": [
+   "point",
+   "visibility",
+   "weather"
+  ],
+  "ph.points::WeatherWetbulbPoint": [
+   "point",
+   "weather",
+   "webBulb"
+  ],
+  "ph.points::WeatherWindDirectionPoint": [
+   "direction",
+   "point",
+   "weather",
+   "wind"
+  ],
+  "ph.points::WeatherWindSpeedPoint": [
+   "point",
+   "speed",
+   "weather",
+   "wind"
+  ],
+  "ph.points::WindowOpenSensor": [
+   "open",
+   "point",
+   "sensor",
+   "window"
+  ],
+  "ph.points::ZoneAirHumiditySensor": [
+   "air",
+   "humidity",
+   "point",
+   "sensor",
+   "zone"
+  ],
+  "ph.points::ZoneAirHumiditySp": [
+   "air",
+   "humidity",
+   "point",
+   "sp",
+   "zone"
+  ],
+  "ph.points::ZoneAirHvacModeSp": [
+   "air",
+   "hvacMode",
+   "point",
+   "sp",
+   "zone"
+  ],
+  "ph.points::ZoneAirTempSensor": [
+   "air",
+   "point",
+   "sensor",
+   "temp",
+   "zone"
+  ],
+  "ph.points::ZoneAirTempSp": [
+   "air",
+   "point",
+   "sp",
+   "temp",
+   "zone"
+  ],
+  "ph.points::ZoneCo2Sensor": [
+   "air",
+   "co2",
+   "concentration",
+   "point",
+   "sensor",
+   "zone"
+  ],
+  "ph.points::ZoneCo2Sp": [
+   "air",
+   "co2",
+   "concentration",
+   "point",
+   "sp",
+   "zone"
+  ],
+  "ph.points::ZoneOccupiedSensor": [
+   "occupied",
+   "point",
+   "sensor",
+   "zone"
+  ],
+  "ph.points::ZoneOccupiedSp": [
+   "occupied",
+   "point",
+   "sp",
+   "zone"
+  ],
+  "ph::AbsorptionChillerMechanism": [
+   "absorption"
+  ],
+  "ph::AcElec": [
+   "ac",
+   "elec"
+  ],
+  "ph::AcElecMeter": [
+   "ac",
+   "elec",
+   "equip",
+   "meter"
+  ],
+  "ph::AcEvseConnector": [
+   "ac",
+   "elec",
+   "equip",
+   "evse",
+   "evseConnector"
+  ],
+  "ph::AcEvsePort": [
+   "ac",
+   "elec",
+   "equip",
+   "evse",
+   "port"
+  ],
+  "ph::AcEvsePortConnector": [
+   "ac",
+   "elec",
+   "equip",
+   "evse",
+   "evseConnector",
+   "port"
+  ],
+  "ph::AcFreq": [
+   "ac",
+   "freq"
+  ],
+  "ph::AcMotor": [
+   "ac",
+   "elec",
+   "equip",
+   "motor"
+  ],
+  "ph::ActiveEnergy": [
+   "active",
+   "elec",
+   "energy"
+  ],
+  "ph::ActivePower": [
+   "active",
+   "elec",
+   "power"
+  ],
+  "ph::Actuator": [
+   "actuator",
+   "equip"
+  ],
+  "ph::Ahu": [
+   "ahu",
+   "equip"
+  ],
+  "ph::Air": [
+   "air"
+  ],
+  "ph::AirConditioningSystem": [
+   "air",
+   "conditioning",
+   "system"
+  ],
+  "ph::AirCoolingProcess": [
+   "airCooling"
+  ],
+  "ph::AirExhaustSystem": [
+   "air",
+   "exhaust",
+   "system"
+  ],
+  "ph::AirHandlingEquip": [
+   "equip"
+  ],
+  "ph::AirQuality": [
+   "concentration"
+  ],
+  "ph::AirSystem": [
+   "air",
+   "system"
+  ],
+  "ph::AirTemp": [
+   "air",
+   "temp"
+  ],
+  "ph::AirTerminalUnit": [
+   "equip"
+  ],
+  "ph::AirVentilationSystem": [
+   "air",
+   "system",
+   "ventilation"
+  ],
+  "ph::Ates": [
+   "ates",
+   "equip"
+  ],
+  "ph::AtmosphericPressure": [
+   "atmospheric",
+   "pressure"
+  ],
+  "ph::Attr": [
+   "attr"
+  ],
+  "ph::BaselineSimScenario": [
+   "simBaseline"
+  ],
+  "ph::Battery": [
+   "battery",
+   "equip"
+  ],
+  "ph::Biomass": [
+   "biomass"
+  ],
+  "ph::BiomassHeatingProcess": [
+   "biomassHeating"
+  ],
+  "ph::BlowdownWater": [
+   "blowdown",
+   "water"
+  ],
+  "ph::Boiler": [
+   "boiler",
+   "equip"
+  ],
+  "ph::BoolPoint": [
+   "point"
+  ],
+  "ph::BranchSelector": [
+   "branchSelector",
+   "equip",
+   "vrf"
+  ],
+  "ph::BypassPipeSection": [
+   "bypass"
+  ],
+  "ph::Cable": [
+   "cable",
+   "equip"
+  ],
+  "ph::Cav": [
+   "cav",
+   "equip"
+  ],
+  "ph::CentrifugalChillerMechanism": [
+   "centrifugal"
+  ],
+  "ph::Ch2o": [
+   "ch2o"
+  ],
+  "ph::Ch2oConcentration": [
+   "ch2o",
+   "concentration"
+  ],
+  "ph::Ch4": [
+   "ch4"
+  ],
+  "ph::Ch4Emission": [
+   "ch4",
+   "emission"
+  ],
+  "ph::ChilledBeam": [
+   "chilledBeam",
+   "equip"
+  ],
+  "ph::ChilledBeamAhuZoneDelivery": [
+   "chilledBeamZone"
+  ],
+  "ph::ChilledWater": [
+   "chilled",
+   "water"
+  ],
+  "ph::ChilledWaterCoolingProcess": [
+   "chilledWaterCooling"
+  ],
+  "ph::ChilledWaterPlant": [
+   "chilled",
+   "equip",
+   "plant",
+   "water"
+  ],
+  "ph::ChilledWaterSystem": [
+   "chilled",
+   "system",
+   "water"
+  ],
+  "ph::Chiller": [
+   "chiller",
+   "equip"
+  ],
+  "ph::CircPipeSection": [
+   "circ"
+  ],
+  "ph::Circuit": [
+   "circuit",
+   "equip"
+  ],
+  "ph::ClosedCondenserLoop": [
+   "condenserClosedLoop"
+  ],
+  "ph::ClosedLoopAtesDesign": [
+   "atesClosedLoop"
+  ],
+  "ph::Cloudage": [
+   "cloudage"
+  ],
+  "ph::CmdPoint": [
+   "cmd",
+   "point"
+  ],
+  "ph::CmdPointFunction": [
+   "cmd"
+  ],
+  "ph::Co": [
+   "co"
+  ],
+  "ph::Co2": [
+   "co2"
+  ],
+  "ph::Co2Concentration": [
+   "co2",
+   "concentration"
+  ],
+  "ph::Co2Emission": [
+   "co2",
+   "emission"
+  ],
+  "ph::CoConcentration": [
+   "co",
+   "concentration"
+  ],
+  "ph::Coal": [
+   "coal",
+   "solid"
+  ],
+  "ph::CoalHeatingProcess": [
+   "coalHeating"
+  ],
+  "ph::Coil": [
+   "equip",
+   "heatExchanger"
+  ],
+  "ph::ColdDuctDeck": [
+   "coldDeck"
+  ],
+  "ph::ColdWater": [
+   "cold",
+   "water"
+  ],
+  "ph::ComputedModel": [
+   "computedModel",
+   "syntheticModel"
+  ],
+  "ph::ComputedPoint": [
+   "computed",
+   "point",
+   "synthetic"
+  ],
+  "ph::ComputedSyntheticPointFunction": [
+   "computed",
+   "synthetic"
+  ],
+  "ph::Computer": [
+   "computer",
+   "device"
+  ],
+  "ph::Concentration": [
+   "concentration"
+  ],
+  "ph::Condensate": [
+   "condensate"
+  ],
+  "ph::CondenserCoolingProcess": [
+   "condenserCooling"
+  ],
+  "ph::CondenserWater": [
+   "condenser",
+   "water"
+  ],
+  "ph::CondenserWaterSystem": [
+   "condenser",
+   "system",
+   "water"
+  ],
+  "ph::Conduit": [
+   "equip"
+  ],
+  "ph::ConstantAirVolumeAdjustability": [
+   "constantAirVolume"
+  ],
+  "ph::Controller": [
+   "controller",
+   "device"
+  ],
+  "ph::ControlsPanel": [
+   "controls",
+   "equip",
+   "panel"
+  ],
+  "ph::CoolWater": [
+   "cool",
+   "water"
+  ],
+  "ph::CoolingCoil": [
+   "coolingCoil",
+   "equip",
+   "heatExchanger"
+  ],
+  "ph::CoolingTower": [
+   "coolingTower",
+   "equip"
+  ],
+  "ph::Crac": [
+   "crac",
+   "equip",
+   "fcu"
+  ],
+  "ph::CurPoint": [
+   "cur",
+   "point"
+  ],
+  "ph::CurStatus": [
+   "disabled",
+   "down",
+   "fault",
+   "ok",
+   "remoteDisabled",
+   "remoteDown",
+   "remoteFault",
+   "remoteUnknown",
+   "stale",
+   "unknown"
+  ],
+  "ph::Damper": [
+   "damper",
+   "equip"
+  ],
+  "ph::DamperActuator": [
+   "actuator",
+   "damper",
+   "equip"
+  ],
+  "ph::DataCenter": [
+   "dataCenter",
+   "space"
+  ],
+  "ph::Daytime": [
+   "daytime"
+  ],
+  "ph::DcElec": [
+   "dc",
+   "elec"
+  ],
+  "ph::DcElecMeter": [
+   "dc",
+   "elec",
+   "equip",
+   "meter"
+  ],
+  "ph::DcEvseConnector": [
+   "dc",
+   "elec",
+   "equip",
+   "evse",
+   "evseConnector"
+  ],
+  "ph::DcEvsePort": [
+   "dc",
+   "elec",
+   "equip",
+   "evse",
+   "port"
+  ],
+  "ph::DcEvsePortConnector": [
+   "dc",
+   "elec",
+   "equip",
+   "evse",
+   "evseConnector",
+   "port"
+  ],
+  "ph::DcMotor": [
+   "dc",
+   "elec",
+   "equip",
+   "motor"
+  ],
+  "ph::Device": [
+   "device"
+  ],
+  "ph::DewPoint": [
+   "dewPoint"
+  ],
+  "ph::Diesel": [
+   "diesel"
+  ],
+  "ph::DirectAhuZoneDelivery": [
+   "directZone"
+  ],
+  "ph::Direction": [
+   "direction"
+  ],
+  "ph::DischargeDuctSection": [
+   "discharge"
+  ],
+  "ph::Doas": [
+   "ahu",
+   "doas",
+   "equip"
+  ],
+  "ph::DomesticColdWaterSystem": [
+   "cold",
+   "domestic",
+   "system",
+   "water"
+  ],
+  "ph::DomesticHotWaterSystem": [
+   "domestic",
+   "hot",
+   "system",
+   "water"
+  ],
+  "ph::DomesticWater": [
+   "domestic",
+   "water"
+  ],
+  "ph::DomesticWaterSystem": [
+   "domestic",
+   "system",
+   "water"
+  ],
+  "ph::DoubletAtesDesign": [
+   "atesDoublet"
+  ],
+  "ph::DoubletPairedAtesDesign": [
+   "atesDoubletPaired"
+  ],
+  "ph::DualDuctConfig": [
+   "dualDuct"
+  ],
+  "ph::Duct": [
+   "duct",
+   "equip"
+  ],
+  "ph::DxCoolingProcess": [
+   "dxCooling"
+  ],
+  "ph::DxHeatingProcess": [
+   "dxHeating"
+  ],
+  "ph::EconomizerDuctSection": [
+   "economizer"
+  ],
+  "ph::Elec": [
+   "elec"
+  ],
+  "ph::ElecAcEquip": [
+   "ac",
+   "elec",
+   "equip"
+  ],
+  "ph::ElecAcQuadrant": [
+   "q1",
+   "q2",
+   "q3",
+   "q4"
+  ],
+  "ph::ElecDcEquip": [
+   "dc",
+   "elec",
+   "equip"
+  ],
+  "ph::ElecDemand": [
+   "active",
+   "elec",
+   "power"
+  ],
+  "ph::ElecEnergy": [
+   "elec",
+   "energy"
+  ],
+  "ph::ElecEquip": [
+   "elec",
+   "equip"
+  ],
+  "ph::ElecHeatingProcess": [
+   "elecHeating"
+  ],
+  "ph::ElecMeter": [
+   "elec",
+   "equip",
+   "meter"
+  ],
+  "ph::ElecPanel": [
+   "elec",
+   "equip",
+   "panel"
+  ],
+  "ph::ElecPower": [
+   "elec",
+   "power"
+  ],
+  "ph::ElecSystem": [
+   "elec",
+   "system"
+  ],
+  "ph::Elevator": [
+   "elevator",
+   "equip"
+  ],
+  "ph::Emission": [
+   "emission"
+  ],
+  "ph::Energy": [
+   "energy"
+  ],
+  "ph::EnteringPipeSection": [
+   "entering"
+  ],
+  "ph::Enthalpy": [
+   "enthalpy"
+  ],
+  "ph::EnumPoint": [
+   "point"
+  ],
+  "ph::Equip": [
+   "equip"
+  ],
+  "ph::Escalator": [
+   "equip",
+   "escalator"
+  ],
+  "ph::EvseConnector": [
+   "elec",
+   "equip",
+   "evse",
+   "evseConnector"
+  ],
+  "ph::EvseConnectorType": [
+   "ccs1",
+   "ccs2",
+   "chademo",
+   "gbt",
+   "iecType2",
+   "mcs",
+   "saeJ1772",
+   "saeJ3068",
+   "saeJ3400"
+  ],
+  "ph::EvseDispenser": [
+   "dispenser",
+   "elec",
+   "equip",
+   "evse"
+  ],
+  "ph::EvseEquip": [
+   "elec",
+   "equip",
+   "evse"
+  ],
+  "ph::EvsePort": [
+   "elec",
+   "equip",
+   "evse",
+   "port"
+  ],
+  "ph::EvsePowerConverter": [
+   "elec",
+   "equip",
+   "evse",
+   "powerConverter"
+  ],
+  "ph::EvseSystem": [
+   "elec",
+   "evse",
+   "system"
+  ],
+  "ph::ExhaustDuctSection": [
+   "exhaust"
+  ],
+  "ph::Fan": [
+   "equip",
+   "fan"
+  ],
+  "ph::Fcu": [
+   "equip",
+   "fcu"
+  ],
+  "ph::FeelsLike": [
+   "feelsLike"
+  ],
+  "ph::Floor": [
+   "floor",
+   "space"
+  ],
+  "ph::Flow": [
+   "flow"
+  ],
+  "ph::FlowInverter": [
+   "equip",
+   "flowInverter"
+  ],
+  "ph::FlowMeter": [
+   "equip",
+   "flow",
+   "meter"
+  ],
+  "ph::FlueDuctSection": [
+   "flue"
+  ],
+  "ph::Freq": [
+   "freq"
+  ],
+  "ph::FuelOil": [
+   "fuelOil"
+  ],
+  "ph::FuelOilHeatingProcess": [
+   "fuelOilHeating"
+  ],
+  "ph::FumeHood": [
+   "equip",
+   "fumeHood"
+  ],
+  "ph::Gasoline": [
+   "gasoline"
+  ],
+  "ph::GeoCountry": [
+   "ad",
+   "ae",
+   "af",
+   "ag",
+   "ai",
+   "al",
+   "am",
+   "an",
+   "ao",
+   "aq",
+   "ar",
+   "as",
+   "at",
+   "au",
+   "aw",
+   "ax",
+   "az",
+   "ba",
+   "bb",
+   "bd",
+   "be",
+   "bf",
+   "bg",
+   "bh",
+   "bi",
+   "bj",
+   "bl",
+   "bm",
+   "bn",
+   "bo",
+   "br",
+   "bs",
+   "bt",
+   "bv",
+   "bw",
+   "by",
+   "bz",
+   "ca",
+   "cc",
+   "cd",
+   "cf",
+   "cg",
+   "ch",
+   "ci",
+   "ck",
+   "cl",
+   "cm",
+   "cn",
+   "co",
+   "cr",
+   "cu",
+   "cv",
+   "cx",
+   "cy",
+   "cz",
+   "de",
+   "dj",
+   "dk",
+   "dm",
+   "do",
+   "dz",
+   "ec",
+   "ee",
+   "eg",
+   "eh",
+   "er",
+   "es",
+   "et",
+   "fi",
+   "fj",
+   "fk",
+   "fm",
+   "fo",
+   "fr",
+   "ga",
+   "gb",
+   "gd",
+   "ge",
+   "gf",
+   "gg",
+   "gh",
+   "gi",
+   "gl",
+   "gm",
+   "gn",
+   "gp",
+   "gq",
+   "gr",
+   "gs",
+   "gt",
+   "gu",
+   "gw",
+   "gy",
+   "hk",
+   "hm",
+   "hn",
+   "hr",
+   "ht",
+   "hu",
+   "id",
+   "ie",
+   "il",
+   "im",
+   "in",
+   "io",
+   "iq",
+   "ir",
+   "is",
+   "it",
+   "je",
+   "jm",
+   "jo",
+   "jp",
+   "ke",
+   "kg",
+   "kh",
+   "ki",
+   "km",
+   "kn",
+   "kp",
+   "kr",
+   "kw",
+   "ky",
+   "kz",
+   "la",
+   "lb",
+   "lc",
+   "li",
+   "lk",
+   "lr",
+   "ls",
+   "lt",
+   "lu",
+   "lv",
+   "ly",
+   "ma",
+   "mc",
+   "md",
+   "me",
+   "mf",
+   "mg",
+   "mh",
+   "mk",
+   "ml",
+   "mm",
+   "mn",
+   "mo",
+   "mp",
+   "mq",
+   "mr",
+   "ms",
+   "mt",
+   "mu",
+   "mv",
+   "mw",
+   "mx",
+   "my",
+   "mz",
+   "na",
+   "nc",
+   "ne",
+   "nf",
+   "ng",
+   "ni",
+   "nl",
+   "no",
+   "np",
+   "nr",
+   "nu",
+   "nz",
+   "om",
+   "pa",
+   "pe",
+   "pf",
+   "pg",
+   "ph",
+   "pk",
+   "pl",
+   "pm",
+   "pn",
+   "pr",
+   "ps",
+   "pt",
+   "pw",
+   "py",
+   "qa",
+   "re",
+   "ro",
+   "rs",
+   "ru",
+   "rw",
+   "sa",
+   "sb",
+   "sc",
+   "sd",
+   "se",
+   "sg",
+   "sh",
+   "si",
+   "sj",
+   "sk",
+   "sl",
+   "sm",
+   "sn",
+   "so",
+   "sr",
+   "st",
+   "sv",
+   "sy",
+   "sz",
+   "tc",
+   "td",
+   "tf",
+   "tg",
+   "th",
+   "tj",
+   "tk",
+   "tl",
+   "tm",
+   "tn",
+   "to",
+   "tr",
+   "tt",
+   "tv",
+   "tw",
+   "tz",
+   "ua",
+   "ug",
+   "um",
+   "us",
+   "uy",
+   "uz",
+   "va",
+   "vc",
+   "ve",
+   "vg",
+   "vi",
+   "vn",
+   "vu",
+   "wf",
+   "ws",
+   "ye",
+   "yt",
+   "za",
+   "zm",
+   "zw"
+  ],
+  "ph::GeoState": [
+   "ak",
+   "al",
+   "ar",
+   "as",
+   "az",
+   "ca",
+   "co",
+   "ct",
+   "dc",
+   "de",
+   "fl",
+   "fm",
+   "ga",
+   "gu",
+   "hi",
+   "ia",
+   "id",
+   "il",
+   "in",
+   "ks",
+   "ky",
+   "la",
+   "ma",
+   "md",
+   "me",
+   "mh",
+   "mi",
+   "mn",
+   "mo",
+   "mp",
+   "ms",
+   "mt",
+   "nc",
+   "nd",
+   "ne",
+   "nh",
+   "nj",
+   "nm",
+   "nv",
+   "ny",
+   "oh",
+   "ok",
+   "or",
+   "pa",
+   "pr",
+   "pw",
+   "ri",
+   "sc",
+   "sd",
+   "tn",
+   "tx",
+   "ut",
+   "va",
+   "vi",
+   "vt",
+   "wa",
+   "wi",
+   "wv",
+   "wy"
+  ],
+  "ph::GroundFloor": [
+   "floor",
+   "ground",
+   "space"
+  ],
+  "ph::GroundWater": [
+   "ground",
+   "water"
+  ],
+  "ph::HeaderPipeSection": [
+   "header"
+  ],
+  "ph::HeatExchanger": [
+   "equip",
+   "heatExchanger"
+  ],
+  "ph::HeatingCoil": [
+   "equip",
+   "heatExchanger",
+   "heatingCoil"
+  ],
+  "ph::Hfc": [
+   "hfc"
+  ],
+  "ph::HfcEmission": [
+   "emission",
+   "hfc"
+  ],
+  "ph::HisMode": [
+   "consumption",
+   "cov",
+   "sampled"
+  ],
+  "ph::HisPoint": [
+   "his",
+   "point"
+  ],
+  "ph::HisStatus": [
+   "disabled",
+   "down",
+   "fault",
+   "ok",
+   "pending",
+   "syncing",
+   "unknown"
+  ],
+  "ph::HotDuctDeck": [
+   "hotDeck"
+  ],
+  "ph::HotWater": [
+   "hot",
+   "water"
+  ],
+  "ph::HotWaterBoiler": [
+   "boiler",
+   "equip",
+   "hot",
+   "water"
+  ],
+  "ph::HotWaterHeatingProcess": [
+   "hotWaterHeating"
+  ],
+  "ph::HotWaterPlant": [
+   "equip",
+   "hot",
+   "plant",
+   "water"
+  ],
+  "ph::HotWaterSystem": [
+   "hot",
+   "system",
+   "water"
+  ],
+  "ph::HumidifierEquip": [
+   "equip",
+   "humidifier"
+  ],
+  "ph::Humidity": [
+   "humidity"
+  ],
+  "ph::HvacMode": [
+   "cooldown",
+   "cooling",
+   "depressurize",
+   "heating",
+   "manual",
+   "neutral",
+   "off",
+   "pressurize",
+   "purge",
+   "reheat",
+   "warmup"
+  ],
+  "ph::HvacZoneSpace": [
+   "hvac",
+   "space",
+   "zone"
+  ],
+  "ph::Ice": [
+   "ice",
+   "solid"
+  ],
+  "ph::Illuminance": [
+   "illuminance"
+  ],
+  "ph::InletDuctSection": [
+   "inlet"
+  ],
+  "ph::Irradiance": [
+   "irradiance"
+  ],
+  "ph::Kind": [
+   "bool",
+   "coord",
+   "date",
+   "dateTime",
+   "dict",
+   "grid",
+   "list",
+   "marker",
+   "na",
+   "number",
+   "ref",
+   "str",
+   "time",
+   "uri",
+   "xstr"
+  ],
+  "ph::Laptop": [
+   "computer",
+   "device",
+   "laptop"
+  ],
+  "ph::LeavingPipeSection": [
+   "leaving"
+  ],
+  "ph::Level": [
+   "level"
+  ],
+  "ph::Light": [
+   "light"
+  ],
+  "ph::LightLevel": [
+   "level",
+   "light"
+  ],
+  "ph::LightingSystem": [
+   "elec",
+   "lighting",
+   "system"
+  ],
+  "ph::LightingZoneSpace": [
+   "lighting",
+   "space",
+   "zone"
+  ],
+  "ph::Luminaire": [
+   "equip",
+   "luminaire"
+  ],
+  "ph::Luminance": [
+   "luminance"
+  ],
+  "ph::MakeupWater": [
+   "makeup",
+   "water"
+  ],
+  "ph::MassFlow": [
+   "flow",
+   "mass"
+  ],
+  "ph::Mau": [
+   "ahu",
+   "doas",
+   "equip",
+   "mau"
+  ],
+  "ph::Meter": [
+   "equip",
+   "meter"
+  ],
+  "ph::MixedDuctSection": [
+   "mixed"
+  ],
+  "ph::MlModel": [
+   "mlModel",
+   "syntheticModel"
+  ],
+  "ph::MlPoint": [
+   "ml",
+   "point",
+   "synthetic"
+  ],
+  "ph::MlSyntheticPointFunction": [
+   "ml",
+   "synthetic"
+  ],
+  "ph::MlVar": [
+   "mlVar"
+  ],
+  "ph::MobilePhone": [
+   "device",
+   "mobile",
+   "phone"
+  ],
+  "ph::MonoAtesDesign": [
+   "atesMono"
+  ],
+  "ph::Motor": [
+   "elec",
+   "equip",
+   "motor"
+  ],
+  "ph::MovingWalkway": [
+   "equip",
+   "movingWalkway"
+  ],
+  "ph::MultiAhuZoneDelivery": [
+   "multiZone"
+  ],
+  "ph::N2o": [
+   "n2o"
+  ],
+  "ph::N2oEmission": [
+   "emission",
+   "n2o"
+  ],
+  "ph::NaturalGas": [
+   "naturalGas"
+  ],
+  "ph::NaturalGasHeatingProcess": [
+   "naturalGasHeating"
+  ],
+  "ph::Network": [
+   "network"
+  ],
+  "ph::NetworkingDevice": [
+   "device",
+   "networking"
+  ],
+  "ph::NetworkingRouter": [
+   "device",
+   "networking",
+   "router"
+  ],
+  "ph::NetworkingSwitch": [
+   "device",
+   "networking",
+   "switch"
+  ],
+  "ph::NeutralDuctDeck": [
+   "neutralDeck"
+  ],
+  "ph::Nf3": [
+   "nf3"
+  ],
+  "ph::Nf3Emission": [
+   "emission",
+   "nf3"
+  ],
+  "ph::Nh3": [
+   "nh3"
+  ],
+  "ph::Nh3Concentration": [
+   "concentration",
+   "nh3"
+  ],
+  "ph::No2": [
+   "no2"
+  ],
+  "ph::No2Concentration": [
+   "concentration",
+   "no2"
+  ],
+  "ph::NumberPoint": [
+   "point"
+  ],
+  "ph::O2": [
+   "o2"
+  ],
+  "ph::O3": [
+   "o3"
+  ],
+  "ph::O3Concentration": [
+   "concentration",
+   "o3"
+  ],
+  "ph::Op": [
+   "op"
+  ],
+  "ph::OpenCondenserLoop": [
+   "condenserOpenLoop"
+  ],
+  "ph::OperationSimScenario": [
+   "simOperation"
+  ],
+  "ph::OptimumSimScenario": [
+   "simOptimum"
+  ],
+  "ph::OutsideDuctSection": [
+   "outside"
+  ],
+  "ph::Panel": [
+   "equip",
+   "panel"
+  ],
+  "ph::ParallelVavAirCircuit": [
+   "parallel"
+  ],
+  "ph::Pf": [
+   "pf"
+  ],
+  "ph::Pfc": [
+   "pfc"
+  ],
+  "ph::PfcEmission": [
+   "emission",
+   "pfc"
+  ],
+  "ph::Phone": [
+   "device",
+   "phone"
+  ],
+  "ph::Pipe": [
+   "equip",
+   "pipe"
+  ],
+  "ph::Plant": [
+   "equip",
+   "plant"
+  ],
+  "ph::Pm01": [
+   "pm01",
+   "solid"
+  ],
+  "ph::Pm01Concentration": [
+   "concentration",
+   "pm01"
+  ],
+  "ph::Pm10": [
+   "pm10",
+   "solid"
+  ],
+  "ph::Pm10Concentration": [
+   "concentration",
+   "pm10"
+  ],
+  "ph::Pm25": [
+   "pm25",
+   "solid"
+  ],
+  "ph::Pm25Concentration": [
+   "concentration",
+   "pm25"
+  ],
+  "ph::Point": [
+   "point"
+  ],
+  "ph::Power": [
+   "power"
+  ],
+  "ph::Precipitation": [
+   "precipitation"
+  ],
+  "ph::Pressure": [
+   "pressure"
+  ],
+  "ph::PressureDependentVavModulation": [
+   "pressureDependent"
+  ],
+  "ph::PressureIndependentVavModulation": [
+   "pressureIndependent"
+  ],
+  "ph::PrimaryFunction": [
+   "adultEducation",
+   "ambulatorySurgicalCenter",
+   "aquarium",
+   "automobileDealership",
+   "bankBranch",
+   "barNightclub",
+   "barracks",
+   "bowlingAlley",
+   "casino",
+   "collegeUniversity",
+   "convenienceStoreWithGasStation",
+   "convenienceStoreWithoutGasStation",
+   "conventionCenter",
+   "courthouse",
+   "dataCenter",
+   "distributionCenter",
+   "drinkingWaterTreatmentDistribution",
+   "enclosedMall",
+   "energyPowerStation",
+   "fastFoodRestaurant",
+   "financialOffice",
+   "fireStation",
+   "fitnessCenterHealthClubGym",
+   "foodSales",
+   "foodService",
+   "hospitalGeneralMedicalSurgical",
+   "hotel",
+   "iceCurlingRink",
+   "indoorArena",
+   "k12School",
+   "laboratory",
+   "library",
+   "lifestyleCenter",
+   "mailingCenterPostOffice",
+   "manufacturingIndustrialPlant",
+   "medicalOffice",
+   "mixedUseProperty",
+   "movieTheater",
+   "multifamilyHousing",
+   "museum",
+   "nonRefrigeratedWarehouse",
+   "office",
+   "other",
+   "otherEducation",
+   "otherEntertainmentPublicAssembly",
+   "otherLodgingResidential",
+   "otherMall",
+   "otherPublicServices",
+   "otherRecreation",
+   "otherRestaurantBar",
+   "otherServices",
+   "otherSpecialtyHospital",
+   "otherStadium",
+   "otherTechnologyScience",
+   "otherUtility",
+   "outpatientRehabilitationPhysicalTherapy",
+   "parking",
+   "performingArts",
+   "personalServicesHealthBeautyDryCleaningEtc",
+   "policeStation",
+   "preSchoolDaycare",
+   "prisonIncarceration",
+   "raceTrack",
+   "refrigeratedWarehouse",
+   "repairServicesVehicleShoeLocksmithEtc",
+   "residenceHallDormitory",
+   "restaurant",
+   "retailStore",
+   "rollerRink",
+   "selfStorageFacility",
+   "seniorCareCommunity",
+   "singleFamilyHome",
+   "socialMeetingHall",
+   "stadiumClosed",
+   "stadiumOpen",
+   "stripMall",
+   "supermarketGroceryStore",
+   "swimmingPool",
+   "transportationTerminalStation",
+   "urgentCareClinicOtherOutpatient",
+   "veterinaryOffice",
+   "vocationalSchool",
+   "wastewaterTreatmentPlant",
+   "wholesaleClubSupercenter",
+   "worshipFacility",
+   "zoo"
+  ],
+  "ph::PrimaryPlantLoop": [
+   "primaryLoop"
+  ],
+  "ph::Propane": [
+   "propane"
+  ],
+  "ph::PropaneHeatingProcess": [
+   "propaneHeating"
+  ],
+  "ph::Pump": [
+   "equip",
+   "pump"
+  ],
+  "ph::PurgeWater": [
+   "purge",
+   "water"
+  ],
+  "ph::Rack": [
+   "equip",
+   "rack"
+  ],
+  "ph::RadiantEquip": [
+   "equip"
+  ],
+  "ph::RadiantFloor": [
+   "equip",
+   "radiantFloor"
+  ],
+  "ph::Radiator": [
+   "equip",
+   "radiator"
+  ],
+  "ph::ReciprocalChillerMechanism": [
+   "reciprocal"
+  ],
+  "ph::Refrig": [
+   "refrig"
+  ],
+  "ph::RefrigSystem": [
+   "refrig",
+   "system"
+  ],
+  "ph::ReturnDuctSection": [
+   "return"
+  ],
+  "ph::RoofFloor": [
+   "floor",
+   "roof",
+   "space"
+  ],
+  "ph::Room": [
+   "room",
+   "space"
+  ],
+  "ph::RotaryScrewChillerMechanism": [
+   "rotaryScrew"
+  ],
+  "ph::Rtu": [
+   "ahu",
+   "equip",
+   "rtu"
+  ],
+  "ph::SecondaryPlantLoop": [
+   "secondaryLoop"
+  ],
+  "ph::SensorPoint": [
+   "point",
+   "sensor"
+  ],
+  "ph::SensorPointFunction": [
+   "sensor"
+  ],
+  "ph::SeriesVavAirCircuit": [
+   "series"
+  ],
+  "ph::ServerComputer": [
+   "computer",
+   "device",
+   "server"
+  ],
+  "ph::Sf6": [
+   "sf6"
+  ],
+  "ph::Sf6Emission": [
+   "emission",
+   "sf6"
+  ],
+  "ph::SimModel": [
+   "simModel",
+   "syntheticModel"
+  ],
+  "ph::SimPoint": [
+   "point",
+   "sim",
+   "synthetic"
+  ],
+  "ph::SimSyntheticPointFunction": [
+   "sim",
+   "synthetic"
+  ],
+  "ph::SingleDuctConfig": [
+   "singleDuct"
+  ],
+  "ph::SinglePhaseCount": [
+   "singlePhase"
+  ],
+  "ph::Site": [
+   "site"
+  ],
+  "ph::SiteMeterScope": [
+   "siteMeter"
+  ],
+  "ph::Solar": [
+   "solar"
+  ],
+  "ph::SolarIrradiance": [
+   "irradiance",
+   "solar"
+  ],
+  "ph::Solid": [
+   "solid"
+  ],
+  "ph::SpPoint": [
+   "point",
+   "sp"
+  ],
+  "ph::SpPointFunction": [
+   "sp"
+  ],
+  "ph::Space": [
+   "space"
+  ],
+  "ph::Speed": [
+   "speed"
+  ],
+  "ph::SplitPhaseCount": [
+   "splitPhase"
+  ],
+  "ph::StateOfCharge": [
+   "stateOfCharge"
+  ],
+  "ph::Steam": [
+   "steam"
+  ],
+  "ph::SteamBoiler": [
+   "boiler",
+   "equip",
+   "steam"
+  ],
+  "ph::SteamHeatingProcess": [
+   "steamHeating"
+  ],
+  "ph::SteamPlant": [
+   "equip",
+   "plant",
+   "steam"
+  ],
+  "ph::SteamSystem": [
+   "steam",
+   "system",
+   "water"
+  ],
+  "ph::SubmeterMeterScope": [
+   "submeter"
+  ],
+  "ph::SubterraneanFloor": [
+   "floor",
+   "space",
+   "subterranean"
+  ],
+  "ph::SyntheticModel": [
+   "syntheticModel"
+  ],
+  "ph::SyntheticPoint": [
+   "point",
+   "synthetic"
+  ],
+  "ph::SyntheticPointFunction": [
+   "synthetic"
+  ],
+  "ph::System": [
+   "system"
+  ],
+  "ph::Tablet": [
+   "device",
+   "tablet"
+  ],
+  "ph::Tank": [
+   "equip",
+   "tank"
+  ],
+  "ph::Temp": [
+   "temp"
+  ],
+  "ph::TertiaryPlantLoop": [
+   "tertiaryLoop"
+  ],
+  "ph::Thermostat": [
+   "equip",
+   "thermostat"
+  ],
+  "ph::ThreePhaseCount": [
+   "threePhase"
+  ],
+  "ph::TripleDuctConfig": [
+   "tripleDuct"
+  ],
+  "ph::Tvoc": [
+   "tvoc"
+  ],
+  "ph::TvocConcentration": [
+   "concentration",
+   "tvoc"
+  ],
+  "ph::TwoPhaseCount": [
+   "twoPhase"
+  ],
+  "ph::UnidirectionalAtesDesign": [
+   "atesUnidirectional"
+  ],
+  "ph::UnitVent": [
+   "equip",
+   "fcu",
+   "unitVent"
+  ],
+  "ph::Ups": [
+   "equip",
+   "ups"
+  ],
+  "ph::Valve": [
+   "equip",
+   "valve"
+  ],
+  "ph::ValveActuator": [
+   "actuator",
+   "equip",
+   "valve"
+  ],
+  "ph::VariableAirVolumeAdjustability": [
+   "variableAirVolume"
+  ],
+  "ph::Vav": [
+   "equip",
+   "vav"
+  ],
+  "ph::VavAhuZoneDelivery": [
+   "vavZone"
+  ],
+  "ph::VentilationDuctSection": [
+   "ventilation"
+  ],
+  "ph::VerticalTransport": [
+   "equip"
+  ],
+  "ph::Vfd": [
+   "ac",
+   "elec",
+   "equip"
+  ],
+  "ph::Visibility": [
+   "visibility"
+  ],
+  "ph::Volume": [
+   "volume"
+  ],
+  "ph::VolumetricFlow": [
+   "flow",
+   "volume"
+  ],
+  "ph::VrfCoolingOnlySystem": [
+   "coolingOnly",
+   "refrig",
+   "system",
+   "vrf"
+  ],
+  "ph::VrfEquip": [
+   "equip",
+   "vrf"
+  ],
+  "ph::VrfHeatPumpSystem": [
+   "heatPump",
+   "refrig",
+   "system",
+   "vrf"
+  ],
+  "ph::VrfHeatRecoverySystem": [
+   "heatRecovery",
+   "refrig",
+   "system",
+   "vrf"
+  ],
+  "ph::VrfIndoorUnit": [
+   "equip",
+   "indoorUnit",
+   "vrf"
+  ],
+  "ph::VrfIndoorUnitFcu": [
+   "equip",
+   "indoorUnit",
+   "vrf"
+  ],
+  "ph::VrfOutdoorUnit": [
+   "equip",
+   "outdoorUnit",
+   "vrf"
+  ],
+  "ph::VrfRefrigPlant": [
+   "equip",
+   "plant",
+   "refrig",
+   "vrf"
+  ],
+  "ph::VrfSystem": [
+   "refrig",
+   "system",
+   "vrf"
+  ],
+  "ph::Vsd": [
+   "elec",
+   "equip"
+  ],
+  "ph::WarmWater": [
+   "warm",
+   "water"
+  ],
+  "ph::Water": [
+   "water"
+  ],
+  "ph::WaterCoolingProcess": [
+   "waterCooling"
+  ],
+  "ph::WaterSystem": [
+   "system",
+   "water"
+  ],
+  "ph::Weather": [
+   "weather"
+  ],
+  "ph::WeatherCond": [
+   "weatherCond"
+  ],
+  "ph::WeatherCondEnum": [
+   "clear",
+   "cloudy",
+   "flurries",
+   "ice",
+   "partlyCloudy",
+   "rain",
+   "showers",
+   "snow",
+   "thunderstorms",
+   "unknown"
+  ],
+  "ph::WeatherDaytimeEnum": [
+   "daytime",
+   "nighttime"
+  ],
+  "ph::WeatherPoint": [
+   "point",
+   "weather"
+  ],
+  "ph::WeatherStation": [
+   "weatherStation"
+  ],
+  "ph::Well": [
+   "equip",
+   "well"
+  ],
+  "ph::WetBulb": [
+   "wetBulb"
+  ],
+  "ph::Wind": [
+   "wind"
+  ],
+  "ph::WindDirection": [
+   "direction",
+   "wind"
+  ],
+  "ph::WindSpeed": [
+   "speed",
+   "wind"
+  ],
+  "ph::Wire": [
+   "equip",
+   "wire"
+  ],
+  "ph::WritablePoint": [
+   "point",
+   "writable"
+  ],
+  "ph::WriteStatus": [
+   "disabled",
+   "down",
+   "fault",
+   "ok",
+   "unbound",
+   "unknown"
+  ],
+  "ph::ZoneMonitor": [
+   "equip",
+   "zoneMonitor"
+  ],
+  "ph::ZoneOcc": [
+   "occ"
+  ],
+  "ph::ZoneSpace": [
+   "space",
+   "zone"
+  ],
+  "ph::ZoneStandby": [
+   "standby"
+  ],
+  "ph::ZoneUnocc": [
+   "unocc"
+  ]
+ }
+}

@@ -58,6 +58,8 @@ supported, never a silent wrong answer.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -109,6 +111,7 @@ _TOKEN_RE = re.compile(
     | (?P<TIME>\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)
     | (?P<NUMBER>-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?P<UNIT>[A-Za-z°%$£€_/\u0080-\uffff][A-Za-z0-9°%$£€_/\u0080-\uffff]*)?
     | (?P<SYMBOL>\^[A-Za-z_][A-Za-z0-9_:\-]*)
+    | (?P<SPEC>[a-z][A-Za-z0-9_]*(?:\.[a-z][A-Za-z0-9_]*)*::[A-Z][A-Za-z0-9_]*)
     | (?P<STRING>"(?:[^"\\]|\\.)*")
     | (?P<REF>@[A-Za-z0-9_:~./,\-]+)
     | (?P<RANGE>\.\.)
@@ -202,6 +205,13 @@ class Path:
 
     hops: tuple[str, ...]
     leaf: object
+
+
+@dataclass(frozen=True)
+class Spec:
+    """`ph::Ahu`, `ph.points::ZoneAirTempSensor`: a Xeto spec."""
+
+    qname: str
 
 
 @dataclass(frozen=True)
@@ -366,6 +376,11 @@ class Parser:
         if tok.kind == "not":
             self._advance()
             return Not(self._parse_term())
+        if tok.kind == "SPEC":
+            self._advance()
+            if _xeto_specs().get(tok.value) is None:
+                raise HisQueryError(f"unknown Xeto spec {tok.value!r} at position {tok.pos}")
+            return Spec(tok.value)
         if tok.kind == "SYMBOL":
             # ^hot-water: a def conjunct - every part present as a tag
             self._advance()
@@ -480,6 +495,20 @@ _SCHEMA_TYPES = (
 
 def _in_vocabulary_namespace(iri: str) -> bool:
     return iri.startswith(_VOCABULARY_NAMESPACES)
+
+
+XETO_SPECS_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "ontology", "xeto-ph-specs.json")
+
+
+@lru_cache(maxsize=1)
+def _xeto_specs() -> dict[str, list[str]]:
+    """ph Xeto spec -> required markers (tools/xeto_specs.py). Empty if the
+    table isn't deployed, so spec names fall back to Brick classes only."""
+    try:
+        with open(XETO_SPECS_PATH, encoding="utf-8") as f:
+            return json.load(f)["specs"]
+    except OSError:
+        return {}
 
 
 def _looks_like_class(name: str) -> bool:
@@ -690,6 +719,8 @@ class _Compiler:
             return self._cmp(node)
         if isinstance(node, Path):
             return self._path(node)
+        if isinstance(node, Spec):
+            return self._spec(node.qname)
         if isinstance(node, Not):
             inner = node.node
             if isinstance(inner, Path) and isinstance(inner.leaf, Has):
@@ -756,7 +787,22 @@ class _Compiler:
                 parts.append(self._typed_as_any(iris))
         for alias in _STRUCTURAL_ALIASES.get(name, []):
             parts.append(self._flag(alias.replace("{v}", self._var())))
+        # A bare capitalized name is the Brick class *or* the ph Xeto spec
+        # of that name (Brick + Xeto interop, Baler#9): `Ahu` matches Brick
+        # AHUs and anything tagged `equip ahu`.
+        for lib in ("ph", "ph.points", "ph.equips.x", "ph.points.x"):
+            if f"{lib}::{name}" in _xeto_specs():
+                parts.append(self._spec(f"{lib}::{name}"))
+                break
         return self._any(parts)
+
+    def _spec(self, qname: str) -> str:
+        """A record fits a Xeto spec when it has every marker the spec (and
+        what it inherits) requires; each marker matches the way a bare tag
+        does, so Brick-typed data fits too. Choices and other non-marker
+        slots aren't checked - a structural approximation of Xeto typing."""
+        markers = _xeto_specs()[qname]
+        return "(" + " && ".join(self._has(m) for m in markers) + ")"
 
     def _cmp(self, node: Cmp) -> str:
         if node.name == "id":

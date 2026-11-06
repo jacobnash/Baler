@@ -91,6 +91,7 @@ def test_and_binds_tighter_than_or_and_not_tighter_than_and():
         ("ahu or (vav", "expected ')'"),
         ("ahu)", "unexpected ')'"),
         ("equipRef-> == 1", "tag name after '->'"),
+        ("ph::NoSuchSpec", "unknown Xeto spec"),
         ("temp and equipRef->(vav)", "tag name after '->'"),
         ("readAll(ahu).foo()", "unsupported function 'foo'"),
         ("readAll(ahu).hisRead()", "needs a span"),
@@ -302,6 +303,13 @@ def _match(graph, text):
         ("id == @urn:equip:fbf/vav-1", [VAV]),
         ("equipRef == @urn:equip:fbf/ahu-1", [DAT, FAN]),  # full URI -> brick:isPointOf
         ("equipRef == @VAV-9", [HX_ZT]),  # bare Haystack id -> equipRef literal
+        # --- Xeto spec names (Brick + Xeto interop): the spec's markers, each
+        # matched the way a bare tag is - so Brick-only data fits too ---
+        ("ph::Ahu", ALL_AHUS),
+        ("Ahu", ALL_AHUS),  # bare: the Brick class or the ph spec
+        ("ph.points::ZoneAirTempSensor", [B_ZT]),
+        ("ph::Vav", [VAV, HX_VAV]),
+        ("ph::Ahu and not ph::Vav", ALL_AHUS),
         # --- tag paths: follow the ref, test the far end ---
         ("equipRef->vav", [ZT, HX_ZT]),  # ZT via brick:isPointOf; HX_ZT via its raw equipRef literal
         ("equipRef->ahu", [DAT, FAN, B_ZT, B_FAN, WHEEL, BYPASS]),  # Brick-typed equips count, as for `ahu`
@@ -330,7 +338,7 @@ def _match(graph, text):
         ("Zone_Air_Temperature_Sensor", [B_ZT]),
         ("Fan_Status", [B_FAN]),  # via the PROJ subclass the graph declares
         ("Fan_Status_Variant", [B_FAN]),  # the PROJ class by its own name
-        ("Point", [DAT, B_ZT, B_FAN, WHEEL, BYPASS]),  # rdf:type-based; FAN/ZT/HX_ZT carry no Brick type
+        ("Point", ALL_POINTS),  # the Brick class or the ph::Point spec: Brick-typed and Haystack-tagged points
         ("Equipment", ALL_AHUS),
         ("Sensor and not Temperature_Sensor", [WHEEL, BYPASS]),
         ("Not_A_Brick_Class", []),
