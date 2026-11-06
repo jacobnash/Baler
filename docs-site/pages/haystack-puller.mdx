@@ -17,7 +17,17 @@ to Baler. This is pull-mode — Baler reaches out to a remote
 Haystack server on its own poll loop, nothing is installed on the other
 side.
 
-## Enabling it
+## Enabling it: Ops → Sources (recommended)
+
+Sign in as an admin, open **Ops → Sources → Add source**, pick *Haystack server*, and fill in the
+URL, user and password. Enable it and the always-on `source_runner` service starts pulling
+within 30 seconds, on the interval you set. The Sources table shows each source's health: `ok`,
+`failing` with the error from its last run, `misconfigured` with the settings that are missing,
+or `pending` / `disabled`. Passwords are encrypted at rest and never shown again. The same page
+configures SQL, Open-Meteo and ENERGY STAR sources. API: `GET/POST /ops/sources`,
+`PATCH/DELETE /ops/sources/{id}` (admin).
+
+## Enabling it from env (older installs, one-off imports)
 
 It's **not** part of the default stack — plain `docker compose up -d`
 does not start it. It's gated behind a compose profile:

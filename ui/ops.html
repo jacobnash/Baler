@@ -81,6 +81,17 @@
         <button type="button" id="change-password-btn">Change my password</button></p>
     </section>
 
+    <section id="sources-section" hidden>
+      <h2>Sources</h2>
+      <p class="hint">What feeds this system besides Windrow's devices (see Devices). Each runs on its own interval; health is from its last run.</p>
+      <div class="toolbar"><button type="button" id="new-source-btn">Add source</button>
+        <span id="sources-status" class="hint"></span></div>
+      <table>
+        <thead><tr><th>Name</th><th>Kind</th><th>Health</th><th>Last run</th><th>Problem</th><th></th></tr></thead>
+        <tbody id="sources-body"></tbody>
+      </table>
+    </section>
+
     <section id="users-section" hidden>
       <h2>Users</h2>
       <div class="toolbar"><button type="button" id="new-user-btn">New user</button>
@@ -91,6 +102,22 @@
       </table>
     </section>
   </main>
+
+  <dialog id="source-dialog">
+    <form id="source-form" method="dialog">
+      <h3 id="source-title">Add source</h3>
+      <label>Kind <select id="source-kind"></select></label>
+      <p id="source-kind-help" class="hint"></p>
+      <label>Name <input type="text" id="source-name" required /></label>
+      <div id="source-fields"></div>
+      <label class="inline"><input type="checkbox" id="source-enabled" /> Enabled</label>
+      <p id="source-error" class="field-error" hidden></p>
+      <menu>
+        <button type="submit" value="save">Save</button>
+        <button type="button" id="source-cancel">Cancel</button>
+      </menu>
+    </form>
+  </dialog>
 
   <dialog id="user-dialog">
     <form id="user-form" method="dialog">
@@ -155,6 +182,7 @@
     </form>
   </dialog>
   <script src="auth.js"></script>
+  <script src="sources.js"></script>
   <script src="users.js"></script>
   <script src="ops.js"></script>
 </body>

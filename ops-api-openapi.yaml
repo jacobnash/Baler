@@ -26,8 +26,113 @@ paths:
       responses:
         "200":
           description: YAML OpenAPI spec
+  /sources/kinds:
+    get:
+      operationId: listSourceKinds
+      summary: The source kinds and the settings each declares (admin)
+      responses:
+        "200":
+          description: kind -> {label, help, fields[{name, label, required, secret, type, default, help}]}
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /sources:
+    get:
+      operationId: listSources
+      summary: Every configured source with its health (admin)
+      description: >-
+        health is disabled, misconfigured (missing lists the required
+        settings), pending (enabled, not run yet), failing (last_error says
+        why) or ok. Secret settings are never returned - secrets_set names
+        the ones that are set. Baler#20.
+      responses:
+        "200":
+          description: Sources.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Source" }
+    post:
+      operationId: createSource
+      summary: Add a source (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, name]
+              properties:
+                kind: { type: string, enum: [haystack, sql, openmeteo, energystar] }
+                name: { type: string }
+                settings: { type: object, additionalProperties: true }
+                enabled: { type: boolean, description: "needs every required setting" }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Source" }
+        "400":
+          description: Unknown kind or setting, a bad value, or enabled while settings are missing.
+  /sources/{id}:
+    patch:
+      operationId: updateSource
+      summary: Rename, change settings, enable or disable (admin)
+      description: >-
+        Settings merge; a null or empty value clears one. A secret is replaced
+        only when sent. Enabling needs every required setting. The runner
+        picks changes up within 30s.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                settings: { type: object, additionalProperties: true }
+                enabled: { type: boolean }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Source" }
+        "400":
+          description: A bad setting, or enabling with settings missing.
+        "404":
+          description: No such source.
+    delete:
+      operationId: deleteSource
+      summary: Remove a source (admin); data it already pulled stays
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204":
+          description: Deleted.
+        "404":
+          description: No such source.
 components:
   schemas:
+    Source:
+      type: object
+      properties:
+        id: { type: string }
+        kind: { type: string }
+        name: { type: string }
+        enabled: { type: boolean }
+        settings: { type: object, additionalProperties: true }
+        secrets_set: { type: array, items: { type: string } }
+        missing: { type: array, items: { type: string } }
+        health: { type: string, enum: [disabled, misconfigured, pending, failing, ok] }
+        last_run_at: { type: [string, "null"], format: date-time }
+        last_ok_at: { type: [string, "null"], format: date-time }
+        last_error: { type: [string, "null"] }
+        last_result: {}
     ComponentState:
       type: object
       required: [id, label, layer, service, state]

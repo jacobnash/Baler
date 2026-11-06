@@ -64,6 +64,12 @@ const ROUTES = [
 
   // ops_api
   ["GET",    /^\/ops\/status$/,                      "ops", "viewer"],
+  // source registry (Baler#20): settings include credentials - admin only
+  ["GET",    /^\/ops\/sources$/,                     "ops", "admin"],
+  ["GET",    /^\/ops\/sources\/kinds$/,               "ops", "admin"],
+  ["POST",   /^\/ops\/sources$/,                     "ops", "admin"],
+  ["PATCH",  /^\/ops\/sources\/[^/]+$/,                "ops", "admin"],
+  ["DELETE", /^\/ops\/sources\/[^/]+$/,                "ops", "admin"],
 
   // auth_api - POST /auth/login has its own exact-match nginx location
   // with no js_access at all (can't require a token to get a token), so

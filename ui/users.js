@@ -316,6 +316,7 @@ async function initUsers() {
   $("account-who").textContent = `Signed in as ${me.email || "an API key"} (${me.role}).`;
   $("change-password-btn").hidden = me.kind !== "session";
   if (me.role !== "admin") return;
+  initSources(); // sources.js: the source registry, admin-only like Users
   $("users-section").hidden = false;
   try {
     await loadUsers();

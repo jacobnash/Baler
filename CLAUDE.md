@@ -53,6 +53,10 @@ integrations). This file is gotchas only — don't duplicate those.
   filtered subset — it's a tautology. It needs `docker compose up -d`
   first (hits live Postgres/Oxigraph/MQTT). Use
   `pytest -m "not integration"` for a services-free run.
+- **Sources are configured in Ops → Sources** (`baler.sources` registry,
+  run by the always-on `source_runner`). The per-kind `*_puller` services
+  are the older env-configured path. Changing `BALER_GATEWAY_SECRET` makes
+  stored source secrets unreadable unless `BALER_SOURCES_KEY` is set.
 - **`haystack_puller` is profile-gated**: `docker compose up -d` does not
   start it. Needs `docker compose --profile haystack-pull up -d
   haystack_puller`. Set `REMOTE_HAYSTACK_URL`/`REMOTE_HAYSTACK_USER` first

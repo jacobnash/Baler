@@ -105,3 +105,12 @@ button.linkish {
 .secret-value { font-size: 1rem; padding: 0.2rem 0.4rem; border: 1px solid var(--border); border-radius: var(--radius-sm); user-select: all; word-break: break-all; }
 .badge.user-disabled { --badge-color: var(--color-warning); }
 tr.user-disabled-row td:not(.actions) { opacity: 0.6; }
+
+/* Sources section (sources.js, Baler#20) */
+.badge.health-ok { --badge-color: var(--color-success); }
+.badge.health-failing, .badge.health-misconfigured { --badge-color: var(--color-critical); }
+.badge.health-pending { --badge-color: var(--color-warning); }
+.badge.health-disabled { --badge-color: var(--muted); }
+#sources-body td.problem { color: var(--color-critical); font-size: 0.8rem; max-width: 24rem; word-break: break-word; }
+#source-dialog label.inline { display: flex; gap: 0.4rem; align-items: center; }
+#source-dialog label.inline input { width: auto; display: inline; }

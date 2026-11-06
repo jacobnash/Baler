@@ -19,6 +19,7 @@ x-daemon-env: &daemon-env
   # check it. Set it in .env once you're actually using auth_api/the new
   # gateway auth - until then the stack runs exactly as before.
   BALER_GATEWAY_SECRET: ${BALER_GATEWAY_SECRET:-${TIMBERDOODLE_GATEWAY_SECRET:-}}
+  BALER_SOURCES_KEY: ${BALER_SOURCES_KEY:-}
   # Only auth_api.py (issues tokens) actually needs this - blanket-added
   # to the anchor like the var above, harmless for daemons that never
   # read it.
@@ -313,6 +314,20 @@ services:
         condition: service_healthy
       oxigraph:
         condition: service_started
+
+  # Runs every source configured in Ops -> Sources (the registry,
+  # baler.sources - Baler#20): Haystack servers, SQL, Open-Meteo, ENERGY
+  # STAR, each on its own interval with health shown in the UI. Idle until a
+  # source is enabled. The per-kind *_puller services below are the older
+  # env-configured way, kept behind their profiles for existing installs.
+  source_runner:
+    build: .
+    command: python -m baler.source_runner
+    environment: *daemon-env
+    volumes:
+      - .:/app
+    depends_on: *daemon-depends-on
+    restart: unless-stopped
 
   openmeteo_puller:
     build: .
