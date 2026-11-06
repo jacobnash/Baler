@@ -520,19 +520,39 @@ class TimeChart {
       ctx.lineJoin = "round";
       ctx.beginPath();
       const stepped = this.opts.bool || typeof s.history[0].value === "boolean";
+      // A gap far longer than the usual spacing is missing data: lift the
+      // pen there rather than draw a line that looks like readings.
+      const gap = stepped ? Infinity : gapThreshold(s.history);
       let prevY = null;
-      s.history.forEach((row, i) => {
+      let prevTs = null;
+      let runLen = 0; // samples in the current unbroken run
+      const lone = []; // samples joined to no neighbour (Baler#55)
+      let runStart = null;
+      const endRun = () => {
+        if (runLen === 1 && runStart) lone.push(runStart);
+      };
+      s.history.forEach((row) => {
         const v = typeof row.value === "boolean" ? (row.value ? 1 : 0) : row.value;
         if (typeof v !== "number") return;
         const x = this.xOf(row.ts, w);
         const y = yOf(v);
-        if (i === 0 || prevY === null) ctx.moveTo(x, y);
-        else if (stepped) {
+        if (prevY === null || row.ts - prevTs > gap) {
+          endRun();
+          ctx.moveTo(x, y);
+          runLen = 1;
+          runStart = [x, y];
+        } else if (stepped) {
           ctx.lineTo(x, prevY);
           ctx.lineTo(x, y);
-        } else ctx.lineTo(x, y);
+          runLen++;
+        } else {
+          ctx.lineTo(x, y);
+          runLen++;
+        }
         prevY = y;
+        prevTs = row.ts;
       });
+      if (!stepped) endRun();
       if (stepped) {
         // Carry the last state to the right edge (or "now", whichever is
         // first) so an on/off strip reads as a state, not a dot.
@@ -541,6 +561,13 @@ class TimeChart {
         if (edge > lastRow.ts && prevY !== null) ctx.lineTo(this.xOf(edge, w), prevY);
       }
       ctx.stroke();
+      // A single sample (a source's first reading) or one isolated between
+      // gaps is a path with no length - it draws nothing. Mark it.
+      for (const [x, y] of lone) {
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
       if (stepped) {
         ctx.globalAlpha = 0.15;
         ctx.lineTo(this.xOf(Math.min(end, Date.now() / 1000), w), yOf(0));
@@ -626,6 +653,19 @@ function nearest(history, t) {
   }
   const a = history[lo], b = history[lo - 1];
   return b && Math.abs(b.ts - t) < Math.abs(a.ts - t) ? b : a;
+}
+
+// Seconds between samples above which the line breaks: 5x the median
+// spacing, at least a minute (the same rule as chart.js's drawLineChart).
+function gapThreshold(history) {
+  const steps = [];
+  for (let i = 1; i < history.length; i++) {
+    const d = history[i].ts - history[i - 1].ts;
+    if (d > 0) steps.push(d);
+  }
+  if (!steps.length) return Infinity;
+  steps.sort((a, b) => a - b);
+  return Math.max(steps[Math.floor(steps.length / 2)] * 5, 60);
 }
 
 function niceStep(raw) {
