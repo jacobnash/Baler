@@ -172,6 +172,7 @@ function buildEquipNode(equip, label) {
   const equipSummary = document.createElement("summary");
   equipSummary.textContent = `${label} `;
   equipSummary.appendChild(hisLink(equip.uri));
+  if (canEditRecords()) equipSummary.appendChild(recordEditButton(equip, () => init()));
   equipDetails.appendChild(equipSummary);
 
   const pointList = document.createElement("ul");
@@ -326,6 +327,12 @@ async function selectPoint(point, btn) {
   detailEl.innerHTML = "";
   const h2 = document.createElement("h2");
   h2.textContent = point.dis;
+  if (canEditRecords()) {
+    h2.append(" ", recordEditButton(point, () => {
+      detailEl.innerHTML = '<p class="hint">Saved. Select the point again to see the change.</p>';
+      init();
+    }));
+  }
   detailEl.appendChild(h2);
 
   if (point.brickClass) {
@@ -400,6 +407,7 @@ function renderHistoryInto(container, history, unit = "") {
 // see index.html's script tags for load order.
 
 async function init() {
+  await recordRoleKnown(); // record_edit.js: operators and admins get Edit buttons
   try {
     const { byType, equips } = await loadEquipment();
     statusEl.textContent = byType.size === 0 ? "connected, but no equipment visible yet" : `${byType.size} equipment classes`;

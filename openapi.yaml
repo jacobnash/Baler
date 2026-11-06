@@ -363,6 +363,80 @@ paths:
             application/yaml:
               schema:
                 type: string
+  /records:
+    patch:
+      operationId: editRecord
+      summary: Hand-edit an equip/point record (operator)
+      description: >-
+        Display name, Brick class, tags (Baler#19). A set tag replaces its old
+        value, unit and timezone. Structural tags (id, equipRef, siteRef,
+        curVal, his...) aren't editable. Logged in record_edits. A record
+        outside the caller's site scope reads as missing (404).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: { type: string, description: "The record's URI, e.g. urn:point:fbf/ahu-1/sat" }
+                dis: { type: string }
+                brickClass: { type: string, description: "Any spelling of a Brick class name" }
+                set:
+                  type: object
+                  description: 'tag -> true (marker), a number, {"val": n, "unit": u}, or a string'
+                  additionalProperties: true
+                remove: { type: array, items: { type: string } }
+      responses:
+        "200":
+          description: What changed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  changed: { type: object }
+        "400":
+          description: A bad or reserved tag, an unknown Brick class, or nothing to change.
+        "404":
+          description: No such record (or out of scope).
+    delete:
+      operationId: deleteRecord
+      summary: Delete an equip/point record from the model (admin)
+      description: >-
+        Removes the record's triples and every link to it. Its history rows
+        stay. Logged in record_edits.
+      parameters:
+        - { name: id, in: query, required: true, schema: { type: string } }
+      responses:
+        "204":
+          description: Deleted.
+        "404":
+          description: No such record (or out of scope).
+  /records/edits:
+    get:
+      operationId: listRecordEdits
+      summary: A record's hand-edit history, newest first
+      parameters:
+        - { name: id, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Edits.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    ts: { type: string, format: date-time }
+                    action: { type: string, enum: [edit, delete] }
+                    who: { type: string }
+                    detail: { type: object }
+        "404":
+          description: No such record (or out of scope).
 components:
   schemas:
     Reading:

@@ -184,3 +184,13 @@ dialog input, dialog textarea, dialog select {
 }
 dialog textarea { min-height: 4rem; font-family: monospace; font-size: 0.8rem; }
 dialog menu { display: flex; gap: 0.5rem; padding: 0; margin: 0.75rem 0 0; }
+
+/* Record editor (record_edit.js, Baler#19) */
+.edit-btn { font-size: 0.75rem; margin-left: 0.4rem; }
+#rec-tags { border: 1px solid var(--border); border-radius: 4px; max-height: 12rem; overflow-y: auto; }
+#rec-tags label { display: flex; gap: 0.4rem; align-items: center; margin: 0.1rem 0; font-size: 0.8rem; }
+#rec-tags input { width: auto; display: inline; margin: 0; }
+.rec-add { display: flex; gap: 0.4rem; }
+.rec-add input { flex: 1; }
+button.danger { margin-left: auto; color: var(--color-critical, #c53030); }
+.field-error { color: var(--color-critical, #c53030); font-size: 0.8rem; }

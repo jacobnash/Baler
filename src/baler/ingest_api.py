@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 from rdflib import URIRef
 
-from baler import auth, docs_ui, gateway_auth, hisquery, tracing
+from baler import auth, docs_ui, gateway_auth, hisquery, record_edit, tracing
 from baler.http_handler_base import BaseAPIHandler
 from baler.http_handler_base import respond_error as _respond_error
 from baler.http_handler_base import respond_json as _respond_json
@@ -54,7 +54,7 @@ DEFAULT_TZ = os.environ.get("BALER_TZ") or "UTC"
 def make_handler(store, ts_pool):
     class IngestHandler(BaseAPIHandler):
         TRACER = tracer
-        ALLOWED_METHODS = "GET, POST, DELETE, OPTIONS"
+        ALLOWED_METHODS = "GET, POST, PATCH, DELETE, OPTIONS"
 
         def _require_gateway(self) -> bool:
             if gateway_auth.request_came_through_gateway(self):
@@ -198,6 +198,9 @@ def make_handler(store, ts_pool):
             if self.path.startswith("/history"):
                 self._get_history()
                 return
+            if self.path.startswith("/records/edits"):
+                self.handle_traced("ingest_api.get_record_edits", self._get_record_edits)
+                return
             if self.path == "/his" or self.path.startswith("/his?"):
                 self._get_his()
                 return
@@ -254,14 +257,77 @@ def make_handler(store, ts_pool):
                 span.set_attribute("series", len(result["series"]))
                 _respond_json(self, 200, result)
 
+        def do_PATCH(self):
+            if not self._require_gateway():
+                return
+            if urlparse(self.path).path == "/records":
+                self.handle_traced("ingest_api.patch_record", self._patch_record)
+                return
+            self.send_response(404)
+            self.end_headers()
+
         def do_DELETE(self):
             if not self._require_gateway():
                 return
             if self.path.startswith("/history"):
                 self._delete_history()
                 return
+            if urlparse(self.path).path == "/records":
+                self.handle_traced("ingest_api.delete_record", self._delete_record)
+                return
             self.send_response(404)
             self.end_headers()
+
+        def _visible_record(self, conn, uri) -> tuple[bool, dict | None]:
+            """(the caller may see `uri` and it exists, their claims). Out of
+            scope reads as missing, never as forbidden."""
+            claims = claims_from_header(self.headers.get("Authorization"))
+            if not isinstance(uri, str) or not uri.startswith("urn:"):
+                return False, claims
+            scope = scope_for(conn, claims)
+            ok = bool(hisquery.visible_uris(store, [uri], scope)) and record_edit.exists(store, hisquery._uri(uri))
+            return ok, claims
+
+        def _who(self, conn, claims) -> tuple[str | None, str | None]:
+            sub = (claims or {}).get("sub")
+            user = auth.get_user(conn, sub) if sub and (claims or {}).get("kind") == "session" else None
+            return sub, (user["email"] if user else sub)
+
+        def _patch_record(self, span) -> None:
+            body = self.read_json_body()
+            uri = body.get("id")
+            span.set_attribute("entity_uri", str(uri))
+            with ts_pool.connection() as conn:
+                ok, claims = self._visible_record(conn, uri)
+                if not ok:
+                    _respond_error(self, 404, "no such record")
+                    return
+                changed = record_edit.apply_edit(store, uri, body)
+                record_edit.log_edit(conn, uri, "edit", *self._who(conn, claims), changed)
+            _respond_json(self, 200, {"id": uri, "changed": changed})
+
+        def _delete_record(self, span) -> None:
+            uri = parse_qs(urlparse(self.path).query).get("id", [None])[0]
+            span.set_attribute("entity_uri", str(uri))
+            with ts_pool.connection() as conn:
+                ok, claims = self._visible_record(conn, uri)
+                if not ok:
+                    _respond_error(self, 404, "no such record")
+                    return
+                record_edit.delete_record(store, uri)
+                record_edit.log_edit(conn, uri, "delete", *self._who(conn, claims), {})
+            self.send_response(204)
+            self.end_headers()
+
+        def _get_record_edits(self, span) -> None:
+            uri = parse_qs(urlparse(self.path).query).get("id", [None])[0]
+            with ts_pool.connection() as conn:
+                ok, _claims = self._visible_record(conn, uri)
+                # a deleted record's log is still readable by whoever could see it
+                if not ok and not (isinstance(uri, str) and scope_for(conn, _claims).allows(uri)):
+                    _respond_error(self, 404, "no such record")
+                    return
+                _respond_json(self, 200, record_edit.list_edits(conn, uri))
 
         def _get_history(self) -> None:
             with tracer.start_as_current_span("ingest_api.get_history") as span:
@@ -327,6 +393,7 @@ def main() -> None:
     ts_pool = connect_pool(statement_timeout=GATEWAY_STATEMENT_TIMEOUT)
     with ts_pool.connection() as conn:
         auth.ensure_schema(conn)  # sites.topic_prefixes, read by the /his and /history scope check
+        record_edit.ensure_schema(conn)
 
     server = ThreadingHTTPServer((args.host, args.port), make_handler(store, ts_pool))
     print(f"POST /ingest listening on {args.host}:{args.port}")

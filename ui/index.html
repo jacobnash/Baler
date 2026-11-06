@@ -37,8 +37,27 @@
       <p class="hint">Select a point on the left to see its tags and history.</p>
     </section>
   </main>
+  <dialog id="rec-dialog">
+    <form id="rec-form" method="dialog">
+      <h3 id="rec-title">Edit</h3>
+      <label>Display name <input type="text" id="rec-dis" /></label>
+      <label>Brick class <input type="text" id="rec-class" placeholder="e.g. Supply_Air_Temperature_Sensor" /></label>
+      <fieldset id="rec-tags"><legend>Tags (tick to remove)</legend><div id="rec-tag-list"></div></fieldset>
+      <label>Add or replace a tag
+        <span class="rec-add"><input type="text" id="rec-add-name" placeholder="name, e.g. air" />
+        <input type="text" id="rec-add-value" placeholder="value: blank = marker, 72°F, text" /></span></label>
+      <details id="rec-history"><summary>Edit history</summary><ul id="rec-history-list" class="hint"></ul></details>
+      <p id="rec-error" class="field-error" hidden></p>
+      <menu>
+        <button type="submit" value="save">Save</button>
+        <button type="button" id="rec-cancel">Cancel</button>
+        <button type="button" id="rec-delete" class="danger" hidden>Delete record…</button>
+      </menu>
+    </form>
+  </dialog>
   <script src="auth.js"></script>
   <script src="chart.js"></script>
+  <script src="record_edit.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
