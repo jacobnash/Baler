@@ -44,7 +44,7 @@ Bare-metal `python -m baler.*` processes don't go through compose, so rename the
 ## nash-srv (self-hosted deploy runner)
 
 Renaming the GitHub repo moved the runner's checkout from `_work/timberdoodle/timberdoodle` to
-`_work/baler/baler`. The old root-owned wrapper (`/usr/local/sbin/timberdoodle-deploy.sh`) only knows
+`_work/Baler/Baler` (the runner uses the repo's exact, case-sensitive name). The old root-owned wrapper (`/usr/local/sbin/timberdoodle-deploy.sh`) only knows
 the old path, so it would keep redeploying stale code. `deploy.yml` now waits for a runner labelled
 `baler` instead, so no deploy runs until you've done the steps below. Run them as your own sudo user
 on nash-srv.

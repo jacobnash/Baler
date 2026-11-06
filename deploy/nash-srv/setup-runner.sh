@@ -34,7 +34,9 @@ WRAPPER="/usr/local/sbin/baler-deploy.sh"
 SUDOERS_FILE="/etc/sudoers.d/github-runner-baler"
 ENV_DIR="${RUNNER_HOME}/.config/baler"
 ENV_FILE="${ENV_DIR}/nash-srv.env"
-WORKDIR="${RUNNER_DIR}/_work/baler/baler"
+# The runner checks out to _work/<repo>/<repo> using the repo's exact,
+# case-sensitive name on GitHub: jacobnash/Baler, so a capital B.
+WORKDIR="${RUNNER_DIR}/_work/Baler/Baler"
 COMPOSE_BASE="${WORKDIR}/docker-compose.yml"
 COMPOSE_OVERRIDE="${WORKDIR}/deploy/nash-srv/docker-compose.override.yml"
 COMPOSE_WINDROW="${WORKDIR}/deploy/nash-srv/docker-compose.windrow.yml"
