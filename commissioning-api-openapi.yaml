@@ -35,6 +35,7 @@ tags:
   - name: Templates
   - name: Issues
   - name: Procedures
+  - name: Spec
 paths:
   /projects:
     get:
@@ -915,6 +916,277 @@ paths:
                         symptom: { type: [string, "null"] }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/spec:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Spec]
+      operationId: listCxSpecItems
+      summary: The project's spec items (equipment, points, sequences)
+      parameters:
+        - { name: kind, in: query, schema: { type: string, enum: [equipment, point, sequence] } }
+        - { name: status, in: query, schema: { type: string, enum: [proposed, accepted, rejected] } }
+        - { name: document_id, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Spec items
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SpecItem" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/spec/import:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Spec]
+      operationId: importCxSpec
+      summary: Import an equipment schedule or point list, CSV or XLSX (operator)
+      description: >-
+        Columns are matched by common names (Tag / Mark, Type, Equipment,
+        Point Name, Units, Location, ...). A row with a tag is equipment; a
+        row with an equipment column and a point name is a point (or force
+        it with `kind`). The type column, or else the tag's letters (AHU,
+        VAV, FCU, CH, B, P, ...), gives the Brick class; inferred classes
+        say so in properties.class_basis. Items are `accepted` (a person
+        supplied the file) unless `status` is `proposed`. XLSX needs the
+        server's cx-spec extra (openpyxl).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                format: { type: string, enum: [csv, xlsx], default: csv }
+                data: { type: string, description: CSV text, or the XLSX file as base64 }
+                filename: { type: string }
+                kind: { type: string, enum: [auto, equipment, points], default: auto }
+                status: { type: string, enum: [accepted, proposed], default: accepted }
+      responses:
+        "201":
+          description: What was imported
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [document_id, items, rows, skipped_rows, unclassified]
+                properties:
+                  document_id: { type: string }
+                  items: { type: integer }
+                  rows: { type: integer }
+                  skipped_rows: { type: integer }
+                  unclassified: { type: integer }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/spec/extract:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Spec]
+      operationId: extractCxSpec
+      summary: Read a PDF (schedules, point lists, sequences) into proposed spec items with Claude (operator)
+      description: >-
+        Asynchronous: 202 with the document, then poll GET
+        /spec-documents/{id}. Every extracted item is `proposed` and cites
+        its page and the verbatim text it was read from; nothing is used
+        (alignment ignores proposals) until a person accepts it. The PDF
+        is held in memory for the extraction only and never stored. Needs
+        the server's llm extra and ANTHROPIC_API_KEY (501 without the
+        extra); the model is BALER_CX_MODEL. Up to 30 MB.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                data: { type: string, description: The PDF as base64 }
+                filename: { type: string }
+                media_type: { type: string, enum: [application/pdf] }
+      responses:
+        "202":
+          description: The queued document
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpecDocument" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { description: The llm extra isn't installed on the server }
+  /projects/{id}/spec/documents:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Spec]
+      operationId: listCxSpecDocuments
+      summary: Imported and extracted documents, newest first
+      responses:
+        "200":
+          description: Documents
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SpecDocument" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /spec-documents/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Spec]
+      operationId: getCxSpecDocument
+      summary: An imported or extracted document (poll this after .../spec/extract)
+      responses:
+        "200":
+          description: The document
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpecDocument" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /spec-items/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    patch:
+      tags: [Spec]
+      operationId: reviewCxSpecItem
+      summary: Accept, correct or reject a spec item (operator)
+      description: Corrections keep what was proposed in source.corrected_from.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string, enum: [proposed, accepted, rejected] }
+                kind: { type: string, enum: [equipment, point, sequence] }
+                tag: { type: string }
+                name: { type: string }
+                equip_tag: { type: [string, "null"] }
+                brick_class: { type: [string, "null"] }
+                properties: { type: object }
+      responses:
+        "200":
+          description: The item
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpecItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/spec/review:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Spec]
+      operationId: reviewCxSpecItems
+      summary: Accept or reject many spec items at once (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids, status]
+              properties:
+                ids: { type: array, items: { type: string } }
+                status: { type: string, enum: [accepted, rejected] }
+      responses:
+        "200":
+          description: How many changed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { updated: { type: integer } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/alignment:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Spec]
+      operationId: getCxAlignment
+      summary: Accepted spec equipment against today's inventory, with deviations
+      description: >-
+        Computed on request: tag evidence (delimiters, case, leading zeros,
+        known abbreviations) and Brick class agreement give each mapping a
+        confidence - confirmed (a person), high, medium, low (with named
+        alternatives) or unmatched. Deviations: spec_not_found (read per
+        phase), type_mismatch, duplicate_claim, unspecified_in_field.
+        Confirmed and high mappings list their points: present,
+        specified_absent (never invented) and unspecified_present.
+      responses:
+        "200":
+          description: The alignment
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [mappings, deviations, counts]
+                properties:
+                  mappings:
+                    type: array
+                    items:
+                      type: object
+                      required: [spec_item_id, spec_tag, equip_uri, confidence, basis, alternatives]
+                      properties:
+                        spec_item_id: { type: string }
+                        spec_tag: { type: string }
+                        equip_uri: { type: [string, "null"] }
+                        confidence: { type: string, enum: [confirmed, high, medium, low, unmatched] }
+                        basis: { type: array, items: { type: object } }
+                        alternatives: { type: array, items: { type: object } }
+                        decision: { type: [object, "null"] }
+                        points: { type: array, items: { type: object } }
+                  deviations: { type: array, items: { type: object } }
+                  counts: { type: object, additionalProperties: { type: integer } }
+                  proposed_items: { type: integer, description: Proposals still waiting for a person }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/alignment/decisions:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Spec]
+      operationId: decideCxMapping
+      summary: Confirm or reject a spec item's equipment (operator)
+      description: >-
+        With `write_back` (confirmations only) the mapping is written into
+        the graph through record_edit and audited in record_edits: the spec
+        tag as the `cxSpecTag` tag, and the spec's Brick class when the
+        equipment has none (or always, with `write_class`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [spec_item_id, equip_uri, status]
+              properties:
+                spec_item_id: { type: string }
+                equip_uri: { type: string }
+                status: { type: string, enum: [confirmed, rejected] }
+                write_back: { type: boolean }
+                write_class: { type: boolean }
+      responses:
+        "201":
+          description: The decision
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Mapping" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /mappings/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    delete:
+      tags: [Spec]
+      operationId: undoCxMapping
+      summary: Undo a decision (operator); a graph write-back stays and is undone in the record editor
+      responses:
+        "204": { description: Undone }
+        "404": { $ref: "#/components/responses/NotFound" }
   /templates:
     get:
       tags: [Templates]
@@ -1308,6 +1580,62 @@ components:
             counts: { type: object, additionalProperties: { type: integer } }
             changes: { type: array, items: { type: object } }
         error: { type: [string, "null"] }
+    SpecItem:
+      type: object
+      required: [id, project_id, kind, tag, name, brick_class, properties, source, status]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        document_id: { type: [string, "null"] }
+        kind: { type: string, enum: [equipment, point, sequence] }
+        tag: { type: string }
+        name: { type: string }
+        equip_tag: { type: [string, "null"] }
+        brick_class: { type: [string, "null"] }
+        properties: { type: object }
+        source:
+          type: object
+          description: document, page, quote (extraction) or row (import), method, corrected_from
+        confidence: { type: [number, "null"] }
+        status: { type: string, enum: [proposed, accepted, rejected] }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        reviewed_by: { type: [string, "null"] }
+        reviewed_at: { type: [string, "null"], format: date-time }
+    SpecDocument:
+      type: object
+      required: [id, project_id, filename, media_type, size, sha256, method, status, items]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        filename: { type: string }
+        media_type: { type: string }
+        size: { type: integer }
+        sha256: { type: string }
+        method: { type: string, enum: [llm, table] }
+        status: { type: string, enum: [queued, running, completed, failed] }
+        items: { type: integer }
+        info: { type: [object, "null"], description: "model, notes, token usage" }
+        error: { type: [string, "null"] }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+    Mapping:
+      type: object
+      required: [id, spec_item_id, equip_uri, status]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        spec_item_id: { type: string }
+        equip_uri: { type: [string, "null"] }
+        confidence: { type: string }
+        basis: { type: array, items: { type: object } }
+        alternatives: { type: array, items: { type: object } }
+        status: { type: string, enum: [proposed, confirmed, rejected] }
+        decided_by: { type: [string, "null"] }
+        decided_at: { type: [string, "null"], format: date-time }
+        written_back: { type: [object, "null"] }
+        created_at: { type: string, format: date-time }
     IssueSeverity:
       type: [string, "null"]
       enum: [critical, major, minor, info, null]

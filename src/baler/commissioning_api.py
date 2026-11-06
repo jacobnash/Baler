@@ -22,6 +22,8 @@ GET /runs/{id} until status is completed or failed.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import re
@@ -42,6 +44,7 @@ from baler.commissioning import (
     procedures,
     report,
     runner,
+    spec,
 )
 from baler.commissioning import templates as tpl
 from baler.http_handler_base import BaseAPIHandler, respond_error, respond_json
@@ -66,6 +69,10 @@ _PROCEDURE = re.compile(r"/procedures/([^/]+)")
 _PROCEDURE_RUNS = re.compile(r"/procedures/([^/]+)/runs")
 _TEST_RUN = re.compile(r"/test-runs/([^/]+)")
 _RUN_DIFF = re.compile(r"/runs/([^/]+)/diff")
+_PROJECT_SPEC = re.compile(r"/projects/([^/]+)/(spec|spec/import|spec/extract|spec/documents|spec/review|alignment|alignment/decisions)")
+_SPEC_DOC = re.compile(r"/spec-documents/([^/]+)")
+_SPEC_ITEM = re.compile(r"/spec-items/([^/]+)")
+_MAPPING = re.compile(r"/mappings/([^/]+)")
 _RUN = re.compile(r"/runs/([^/]+)")
 _RUN_REPORT = re.compile(r"/runs/([^/]+)/report")
 
@@ -193,17 +200,31 @@ def make_handler(repo, clock=None, worker=None):
             if m:
                 found = {"GET": ("get_issue", self._get_issue), "PATCH": ("patch_issue", self._patch_issue)}.get(method)
                 return None if found is None else self._bind(found, m.group(1))
+            m = _PROJECT_SPEC.fullmatch(path)
+            if m:
+                stable = {("GET", "spec"): ("list_spec", self._list_spec),
+                          ("POST", "spec/import"): ("import_spec", self._import_spec),
+                          ("POST", "spec/extract"): ("extract_spec", self._extract_spec),
+                          ("GET", "spec/documents"): ("list_spec_documents", self._list_spec_documents),
+                          ("POST", "spec/review"): ("review_spec", self._review_spec),
+                          ("GET", "alignment"): ("alignment", self._alignment),
+                          ("POST", "alignment/decisions"): ("decide_mapping", self._decide_mapping)}
+                entry = stable.get((method, m.group(2)))
+                return None if entry is None else self._bind(entry, m.group(1))
             for rx, ptable in (
                 (_PROCEDURE_RUNS, {"POST": ("create_test_run", self._create_test_run), "GET": ("list_test_runs", self._list_test_runs)}),
                 (_PROCEDURE, {"GET": ("get_procedure", self._get_procedure), "PATCH": ("patch_procedure", self._patch_procedure),
                               "DELETE": ("archive_procedure", self._archive_procedure)}),
                 (_TEST_RUN, {"GET": ("get_test_run", self._get_test_run)}),
                 (_RUN_DIFF, {"GET": ("run_diff", self._run_diff)}),
+                (_SPEC_DOC, {"GET": ("get_spec_document", self._get_spec_document)}),
+                (_SPEC_ITEM, {"PATCH": ("patch_spec_item", self._patch_spec_item)}),
+                (_MAPPING, {"DELETE": ("undo_mapping", self._undo_mapping)}),
             ):
                 m = rx.fullmatch(path)
                 if m:
-                    entry = ptable.get(method)
-                    return None if entry is None else self._bind(entry, m.group(1))
+                    pentry = ptable.get(method)
+                    return None if pentry is None else self._bind(pentry, m.group(1))
             m = _RISK.fullmatch(path)
             if m and method == "DELETE":
                 kid = m.group(1)
@@ -809,9 +830,9 @@ def make_handler(repo, clock=None, worker=None):
             else:
                 specs = [{**procedures.normalize(body), "template": None}]
             made = []
-            for i, spec in enumerate(specs):
+            for i, proc_spec in enumerate(specs):
                 at = now + timedelta(microseconds=i)  # keep the seeds' order (AHU first) in listings
-                proc = {"id": db.new_id(), "project_id": pid, **spec, "created_by": claims.get("sub"),
+                proc = {"id": db.new_id(), "project_id": pid, **proc_spec, "created_by": claims.get("sub"),
                         "created_at": at, "updated_at": at}
                 repo.create_procedure(proc)
                 made.append(proc)
@@ -922,6 +943,256 @@ def make_handler(repo, clock=None, worker=None):
             prev = [r for r in repo.get_results(other["id"]) if scope.allows(r["equip_uri"])] if other else []
             respond_json(self, 200, {"run_id": rid, "against": other["id"] if other else None,
                                      **procedures.diff_results(prev, cur)})
+
+        # ------------------------------------------------------ spec (Cx 7)
+
+        def _list_spec(self, span, claims, pid) -> None:
+            if self._project(pid, claims) is None:
+                return
+            q = parse_qs(urlparse(self.path).query)
+            eq: dict[str, str] = {"project_id": pid}
+            eq.update({k: q[k][0] for k in ("kind", "status", "document_id") if k in q})
+            respond_json(self, 200, [db.public_row(r) for r in repo.find_rows("cx_spec_items", **eq)])
+
+        def _new_document(self, pid, claims, filename, media_type, raw: bytes, method: str, status: str) -> dict:
+            doc = {"id": db.new_id(), "project_id": pid, "filename": filename[:300], "media_type": media_type,
+                   "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "method": method, "status": status,
+                   "items": 0, "info": None, "error": None, "created_by": claims.get("sub"), "created_at": now_fn(),
+                   "finished_at": None}
+            repo.put_rows("cx_spec_documents", [doc])
+            return doc
+
+        def _import_spec(self, span, claims, pid) -> None:
+            """A schedule or point list as CSV text or XLSX (base64)."""
+            if self._project(pid, claims) is None:
+                return
+            body = self.read_json_body()
+            fmt = body.get("format", "csv")
+            data = body.get("data")
+            if not isinstance(data, str) or not data:
+                raise ValueError("data is required: CSV text, or base64 XLSX")
+            status = body.get("status", "accepted")
+            if status not in ("accepted", "proposed"):
+                raise ValueError("status is accepted (a person supplied the file) or proposed")
+            kind = body.get("kind", "auto")
+            if kind not in ("auto", "equipment", "points"):
+                raise ValueError("kind is auto, equipment or points")
+            filename = str(body.get("filename") or f"import.{fmt}")
+            rows = spec.read_rows(fmt, data)
+            items = spec.items_from_rows(rows, filename, kind)
+            raw = data.encode("utf-8")
+            doc = self._new_document(pid, claims, filename, "text/csv" if fmt == "csv" else
+                                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", raw, "table", "completed")
+            now = now_fn()
+            sub = claims.get("sub")
+            reviewed = status == "accepted"
+            out = [{"id": db.new_id(), "project_id": pid, "document_id": doc["id"], "status": status, "created_by": sub,
+                    "created_at": now, "reviewed_by": sub if reviewed else None, "reviewed_at": now if reviewed else None, **it}
+                   for it in items]
+            repo.put_rows("cx_spec_items", out)
+            repo.update_row("cx_spec_documents", doc["id"], {"items": len(out), "finished_at": now})
+            self._event(pid, "spec.import", claims, {"document_id": doc["id"], "filename": filename, "items": len(out), "status": status})
+            unclassified = sum(1 for it in out if not it.get("brick_class"))
+            respond_json(self, 201, {"document_id": doc["id"], "items": len(out), "rows": len(rows),
+                                     "skipped_rows": len(rows) - len(out), "unclassified": unclassified})
+
+        def _extract_spec(self, span, claims, pid) -> None:
+            """A PDF read by Claude into proposed spec items, in the
+            background (202; poll GET /spec-documents/{id})."""
+            if self._project(pid, claims) is None:
+                return
+            body = self.read_json_body()
+            if body.get("media_type", "application/pdf") != "application/pdf":
+                raise ValueError("only PDFs are extracted; send CSV/XLSX to .../spec/import")
+            try:
+                raw = base64.b64decode(str(body.get("data") or ""), validate=True)
+            except ValueError as exc:
+                raise ValueError("data must be the PDF as base64") from exc
+            if not raw.startswith(b"%PDF"):
+                raise ValueError("that isn't a PDF")
+            if len(raw) > spec.MAX_PDF_BYTES:
+                raise ValueError(f"PDF is over {spec.MAX_PDF_BYTES // (1024 * 1024)} MB; split it")
+            if worker.extract_fn is None:
+                try:
+                    import anthropic  # noqa: F401
+                    import pydantic  # noqa: F401
+                except ImportError:
+                    respond_error(self, 501, "PDF extraction needs the llm extra (anthropic) installed on the server")
+                    return
+            filename = str(body.get("filename") or "document.pdf")
+            doc = self._new_document(pid, claims, filename, "application/pdf", raw, "llm", "queued")
+            sub = claims.get("sub")
+            self._event(pid, "spec.extract_start", claims, {"document_id": doc["id"], "filename": filename, "size": len(raw)})
+            worker.submit(runner.ExtractJob(doc["id"], pid, filename, raw, sub, repo.user_email(sub)))
+            respond_json(self, 202, db.public_row(doc))
+
+        def _list_spec_documents(self, span, claims, pid) -> None:
+            if self._project(pid, claims) is not None:
+                rows = repo.find_rows("cx_spec_documents", project_id=pid)
+                respond_json(self, 200, [db.public_row(r) for r in reversed(rows)])
+
+        def _get_spec_document(self, span, claims, did) -> None:
+            doc = repo.get_row("cx_spec_documents", did)
+            if doc is None or not self._visible(repo.get_project(doc["project_id"]), claims):
+                respond_error(self, 404, "no such document")
+                return
+            respond_json(self, 200, db.public_row(doc))
+
+        def _visible_spec_item(self, iid: str, claims: dict) -> dict | None:
+            item = repo.get_row("cx_spec_items", iid)
+            if item is None or not self._visible(repo.get_project(item["project_id"]), claims):
+                respond_error(self, 404, "no such spec item")
+                return None
+            return item
+
+        _SPEC_EDITABLE = ("tag", "name", "equip_tag", "brick_class", "kind", "properties")
+
+        def _check_spec_changes(self, body: dict) -> dict:
+            changes = {k: body[k] for k in self._SPEC_EDITABLE if k in body}
+            if "kind" in changes and changes["kind"] not in spec.KINDS:
+                raise ValueError(f"kind is one of {', '.join(spec.KINDS)}")
+            if changes.get("brick_class") is not None:
+                from baler import brick_vocab
+
+                canon = brick_vocab.load().canonical_class(str(changes["brick_class"]))
+                if not canon:
+                    raise ValueError(f"no Brick class named {changes['brick_class']!r}")
+                changes["brick_class"] = canon
+            for k in ("tag", "name"):
+                if k in changes and (not isinstance(changes[k], str) or not changes[k].strip()):
+                    raise ValueError(f"{k} must be a non-empty string")
+            if "properties" in changes and not isinstance(changes["properties"], dict):
+                raise TypeError("properties is an object")
+            return changes
+
+        def _patch_spec_item(self, span, claims, iid) -> None:
+            """Accept, correct or reject a spec item. A correction keeps
+            what was proposed in source.corrected_from."""
+            item = self._visible_spec_item(iid, claims)
+            if item is None:
+                return
+            body = self.read_json_body()
+            changes = self._check_spec_changes(body)
+            status = body.get("status")
+            if status is not None and status not in spec.STATUSES:
+                raise ValueError(f"status is one of {', '.join(spec.STATUSES)}")
+            if not changes and status is None:
+                raise ValueError("nothing to change")
+            now = now_fn()
+            update: dict = dict(changes)
+            if changes:
+                before = {k: item.get(k) for k in changes if item.get(k) != changes[k]}
+                if before:
+                    update["source"] = {**item["source"], "corrected_from": {**item["source"].get("corrected_from", {}), **before}}
+            if status is not None:
+                update["status"] = status
+            update.update(reviewed_by=claims.get("sub"), reviewed_at=now)
+            repo.update_row("cx_spec_items", iid, update)
+            self._event(item["project_id"], "spec.review", claims, {"spec_item_id": iid, "status": status, "corrected": sorted(changes)})
+            respond_json(self, 200, db.public_row(repo.get_row("cx_spec_items", iid) or item))
+
+        def _review_spec(self, span, claims, pid) -> None:
+            """Accept or reject many proposals at once ({ids, status})."""
+            if self._project(pid, claims) is None:
+                return
+            body = self.read_json_body()
+            ids, status = body.get("ids"), body.get("status")
+            if status not in ("accepted", "rejected") or not isinstance(ids, list) or not ids or len(ids) > 5000:
+                raise ValueError("send ids (a list) and status accepted or rejected")
+            now = now_fn()
+            done = 0
+            for iid in ids:
+                item = repo.get_row("cx_spec_items", str(iid))
+                if item is None or item["project_id"] != pid:
+                    continue
+                repo.update_row("cx_spec_items", item["id"], {"status": status, "reviewed_by": claims.get("sub"), "reviewed_at": now})
+                done += 1
+            self._event(pid, "spec.review", claims, {"status": status, "count": done})
+            respond_json(self, 200, {"updated": done})
+
+        def _alignment_for(self, p: dict, claims: dict) -> tuple[dict, list[dict], list[dict]]:
+            scopes, _ = self._scopes(p, claims)
+            equips = inventory.build(repo.store, scopes)
+            items = repo.find_rows("cx_spec_items", project_id=p["id"])
+            decisions = [d for d in repo.find_rows("cx_mappings", project_id=p["id"]) if d["status"] in ("confirmed", "rejected")]
+            latest = {d["spec_item_id"]: d for d in decisions}  # oldest first, so the newest wins
+            return spec.align(items, equips, phases.current(p["phases"]), latest), equips, items
+
+        def _alignment(self, span, claims, pid) -> None:
+            """Accepted spec equipment against today's inventory, computed
+            now; a person's decisions (confirm/reject) pin it."""
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            result, equips, items = self._alignment_for(p, claims)
+            by_id = {e["id"]: e for e in equips}
+            points = [i for i in items if i["kind"] == "point"]
+            decisions = {d["spec_item_id"]: d for d in repo.find_rows("cx_mappings", project_id=pid)}
+            spec_by_id = {i["id"]: i for i in items}
+            for m in result["mappings"]:
+                d = decisions.get(m["spec_item_id"])
+                m["decision"] = db.public_row(d) if d else None
+                if m["equip_uri"] in by_id and m["confidence"] in ("confirmed", "high"):
+                    m["points"] = spec.points_alignment(spec_by_id[m["spec_item_id"]], by_id[m["equip_uri"]], points)
+            counts: dict[str, int] = {}
+            for m in result["mappings"]:
+                counts[m["confidence"]] = counts.get(m["confidence"], 0) + 1
+            respond_json(self, 200, {**result, "counts": counts,
+                                     "proposed_items": sum(1 for i in items if i["status"] == "proposed")})
+
+        def _decide_mapping(self, span, claims, pid) -> None:
+            """Confirm or reject a spec item's mapping. Confirming with
+            write_back records it in the graph through record_edit (the
+            spec tag as cxSpecTag, and the spec's Brick class when the
+            equipment has none, or with write_class), audited in
+            record_edits."""
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            body = self.read_json_body()
+            item = repo.get_row("cx_spec_items", str(body.get("spec_item_id")))
+            if item is None or item["project_id"] != pid or item["kind"] != "equipment":
+                raise ValueError("spec_item_id must be an equipment spec item of this project")
+            status = body.get("status")
+            if status not in ("confirmed", "rejected"):
+                raise ValueError("status is confirmed or rejected")
+            uri = body.get("equip_uri")
+            scopes, _ = self._scopes(p, claims)
+            equips = {e["id"]: e for e in inventory.build(repo.store, scopes)}
+            if uri not in equips:
+                raise ValueError("equip_uri must be equipment in this project's inventory")
+            now = now_fn()
+            sub = claims.get("sub")
+            written = None
+            if status == "confirmed" and body.get("write_back"):
+                edit: dict = {"set": {"cxSpecTag": item["tag"]}}
+                have = equips[uri].get("brickClasses") or []
+                if item.get("brick_class") and (not have or body.get("write_class")) and item["brick_class"] not in have:
+                    edit["brickClass"] = item["brick_class"]
+                written = repo.write_back(uri, edit, sub, repo.user_email(sub))
+            m = {"id": db.new_id(), "project_id": pid, "spec_item_id": item["id"], "equip_uri": uri,
+                 "confidence": "confirmed" if status == "confirmed" else "rejected", "basis": [{"kind": "person"}],
+                 "alternatives": [], "status": status, "decided_by": sub, "decided_at": now, "written_back": written,
+                 "created_at": now}
+            repo.delete_rows("cx_mappings", spec_item_id=item["id"], equip_uri=uri)
+            if status == "confirmed":  # one confirmed equipment per spec item
+                for old in repo.find_rows("cx_mappings", spec_item_id=item["id"], status="confirmed"):
+                    repo.delete_rows("cx_mappings", id=old["id"])
+            repo.put_rows("cx_mappings", [m])
+            self._event(pid, f"mapping.{status}", claims, {"spec_tag": item["tag"], "equip_uri": uri, "written_back": written})
+            respond_json(self, 201, db.public_row(m))
+
+        def _undo_mapping(self, span, claims, mid) -> None:
+            m = repo.get_row("cx_mappings", mid)
+            if m is None or self._project(m["project_id"], claims) is None:
+                if m is None:
+                    respond_error(self, 404, "no such mapping")
+                return
+            repo.delete_rows("cx_mappings", id=mid)
+            self._event(m["project_id"], "mapping.undo", claims, {"spec_item_id": m["spec_item_id"], "equip_uri": m["equip_uri"],
+                                                                  "note": "a graph write-back, if any, stays (undo it in the record editor)"})
+            self.send_response(204)
+            self.end_headers()
 
         def _templates(self, span, claims) -> None:
             respond_json(self, 200, [t.as_dict() for t in tpl.load()])

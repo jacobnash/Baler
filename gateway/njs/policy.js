@@ -118,6 +118,18 @@ const ROUTES = [
   ["POST",   /^\/cx\/procedures\/[^/]+\/runs$/,                 "commissioning", "operator"],
   ["GET",    /^\/cx\/test-runs\/[^/]+$/,                       "commissioning", "viewer"],
   ["GET",    /^\/cx\/runs\/[^/]+\/diff$/,                       "commissioning", "viewer"],
+  // Cx 7 (Baler#43): spec ingestion and alignment. Extraction calls the
+  // Claude API, so it's a change (operator), like imports.
+  ["GET",    /^\/cx\/projects\/[^/]+\/spec$/,                   "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/spec\/import$/,            "commissioning", "operator"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/spec\/extract$/,           "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/spec\/documents$/,         "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/spec\/review$/,            "commissioning", "operator"],
+  ["GET",    /^\/cx\/spec-documents\/[^/]+$/,                  "commissioning", "viewer"],
+  ["PATCH",  /^\/cx\/spec-items\/[^/]+$/,                      "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/alignment$/,              "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/alignment\/decisions$/,   "commissioning", "operator"],
+  ["DELETE", /^\/cx\/mappings\/[^/]+$/,                        "commissioning", "operator"],
 
   // auth_api - POST /auth/login has its own exact-match nginx location
   // with no js_access at all (can't require a token to get a token), so

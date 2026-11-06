@@ -243,16 +243,59 @@ def execute_test(repo, job: TestJob, clock: Callable[[], datetime], run_fn=engin
             log.exception("cx test run %s: could not record the failure", job.run_id)
 
 
+# ------------------------------------------------------- spec extraction (Cx 7)
+
+
+@dataclass
+class ExtractJob:
+    document_id: str
+    project_id: str
+    filename: str
+    data: bytes  # in memory only, never written anywhere
+    user_sub: str | None = None
+    user_email: str | None = None
+
+
+def execute_extract(repo, job: ExtractJob, clock: Callable[[], datetime], extract_fn=None) -> None:
+    """PDF -> proposed spec items. Never raises."""
+    try:
+        repo.update_row("cx_spec_documents", job.document_id, {"status": "running"})
+        if extract_fn is None:
+            from baler.commissioning import spec_llm
+
+            extract_fn = spec_llm.extract_pdf
+        items, info = extract_fn(job.data, job.filename)
+        now = clock()
+        rows = [{"id": db.new_id(), "project_id": job.project_id, "document_id": job.document_id, "status": "proposed",
+                 "created_by": "llm", "created_at": now, "reviewed_by": None, "reviewed_at": None, **it} for it in items]
+        repo.put_rows("cx_spec_items", rows)
+        repo.update_row("cx_spec_documents", job.document_id,
+                        {"status": "completed", "items": len(rows), "info": info, "finished_at": now})
+        repo.add_event(job.project_id, "spec.extract", job.user_sub, job.user_email,
+                       {"document_id": job.document_id, "filename": job.filename, "proposed": len(rows), "model": info.get("model")}, now)
+    except Exception as exc:  # noqa: BLE001 - recorded on the row
+        log.error("cx extraction %s failed:\n%s", job.document_id, traceback.format_exc())
+        try:
+            repo.update_row("cx_spec_documents", job.document_id, {"status": "failed", "error": error_text(exc), "finished_at": clock()})
+            repo.add_event(job.project_id, "spec.extract_fail", job.user_sub, job.user_email,
+                           {"document_id": job.document_id, "error": error_text(exc)}, clock())
+        except Exception:
+            log.exception("cx extraction %s: could not record the failure", job.document_id)
+    finally:
+        job.data = b""
+
+
 class RunWorker:
     def __init__(self, repo, clock: Callable[[], datetime], workers: int = WORKERS, run_fn=engine.run):
         self.repo = repo
         self.clock = clock
         self.run_fn = run_fn
-        self._queue: queue.Queue[RunJob | TestJob] = queue.Queue()
+        self._queue: queue.Queue[RunJob | TestJob | ExtractJob] = queue.Queue()
+        self.extract_fn = None  # tests swap the Claude call
         for i in range(workers):
             threading.Thread(target=self._loop, name=f"cx-run-{i}", daemon=True).start()
 
-    def submit(self, job: RunJob | TestJob) -> None:
+    def submit(self, job: RunJob | TestJob | ExtractJob) -> None:
         self._queue.put(job)
 
     def _loop(self) -> None:
@@ -261,6 +304,8 @@ class RunWorker:
             try:
                 if isinstance(job, TestJob):
                     execute_test(self.repo, job, self.clock, self.run_fn)
+                elif isinstance(job, ExtractJob):
+                    execute_extract(self.repo, job, self.clock, self.extract_fn)
                 else:
                     execute(self.repo, job, self.clock, self.run_fn)
             finally:

@@ -58,3 +58,6 @@ label.inline { display: inline-flex; gap: 0.3rem; align-items: center; }
 .phase-edit input, .phase-edit select { font: inherit; font-size: 0.8rem; }
 #settings-json { width: 100%; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.8rem; }
 
+
+/* `hidden` must win over the toolbar/label display rules above (auth.js explains why it otherwise loses) */
+.cx-main [hidden], .cx-drawer[hidden] { display: none !important; }

@@ -108,6 +108,37 @@
         </div>
       </section>
 
+      <section id="spec-section">
+        <h2>Spec and alignment</h2>
+        <p class="hint">Equipment schedules and point lists from the design documents. CSV/XLSX rows you import are accepted; a PDF is read by Claude into proposals, each citing its page, that someone must accept before they count.</p>
+        <div class="toolbar">
+          <label data-min-role="operator">Add a document <input type="file" id="spec-file" accept=".csv,.xlsx,.pdf" /></label>
+          <span id="spec-status" class="hint"></span>
+        </div>
+        <ul id="spec-docs" class="cx-events hint"></ul>
+        <h3 class="cx-sub">Spec items</h3>
+        <div class="toolbar">
+          <label>Show <select id="spec-filter">
+            <option value="proposed">proposed (to review)</option>
+            <option value="accepted">accepted</option>
+            <option value="rejected">rejected</option>
+            <option value="">all</option>
+          </select></label>
+          <button type="button" id="spec-accept-all" data-min-role="operator">Accept all shown</button>
+        </div>
+        <table>
+          <thead><tr><th>Kind</th><th>Tag</th><th>Name</th><th>Brick class</th><th>Source</th><th>Confidence</th><th></th></tr></thead>
+          <tbody id="spec-body"></tbody>
+        </table>
+        <h3 class="cx-sub">Alignment against the inventory</h3>
+        <div class="toolbar"><button type="button" id="align-btn">Align now</button><span id="align-status" class="hint"></span></div>
+        <table>
+          <thead><tr><th>Spec tag</th><th>Equipment</th><th>Confidence</th><th>Why</th><th></th></tr></thead>
+          <tbody id="align-body"></tbody>
+        </table>
+        <ul id="align-deviations" class="cx-events"></ul>
+      </section>
+
       <section id="issues-section">
         <h2>Issues</h2>
         <p class="hint">An issue opened from a failing check closes only when a later run passes that check; manual and imported ones close by hand.</p>
@@ -260,5 +291,6 @@
   <script src="cx.js"></script>
   <script src="cx_issues.js"></script>
   <script src="cx_procedures.js"></script>
+  <script src="cx_spec.js"></script>
 </body>
 </html>

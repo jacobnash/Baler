@@ -226,3 +226,31 @@ def test_procedures_and_test_runs_round_trip(repo):
     assert pid in {p["id"] for p in repo.list_scheduled_projects()}
     repo.update_project(pid, now, archived_at=now)
     assert pid not in {p["id"] for p in repo.list_scheduled_projects()}
+
+
+def test_spec_rows_round_trip(repo):
+    """Cx 7 (#43) on PgRepo: documents, spec items and mappings through the
+    generic row helpers, JSON columns intact."""
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    pid = _new_project(repo, _org(repo, "spec"), now)
+    doc = {"id": db.new_id(), "project_id": pid, "filename": "M-601.pdf", "media_type": "application/pdf", "size": 3,
+           "sha256": "x", "method": "llm", "status": "queued", "items": 0, "info": None, "error": None, "created_by": "it",
+           "created_at": now, "finished_at": None}
+    repo.put_rows("cx_spec_documents", [doc])
+    repo.update_row("cx_spec_documents", doc["id"], {"status": "completed", "info": {"model": "m", "notes": ""}, "items": 1})
+    got = repo.get_row("cx_spec_documents", doc["id"])
+    assert got["status"] == "completed" and got["info"] == {"model": "m", "notes": ""}
+    item = {"id": db.new_id(), "project_id": pid, "document_id": doc["id"], "kind": "equipment", "tag": "AHU-1", "name": "AHU",
+            "equip_tag": None, "brick_class": "Air_Handling_Unit", "properties": {"cfm": "12000"},
+            "source": {"document": "M-601.pdf", "page": 3}, "confidence": 0.9, "status": "proposed", "created_by": "llm",
+            "created_at": now, "reviewed_by": None, "reviewed_at": None}
+    repo.put_rows("cx_spec_items", [item])
+    assert repo.find_rows("cx_spec_items", project_id=pid, status="proposed")[0]["source"] == {"document": "M-601.pdf", "page": 3}
+    m = {"id": db.new_id(), "project_id": pid, "spec_item_id": item["id"], "equip_uri": "urn:equip:x", "confidence": "confirmed",
+         "basis": [], "alternatives": [], "status": "confirmed", "decided_by": "it", "decided_at": now,
+         "written_back": {"set": {"cxSpecTag": "AHU-1"}}, "created_at": now}
+    repo.put_rows("cx_mappings", [m])
+    assert repo.find_rows("cx_mappings", spec_item_id=item["id"])[0]["written_back"] == {"set": {"cxSpecTag": "AHU-1"}}
+    assert repo.delete_rows("cx_mappings", id=m["id"]) == 1
+    with pytest.raises(ValueError):
+        repo.find_rows("cx_spec_items", nope=1)

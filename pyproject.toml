@@ -26,6 +26,8 @@ validate = ["pyshacl>=0.30.0"]
 # ConStrain itself is vendored, not a dependency - it pins rdflib 6 via
 # brickschema==0.7.1; see todo/cx3-constrain-gl36-spike.md.
 cx-gl36 = ["pandas>=2.1"]
+# Cx 7 (#43): XLSX equipment schedules and point lists (commissioning.spec).
+cx-spec = ["openpyxl>=3.1"]
 # haystack_api.py (Project Haystack HTTP API). Built from source with
 # maturin until openhay ships wheels to PyPI - needs a Rust toolchain.
 haystack = ["openhay @ git+https://github.com/jacobnash/openhay@main#subdirectory=crates/openhay-py"]

@@ -299,7 +299,13 @@ services:
     build: .
     command: python -m baler.commissioning_api
     restart: unless-stopped  # connects eagerly in main() - same first-boot DB race as fault_api
-    environment: *daemon-env
+    environment:
+      <<: *daemon-env
+      # Spec PDF extraction (Cx 7) and the commissioning agent (Cx 10)
+      # call the Claude API. Blank: those two answer an error, the rest of
+      # Cx works.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      BALER_CX_MODEL: ${BALER_CX_MODEL:-}
     volumes:
       - .:/app
     depends_on: *daemon-depends-on

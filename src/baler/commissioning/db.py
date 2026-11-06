@@ -200,7 +200,74 @@ CREATE TABLE IF NOT EXISTS cx_test_runs (
 );
 CREATE INDEX IF NOT EXISTS cx_test_runs_procedure ON cx_test_runs (procedure_id, requested_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS cx_test_runs_one_active ON cx_test_runs (procedure_id) WHERE status IN ('queued', 'running');
+
+-- Cx 7 (#43): spec documents (the file itself is never stored), spec
+-- items (proposed by extraction or imported), and spec<->device mappings.
+CREATE TABLE IF NOT EXISTS cx_spec_documents (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES cx_projects(id),
+    filename    TEXT NOT NULL,
+    media_type  TEXT NOT NULL,
+    size        INT NOT NULL,
+    sha256      TEXT NOT NULL,
+    method      TEXT NOT NULL,              -- llm | table
+    status      TEXT NOT NULL,              -- queued | running | completed | failed
+    items       INT NOT NULL DEFAULT 0,
+    info        JSONB,                      -- model, notes, token usage
+    error       TEXT,
+    created_by  TEXT,
+    created_at  TIMESTAMPTZ NOT NULL,
+    finished_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS cx_spec_documents_project ON cx_spec_documents (project_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS cx_spec_items (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES cx_projects(id),
+    document_id TEXT,
+    kind        TEXT NOT NULL,              -- equipment | point | sequence
+    tag         TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    equip_tag   TEXT,
+    brick_class TEXT,
+    properties  JSONB NOT NULL DEFAULT '{}',
+    source      JSONB NOT NULL,             -- document, page, quote/row, method
+    confidence  DOUBLE PRECISION,
+    status      TEXT NOT NULL,              -- proposed | accepted | rejected
+    created_by  TEXT,
+    created_at  TIMESTAMPTZ NOT NULL,
+    reviewed_by TEXT,
+    reviewed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS cx_spec_items_project ON cx_spec_items (project_id, kind, status);
+
+CREATE TABLE IF NOT EXISTS cx_mappings (
+    id           TEXT PRIMARY KEY,
+    project_id   TEXT NOT NULL REFERENCES cx_projects(id),
+    spec_item_id TEXT NOT NULL REFERENCES cx_spec_items(id),
+    equip_uri    TEXT,
+    confidence   TEXT NOT NULL,             -- confirmed | high | medium | low | unmatched
+    basis        JSONB NOT NULL,
+    alternatives JSONB NOT NULL,
+    status       TEXT NOT NULL,             -- proposed | confirmed | rejected
+    decided_by   TEXT,
+    decided_at   TIMESTAMPTZ,
+    written_back JSONB,
+    created_at   TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cx_mappings_project ON cx_mappings (project_id, status);
 """
+
+ROW_TABLES: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
+    "cx_spec_documents": (("id", "project_id", "filename", "media_type", "size", "sha256", "method", "status", "items",
+                           "info", "error", "created_by", "created_at", "finished_at"), frozenset({"info"})),
+    "cx_spec_items": (("id", "project_id", "document_id", "kind", "tag", "name", "equip_tag", "brick_class", "properties",
+                       "source", "confidence", "status", "created_by", "created_at", "reviewed_by", "reviewed_at"),
+                      frozenset({"properties", "source"})),
+    "cx_mappings": (("id", "project_id", "spec_item_id", "equip_uri", "confidence", "basis", "alternatives", "status",
+                     "decided_by", "decided_at", "written_back", "created_at"),
+                    frozenset({"basis", "alternatives", "written_back"})),
+}
 
 PROC_COLS = ("id", "project_id", "name", "kind", "equip_class", "equip_uris", "description", "steps", "window_hours",
              "schedule", "status", "template", "created_by", "created_at", "updated_at")
@@ -239,6 +306,9 @@ class RunActive(Exception):
 def ensure_schema(conn) -> None:
     auth.ensure_schema(conn)  # orgs/sites (+ sites.topic_prefixes) first: cx_projects references them
     ddl.run(conn, SCHEMA)
+    from baler import record_edit
+
+    record_edit.ensure_schema(conn)  # Cx 7 write-back logs to record_edits
 
 
 def new_id() -> str:
@@ -299,6 +369,8 @@ class MemoryRepo:
         self.risks: dict[str, dict] = {}
         self.procedures: dict[str, dict] = {}
         self.test_runs: dict[str, dict] = {}
+        self._rows: dict[str, dict[str, dict]] = {}
+        self.edits: list[dict] = []
         self._lock = threading.Lock()  # runs are written from the worker thread
 
     def scope_for(self, claims) -> Scope:
@@ -525,6 +597,45 @@ class MemoryRepo:
             for r in hit:
                 r.update(status="failed", finished_at=now, error=INTERRUPTED)
             return [{"id": r["id"], "project_id": r["project_id"]} for r in hit]
+
+    # ------------------------------------------- generic rows (Cx 7 on)
+
+    def put_rows(self, table: str, rows: list[dict]) -> None:
+        with self._lock:
+            store = self._rows.setdefault(table, {})
+            for r in rows:
+                store[r["id"]] = copy.deepcopy(r)
+
+    def get_row(self, table: str, row_id: str) -> dict | None:
+        with self._lock:
+            r = self._rows.get(table, {}).get(row_id)
+            return None if r is None else copy.deepcopy(r)
+
+    def find_rows(self, table: str, order: str = "created_at", **eq) -> list[dict]:
+        with self._lock:
+            rows = [copy.deepcopy(r) for r in self._rows.get(table, {}).values()
+                    if all(r.get(k) == v for k, v in eq.items())]
+        return sorted(rows, key=lambda r: (r.get(order) is None, r.get(order), r["id"]))
+
+    def update_row(self, table: str, row_id: str, changes: dict) -> None:
+        with self._lock:
+            self._rows[table][row_id].update(copy.deepcopy(changes))
+
+    def delete_rows(self, table: str, **eq) -> int:
+        with self._lock:
+            store = self._rows.get(table, {})
+            hit = [k for k, r in store.items() if all(r.get(c) == v for c, v in eq.items())]
+            for k in hit:
+                del store[k]
+            return len(hit)
+
+    def write_back(self, uri: str, body: dict, user_sub, user_email) -> dict:
+        """record_edit on the graph plus its audit row (Cx 7 confirmations)."""
+        from baler import record_edit
+
+        changed = record_edit.apply_edit(self.store, uri, body)
+        self.edits.append({"uri": uri, "action": "update", "user_sub": user_sub, "user_email": user_email, "detail": changed})
+        return changed
 
 
 # ------------------------------------------------------------- postgres
@@ -883,3 +994,56 @@ class PgRepo:
             rows = conn.execute("UPDATE cx_test_runs SET status = 'failed', finished_at = %s, error = %s"
                                 " WHERE status IN ('queued', 'running') RETURNING id, project_id", (now, INTERRUPTED)).fetchall()
         return [{"id": i, "project_id": p} for i, p in rows]
+
+    # ------------------------------------------- generic rows (Cx 7 on)
+
+    def put_rows(self, table: str, rows: list[dict]) -> None:
+        cols, js = ROW_TABLES[table]
+        vals = [tuple(json.dumps(r.get(c), default=str) if c in js and r.get(c) is not None else r.get(c) for c in cols)
+                for r in rows]
+        if not vals:
+            return
+        with self.pool.connection() as conn, conn.cursor() as cur:
+            cur.executemany(f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})", vals)
+
+    def get_row(self, table: str, row_id: str) -> dict | None:
+        rows = self.find_rows(table, id=row_id)
+        return rows[0] if rows else None
+
+    def find_rows(self, table: str, order: str = "created_at", **eq) -> list[dict]:
+        cols, _ = ROW_TABLES[table]
+        if order not in cols or any(k not in cols for k in eq):
+            raise ValueError("unknown column")
+        where = " AND ".join(f"{k} = %s" for k in eq) or "TRUE"
+        with self.pool.connection() as conn:
+            rows = conn.execute(f"SELECT {', '.join(cols)} FROM {table} WHERE {where} ORDER BY {order}, id",
+                                tuple(eq.values())).fetchall()
+        return [dict(zip(cols, r, strict=True)) for r in rows]
+
+    def update_row(self, table: str, row_id: str, changes: dict) -> None:
+        cols, js = ROW_TABLES[table]
+        keys = [c for c in changes if c in cols and c != "id"]
+        if not keys:
+            return
+        vals = [json.dumps(changes[c], default=str) if c in js and changes[c] is not None else changes[c] for c in keys]
+        with self.run_pool.connection() as conn:
+            conn.execute(f"UPDATE {table} SET {', '.join(f'{c} = %s' for c in keys)} WHERE id = %s", (*vals, row_id))
+
+    def delete_rows(self, table: str, **eq) -> int:
+        cols, _ = ROW_TABLES[table]
+        if not eq or any(k not in cols for k in eq):
+            raise ValueError("unknown column")
+        with self.pool.connection() as conn:
+            cur = conn.execute(f"DELETE FROM {table} WHERE {' AND '.join(f'{k} = %s' for k in eq)}", tuple(eq.values()))
+            return cur.rowcount
+
+    def write_back(self, uri: str, body: dict, user_sub, user_email) -> dict:
+        """record_edit on the graph plus its record_edits audit row, so a
+        Cx confirmation shows up in GET /ingest/records/edits like any
+        other edit."""
+        from baler import record_edit
+
+        changed = record_edit.apply_edit(self.store, uri, body)
+        with self.pool.connection() as conn:
+            record_edit.log_edit(conn, uri, "update", user_sub, user_email, {**changed, "via": "commissioning"})
+        return changed
