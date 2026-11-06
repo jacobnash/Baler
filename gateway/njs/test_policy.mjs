@@ -149,6 +149,12 @@ check("per-user session cutoff: parse denylist rows, reject older sessions only"
     assert.equal(policy.sessionCutOff({ iat: 100, exp: 100 + 43200 }, "100"), false); // a fresh login that second
     assert.equal(policy.sessionCutOff({ iat: 99 }, undefined), false);
     assert.equal(policy.sessionCutOff({ exp: 50 + 43200 }, "100"), true); // pre-iat token: iat = exp - TTL
+    // #50: ms precision - a token from earlier in the cutoff's second is cut off,
+    // one issued after it in the same second (a fresh login) isn't
+    assert.deepEqual(policy.parseUserCutoff("user:abc:1700000000.512"), { key: "user:abc", epoch: 1700000000.512 });
+    assert.equal(policy.sessionCutOff({ iat: 1700000000.2 }, "1700000000.512"), true);
+    assert.equal(policy.sessionCutOff({ iat: 1700000000.6 }, "1700000000.512"), false);
+    assert.equal(policy.sessionCutOff({ iat: 1700000000 }, "1700000000.512"), true); // old whole-second token
 });
 
 console.log(`\n${passed} passed`);

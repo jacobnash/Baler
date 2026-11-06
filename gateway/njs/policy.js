@@ -182,7 +182,8 @@ const SESSION_TTL_SECONDS = 12 * 3600;
  * {key: "user:<id>", epoch}, or null for an ordinary jti.
  */
 function parseUserCutoff(jti) {
-    const m = /^(user:.+):(\d+)$/.exec(jti);
+    // epoch seconds, with milliseconds since #50 (older rows: whole seconds)
+    const m = /^(user:.+):(\d+(?:\.\d+)?)$/.exec(jti);
     return m ? { key: m[1], epoch: Number(m[2]) } : null;
 }
 

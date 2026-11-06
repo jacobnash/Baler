@@ -121,7 +121,9 @@ def issue_session_token(user: dict, site_ids: list[str]) -> str:
         "site_ids": site_ids,
         "kind": "session",
         "jti": jti,
-        "iat": int(time.time()),
+        # milliseconds, not whole seconds: a session cutoff (end_user_sessions)
+        # in the same second as a login must still end that login (#50)
+        "iat": round(time.time(), 3),
         "exp": int(time.time()) + SESSION_TTL_SECONDS,
     }
     return pyjwt.encode(claims, _jwt_secret(), algorithm="HS256")
@@ -361,7 +363,7 @@ _USER_CUTOFF = "user:{}:{}"
 
 
 def end_user_sessions(conn: psycopg.Connection, user_id: str) -> None:
-    now = int(time.time())
+    now = f"{time.time():.3f}"  # ms, like session iat (#50)
     conn.execute(
         "INSERT INTO revoked_tokens (jti, revoked_at, expires_at) VALUES (%s, now(), now() + make_interval(secs => %s)) "
         "ON CONFLICT (jti) DO NOTHING",
