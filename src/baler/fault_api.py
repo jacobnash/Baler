@@ -248,8 +248,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8002)
-    parser.add_argument("--rules-file", default="rules.json")
-    parser.add_argument("--webhooks-file", default="webhooks.json")
+    parser.add_argument("--rules-file", default=json_store.data_file("rules.json"))
+    parser.add_argument("--webhooks-file", default=json_store.data_file("webhooks.json"))
     args = parser.parse_args()
 
     tracing.init_tracing("baler-fault-api")

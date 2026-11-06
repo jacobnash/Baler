@@ -15,6 +15,7 @@ the same file are actually needed.
 
 import json
 import os
+import shutil
 import uuid
 
 
@@ -60,3 +61,26 @@ def save(path: str, records: list[dict]) -> None:
 
 def new_id() -> str:
     return uuid.uuid4().hex
+
+
+def data_file(name: str) -> str:
+    """Where a store file lives (#30). With BALER_DATA_DIR set (compose sets
+    /data, a named volume) it's <dir>/<name>, seeded on first use from the
+    repo's copy of `name` in the working directory - which is then seed
+    data only. Unset (local runs, tests): `name` itself, as before.
+
+    In compose the working directory is the deploy checkout, where these
+    files are tracked in git, so writing them there meant every deploy's
+    checkout reverted whatever the API had created."""
+    data_dir = os.environ.get("BALER_DATA_DIR")
+    if not data_dir:
+        return name
+    path = os.path.join(data_dir, name)
+    if not os.path.exists(path) and os.path.exists(name):
+        os.makedirs(data_dir, exist_ok=True)
+        # copy then rename: two services seeding the same file at once
+        # (fault_api and fault_detector share rules.json) can't half-write it
+        tmp = f"{path}.{uuid.uuid4().hex}.tmp"
+        shutil.copyfile(name, tmp)
+        os.replace(tmp, path)
+    return path

@@ -335,7 +335,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mqtt-host", default=os.environ.get("MQTT_HOST", "localhost"))
     parser.add_argument("--mqtt-port", type=int, default=1883)
-    parser.add_argument("--derivations-file", default="derivations.json")
+    parser.add_argument("--derivations-file", default=json_store.data_file("derivations.json"))
     parser.add_argument("--dsn", default=timeseries.DEFAULT_DSN)
     parser.add_argument("--oxigraph-url", default=os.environ.get("OXIGRAPH_URL", "http://localhost:7878"))
     parser.add_argument("--tick-seconds", type=float, default=5.0)

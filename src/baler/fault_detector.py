@@ -263,8 +263,8 @@ def main() -> None:
     parser.add_argument("--mqtt-host", default=os.environ.get("MQTT_HOST", "localhost"))
     parser.add_argument("--mqtt-port", type=int, default=1883)
     parser.add_argument("--topic-pattern", default="fbf/#")
-    parser.add_argument("--rules-file", default="rules.json")
-    parser.add_argument("--webhooks-file", default="webhooks.json")
+    parser.add_argument("--rules-file", default=json_store.data_file("rules.json"))
+    parser.add_argument("--webhooks-file", default=json_store.data_file("webhooks.json"))
     parser.add_argument("--his-interval", type=float, default=30.0)
     args = parser.parse_args()
 

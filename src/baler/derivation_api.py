@@ -228,7 +228,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8003)
-    parser.add_argument("--derivations-file", default="derivations.json")
+    parser.add_argument("--derivations-file", default=json_store.data_file("derivations.json"))
     parser.add_argument("--oxigraph-url", default=os.environ.get("OXIGRAPH_URL", "http://localhost:7878"))
     args = parser.parse_args()
 

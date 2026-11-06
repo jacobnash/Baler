@@ -183,10 +183,14 @@ services:
     # restart, and gateway's depends_on: service_healthy then fails the
     # whole stack since nothing brings it back.
     restart: unless-stopped
-    environment: *daemon-env
+    environment:
+      <<: *daemon-env
+      # rules/webhooks/derivations stores: a volume, not the checkout (#30)
+      BALER_DATA_DIR: /data
     extra_hosts: *host-gateway
     volumes:
       - .:/app
+      - baler-data:/data
     depends_on: *daemon-depends-on
     healthcheck:
       <<: *http-api-healthcheck
@@ -196,18 +200,26 @@ services:
     build: .
     command: python -m baler.fault_detector
     restart: unless-stopped  # see mqtt_listener - recover from the DB-not-ready-yet startup race
-    environment: *daemon-env
+    environment:
+      <<: *daemon-env
+      # rules/webhooks/derivations stores: a volume, not the checkout (#30)
+      BALER_DATA_DIR: /data
     extra_hosts: *host-gateway
     volumes:
       - .:/app
+      - baler-data:/data
     depends_on: *daemon-depends-on
 
   derivation_api:
     build: .
     command: python -m baler.derivation_api
-    environment: *daemon-env
+    environment:
+      <<: *daemon-env
+      # rules/webhooks/derivations stores: a volume, not the checkout (#30)
+      BALER_DATA_DIR: /data
     volumes:
       - .:/app
+      - baler-data:/data
     depends_on: *daemon-depends-on
     healthcheck:
       <<: *http-api-healthcheck
@@ -217,9 +229,13 @@ services:
     build: .
     command: python -m baler.derivation_engine
     restart: unless-stopped  # see mqtt_listener - recover from the DB-not-ready-yet startup race
-    environment: *daemon-env
+    environment:
+      <<: *daemon-env
+      # rules/webhooks/derivations stores: a volume, not the checkout (#30)
+      BALER_DATA_DIR: /data
     volumes:
       - .:/app
+      - baler-data:/data
     depends_on: *daemon-depends-on
 
   validate_api:
@@ -389,6 +405,10 @@ services:
 # can't silently swap in fresh empty volumes. An install created as
 # Timberdoodle sets BALER_VOLUME_PREFIX=timberdoodle to keep its data.
 volumes:
+  # API-created fault rules, webhooks and derivations (BALER_DATA_DIR, #30):
+  # in the checkout they were tracked files every deploy reverted.
+  baler-data:
+    name: ${BALER_VOLUME_PREFIX:-baler}_app-data
   oxigraph-data:
     name: ${BALER_VOLUME_PREFIX:-baler}_oxigraph-data
   postgres-data:
