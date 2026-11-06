@@ -143,6 +143,7 @@ function wireCreateOrg() {
 wireCreateOrg();
 
 initAuth(async () => {
+  initUsers(); // users.js: your account, and the Users section for admins
   try {
     await refresh();
     setInterval(() => refresh().catch(() => {}), 15000);

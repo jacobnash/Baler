@@ -74,8 +74,88 @@
       <h2>Tools</h2>
       <div id="tools-chips" class="ops-grid"></div>
     </section>
+
+    <section id="account-section">
+      <h2>Your account</h2>
+      <p class="hint"><span id="account-who">…</span>
+        <button type="button" id="change-password-btn">Change my password</button></p>
+    </section>
+
+    <section id="users-section" hidden>
+      <h2>Users</h2>
+      <div class="toolbar"><button type="button" id="new-user-btn">New user</button>
+        <span id="users-status" class="hint"></span></div>
+      <table>
+        <thead><tr><th>Email</th><th>Role</th><th>Sites</th><th>Added</th><th></th></tr></thead>
+        <tbody id="users-body"></tbody>
+      </table>
+    </section>
   </main>
+
+  <dialog id="user-dialog">
+    <form id="user-form" method="dialog">
+      <h3 id="user-dialog-title">New user</h3>
+      <label id="user-email-label">Email <input type="email" id="user-email" autocomplete="off" required /></label>
+      <label>Role
+        <select id="user-role">
+          <option value="viewer">Viewer</option>
+          <option value="operator">Operator</option>
+          <option value="admin">Admin</option>
+        </select>
+      </label>
+      <p id="user-role-help" class="hint"></p>
+      <fieldset id="user-sites">
+        <legend>Sites</legend>
+        <p class="hint">None checked = the whole organization.</p>
+        <div id="user-sites-list"></div>
+      </fieldset>
+      <p id="user-password-note" class="hint">A password is generated for you and shown once after you create the user.</p>
+      <p id="user-error" class="field-error" hidden></p>
+      <menu>
+        <button type="submit" id="user-submit" value="save">Create</button>
+        <button type="button" id="user-cancel">Cancel</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="secret-dialog">
+    <h3 id="secret-title">Password</h3>
+    <p class="hint" id="secret-intro"></p>
+    <p><code id="secret-value" class="secret-value"></code>
+      <button type="button" id="secret-copy">Copy</button></p>
+    <p class="hint">It won't be shown again.</p>
+    <menu><button type="button" id="secret-done">Done</button></menu>
+  </dialog>
+
+  <dialog id="confirm-dialog">
+    <form id="confirm-form" method="dialog">
+      <h3 id="confirm-title"></h3>
+      <p class="hint" id="confirm-text"></p>
+      <label id="confirm-type-label">Type <strong id="confirm-expect"></strong> to confirm
+        <input type="text" id="confirm-input" autocomplete="off" /></label>
+      <p id="confirm-error" class="field-error" hidden></p>
+      <menu>
+        <button type="submit" id="confirm-ok" value="ok">Confirm</button>
+        <button type="button" id="confirm-cancel">Cancel</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="password-dialog">
+    <form id="password-form" method="dialog">
+      <h3>Change my password</h3>
+      <label>Current password <input type="password" id="pw-current" autocomplete="current-password" required /></label>
+      <label>New password (12+ characters) <input type="password" id="pw-new" autocomplete="new-password" minlength="12" required /></label>
+      <label>New password again <input type="password" id="pw-again" autocomplete="new-password" minlength="12" required /></label>
+      <p id="pw-error" class="field-error" hidden></p>
+      <menu>
+        <button type="submit" value="save">Change password</button>
+        <button type="button" id="pw-cancel">Cancel</button>
+      </menu>
+    </form>
+  </dialog>
   <script src="auth.js"></script>
+  <script src="users.js"></script>
   <script src="ops.js"></script>
 </body>
 </html>

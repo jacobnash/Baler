@@ -233,9 +233,14 @@ def make_handler(ts_pool):
             caller = self._require_caller(span)
             if not caller:
                 return
+            email = None
+            if caller.get("kind") == "session":
+                with ts_pool.connection() as conn:
+                    user = auth.get_user(conn, caller["sub"])
+                email = user["email"] if user else None
             _respond_json(self, 200, {
                 "sub": caller["sub"], "org_id": caller["org_id"], "role": caller["role"],
-                "site_ids": caller.get("site_ids", []), "kind": caller.get("kind"),
+                "site_ids": caller.get("site_ids", []), "kind": caller.get("kind"), "email": email,
             })
 
         def _create_org(self, span) -> None:

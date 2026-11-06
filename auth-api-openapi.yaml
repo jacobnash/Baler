@@ -501,6 +501,7 @@ components:
         role: { type: string, enum: [admin, operator, viewer, service] }
         site_ids: { type: array, items: { type: string } }
         kind: { type: string, enum: [session, api_key] }
+        email: { type: [string, "null"], description: "The login's email; null for an API key." }
     ApiKey:
       type: object
       required: [id, org_id, role]

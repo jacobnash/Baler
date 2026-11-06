@@ -93,3 +93,13 @@ button.linkish {
   font: inherit;
   padding: 0.35rem;
 }
+
+/* Users section (users.js) */
+#users-section td.actions { white-space: nowrap; }
+.badge.role-admin { --badge-color: var(--color-critical); }
+.badge.role-operator { --badge-color: var(--color-warning); }
+.badge.role-viewer { --badge-color: var(--muted); }
+#user-sites { border: 1px solid var(--border); border-radius: var(--radius-sm); margin: 0.5rem 0; }
+#user-sites label { display: flex; align-items: center; gap: 0.4rem; margin: 0.15rem 0; }
+#user-sites input { width: auto; display: inline; margin: 0; }
+.secret-value { font-size: 1rem; padding: 0.2rem 0.4rem; border: 1px solid var(--border); border-radius: var(--radius-sm); user-select: all; word-break: break-all; }
