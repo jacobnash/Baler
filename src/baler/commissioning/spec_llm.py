@@ -70,11 +70,13 @@ def model_name() -> str:
 def extract_pdf(data: bytes, filename: str, client=None) -> tuple[list[dict], dict]:
     """(proposed spec items without ids, info {model, notes, usage}).
     Raises ExtractionError on a refusal, truncation or unparseable reply."""
-    import anthropic
 
     if len(data) > MAX_PDF_BYTES:
         raise ExtractionError(f"PDF is over {MAX_PDF_BYTES // (1024 * 1024)} MB; split it")
-    client = client or anthropic.Anthropic()
+    if client is None:
+        import anthropic
+
+        client = anthropic.Anthropic()
     model = model_name()
     response = client.beta.messages.parse(
         model=model,
