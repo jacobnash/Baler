@@ -26,6 +26,18 @@ Haxall, or CI fails.
 | watch | `watchSub` returns the point, then `watchPoll` and `watchUnsub` succeed |
 | pointWrite | a write at level 8 shows up in the priority array, then relinquishes. For Baler this goes gateway → `haystack_api` → broker → the owning site; the test plays the site |
 
+## Results: Baler /api
+
+From the first CI run (every cell is gated, so a red one fails the build):
+
+| client | format | about | read | readById | nav | hisWrite+Read | watch | pointWrite |
+|---|---|---|---|---|---|---|---|---|
+| openhay | zinc | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| openhay | json3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| openhay | hayson | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| phable | zinc | ✅ | ✅ | ✅ | — | ✅ | — | ✅ |
+| phable | json | ✅ | ✅ | ✅ | — | ✅ | — | ✅ |
+
 ## Reference results: Haxall 4.0.6
 
 | client | format | about | read | readById | nav | hisWrite+Read | watch | pointWrite |
