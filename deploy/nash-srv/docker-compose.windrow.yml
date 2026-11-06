@@ -42,11 +42,16 @@ services:
       python -m windrow.api
       --address 172.30.0.11/24:47820 --host 0.0.0.0 --port 8001
       --mqtt-host mosquitto --mqtt-port 1883
-      --mqtt-username baler --mqtt-password ${MQTT_PASSWORD:?set in nash-srv.env}
       --state-file /app/state/windrow-connections.json
       --devices-state-file /app/state/windrow-devices.json
       --modbus-state-file /app/state/windrow-modbus-connections.json
     environment:
+      # Credentials as env, not flags: a --mqtt-password argument shows in
+      # ps / docker top to anyone on the host (#49). windrow.api reads both.
+      MQTT_USERNAME: baler
+      MQTT_PASSWORD: ${MQTT_PASSWORD:?set in nash-srv.env}
+      # Traces to the stack's Jaeger, not the container's own localhost (#48).
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
       # Only requests the gateway forwarded (its /windrow/ route checks the
       # login and role, then adds X-Gateway-Secret) - Baler#14.
       WINDROW_GATEWAY_SECRET: ${BALER_GATEWAY_SECRET:-${TIMBERDOODLE_GATEWAY_SECRET:?set BALER_GATEWAY_SECRET in .env}}
