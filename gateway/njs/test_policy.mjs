@@ -105,4 +105,11 @@ check("isHaystackHandshake only on /api/ and only for HELLO/SCRAM", () => {
     assert.ok(!policy.isHaystackHandshake("/api/demo/read", undefined));
 });
 
+
+check("derivation target enable: the target URI's own slashes (decoded %2F) still route", () => {
+    const uri = "/derivation/derivations/d1/targets/urn:equip:fbf/hospital-a/ahu-1/enable";
+    assert.equal(policy.resolveRoute("POST", uri).minRole, "operator");
+    assert.equal(policy.resolveRoute("GET", uri), null);
+});
+
 console.log(`\n${passed} passed`);

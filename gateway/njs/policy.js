@@ -52,7 +52,8 @@ const ROUTES = [
   ["POST",   /^\/derivation\/derivations\/test$/,                         "derivations", "operator"],
   ["POST",   /^\/derivation\/derivations\/dry-run$/,                      "derivations", "operator"],
   ["GET",    /^\/derivation\/derivations\/[^/]+\/targets$/,                "derivations", "viewer"],
-  ["POST",   /^\/derivation\/derivations\/[^/]+\/targets\/[^/]+\/enable$/,  "derivations", "operator"],
+  // The target is a URI with "/" in it; clients send %2F, and r.uri here is decoded.
+  ["POST",   /^\/derivation\/derivations\/[^/]+\/targets\/.+\/enable$/,      "derivations", "operator"],
 
   // validate_api
   ["POST",   /^\/validate\/validate$/,               "validate", "viewer"],
