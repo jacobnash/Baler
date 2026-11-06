@@ -21,10 +21,12 @@ coarse tick, there's no incremental time-window history to backfill.
 import argparse
 import os
 import time
+from datetime import datetime, timezone
 
 from baler import ingest, mapping, tracing
 from baler.openmeteo_client import OpenMeteoClient
 from baler.remote_store import RemoteStore
+from baler.store import HAYSTACK
 from baler.timeseries import connect
 
 tracer = tracing.get_tracer(__name__)
@@ -43,11 +45,26 @@ DEFAULT_VARIABLE_TAGS = {
 }
 
 
+def observed_at(current: dict, fallback: float) -> float:
+    """Open-Meteo's own observation time (`current.time`, GMT as requested),
+    not when we fetched it: a 15-minute-old observation shouldn't look
+    fresh (#53). Falls back to the fetch time if absent or unparseable."""
+    raw = current.get("time")
+    try:
+        dt = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return fallback
+    return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp()
+
+
 def pull_once(client: OpenMeteoClient, store, ts_conn, station_id: str, variable_tags: dict[str, dict]) -> dict[str, int]:
-    now = time.time()
     with tracer.start_as_current_span("openmeteo_puller.pull_once") as span:
         span.set_attribute("station_id", station_id)
-        current = client.current(list(variable_tags))
+        if hasattr(client, "current_with_units"):
+            current, units = client.current_with_units(list(variable_tags))
+        else:
+            current, units = client.current(list(variable_tags)), {}
+        now = observed_at(current, time.time())
         span.set_attribute("variable_count", len(variable_tags))
 
         topic_prefix = f"weather/{station_id}"
@@ -60,6 +77,12 @@ def pull_once(client: OpenMeteoClient, store, ts_conn, station_id: str, variable
             if value is None:
                 continue
             topic = f"{topic_prefix}/{var}"
+            unit = units.get(var)
+            if unit:
+                # replace, not add: switching metric <-> imperial must not
+                # leave the point with two units (#53)
+                store.update(f"DELETE WHERE {{ <{ingest.topic_to_point_uri(topic)}> <{HAYSTACK}unit> ?u }}")
+                tags = {**tags, "unit": unit}
             point_uri = ingest.ingest_tags(store, topic, tags)
             ingest.link_point_to_equip(store, point_uri, equip_uri)
             outcome, _ = mapping.classify_point_with_fallback(store, point_uri)
@@ -73,6 +96,8 @@ def main() -> None:
     parser.add_argument("--latitude", type=float, default=os.environ.get("OPENMETEO_LATITUDE"), required=os.environ.get("OPENMETEO_LATITUDE") is None)
     parser.add_argument("--longitude", type=float, default=os.environ.get("OPENMETEO_LONGITUDE"), required=os.environ.get("OPENMETEO_LONGITUDE") is None)
     parser.add_argument("--station-id", default=os.environ.get("OPENMETEO_STATION_ID", "openmeteo"))
+    parser.add_argument("--units", choices=["metric", "imperial"], default=os.environ.get("OPENMETEO_UNITS", "metric"),
+                        help="°C + km/h, or °F + mph")
     parser.add_argument("--tick-seconds", type=float, default=900.0, help="Open-Meteo's own current-conditions data refreshes ~every 15 minutes, polling faster just re-reads the same value")
     parser.add_argument("--once", action="store_true", help="pull once and exit instead of polling forever")
     args = parser.parse_args()
@@ -81,7 +106,7 @@ def main() -> None:
 
     store = RemoteStore()
     ts_conn = connect()
-    client = OpenMeteoClient(args.latitude, args.longitude)
+    client = OpenMeteoClient(args.latitude, args.longitude, args.units)
 
     if args.once:
         print(f"pulling {args.station_id!r} @ ({args.latitude}, {args.longitude}) once")

@@ -51,7 +51,7 @@ def _run_openmeteo(s: dict, store, ts_conn):
     from baler import openmeteo_puller
     from baler.openmeteo_client import OpenMeteoClient
 
-    client = OpenMeteoClient(float(s["latitude"]), float(s["longitude"]))
+    client = OpenMeteoClient(float(s["latitude"]), float(s["longitude"]), str(s.get("units") or "metric"))
     return openmeteo_puller.pull_once(client, store, ts_conn, s["station_id"], openmeteo_puller.DEFAULT_VARIABLE_TAGS)
 
 

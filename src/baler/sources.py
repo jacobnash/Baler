@@ -86,6 +86,7 @@ KINDS: dict[str, dict] = {
             _field("latitude", "Latitude", required=True, kind="float"),
             _field("longitude", "Longitude", required=True, kind="float"),
             _field("station_id", "Station id", default="openmeteo"),
+            _field("units", "Units", default="metric", help="metric (°C, km/h) or imperial (°F, mph)"),
             _field("tick_seconds", "Poll every (s)", kind="float", default=900.0),
         ],
     },

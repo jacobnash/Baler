@@ -82,3 +82,67 @@ def test_pull_once_skips_a_variable_missing_from_the_response(ts_conn):
 
     assert counts == {"equip": "direct", "temperature_2m": "direct"}
     assert read_latest(ts_conn, f"urn:point:weather/{STATION_ID}/temperature_2m") == 23.2
+
+
+class FakeUnitsClient(FakeOpenMeteoClient):
+    """Like Open-Meteo with explicit units: also returns current_units."""
+
+    def __init__(self, current: dict, units: dict):
+        super().__init__(current)
+        self._units = units
+
+    def current_with_units(self, variables):
+        self.requested_variables = list(variables)
+        return self._current, self._units
+
+
+def test_observation_time_is_open_meteos_not_the_fetch_time():
+    from baler.openmeteo_puller import observed_at
+
+    assert observed_at({"time": "2026-11-06T20:45"}, 0.0) == 1793997900.0  # GMT, as requested
+    assert observed_at({}, 123.0) == 123.0
+    assert observed_at({"time": "garbage"}, 123.0) == 123.0
+
+
+def test_client_asks_for_explicit_units_and_maps_them_to_haystack(monkeypatch):
+    from baler import openmeteo_client
+
+    sent = {}
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"current": {"time": "2026-11-06T20:45", "temperature_2m": 51.3, "wind_speed_10m": 3.2},
+                    "current_units": {"time": "iso8601", "interval": "seconds",
+                                      "temperature_2m": "°F", "wind_speed_10m": "mp/h"}}
+
+    client = openmeteo_client.OpenMeteoClient(37.76, -122.39, "imperial")
+    monkeypatch.setattr(client._session, "get", lambda url, params: sent.update(params) or Resp())
+    current, units = client.current_with_units(["temperature_2m", "wind_speed_10m"])
+    assert sent["temperature_unit"] == "fahrenheit" and sent["wind_speed_unit"] == "mph"
+    assert units == {"temperature_2m": "°F", "wind_speed_10m": "mph"}
+    assert current["temperature_2m"] == 51.3
+    with pytest.raises(ValueError):
+        openmeteo_client.OpenMeteoClient(0, 0, "kelvin")
+
+
+@pytest.mark.integration
+def test_points_carry_their_unit_and_switching_units_replaces_it(ts_conn):
+    """#53: a °C weather point next to a °F building must say so."""
+    from rdflib import Literal
+
+    from baler.store import HAYSTACK
+
+    store = Store()
+    metric = FakeUnitsClient({"time": "2026-11-06T20:45", "temperature_2m": 10.7},
+                             {"temperature_2m": "°C"})
+    pull_once(metric, store, ts_conn, STATION_ID, {"temperature_2m": DEFAULT_VARIABLE_TAGS["temperature_2m"]})
+    point = URIRef(f"urn:point:weather/{STATION_ID}/temperature_2m")
+    assert set(store.graph.objects(point, HAYSTACK.unit)) == {Literal("°C")}
+
+    imperial = FakeUnitsClient({"time": "2026-11-06T21:00", "temperature_2m": 51.3}, {"temperature_2m": "°F"})
+    pull_once(imperial, store, ts_conn, STATION_ID, {"temperature_2m": DEFAULT_VARIABLE_TAGS["temperature_2m"]})
+    assert set(store.graph.objects(point, HAYSTACK.unit)) == {Literal("°F")}
+    assert read_latest(ts_conn, str(point)) == 51.3

@@ -138,6 +138,15 @@ location. It ingests through `ingest.py`/`mapping.py` directly (no MQTT
 hop) and classifies inline, so — unlike the local-device path above — a
 separate `autotag` sweep isn't needed.
 
+**Units:** each point carries a `unit` tag. That's °C and km/h (`metric`,
+the default) or °F and mph (`imperial`), set per source in Ops → Sources
+(*Units*) or with `OPENMETEO_UNITS` / `--units` for the standalone puller.
+Humidity is `%` and wind direction `°`. Pick the one your building points
+use, so filters like `unit=="°F"` and outdoor-vs-zone comparisons line up.
+Switching units replaces the tag; history already recorded keeps the old
+scale. Readings are stamped with Open-Meteo's observation time, not the
+fetch time, so a 15-minute-old observation doesn't look fresh.
+
 Not part of the default stack — gated behind its own compose profile,
 same shape as `haystack_puller`/`energystar_puller`:
 
