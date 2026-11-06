@@ -48,6 +48,17 @@ def on_disconnect(client, userdata, flags, reason_code, properties=None):
 
 def make_on_message(store, ts_conn):
     def on_message(client, userdata, msg):
+        """One bad message is logged and skipped, never fatal: this client
+        has a persistent session, so a message that crashed it would be
+        redelivered after every restart and stop ingest for good (a bare
+        `1` on an fbf/ topic did exactly that in CI). Infrastructure errors
+        (Postgres/Oxigraph down) still raise, so the container restarts."""
+        try:
+            _handle(msg)
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            print(f"skipped bad message on {msg.topic}: {exc!r}")
+
+    def _handle(msg):
         with tracer.start_as_current_span("mqtt_listener.on_message") as span:
             span.set_attribute("topic", msg.topic)
             try:
@@ -55,6 +66,10 @@ def make_on_message(store, ts_conn):
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 span.set_attribute("error", str(exc))
                 print(f"malformed payload on {msg.topic}: {exc!r}")
+                return
+            if not isinstance(payload, dict):
+                span.set_attribute("error", "payload is not a JSON object")
+                print(f"malformed payload on {msg.topic}: expected a JSON object, got {type(payload).__name__}")
                 return
 
             value = payload.get("value")

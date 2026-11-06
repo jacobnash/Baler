@@ -2,6 +2,7 @@
 Postgres side with a fake control channel, and - integration - real
 isolation on the compose stack's mosquitto (dynamic-security plugin)."""
 
+import json
 import os
 import threading
 import time
@@ -209,11 +210,13 @@ def test_real_broker_enforces_site_isolation():
         assert node.connect(host, port) == 0
         node.loop_start()
         node.subscribe([(f"cmd/{user}/#", 0), ("fbf/#", 0)])
-        node.publish(f"{prefix}/ahu/sat", "1", qos=1).wait_for_publish(5)
-        node.publish(f"fbf/other-{tag}/ahu/sat", "1", qos=1).wait_for_publish(5)
+        # a real reading envelope: mqtt_listener on the same broker ingests fbf/#
+        reading = json.dumps({"value": 1.0, "ts": time.time()})
+        node.publish(f"{prefix}/ahu/sat", reading, qos=1).wait_for_publish(5)
+        node.publish(f"fbf/other-{tag}/ahu/sat", reading, qos=1).wait_for_publish(5)
         time.sleep(0.5)
         backend.publish(f"cmd/{user}/write", "x", qos=1).wait_for_publish(5)
-        backend.publish(f"fbf/it-{tag}/not-for-node", "x", qos=1).wait_for_publish(5)
+        backend.publish(f"fbf/it-{tag}/not-for-node", reading, qos=1).wait_for_publish(5)
         time.sleep(1.0)
         assert f"{prefix}/ahu/sat" in got
         assert f"fbf/other-{tag}/ahu/sat" not in got  # the other site's topic never arrived
