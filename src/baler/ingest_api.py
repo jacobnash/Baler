@@ -75,6 +75,9 @@ def make_handler(store, ts_pool):
             if self.path == "/equip/merge":
                 self._post_equip_merge()
                 return
+            if urlparse(self.path).path == "/records":
+                self.handle_traced("ingest_api.create_record", self._create_record)
+                return
             if self.path == "/part":
                 self._post_part()
                 return
@@ -305,6 +308,29 @@ def make_handler(store, ts_pool):
                 changed = record_edit.apply_edit(store, uri, body)
                 record_edit.log_edit(conn, uri, "edit", *self._who(conn, claims), changed)
             _respond_json(self, 200, {"id": uri, "changed": changed})
+
+        def _create_record(self, span) -> None:
+            body = self.read_json_body()
+            kind = body.get("kind")
+            uri = record_edit.new_uri(kind, body.get("key"))
+            span.set_attribute("entity_uri", uri)
+            link = body.get("equip") if kind == "point" else body.get("parent")
+            with ts_pool.connection() as conn:
+                claims = claims_from_header(self.headers.get("Authorization"))
+                if not scope_for(conn, claims).allows(uri):
+                    _respond_error(self, 400, "that key isn't under any of your sites' topic prefixes")
+                    return
+                if record_edit.exists(store, hisquery._uri(uri)):
+                    _respond_error(self, 409, "a record with that key already exists")
+                    return
+                if link is not None:
+                    ok, _ = self._visible_record(conn, link)
+                    if not ok:
+                        _respond_error(self, 404, f"no such {'equip' if kind == 'point' else 'parent'}: {link}")
+                        return
+                created = record_edit.create_record(store, kind, uri, body, link)
+                record_edit.log_edit(conn, uri, "create", *self._who(conn, claims), {k: v for k, v in body.items() if k != "key"})
+            _respond_json(self, 201, created)
 
         def _delete_record(self, span) -> None:
             uri = parse_qs(urlparse(self.path).query).get("id", [None])[0]

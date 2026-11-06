@@ -152,3 +152,49 @@ def list_edits(conn, uri: str, limit: int = 50) -> list[dict]:
         (uri, limit),
     ).fetchall()
     return [{"ts": r[0].isoformat(), "action": r[1], "who": r[2], "detail": r[3]} for r in rows]
+
+
+_KEY = re.compile(r"[A-Za-z0-9_\-.,~]+(/[A-Za-z0-9_\-.,~]+)*")
+
+
+def new_uri(kind: str, key) -> str:
+    """`equip` + `fbf/hospital-a/ahu-9` -> urn:equip:fbf/hospital-a/ahu-9.
+    The key is topic-shaped, like every BACnet/MQTT record's, so site scope
+    (topic prefixes) applies to hand-made records the same way."""
+    if kind not in ("equip", "point"):
+        raise ValueError("kind must be equip or point")
+    if not isinstance(key, str) or not _KEY.fullmatch(key):
+        raise ValueError("key must be a path like fbf/hospital-a/ahu-9 (letters, digits, _ - . , ~ and /)")
+    return f"urn:{kind}:{key}"
+
+
+def create_record(store, kind: str, uri: str, body: dict, link_to: str | None = None) -> dict:
+    """A new equip or point (Baler#24). `link_to` is, for a point, its equip
+    (required); for an equip, an optional parent it's part of. The caller
+    checks scope and that neither already exists / link_to does."""
+    tags = dict(body.get("tags") or {})
+    if not isinstance(tags, dict):
+        raise TypeError("tags is {tag: value}")
+    dis = body.get("dis")
+    if not isinstance(dis, str) or not dis.strip():
+        raise ValueError("dis (display name) is required")
+    if kind == "point" and not link_to:
+        raise ValueError("a point needs its equip (equip: the equip's id)")
+    node = URIRef(uri)
+    triples: list = [(node, HAYSTACK.hasTag, Literal(kind)), (node, HAYSTACK.dis, Literal(dis.strip()))]
+    for tag, value in tags.items():
+        _check_tag(tag)
+        if tag == "dis":
+            raise ValueError("set dis with the dis field, not as a tag")
+        triples.extend(_value_triples(node, tag, value))
+    if body.get("brickClass"):
+        canonical = brick_vocab.load().canonical_class(str(body["brickClass"]))
+        if not canonical:
+            raise ValueError(f"no Brick class named {body['brickClass']!r}")
+        triples.append((node, RDF.type, BRICK[canonical]))
+    if link_to and kind == "point":
+        triples += [(node, BRICK.isPointOf, URIRef(link_to)), (URIRef(link_to), BRICK.hasPoint, node)]
+    elif link_to:
+        triples.append((URIRef(link_to), BRICK.hasPart, node))
+    store.add_many(triples)
+    return {"id": uri, "kind": kind, "dis": dis.strip(), "link": link_to}

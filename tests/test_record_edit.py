@@ -64,3 +64,32 @@ def test_delete_removes_record_and_links_to_it():
     assert not record_edit.exists(store, uri)
     assert list(store.graph.triples((equip, BRICK.hasPoint, None))) == []  # the link went too
     assert _objs(store, str(equip), HAYSTACK.dis) == ["AHU-1"]  # the equip itself stays
+
+
+def test_create_equip_and_point():
+    store = Store()
+    site = "urn:location:site-a"
+    store.graph.add((URIRef(site), RDF.type, BRICK.Site))
+    eq = record_edit.new_uri("equip", "fbf/a/ahu-9")
+    record_edit.create_record(store, "equip", eq, {"dis": "AHU-9", "brickClass": "ahu", "tags": {"ahu": True}}, site)
+    pt = record_edit.new_uri("point", "fbf/a/ahu-9/sat")
+    record_edit.create_record(store, "point", pt, {"dis": "SAT", "tags": {"temp": True, "unit": "°F"}}, eq)
+    assert (URIRef(site), BRICK.hasPart, URIRef(eq)) in store.graph
+    assert (URIRef(pt), BRICK.isPointOf, URIRef(eq)) in store.graph and (URIRef(eq), BRICK.hasPoint, URIRef(pt)) in store.graph
+    assert set(_objs(store, eq, HAYSTACK.hasTag)) == {"equip", "ahu"} and _objs(store, eq, RDF.type) == [str(BRICK.AHU)]
+    assert _objs(store, pt, HAYSTACK.unit) == ["°F"]
+
+
+@pytest.mark.parametrize("kind, key, body, link, msg", [
+    ("thing", "a/b", {"dis": "x"}, None, "kind must be"),
+    ("equip", "/abs", {"dis": "x"}, None, "key must be"),
+    ("equip", "a b", {"dis": "x"}, None, "key must be"),
+    ("point", "a/p", {"dis": "x"}, None, "needs its equip"),
+    ("equip", "a/e", {}, None, "dis"),
+    ("equip", "a/e", {"dis": "x", "tags": {"equipRef": "y"}}, None, "isn't hand-editable"),
+])
+def test_create_rejects_bad_input(kind, key, body, link, msg):
+    store = Store()
+    with pytest.raises((ValueError, TypeError), match=msg):
+        record_edit.create_record(store, kind, record_edit.new_uri(kind, key), body, link)
+    assert len(store.graph) == 0

@@ -33,6 +33,7 @@ const ROUTES = [
   ["DELETE", /^\/ingest\/history$/,                  "points", "operator"],
   ["GET",    /^\/ingest\/his$/,                      "points", "viewer"],
   // hand edits to equip/point records (Baler#19), logged in record_edits
+  ["POST",   /^\/ingest\/records$/,                   "points", "operator"],
   ["PATCH",  /^\/ingest\/records$/,                   "points", "operator"],
   ["DELETE", /^\/ingest\/records$/,                   "points", "admin"],
   ["GET",    /^\/ingest\/records\/edits$/,            "points", "viewer"],

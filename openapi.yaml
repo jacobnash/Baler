@@ -364,6 +364,39 @@ paths:
               schema:
                 type: string
   /records:
+    post:
+      operationId: createRecord
+      summary: Create an equip or point record by hand (operator)
+      description: >-
+        Baler#24. The key is topic-shaped (fbf/hospital-a/ahu-9) and must sit
+        under one of the caller's sites' topic prefixes, so site scope applies
+        to it like any ingested record. A point needs its equip (linked with
+        brick:isPointOf/hasPoint); an equip may name a parent location or
+        equip it's part of (brick:hasPart). Logged in record_edits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, key, dis]
+              properties:
+                kind: { type: string, enum: [equip, point] }
+                key: { type: string }
+                dis: { type: string }
+                brickClass: { type: string }
+                tags: { type: object, additionalProperties: true }
+                equip: { type: string, description: "points: the equip's id" }
+                parent: { type: string, description: "equips: a location or equip id it's part of" }
+      responses:
+        "201":
+          description: Created.
+        "400":
+          description: A bad key, kind, tag or class, a point with no equip, or a key outside the caller's sites.
+        "404":
+          description: The equip or parent doesn't exist (or is out of scope).
+        "409":
+          description: A record with that key already exists.
     patch:
       operationId: editRecord
       summary: Hand-edit an equip/point record (operator)
@@ -432,7 +465,7 @@ paths:
                   type: object
                   properties:
                     ts: { type: string, format: date-time }
-                    action: { type: string, enum: [edit, delete] }
+                    action: { type: string, enum: [create, edit, delete] }
                     who: { type: string }
                     detail: { type: object }
         "404":

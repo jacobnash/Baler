@@ -55,6 +55,22 @@
       </menu>
     </form>
   </dialog>
+  <dialog id="new-dialog">
+    <form id="new-form" method="dialog">
+      <h3 id="new-title">New equipment</h3>
+      <label>Key <input type="text" id="new-key" required placeholder="fbf/hospital-a/ahu-9" /></label>
+      <p class="hint">The record's permanent id, like a device topic. It must sit under one of your sites' prefixes.</p>
+      <label>Display name <input type="text" id="new-dis" required /></label>
+      <label>Brick class <input type="text" id="new-class" placeholder="optional, e.g. AHU" /></label>
+      <label>Tags <input type="text" id="new-tags" placeholder="optional, space-separated markers, e.g. ahu hot water" /></label>
+      <label id="new-parent-label">Part of <select id="new-parent"><option value="">(nothing)</option></select></label>
+      <p id="new-error" class="field-error" hidden></p>
+      <menu>
+        <button type="submit" value="save">Create</button>
+        <button type="button" id="new-cancel">Cancel</button>
+      </menu>
+    </form>
+  </dialog>
   <script src="auth.js"></script>
   <script src="chart.js"></script>
   <script src="record_edit.js"></script>

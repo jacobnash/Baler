@@ -172,7 +172,10 @@ function buildEquipNode(equip, label) {
   const equipSummary = document.createElement("summary");
   equipSummary.textContent = `${label} `;
   equipSummary.appendChild(hisLink(equip.uri));
-  if (canEditRecords()) equipSummary.appendChild(recordEditButton(equip, () => init()));
+  if (canEditRecords()) {
+    equipSummary.appendChild(recordEditButton(equip, () => init()));
+    equipSummary.appendChild(recordNewButton("+ point", "point", equip, null, () => init()));
+  }
   equipDetails.appendChild(equipSummary);
 
   const pointList = document.createElement("ul");
@@ -415,6 +418,13 @@ async function init() {
 
     const locationSection = await renderLocationSection(equips);
     if (locationSection) treeEl.insertBefore(locationSection, treeEl.firstChild);
+    if (canEditRecords()) {
+      // parents a new equip can be part of: the locations, then equipment
+      const locations = (await haystackRead("Site or Building or Floor or Zone").catch(() => [])).map(entity);
+      const bar = Object.assign(document.createElement("p"), { className: "hint" });
+      bar.appendChild(recordNewButton("+ New equipment", "equip", null, [...locations, ...equips], () => init()));
+      treeEl.insertBefore(bar, treeEl.firstChild);
+    }
   } catch (err) {
     if (err instanceof SessionExpired) return;
     statusEl.textContent = `failed to load from the Haystack API at ${HAYSTACK_API_URL}: ${err.message}`;

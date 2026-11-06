@@ -149,4 +149,61 @@ function wireRecordEditor() {
   });
 }
 
+// --- creating records (Baler#24) -------------------------------------------
+
+let recordCreating = null;
+
+function recordNewButton(text, kind, link, parents, onSaved) {
+  const btn = Object.assign(document.createElement("button"), { type: "button", className: "edit-btn", textContent: text });
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    ev.preventDefault();
+    openCreateDialog(kind, link, parents, onSaved);
+  });
+  return btn;
+}
+
+// kind "equip": `parents` are locations/equips it may be part of; kind
+// "point": `link` is its equip (required) and the key starts under it.
+function openCreateDialog(kind, link, parents, onSaved) {
+  recordCreating = { kind, link, onSaved };
+  const $r = (id) => document.getElementById(id);
+  $r("new-form").reset();
+  $r("new-error").hidden = true;
+  $r("new-title").textContent = kind === "point" ? `New point on ${link.dis}` : "New equipment";
+  const keyOf = (uri) => uri.replace(/^urn:(equip|point):/, "");
+  $r("new-key").value = link ? `${keyOf(link.uri)}/` : "";
+  // inline style, not `hidden`: `dialog label { display: block }` overrides the attribute
+  $r("new-parent-label").style.display = kind === "point" ? "none" : "";
+  const sel = $r("new-parent");
+  sel.length = 1;
+  for (const p of parents || []) sel.appendChild(new Option(`${p.dis}${p.brickClass ? ` (${p.brickClass})` : ""}`, p.uri));
+  $r("new-dialog").showModal();
+}
+
+function wireCreateDialog() {
+  const $r = (id) => document.getElementById(id);
+  if (!$r("new-dialog")) return;
+  $r("new-cancel").addEventListener("click", () => $r("new-dialog").close());
+  $r("new-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const { kind, link, onSaved } = recordCreating;
+    const tags = {};
+    for (const t of $r("new-tags").value.split(/\s+/).filter(Boolean)) tags[t] = true;
+    const body = { kind, key: $r("new-key").value.trim(), dis: $r("new-dis").value.trim(), tags };
+    if ($r("new-class").value.trim()) body.brickClass = $r("new-class").value.trim();
+    if (kind === "point") body.equip = link.uri;
+    else if ($r("new-parent").value) body.parent = $r("new-parent").value;
+    try {
+      await recordApi("POST", "/records", body);
+      $r("new-dialog").close();
+      if (onSaved) onSaved();
+    } catch (err) {
+      $r("new-error").textContent = err.message;
+      $r("new-error").hidden = false;
+    }
+  });
+}
+
 wireRecordEditor();
+wireCreateDialog();
