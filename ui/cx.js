@@ -411,6 +411,8 @@ function pollRun(runId) {
     else flash($("run-status"), `finished ${when(run.finished_at)}`);
     await loadRuns(run.status === "completed" ? run.id : null);
     await loadEvents();
+    // a completed run may have closed or reopened issues
+    if (typeof cxProjectHooks !== "undefined") for (const hook of cxProjectHooks) hook(cx.project);
   };
   tick();
 }

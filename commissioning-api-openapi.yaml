@@ -33,6 +33,7 @@ tags:
   - name: Phases
   - name: Runs
   - name: Templates
+  - name: Issues
 paths:
   /projects:
     get:
@@ -408,6 +409,305 @@ paths:
               schema:
                 type: object
                 additionalProperties: { $ref: "#/components/schemas/EquipVerdict" }
+  /projects/{id}/issues:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Issues]
+      operationId: listCxIssues
+      summary: The project's issues log
+      description: >-
+        Filtered by the caller's scope. Reading also expires accepted risks
+        whose review_by has passed (the issue reopens).
+      parameters:
+        - name: status
+          in: query
+          description: Comma-separated statuses
+          schema: { type: string }
+      responses:
+        "200":
+          description: Issues, oldest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Issue" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Issues]
+      operationId: createCxIssue
+      summary: Open an issue by hand, or from a failing result (operator)
+      description: >-
+        With `from_result`, the issue is tied to that check and subject and
+        closes only when a later run passes it. Without, it's a manual issue
+        that closes by hand.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string }
+                description: { type: string }
+                equip_uri: { type: string }
+                severity: { $ref: "#/components/schemas/IssueSeverity" }
+                assignee: { type: string }
+                from_result:
+                  type: object
+                  required: [run_id, check_id, subject]
+                  properties:
+                    run_id: { type: string }
+                    check_id: { type: string }
+                    subject: { type: string }
+      responses:
+        "201":
+          description: The issue
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Issue" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: An active issue already tracks this check and subject (`issue_id`)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+                  issue_id: { type: [string, "null"] }
+  /projects/{id}/issues/import:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Issues]
+      operationId: importCxIssues
+      summary: Import external issues and punch items (operator)
+      description: >-
+        CSV text or a JSON list from CxAlloy, Facility Grid or a
+        spreadsheet. Columns are matched by common names (id / issue #,
+        title / name, description, status, assignee / responsible party,
+        equipment / asset / tag, priority / severity, location, created).
+        Each item keeps its source system and id: importing the same file
+        again updates those issues instead of duplicating them. Equipment
+        text is matched to an inventory URI when exactly one equipment's
+        name fits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source]
+              properties:
+                source: { type: string, description: "The system the items came from, e.g. cxalloy" }
+                csv: { type: string }
+                items: { type: array, items: { type: object } }
+      responses:
+        "200":
+          description: What changed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [source, created, updated, unchanged, unmatched_equipment]
+                properties:
+                  source: { type: string }
+                  created: { type: integer }
+                  updated: { type: integer }
+                  unchanged: { type: integer }
+                  unmatched_equipment: { type: array, items: { type: string } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/issues/export:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Issues]
+      operationId: exportCxIssues
+      summary: Export the issues log as CSV or JSON
+      description: >-
+        `shape=cxalloy` and `shape=facilitygrid` name the columns the way
+        those tools' spreadsheet imports usually do (best effort: map
+        columns in the tool's import dialog if its template differs).
+        Spreadsheet formula characters at the start of a CSV cell are
+        quoted out.
+      parameters:
+        - { name: format, in: query, schema: { type: string, enum: [csv, json], default: csv } }
+        - { name: shape, in: query, schema: { type: string, enum: [baler, cxalloy, facilitygrid], default: baler } }
+      responses:
+        "200":
+          description: The export
+          content:
+            text/csv:
+              schema: { type: string }
+            application/json:
+              schema: { type: array, items: { type: object } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/risks:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Issues]
+      operationId: listCxRisks
+      summary: Accepted risks, standing (or all with include_revoked=true)
+      parameters:
+        - { name: include_revoked, in: query, schema: { type: boolean } }
+      responses:
+        "200":
+          description: Risks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  allOf:
+                    - { $ref: "#/components/schemas/Risk" }
+                    - type: object
+                      properties:
+                        issue: { type: object }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /runs/{id}/issues:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Issues]
+      operationId: createCxIssuesFromRun
+      summary: Open an issue for each failing result no active issue tracks yet (operator)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                check_prefix: { type: string, description: "e.g. template: or pair:" }
+                equip_uri: { type: string }
+                severity: { type: string, enum: [required, expected, optional] }
+      responses:
+        "200":
+          description: Opened issue ids, and how many failures already had one
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [opened, already_tracked]
+                properties:
+                  opened: { type: array, items: { type: string } }
+                  already_tracked: { type: integer }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /issues/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Issues]
+      operationId: getCxIssue
+      summary: An issue with its events and every risk ever accepted on it
+      responses:
+        "200":
+          description: The issue
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/Issue" }
+                  - type: object
+                    required: [events, risks]
+                    properties:
+                      events: { type: array, items: { $ref: "#/components/schemas/Event" } }
+                      risks: { type: array, items: { $ref: "#/components/schemas/Risk" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Issues]
+      operationId: updateCxIssue
+      summary: Change status, assignee, severity or title, or add a note (operator)
+      description: >-
+        Status moves between open, in_progress and ready_for_retest freely.
+        `closed` is refused (409) for an issue tied to a check - that closes
+        only when a later run passes it - and allowed for manual and
+        imported issues. An issue under an accepted risk can't change
+        status until the risk is revoked.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string, enum: [open, in_progress, ready_for_retest, closed] }
+                assignee: { type: [string, "null"] }
+                severity: { $ref: "#/components/schemas/IssueSeverity" }
+                title: { type: string }
+                note: { type: string }
+      responses:
+        "200":
+          description: The issue
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Issue" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /issues/{id}/events:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Issues]
+      operationId: listCxIssueEvents
+      summary: The issue's audit trail, newest first
+      responses:
+        "200":
+          description: Events
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Event" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /issues/{id}/risk:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Issues]
+      operationId: acceptCxRisk
+      summary: Accept the issue as a risk (admin)
+      description: >-
+        Not a fault and not a closed issue. While the risk stands, the check
+        failing again is recorded against it rather than reopening the
+        issue. Once `review_by` passes, the risk lapses and the issue
+        reopens.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason, review_by]
+              properties:
+                reason: { type: string }
+                review_by: { type: string, format: date }
+      responses:
+        "201":
+          description: The risk
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Risk" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /risks/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    delete:
+      tags: [Issues]
+      operationId: revokeCxRisk
+      summary: Revoke an accepted risk; the issue reopens (admin)
+      responses:
+        "204": { description: Revoked }
+        "404": { $ref: "#/components/responses/NotFound" }
   /templates:
     get:
       tags: [Templates]
@@ -448,6 +748,11 @@ components:
           schema: { $ref: "#/components/schemas/Error" }
     Unauthorized:
       description: Not via the gateway, or no verifiable token with an org
+    Conflict:
+      description: The change breaks a rule (the message says which)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     NotFound:
       description: No such project/run, or not visible to the caller
       content:
@@ -638,6 +943,50 @@ components:
               cause: { type: string }
               distinguish: { type: string }
         evidence: { type: object }
+    IssueSeverity:
+      type: [string, "null"]
+      enum: [critical, major, minor, info, null]
+    Issue:
+      type: object
+      required: [id, project_id, equip_uri, check_id, subject, status, title, severity, assignee, detail, source,
+                 source_id, created_at, updated_at, closed_at, risk]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        equip_uri: { type: [string, "null"] }
+        check_id: { type: [string, "null"], description: Null for manual and imported issues }
+        subject: { type: [string, "null"] }
+        status: { type: string, enum: [open, in_progress, ready_for_retest, closed, risk_accepted] }
+        title: { type: string }
+        severity: { $ref: "#/components/schemas/IssueSeverity" }
+        assignee: { type: [string, "null"] }
+        detail: { type: object }
+        source: { type: string, description: "baler, or the system an imported item came from" }
+        source_id: { type: [string, "null"] }
+        opened_run: { type: [string, "null"] }
+        last_seen_run: { type: [string, "null"] }
+        closed_run: { type: [string, "null"], description: The run whose passing result closed it }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        closed_at: { type: [string, "null"], format: date-time }
+        risk:
+          oneOf:
+            - { $ref: "#/components/schemas/Risk" }
+            - { type: "null" }
+    Risk:
+      type: object
+      required: [id, issue_id, reason, review_by, created_at, revoked_at]
+      properties:
+        id: { type: string }
+        issue_id: { type: string }
+        accepted_by: { type: [string, "null"] }
+        accepted_email: { type: [string, "null"] }
+        reason: { type: string }
+        review_by: { type: string, format: date }
+        created_at: { type: string, format: date-time }
+        revoked_at: { type: [string, "null"], format: date-time }
+        revoked_by: { type: [string, "null"] }
     EquipVerdict:
       type: object
       required: [status, counts]

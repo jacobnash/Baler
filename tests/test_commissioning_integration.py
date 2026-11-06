@@ -153,3 +153,45 @@ def test_run_through_the_api_on_postgres(repo, monkeypatch):
         assert run["phase"] == "startup" and run["summary"]["phase"] == "startup"
     finally:
         server.shutdown()
+
+
+def test_issues_and_risks_round_trip(repo):
+    """Cx 4 (#40) on PgRepo: the one-active-issue index, upsert lookup by
+    source, events and risks, and the reconcile the runner applies."""
+    from datetime import date
+
+    from baler.commissioning import runner
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    pid = _new_project(repo, _org(repo, "issues"), now)
+    issue = {"id": db.new_id(), "project_id": pid, "equip_uri": "urn:equip:cx-it", "check_id": "exists",
+             "subject": "urn:point:cx-it/x", "status": "open", "title": "stale", "severity": None, "assignee": None,
+             "detail": {"symptom": "s"}, "source": "baler", "source_id": None, "opened_run": "r1",
+             "last_seen_run": "r1", "closed_run": None, "created_by": "it", "created_at": now, "updated_at": now,
+             "closed_at": None}
+    repo.create_issue(issue)
+    with pytest.raises(db.IssueExists) as exc:
+        repo.create_issue({**issue, "id": db.new_id()})
+    assert exc.value.issue_id == issue["id"]
+    ext = {**issue, "id": db.new_id(), "check_id": None, "subject": None, "source": "cxalloy", "source_id": "A-1"}
+    repo.create_issue(ext)
+    assert repo.find_issue_by_source(pid, "cxalloy", "A-1")["id"] == ext["id"]
+    assert {i["id"] for i in repo.list_issues(pid, ("open",))} == {issue["id"], ext["id"]}
+    repo.update_issue(ext["id"], {"status": "closed", "closed_at": now, "detail": {"a": 1}})
+    assert repo.get_issue(ext["id"])["detail"] == {"a": 1}
+    repo.add_issue_event(issue["id"], "create", "it", None, {"x": 1}, now)
+    assert repo.list_issue_events(issue["id"])[0]["detail"] == {"x": 1}
+
+    rid = db.new_id()
+    repo.create_risk({"id": rid, "issue_id": issue["id"], "accepted_by": "it", "accepted_email": None, "reason": "r",
+                      "review_by": date(2000, 1, 1), "created_at": now, "revoked_at": None, "revoked_by": None})
+    repo.update_issue(issue["id"], {"status": "risk_accepted"})
+    assert repo.get_risk(rid)["review_by"] == date(2000, 1, 1)
+    assert [r["id"] for r in repo.list_risks(pid)] == [rid]
+    # review_by long past: the risk lapses, then the passing result closes the issue
+    changes = runner.reconcile_issues(repo, pid, "r2", [{"check_id": "exists", "subject": "urn:point:cx-it/x", "status": "pass"}], now)
+    assert [c[2] for c in changes] == ["risk.expired", "close.evidence"]
+    assert repo.get_issue(issue["id"])["status"] == "closed" and repo.get_issue(issue["id"])["closed_run"] == "r2"
+    assert repo.list_risks(pid) == [] and repo.get_risk(rid)["revoked_at"] is not None
+    # closed: a new issue on the same check is allowed again
+    repo.create_issue({**issue, "id": db.new_id()})

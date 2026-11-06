@@ -103,7 +103,75 @@ CREATE TABLE IF NOT EXISTS cx_results (
     PRIMARY KEY (run_id, check_id, subject)
 );
 CREATE INDEX IF NOT EXISTS cx_results_equip ON cx_results (run_id, equip_uri);
+
+-- Cx 4 (#40): the issues log. A check-linked issue closes only on
+-- evidence (commissioning.issues); manual and imported ones by hand.
+CREATE TABLE IF NOT EXISTS cx_issues (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL REFERENCES cx_projects(id),
+    equip_uri     TEXT,                     -- real urn:equip: URI, NULL if unmatched
+    check_id      TEXT,                     -- NULL: manual or imported
+    subject       TEXT,
+    status        TEXT NOT NULL,            -- open | in_progress | ready_for_retest | closed | risk_accepted
+    title         TEXT NOT NULL,
+    severity      TEXT,
+    assignee      TEXT,
+    detail        JSONB NOT NULL DEFAULT '{}',
+    source        TEXT NOT NULL DEFAULT 'baler',  -- the external system an imported item came from
+    source_id     TEXT,
+    opened_run    TEXT,
+    last_seen_run TEXT,
+    closed_run    TEXT,
+    created_by    TEXT,
+    created_at    TIMESTAMPTZ NOT NULL,
+    updated_at    TIMESTAMPTZ NOT NULL,
+    closed_at     TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS cx_issues_project ON cx_issues (project_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS cx_issues_one_active
+    ON cx_issues (project_id, check_id, subject) WHERE status <> 'closed' AND check_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS cx_issues_source
+    ON cx_issues (project_id, source, source_id) WHERE source_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS cx_issue_events (
+    id          BIGSERIAL PRIMARY KEY,
+    issue_id    TEXT NOT NULL REFERENCES cx_issues(id),
+    ts          TIMESTAMPTZ NOT NULL,
+    action      TEXT NOT NULL,
+    user_sub    TEXT,
+    user_email  TEXT,
+    detail      JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cx_issue_events_issue ON cx_issue_events (issue_id, ts DESC);
+
+-- Accepted risks: not faults, not closed issues. One standing risk per issue.
+CREATE TABLE IF NOT EXISTS cx_risks (
+    id             TEXT PRIMARY KEY,
+    issue_id       TEXT NOT NULL REFERENCES cx_issues(id),
+    accepted_by    TEXT,
+    accepted_email TEXT,
+    reason         TEXT NOT NULL,
+    review_by      DATE NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL,
+    revoked_at     TIMESTAMPTZ,
+    revoked_by     TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS cx_risks_one_standing ON cx_risks (issue_id) WHERE revoked_at IS NULL;
 """
+
+ISSUE_COLS = ("id", "project_id", "equip_uri", "check_id", "subject", "status", "title", "severity", "assignee",
+              "detail", "source", "source_id", "opened_run", "last_seen_run", "closed_run", "created_by",
+              "created_at", "updated_at", "closed_at")
+RISK_COLS = ("id", "issue_id", "accepted_by", "accepted_email", "reason", "review_by", "created_at", "revoked_at",
+             "revoked_by")
+
+
+class IssueExists(Exception):
+    """An active issue already tracks this check and subject."""
+
+    def __init__(self, issue_id: str | None):
+        super().__init__("an open issue already tracks this check and subject")
+        self.issue_id = issue_id
 
 
 RUN_STATUSES = ("queued", "running", "completed", "failed")
@@ -155,6 +223,11 @@ def public_run(r: dict) -> dict:
     return {k: _iso(v) for k, v in r.items()}
 
 
+def public_row(r: dict) -> dict:
+    """Datetimes and dates as ISO strings."""
+    return {k: v.isoformat() if hasattr(v, "isoformat") else v for k, v in r.items()}
+
+
 # --------------------------------------------------------------- memory
 
 
@@ -172,6 +245,9 @@ class MemoryRepo:
         self.events: list[dict] = []
         self.runs: dict[str, dict] = {}
         self.results: dict[str, list[dict]] = {}
+        self.issues: dict[str, dict] = {}
+        self.issue_events: list[dict] = []
+        self.risks: dict[str, dict] = {}
         self._lock = threading.Lock()  # runs are written from the worker thread
 
     def scope_for(self, claims) -> Scope:
@@ -275,6 +351,77 @@ class MemoryRepo:
     def get_results(self, run_id: str) -> list[dict]:
         with self._lock:
             return [dict(r) for r in self.results.get(run_id, [])]
+
+    # ---------------------------------------------------------- issues
+
+    def _issue_store(self) -> dict[str, dict]:
+        return self.issues
+
+    def create_issue(self, issue: dict) -> None:
+        with self._lock:
+            store = self._issue_store()
+            if issue.get("check_id"):
+                hit = next((i["id"] for i in store.values() if i["project_id"] == issue["project_id"]
+                            and i["check_id"] == issue["check_id"] and i["subject"] == issue["subject"]
+                            and i["status"] != "closed"), None)
+                if hit:
+                    raise IssueExists(hit)
+            store[issue["id"]] = copy.deepcopy(issue)
+
+    def get_issue(self, issue_id: str) -> dict | None:
+        with self._lock:
+            i = self._issue_store().get(issue_id)
+            return None if i is None else copy.deepcopy(i)
+
+    def list_issues(self, project_id: str, statuses=None) -> list[dict]:
+        with self._lock:
+            rows = [copy.deepcopy(i) for i in self._issue_store().values() if i["project_id"] == project_id
+                    and (not statuses or i["status"] in statuses)]
+        return sorted(rows, key=lambda i: (i["created_at"], i["id"]))
+
+    def find_issue_by_source(self, project_id: str, source: str, source_id: str) -> dict | None:
+        with self._lock:
+            hit = next((i for i in self._issue_store().values() if i["project_id"] == project_id
+                        and i["source"] == source and i["source_id"] == source_id), None)
+            return copy.deepcopy(hit) if hit else None
+
+    def update_issue(self, issue_id: str, changes: dict) -> None:
+        with self._lock:
+            self._issue_store()[issue_id].update(copy.deepcopy(changes))
+
+    def add_issue_event(self, issue_id: str, action: str, user_sub, user_email, detail: dict, now: datetime) -> None:
+        with self._lock:
+            self._issue_store()
+            self.issue_events.append({"id": len(self.issue_events) + 1, "issue_id": issue_id, "ts": now, "action": action,
+                                      "user_sub": user_sub, "user_email": user_email, "detail": detail})
+
+    def list_issue_events(self, issue_id: str) -> list[dict]:
+        with self._lock:
+            self._issue_store()
+            rows = [e for e in self.issue_events if e["issue_id"] == issue_id]
+        return [{k: _iso(v) for k, v in e.items() if k != "issue_id"} for e in reversed(rows)]
+
+    def create_risk(self, risk: dict) -> None:
+        with self._lock:
+            self._issue_store()
+            self.risks[risk["id"]] = dict(risk)
+
+    def get_risk(self, risk_id: str) -> dict | None:
+        with self._lock:
+            self._issue_store()
+            r = self.risks.get(risk_id)
+            return None if r is None else dict(r)
+
+    def list_risks(self, project_id: str, include_revoked: bool = False) -> list[dict]:
+        with self._lock:
+            store = self._issue_store()
+            rows = [dict(r) for r in self.risks.values() if store.get(r["issue_id"], {}).get("project_id") == project_id
+                    and (include_revoked or r["revoked_at"] is None)]
+        return sorted(rows, key=lambda r: (r["created_at"], r["id"]))
+
+    def revoke_risk(self, risk_id: str, now: datetime, by: str | None) -> None:
+        with self._lock:
+            self.risks[risk_id].update(revoked_at=now, revoked_by=by)
 
 
 # ------------------------------------------------------------- postgres
@@ -480,3 +627,81 @@ class PgRepo:
                 " WHERE run_id = %s ORDER BY equip_uri, check_id, subject", (run_id,)).fetchall()
         keys = ("equip_uri", "check_id", "subject", "status", "severity", "symptom", "candidates", "evidence")
         return [dict(zip(keys, r, strict=True)) for r in rows]
+
+    # ---------------------------------------------------------- issues
+
+    def create_issue(self, issue: dict) -> None:
+        try:
+            with self.pool.connection() as conn:
+                conn.execute(
+                    f"INSERT INTO cx_issues ({', '.join(ISSUE_COLS)}) VALUES ({', '.join(['%s'] * len(ISSUE_COLS))})",
+                    tuple(json.dumps(issue.get(c) or {}, default=str) if c == "detail" else issue.get(c) for c in ISSUE_COLS),
+                )
+        except psycopg.errors.UniqueViolation as exc:
+            if "cx_issues_one_active" not in str(exc):
+                raise
+            with self.pool.connection() as conn:
+                row = conn.execute("SELECT id FROM cx_issues WHERE project_id = %s AND check_id = %s AND subject = %s"
+                                   " AND status <> 'closed'", (issue["project_id"], issue["check_id"], issue["subject"])).fetchone()
+            raise IssueExists(row[0] if row else None) from exc
+
+    def _issues(self, where: str, args: tuple) -> list[dict]:
+        with self.pool.connection() as conn:
+            rows = conn.execute(f"SELECT {', '.join(ISSUE_COLS)} FROM cx_issues WHERE {where}", args).fetchall()
+        return [dict(zip(ISSUE_COLS, r, strict=True)) for r in rows]
+
+    def get_issue(self, issue_id: str) -> dict | None:
+        rows = self._issues("id = %s", (issue_id,))
+        return rows[0] if rows else None
+
+    def list_issues(self, project_id: str, statuses=None) -> list[dict]:
+        if statuses:
+            return self._issues("project_id = %s AND status = ANY(%s) ORDER BY created_at, id", (project_id, list(statuses)))
+        return self._issues("project_id = %s ORDER BY created_at, id", (project_id,))
+
+    def find_issue_by_source(self, project_id: str, source: str, source_id: str) -> dict | None:
+        rows = self._issues("project_id = %s AND source = %s AND source_id = %s", (project_id, source, source_id))
+        return rows[0] if rows else None
+
+    def update_issue(self, issue_id: str, changes: dict) -> None:
+        cols = [c for c in changes if c in ISSUE_COLS and c not in ("id", "project_id")]
+        if not cols:
+            return
+        vals = [json.dumps(changes[c], default=str) if c == "detail" else changes[c] for c in cols]
+        with self.pool.connection() as conn:
+            conn.execute(f"UPDATE cx_issues SET {', '.join(f'{c} = %s' for c in cols)} WHERE id = %s", (*vals, issue_id))
+
+    def add_issue_event(self, issue_id: str, action: str, user_sub, user_email, detail: dict, now: datetime) -> None:
+        with self.pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO cx_issue_events (issue_id, ts, action, user_sub, user_email, detail) VALUES (%s, %s, %s, %s, %s, %s)",
+                (issue_id, now, action, user_sub, user_email, json.dumps(detail, default=str)))
+
+    def list_issue_events(self, issue_id: str) -> list[dict]:
+        with self.pool.connection() as conn:
+            rows = conn.execute("SELECT id, ts, action, user_sub, user_email, detail FROM cx_issue_events"
+                                " WHERE issue_id = %s ORDER BY ts DESC, id DESC", (issue_id,)).fetchall()
+        return [{"id": i, "ts": _iso(ts), "action": a, "user_sub": s, "user_email": e, "detail": d} for i, ts, a, s, e, d in rows]
+
+    def create_risk(self, risk: dict) -> None:
+        with self.pool.connection() as conn:
+            conn.execute(f"INSERT INTO cx_risks ({', '.join(RISK_COLS)}) VALUES ({', '.join(['%s'] * len(RISK_COLS))})",
+                         tuple(risk.get(c) for c in RISK_COLS))
+
+    def _risks(self, where: str, args: tuple) -> list[dict]:
+        cols = ", ".join(f"r.{c}" for c in RISK_COLS)
+        with self.pool.connection() as conn:
+            rows = conn.execute(f"SELECT {cols} FROM cx_risks r JOIN cx_issues i ON i.id = r.issue_id WHERE {where}", args).fetchall()
+        return [dict(zip(RISK_COLS, r, strict=True)) for r in rows]
+
+    def get_risk(self, risk_id: str) -> dict | None:
+        rows = self._risks("r.id = %s", (risk_id,))
+        return rows[0] if rows else None
+
+    def list_risks(self, project_id: str, include_revoked: bool = False) -> list[dict]:
+        extra = "" if include_revoked else " AND r.revoked_at IS NULL"
+        return self._risks(f"i.project_id = %s{extra} ORDER BY r.created_at, r.id", (project_id,))
+
+    def revoke_risk(self, risk_id: str, now: datetime, by: str | None) -> None:
+        with self.pool.connection() as conn:
+            conn.execute("UPDATE cx_risks SET revoked_at = %s, revoked_by = %s WHERE id = %s", (now, by, risk_id))

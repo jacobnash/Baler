@@ -84,9 +84,49 @@
             <option value="inconclusive">failures or inconclusive</option>
           </select></label>
           <button type="button" id="report-btn">Printable report</button>
+          <button type="button" id="issues-from-run-btn" data-min-role="operator">Open issues for failures</button>
         </div>
         <div class="cx-grid-wrap"><table id="results-grid" class="cx-grid"></table></div>
         <p class="hint">Each cell counts results: <span class="chip chip-fail">fail</span> <span class="chip chip-inconclusive">inconclusive</span> <span class="chip chip-pass">pass</span>. Inconclusive means no evidence either way; it is never a pass. Click a cell for the evidence.</p>
+      </section>
+
+      <section id="issues-section">
+        <h2>Issues</h2>
+        <p class="hint">An issue opened from a failing check closes only when a later run passes that check; manual and imported ones close by hand.</p>
+        <div class="toolbar">
+          <label>Show <select id="issues-filter">
+            <option value="open,in_progress,ready_for_retest,risk_accepted">active</option>
+            <option value="open">open</option>
+            <option value="in_progress">in progress</option>
+            <option value="ready_for_retest">ready for retest</option>
+            <option value="risk_accepted">risk accepted</option>
+            <option value="closed">closed</option>
+            <option value="">all</option>
+          </select></label>
+          <button type="button" id="new-issue-btn" data-min-role="operator">New issue</button>
+          <button type="button" id="import-issues-btn" data-min-role="operator">Import…</button>
+          <label>Export <select id="export-shape">
+            <option value="baler">Baler</option>
+            <option value="cxalloy">CxAlloy</option>
+            <option value="facilitygrid">Facility Grid</option>
+          </select></label>
+          <button type="button" id="export-csv-btn">CSV</button>
+          <button type="button" id="export-json-btn">JSON</button>
+          <span id="issues-status" class="hint"></span>
+        </div>
+        <table>
+          <thead><tr><th>Status</th><th>Issue</th><th>Equipment</th><th>Severity</th><th>Assignee</th><th>Source</th><th>Updated</th></tr></thead>
+          <tbody id="issues-body"></tbody>
+        </table>
+      </section>
+
+      <section id="risks-section">
+        <h2>Accepted risks</h2>
+        <p class="hint">Kept apart from faults and closed issues on purpose. A risk lapses on its review date and its issue reopens.</p>
+        <table>
+          <thead><tr><th>Issue</th><th>Reason</th><th>Accepted by</th><th>Review by</th><th></th></tr></thead>
+          <tbody id="risks-body"></tbody>
+        </table>
       </section>
 
       <section>
@@ -155,8 +195,51 @@
     </form>
   </dialog>
 
+  <dialog id="issue-dialog">
+    <form id="issue-form" method="dialog">
+      <h3 id="issue-dialog-title">Issue</h3>
+      <div id="issue-detail" class="hint"></div>
+      <div id="issue-edit">
+        <label>Title <input type="text" id="issue-title" required /></label>
+        <label>Status <select id="issue-status"></select></label>
+        <label>Severity <select id="issue-severity">
+          <option value="">-</option><option>critical</option><option>major</option><option>minor</option><option>info</option>
+        </select></label>
+        <label>Assignee <input type="text" id="issue-assignee" /></label>
+        <label>Note <textarea id="issue-note" rows="2"></textarea></label>
+      </div>
+      <fieldset id="issue-risk" data-min-role="admin">
+        <legend>Accept as a risk</legend>
+        <label>Reason <input type="text" id="risk-reason" /></label>
+        <label>Review by <input type="date" id="risk-review" /></label>
+        <button type="button" id="risk-accept-btn">Accept risk</button>
+      </fieldset>
+      <details><summary>History</summary><ul id="issue-events" class="cx-events hint"></ul></details>
+      <p id="issue-error" class="field-error" hidden></p>
+      <menu>
+        <button type="submit" id="issue-save" value="save">Save</button>
+        <button type="button" id="issue-cancel">Close</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="import-dialog">
+    <form id="import-form" method="dialog">
+      <h3>Import issues and punch items</h3>
+      <p class="hint">CSV or JSON from CxAlloy, Facility Grid or a spreadsheet. Columns are matched by name (ID / Issue #, Title / Name, Description, Status, Assigned To, Asset / Equipment, Priority). Importing the same file again updates those items.</p>
+      <label>Source system <input type="text" id="import-source" placeholder="cxalloy" required /></label>
+      <label>File <input type="file" id="import-file" accept=".csv,.json,text/csv,application/json" required /></label>
+      <p id="import-error" class="field-error" hidden></p>
+      <menu>
+        <button type="submit" value="save">Import</button>
+        <button type="button" id="import-cancel">Cancel</button>
+      </menu>
+    </form>
+  </dialog>
+
   <script src="auth.js"></script>
   <script src="chart.js"></script>
   <script src="cx.js"></script>
+  <script src="cx_issues.js"></script>
 </body>
 </html>

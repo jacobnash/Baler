@@ -24,7 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from baler.commissioning import engine
+from baler.commissioning import engine, issues
 from baler.scope import Scope
 
 log = logging.getLogger(__name__)
@@ -75,6 +75,10 @@ def execute(repo, job: RunJob, clock: Callable[[], datetime], run_fn=engine.run)
         repo.complete_run(job.run_id, clock(), summary, results)
         detail = {"run_id": job.run_id, "phase": job.phase, "by_status": summary["by_status"]}
         repo.add_event(job.project_id, "run.complete", job.user_sub, job.user_email, detail, clock())
+        try:
+            reconcile_issues(repo, job.project_id, job.run_id, results, clock())
+        except Exception:  # the run itself stands; the next run reconciles again
+            log.exception("cx run %s: issue reconcile failed", job.run_id)
     except Exception as exc:  # noqa: BLE001 - a failing run is recorded on its row, never fatal to the worker
         log.error("cx run %s failed:\n%s", job.run_id, traceback.format_exc())
         try:
@@ -84,6 +88,30 @@ def execute(repo, job: RunJob, clock: Callable[[], datetime], run_fn=engine.run)
         except Exception:
             # The DB is the likely culprit; the next startup marks it failed.
             log.exception("cx run %s: could not record the failure", job.run_id)
+
+
+def reconcile_issues(repo, project_id: str, run_id: str | None, results: list[dict], now: datetime) -> list[tuple]:
+    """Apply a completed run to the issues log (Cx 4): close on passing
+    evidence, reopen failed retests, expire overdue risks. With no run
+    (run_id None, no results) it only expires risks - the issues API
+    does that on read, so an overdue risk reopens without waiting for a run."""
+    active = repo.list_issues(project_id, issues.ACTIVE)
+    if not active:
+        return []
+    risks = {r["issue_id"]: r for r in repo.list_risks(project_id)}
+    changes = issues.reconcile(active, risks, results, run_id or "", now, now.date())
+    for issue_id, change, action, detail in changes:
+        repo.update_issue(issue_id, change)
+        if action == "risk.expired":
+            repo.revoke_risk(detail["risk_id"], now, None)
+        if action != "still.failing":
+            repo.add_issue_event(issue_id, action, None, None, detail, now)
+    closed = [c[0] for c in changes if c[2] == "close.evidence"]
+    reopened = [c[0] for c in changes if c[2] in ("retest.failed", "risk.expired")]
+    if closed or reopened:
+        repo.add_event(project_id, "issues.reconcile", None, None,
+                       {"run_id": run_id, "closed": closed, "reopened": reopened}, now)
+    return changes
 
 
 class RunWorker:

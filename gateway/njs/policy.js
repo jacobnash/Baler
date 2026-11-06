@@ -94,6 +94,19 @@ const ROUTES = [
   ["GET",    /^\/cx\/runs\/[^/]+\/report$/,                     "commissioning", "viewer"],
   ["GET",    /^\/cx\/projects\/[^/]+\/gaps$/,                   "commissioning", "viewer"],
   ["GET",    /^\/cx\/equipment-status$/,                      "commissioning", "viewer"],
+  // Cx 4 (Baler#40): issues log and accepted risks. Accepting or revoking
+  // a risk is an owner's call - admin.
+  ["GET",    /^\/cx\/projects\/[^/]+\/issues$/,                 "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/issues$/,                 "commissioning", "operator"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/issues\/import$/,          "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/issues\/export$/,          "commissioning", "viewer"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/risks$/,                  "commissioning", "viewer"],
+  ["POST",   /^\/cx\/runs\/[^/]+\/issues$/,                     "commissioning", "operator"],
+  ["GET",    /^\/cx\/issues\/[^/]+$/,                          "commissioning", "viewer"],
+  ["PATCH",  /^\/cx\/issues\/[^/]+$/,                          "commissioning", "operator"],
+  ["GET",    /^\/cx\/issues\/[^/]+\/events$/,                   "commissioning", "viewer"],
+  ["POST",   /^\/cx\/issues\/[^/]+\/risk$/,                     "commissioning", "admin"],
+  ["DELETE", /^\/cx\/risks\/[^/]+$/,                           "commissioning", "admin"],
 
   // auth_api - POST /auth/login has its own exact-match nginx location
   // with no js_access at all (can't require a token to get a token), so
