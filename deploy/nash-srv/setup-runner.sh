@@ -82,9 +82,12 @@ cat > "$WRAPPER" <<EOF
 set -euo pipefail
 cd "${WORKDIR}"
 DC=(docker compose -f "${COMPOSE_BASE}" -f "${COMPOSE_OVERRIDE}" -f "${COMPOSE_WINDROW}" --env-file "${ENV_FILE}")
+# git runs as the checkout's owner, never as root: .git/config is writable
+# by anything running as ${RUNNER_USER} (e.g. an npm postinstall in the docs
+# build), and git honours hooks/fsmonitor/etc. from it (#28).
 MARKER=/var/lib/baler/deployed-commit
 mkdir -p /var/lib/baler
-HEAD_SHA=\$(git -c safe.directory='*' rev-parse HEAD)
+HEAD_SHA=\$(runuser -u "${RUNNER_USER}" -- git rev-parse HEAD)
 PREV=\$(cat "\$MARKER" 2>/dev/null || true)
 # Fast path (#25): when everything that changed since the last deploy is
 # code or content the app containers bind-mount (.:/app) or read at
@@ -92,8 +95,8 @@ PREV=\$(cat "\$MARKER" 2>/dev/null || true)
 # every container (~46s). Anything else (compose files, Dockerfile,
 # pyproject.toml, windrow/, no previous deploy recorded) takes the full path.
 FAST=0
-if [ -n "\$PREV" ] && git -c safe.directory='*' cat-file -e "\$PREV^{commit}" 2>/dev/null; then
-  CHANGED=\$(git -c safe.directory='*' diff --name-only "\$PREV" "\$HEAD_SHA")
+if [ -n "\$PREV" ] && runuser -u "${RUNNER_USER}" -- git cat-file -e "\$PREV^{commit}" 2>/dev/null; then
+  CHANGED=\$(runuser -u "${RUNNER_USER}" -- git diff --name-only "\$PREV" "\$HEAD_SHA")
   if [ -n "\$CHANGED" ] && ! printf '%s\\n' "\$CHANGED" | grep -qvE '^(src/|ui/|gateway/|rules/|ontology/|docs-site/|tests/|todo/|scripts/|[^/]*\\.md\$)'; then
     FAST=1
   fi
