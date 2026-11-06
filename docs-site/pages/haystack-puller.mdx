@@ -149,3 +149,21 @@ This is also the reference implementation for any future pull-style
 source (ENERGY STAR, a utility data API, ...) — see
 [Adding a Data Source](/adding-a-data-source) for what's generic here
 versus what's specific to Haystack.
+
+## Importing export files instead of pulling
+
+When you have files rather than a live server (a SkySpark project you're leaving, a Haxall or
+nhaystack dump), `haystack_import` loads them through the same path the puller uses:
+
+```bash
+python -m baler.haystack_import --source-id skyspark-hq records.zinc his-*.zinc
+```
+
+- **Records**: any grid of `site`/`equip`/`point` rows with ids, e.g. `readAll(site or equip or point)`
+  saved with `ioWriteZinc`. They get the same identities and Brick classification as a live pull,
+  so a later `haystack_puller --source-id skyspark-hq` against the same server updates the same
+  points.
+- **History**: `hisRead` grids (meta `id`, columns `ts`/`val`), written with their original
+  timestamps. Record files are always imported first, whatever order you list them in.
+- Zinc, Haystack 3 JSON, Hayson and Trio are all accepted (sniffed; or `--format`). Needs the
+  `haystack` extra (openhay). Re-importing the same files is a no-op.
