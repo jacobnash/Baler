@@ -282,7 +282,8 @@ def check(kind: str, equip: dict, equips: list[dict], history: History, now: dat
                    candidates=CANDIDATES[kind])
 
 
-def run(equips: list[dict], history: History, now: datetime, window: timedelta, cfg: dict) -> list[dict]:
+def run(equips: list[dict], history: History, now: datetime, window: timedelta, cfg: dict,
+        site: list[dict] | None = None) -> list[dict]:
     out = []
     kinds = cfg.get("checks") or list(CHECKS)
     for e in equips:
@@ -290,7 +291,7 @@ def run(equips: list[dict], history: History, now: datetime, window: timedelta, 
             continue
         for kind in kinds:
             try:
-                out.append(check(kind, e, equips, history, now, window, cfg))
+                out.append(check(kind, e, site or equips, history, now, window, cfg))
             except Exception as exc:  # noqa: BLE001 - one AHU's bad data mustn't sink the run
                 out.append(_result(e["id"], kind, "inconclusive", {"error": f"{type(exc).__name__}: {exc}"[:500]},
                                    symptom="the check itself failed on this equipment's data"))

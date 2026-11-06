@@ -90,6 +90,24 @@
         <p class="hint">Each cell counts results: <span class="chip chip-fail">fail</span> <span class="chip chip-inconclusive">inconclusive</span> <span class="chip chip-pass">pass</span>. Inconclusive means no evidence either way; it is never a pass. Click a cell for the evidence.</p>
       </section>
 
+      <section id="procedures-section">
+        <h2>Test procedures</h2>
+        <p class="hint">Power-on, start-up and functional procedures, judged passively on history from when the equipment was started. Nothing is commanded.</p>
+        <div class="toolbar">
+          <button type="button" id="seed-procedures-btn" data-min-role="operator">Add the standard procedures</button>
+          <span id="procedures-status" class="hint"></span>
+        </div>
+        <table>
+          <thead><tr><th>Procedure</th><th>Kind</th><th>Applies to</th><th>Schedule</th><th>Last result</th><th></th></tr></thead>
+          <tbody id="procedures-body"></tbody>
+        </table>
+        <div id="test-run-view" hidden>
+          <h3 class="cx-sub" id="test-run-title"></h3>
+          <p class="hint" id="test-run-meta"></p>
+          <div class="cx-grid-wrap"><table id="test-run-grid" class="cx-grid"></table></div>
+        </div>
+      </section>
+
       <section id="issues-section">
         <h2>Issues</h2>
         <p class="hint">An issue opened from a failing check closes only when a later run passes that check; manual and imported ones close by hand.</p>
@@ -241,5 +259,6 @@
   <script src="chart.js"></script>
   <script src="cx.js"></script>
   <script src="cx_issues.js"></script>
+  <script src="cx_procedures.js"></script>
 </body>
 </html>

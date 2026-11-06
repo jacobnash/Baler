@@ -157,7 +157,56 @@ CREATE TABLE IF NOT EXISTS cx_risks (
     revoked_by     TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS cx_risks_one_standing ON cx_risks (issue_id) WHERE revoked_at IS NULL;
+
+-- Cx 6 (#42): start-up / power-on / functional test procedures as data,
+-- and their passive test runs (commissioning.procedures).
+CREATE TABLE IF NOT EXISTS cx_test_procedures (
+    id           TEXT PRIMARY KEY,
+    project_id   TEXT NOT NULL REFERENCES cx_projects(id),
+    name         TEXT NOT NULL,
+    kind         TEXT NOT NULL,             -- power_on | startup | functional | seasonal
+    equip_class  TEXT NOT NULL,             -- Brick class, subclass-aware
+    equip_uris   JSONB,                     -- optional explicit equipment list
+    description  TEXT NOT NULL DEFAULT '',
+    steps        JSONB NOT NULL,
+    window_hours DOUBLE PRECISION NOT NULL,
+    schedule     JSONB,                     -- {every_hours} or NULL (on demand only)
+    status       TEXT NOT NULL,             -- draft | active | archived
+    template     TEXT,                      -- seed it came from
+    created_by   TEXT,
+    created_at   TIMESTAMPTZ NOT NULL,
+    updated_at   TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cx_test_procedures_project ON cx_test_procedures (project_id);
+
+CREATE TABLE IF NOT EXISTS cx_test_runs (
+    id           TEXT PRIMARY KEY,
+    project_id   TEXT NOT NULL REFERENCES cx_projects(id),
+    procedure_id TEXT NOT NULL REFERENCES cx_test_procedures(id),
+    phase        TEXT,
+    status       TEXT NOT NULL,             -- queued | running | completed | failed
+    started_at   TIMESTAMPTZ NOT NULL,      -- "powered on / started at": the window starts here
+    window_end   TIMESTAMPTZ NOT NULL,
+    requested_at TIMESTAMPTZ NOT NULL,
+    finished_at  TIMESTAMPTZ,
+    triggered_by TEXT,                      -- user sub, or 'schedule'
+    scope        JSONB NOT NULL,
+    procedure    JSONB NOT NULL,            -- the procedure as it was run
+    equipment    JSONB,                     -- per equipment, per step (procedures.evaluate)
+    summary      JSONB,
+    previous_id  TEXT,
+    diff         JSONB,
+    error        TEXT
+);
+CREATE INDEX IF NOT EXISTS cx_test_runs_procedure ON cx_test_runs (procedure_id, requested_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS cx_test_runs_one_active ON cx_test_runs (procedure_id) WHERE status IN ('queued', 'running');
 """
+
+PROC_COLS = ("id", "project_id", "name", "kind", "equip_class", "equip_uris", "description", "steps", "window_hours",
+             "schedule", "status", "template", "created_by", "created_at", "updated_at")
+TEST_RUN_COLS = ("id", "project_id", "procedure_id", "phase", "status", "started_at", "window_end", "requested_at",
+                 "finished_at", "triggered_by", "scope", "procedure", "equipment", "summary", "previous_id", "diff", "error")
+_JSON_COLS = {"equip_uris", "steps", "schedule", "scope", "procedure", "equipment", "summary", "diff"}
 
 ISSUE_COLS = ("id", "project_id", "equip_uri", "check_id", "subject", "status", "title", "severity", "assignee",
               "detail", "source", "source_id", "opened_run", "last_seen_run", "closed_run", "created_by",
@@ -248,6 +297,8 @@ class MemoryRepo:
         self.issues: dict[str, dict] = {}
         self.issue_events: list[dict] = []
         self.risks: dict[str, dict] = {}
+        self.procedures: dict[str, dict] = {}
+        self.test_runs: dict[str, dict] = {}
         self._lock = threading.Lock()  # runs are written from the worker thread
 
     def scope_for(self, claims) -> Scope:
@@ -274,6 +325,9 @@ class MemoryRepo:
         rows = [copy.deepcopy(p) for p in self.projects.values()
                 if p["org_id"] == org_id and (include_archived or not p.get("archived_at"))]
         return sorted(rows, key=lambda p: (p["created_at"], p["id"]))
+
+    def list_scheduled_projects(self) -> list[dict]:
+        return [copy.deepcopy(p) for p in self.projects.values() if (p.get("settings") or {}).get("schedule")]
 
     def update_project(self, project_id: str, now: datetime, name: str | None = None, settings: dict | None = None,
                        archived_at: datetime | None = None) -> None:
@@ -339,8 +393,8 @@ class MemoryRepo:
 
     def list_runs(self, project_id: str, limit: int = 50) -> list[dict]:
         with self._lock:
-            rows = sorted((r for r in self.runs.values() if r["project_id"] == project_id),
-                          key=lambda r: r["started_at"], reverse=True)
+            # newest first; ties (a fixed test clock) newest-inserted first, as Postgres would by time
+            rows = sorted((r for r in self.runs.values() if r["project_id"] == project_id), key=lambda r: r["started_at"])[::-1]
             return [public_run(r) for r in rows[:limit]]
 
     def get_run(self, run_id: str) -> dict | None:
@@ -423,6 +477,55 @@ class MemoryRepo:
         with self._lock:
             self.risks[risk_id].update(revoked_at=now, revoked_by=by)
 
+    # ------------------------------------------------------ procedures
+
+    def create_procedure(self, proc: dict) -> None:
+        with self._lock:
+            self.procedures[proc["id"]] = copy.deepcopy(proc)
+
+    def get_procedure(self, proc_id: str) -> dict | None:
+        with self._lock:
+            p = self.procedures.get(proc_id)
+            return None if p is None else copy.deepcopy(p)
+
+    def list_procedures(self, project_id: str | None = None) -> list[dict]:
+        with self._lock:
+            rows = [copy.deepcopy(p) for p in self.procedures.values() if project_id is None or p["project_id"] == project_id]
+        return sorted(rows, key=lambda p: (p["created_at"], p["id"]))
+
+    def update_procedure(self, proc_id: str, changes: dict) -> None:
+        with self._lock:
+            self.procedures[proc_id].update(copy.deepcopy(changes))
+
+    def create_test_run(self, tr: dict) -> None:
+        with self._lock:
+            active = next((r["id"] for r in self.test_runs.values()
+                           if r["procedure_id"] == tr["procedure_id"] and r["status"] in ACTIVE), None)
+            if active:
+                raise RunActive(active)
+            self.test_runs[tr["id"]] = copy.deepcopy(tr)
+
+    def update_test_run(self, run_id: str, changes: dict) -> None:
+        with self._lock:
+            self.test_runs[run_id].update(copy.deepcopy(changes))
+
+    def get_test_run(self, run_id: str) -> dict | None:
+        with self._lock:
+            r = self.test_runs.get(run_id)
+            return None if r is None else copy.deepcopy(r)
+
+    def list_test_runs(self, procedure_id: str, limit: int = 50) -> list[dict]:
+        with self._lock:
+            rows = [copy.deepcopy(r) for r in self.test_runs.values() if r["procedure_id"] == procedure_id]
+        return sorted(rows, key=lambda r: r["requested_at"])[::-1][:limit]
+
+    def fail_interrupted_test_runs(self, now: datetime) -> list[dict]:
+        with self._lock:
+            hit = [r for r in self.test_runs.values() if r["status"] in ACTIVE]
+            for r in hit:
+                r.update(status="failed", finished_at=now, error=INTERRUPTED)
+            return [{"id": r["id"], "project_id": r["project_id"]} for r in hit]
+
 
 # ------------------------------------------------------------- postgres
 
@@ -502,6 +605,10 @@ class PgRepo:
     def list_projects(self, org_id: str, include_archived: bool = False) -> list[dict]:
         with self.pool.connection() as conn:
             return self._project_rows(conn, "org_id = %s" + ("" if include_archived else " AND archived_at IS NULL"), (org_id,))
+
+    def list_scheduled_projects(self) -> list[dict]:
+        with self.pool.connection() as conn:
+            return self._project_rows(conn, "archived_at IS NULL AND settings ? 'schedule'", ())
 
     def update_project(self, project_id: str, now: datetime, name: str | None = None, settings: dict | None = None,
                        archived_at: datetime | None = None) -> None:
@@ -705,3 +812,74 @@ class PgRepo:
     def revoke_risk(self, risk_id: str, now: datetime, by: str | None) -> None:
         with self.pool.connection() as conn:
             conn.execute("UPDATE cx_risks SET revoked_at = %s, revoked_by = %s WHERE id = %s", (now, by, risk_id))
+
+    # ------------------------------------------------------ procedures
+
+    @staticmethod
+    def _vals(cols, row: dict) -> tuple:
+        return tuple(json.dumps(row.get(c), default=str) if c in _JSON_COLS and row.get(c) is not None else row.get(c)
+                     for c in cols)
+
+    def create_procedure(self, proc: dict) -> None:
+        with self.pool.connection() as conn:
+            conn.execute(f"INSERT INTO cx_test_procedures ({', '.join(PROC_COLS)}) VALUES ({', '.join(['%s'] * len(PROC_COLS))})",
+                         self._vals(PROC_COLS, proc))
+
+    def _procedures(self, where: str, args: tuple) -> list[dict]:
+        with self.pool.connection() as conn:
+            rows = conn.execute(f"SELECT {', '.join(PROC_COLS)} FROM cx_test_procedures WHERE {where}", args).fetchall()
+        return [dict(zip(PROC_COLS, r, strict=True)) for r in rows]
+
+    def get_procedure(self, proc_id: str) -> dict | None:
+        rows = self._procedures("id = %s", (proc_id,))
+        return rows[0] if rows else None
+
+    def list_procedures(self, project_id: str | None = None) -> list[dict]:
+        if project_id is None:
+            return self._procedures("TRUE ORDER BY created_at, id", ())
+        return self._procedures("project_id = %s ORDER BY created_at, id", (project_id,))
+
+    def update_procedure(self, proc_id: str, changes: dict) -> None:
+        cols = [c for c in changes if c in PROC_COLS and c not in ("id", "project_id")]
+        if cols:
+            with self.pool.connection() as conn:
+                conn.execute(f"UPDATE cx_test_procedures SET {', '.join(f'{c} = %s' for c in cols)} WHERE id = %s",
+                             (*self._vals(cols, changes), proc_id))
+
+    def create_test_run(self, tr: dict) -> None:
+        try:
+            with self.pool.connection() as conn:
+                conn.execute(f"INSERT INTO cx_test_runs ({', '.join(TEST_RUN_COLS)}) VALUES ({', '.join(['%s'] * len(TEST_RUN_COLS))})",
+                             self._vals(TEST_RUN_COLS, tr))
+        except psycopg.errors.UniqueViolation as exc:
+            if "cx_test_runs_one_active" not in str(exc):
+                raise
+            with self.pool.connection() as conn:
+                row = conn.execute("SELECT id FROM cx_test_runs WHERE procedure_id = %s AND status IN ('queued', 'running')",
+                                   (tr["procedure_id"],)).fetchone()
+            raise RunActive(row[0] if row else None) from exc
+
+    def update_test_run(self, run_id: str, changes: dict) -> None:
+        cols = [c for c in changes if c in TEST_RUN_COLS and c != "id"]
+        if cols:
+            with self.run_pool.connection() as conn:
+                conn.execute(f"UPDATE cx_test_runs SET {', '.join(f'{c} = %s' for c in cols)} WHERE id = %s",
+                             (*self._vals(cols, changes), run_id))
+
+    def _test_runs(self, where: str, args: tuple) -> list[dict]:
+        with self.pool.connection() as conn:
+            rows = conn.execute(f"SELECT {', '.join(TEST_RUN_COLS)} FROM cx_test_runs WHERE {where}", args).fetchall()
+        return [dict(zip(TEST_RUN_COLS, r, strict=True)) for r in rows]
+
+    def get_test_run(self, run_id: str) -> dict | None:
+        rows = self._test_runs("id = %s", (run_id,))
+        return rows[0] if rows else None
+
+    def list_test_runs(self, procedure_id: str, limit: int = 50) -> list[dict]:
+        return self._test_runs("procedure_id = %s ORDER BY requested_at DESC LIMIT %s", (procedure_id, limit))
+
+    def fail_interrupted_test_runs(self, now: datetime) -> list[dict]:
+        with self.pool.connection() as conn:
+            rows = conn.execute("UPDATE cx_test_runs SET status = 'failed', finished_at = %s, error = %s"
+                                " WHERE status IN ('queued', 'running') RETURNING id, project_id", (now, INTERRUPTED)).fetchall()
+        return [{"id": i, "project_id": p} for i, p in rows]

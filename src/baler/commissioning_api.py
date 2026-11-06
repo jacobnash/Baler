@@ -39,6 +39,7 @@ from baler.commissioning import (
     issues,
     ladder,
     phases,
+    procedures,
     report,
     runner,
 )
@@ -55,18 +56,18 @@ PORT = 8009
 RUN_STATEMENT_TIMEOUT = "10min"
 
 _PROJECT = re.compile(r"/projects/([^/]+)")
-_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|events|inventory|runs|gaps|issues|risks)")
+_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|events|inventory|runs|gaps|issues|risks|procedures)")
 _PROJECT_ISSUES = re.compile(r"/projects/([^/]+)/issues/(import|export)")
 _RUN_ISSUES = re.compile(r"/runs/([^/]+)/issues")
 _ISSUE = re.compile(r"/issues/([^/]+)")
 _ISSUE_SUB = re.compile(r"/issues/([^/]+)/(events|risk)")
 _RISK = re.compile(r"/risks/([^/]+)")
+_PROCEDURE = re.compile(r"/procedures/([^/]+)")
+_PROCEDURE_RUNS = re.compile(r"/procedures/([^/]+)/runs")
+_TEST_RUN = re.compile(r"/test-runs/([^/]+)")
+_RUN_DIFF = re.compile(r"/runs/([^/]+)/diff")
 _RUN = re.compile(r"/runs/([^/]+)")
 _RUN_REPORT = re.compile(r"/runs/([^/]+)/report")
-
-
-def _scope_json(s: Scope) -> dict:
-    return {"prefixes": None if s.prefixes is None else list(s.prefixes), "exclude": list(s.exclude)}
 
 
 def _check_settings(settings) -> dict:
@@ -82,20 +83,16 @@ def _check_settings(settings) -> dict:
         ladder.validate_settings(settings["ladder"])
     if "economizer" in settings:
         economizer.validate_settings(settings["economizer"])
+    if settings.get("schedule") is not None:
+        sched = settings["schedule"]
+        every = sched.get("every_hours") if isinstance(sched, dict) else None
+        if set(sched if isinstance(sched, dict) else {"x"}) - {"every_hours"} or isinstance(every, bool) \
+                or not isinstance(every, (int, float)) or not 1 <= every <= 744:
+            raise ValueError("schedule is {every_hours: 1..744} or null - a verification run that often")
     return settings
 
 
-def engine_kwargs(settings: dict | None) -> dict:
-    """The per-project knobs a run takes from settings."""
-    s = settings or {}
-    out = {}
-    if s.get("gl36"):
-        out["gl36_settings"] = s["gl36"]
-    if s.get("ladder"):
-        out["ladder_config"] = s["ladder"]
-    if s.get("economizer"):
-        out["economizer_settings"] = s["economizer"]
-    return out
+engine_kwargs = runner.engine_kwargs
 
 
 def make_handler(repo, clock=None, worker=None):
@@ -152,6 +149,8 @@ def make_handler(repo, clock=None, worker=None):
                 return "templates", self._templates
             if path == "/equipment-status" and method == "GET":
                 return "equipment_status", self._equipment_status
+            if path == "/procedure-templates" and method == "GET":
+                return "procedure_templates", self._procedure_templates
             m = _PROJECT_SUB.fullmatch(path)
             if m:
                 pid, sub = m.group(1), m.group(2)
@@ -166,6 +165,8 @@ def make_handler(repo, clock=None, worker=None):
                     ("GET", "issues"): ("list_issues", self._list_issues),
                     ("POST", "issues"): ("create_issue", self._create_issue),
                     ("GET", "risks"): ("list_risks", self._list_risks),
+                    ("GET", "procedures"): ("list_procedures", self._list_procedures),
+                    ("POST", "procedures"): ("create_procedure", self._create_procedure),
                 }
                 hit = table.get((method, sub))
                 return None if hit is None else (hit[0], lambda span, claims: hit[1](span, claims, pid))
@@ -192,6 +193,17 @@ def make_handler(repo, clock=None, worker=None):
             if m:
                 found = {"GET": ("get_issue", self._get_issue), "PATCH": ("patch_issue", self._patch_issue)}.get(method)
                 return None if found is None else self._bind(found, m.group(1))
+            for rx, ptable in (
+                (_PROCEDURE_RUNS, {"POST": ("create_test_run", self._create_test_run), "GET": ("list_test_runs", self._list_test_runs)}),
+                (_PROCEDURE, {"GET": ("get_procedure", self._get_procedure), "PATCH": ("patch_procedure", self._patch_procedure),
+                              "DELETE": ("archive_procedure", self._archive_procedure)}),
+                (_TEST_RUN, {"GET": ("get_test_run", self._get_test_run)}),
+                (_RUN_DIFF, {"GET": ("run_diff", self._run_diff)}),
+            ):
+                m = rx.fullmatch(path)
+                if m:
+                    entry = ptable.get(method)
+                    return None if entry is None else self._bind(entry, m.group(1))
             m = _RISK.fullmatch(path)
             if m and method == "DELETE":
                 kid = m.group(1)
@@ -342,13 +354,7 @@ def make_handler(repo, clock=None, worker=None):
         # ----------------------------------------------------- inventory/runs
 
         def _scopes(self, project: dict, claims: dict) -> tuple[list[Scope], list[str]]:
-            scopes = [repo.scope_for(claims)]
-            prefixes: list[str] = []
-            if project.get("site_id"):
-                site = repo.get_site(project["site_id"])
-                prefixes = list((site or {}).get("topic_prefixes") or [])
-                scopes.append(inventory.site_scope(prefixes))
-            return scopes, prefixes
+            return runner.project_scopes(repo, project, claims)
 
         def _inventory(self, span, claims, pid) -> None:
             p = self._project(pid, claims)
@@ -371,25 +377,12 @@ def make_handler(repo, clock=None, worker=None):
                 return
             body = self.read_json_body()
             wh = engine.window_hours(body.get("window_hours", (p.get("settings") or {}).get("window_hours")))
-            scopes, prefixes = self._scopes(p, claims)
-            started = now_fn()
-            phase = phases.current(p["phases"])
-            run = {
-                "id": db.new_id(), "project_id": pid, "phase": phase, "status": "queued", "started_at": started,
-                "finished_at": None, "window_start": started - timedelta(hours=wh), "window_end": started,
-                "triggered_by": claims.get("sub"), "scope": {"caller": _scope_json(scopes[0]), "site_prefixes": prefixes},
-                "summary": None, "progress": None, "error": None,
-            }
+            sub = claims.get("sub")
             try:
-                repo.create_run(run)
+                run = runner.queue_run(repo, worker, p, claims, now_fn(), wh, sub, repo.user_email(sub))
             except db.RunActive as exc:
                 respond_json(self, 409, {"error": str(exc), "run_id": exc.run_id})
                 return
-            sub = claims.get("sub")
-            email = repo.user_email(sub)
-            repo.add_event(pid, "run.create", sub, email, {"run_id": run["id"], "phase": phase, "window_hours": wh}, now_fn())
-            worker.submit(runner.RunJob(run["id"], pid, phase, scopes, started, wh, sub, email,
-                                        engine_kwargs(p.get("settings"))))
             span.set_attribute("run_id", run["id"])
             respond_json(self, 202, db.public_run(run))
 
@@ -774,6 +767,162 @@ def make_handler(repo, clock=None, worker=None):
             self.end_headers()
             self.wfile.write(body)
 
+        # ------------------------------------------------- procedures (Cx 6)
+
+        def _procedure_templates(self, span, claims) -> None:
+            respond_json(self, 200, [procedures.from_seed(t) for t in procedures.SEED_BY_ID])
+
+        def _public_proc(self, proc: dict) -> dict:
+            return db.public_row(proc)
+
+        def _visible_procedure(self, proc_id: str, claims: dict) -> tuple[dict, dict] | None:
+            proc = repo.get_procedure(proc_id)
+            project = repo.get_project(proc["project_id"]) if proc else None
+            if proc is None or project is None or not self._visible(project, claims):
+                respond_error(self, 404, "no such procedure")
+                return None
+            return proc, project
+
+        def _list_procedures(self, span, claims, pid) -> None:
+            if self._project(pid, claims) is None:
+                return
+            archived = parse_qs(urlparse(self.path).query).get("include_archived", ["false"])[0] == "true"
+            rows = [x for x in repo.list_procedures(pid) if archived or x["status"] != "archived"]
+            respond_json(self, 200, [self._public_proc(x) for x in rows])
+
+        def _create_procedure(self, span, claims, pid) -> None:
+            """A procedure from the body, or from a seed template
+            ({"template": "ahu_startup"}), or every seed ({"seed": "all"})."""
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            body = self.read_json_body()
+            now = now_fn()
+            if body.get("seed") == "all":
+                have = {x.get("template") for x in repo.list_procedures(pid)}
+                specs = [procedures.from_seed(t) for t in procedures.SEED_BY_ID if t not in have]
+            elif body.get("template"):
+                specs = [procedures.from_seed(str(body["template"]))]
+                overrides = {k: body[k] for k in ("name", "equip_uris", "window_hours", "schedule", "status") if k in body}
+                if overrides:
+                    specs = [{**procedures.normalize(overrides, specs[0]), "template": specs[0]["template"]}]
+            else:
+                specs = [{**procedures.normalize(body), "template": None}]
+            made = []
+            for i, spec in enumerate(specs):
+                at = now + timedelta(microseconds=i)  # keep the seeds' order (AHU first) in listings
+                proc = {"id": db.new_id(), "project_id": pid, **spec, "created_by": claims.get("sub"),
+                        "created_at": at, "updated_at": at}
+                repo.create_procedure(proc)
+                made.append(proc)
+            self._event(pid, "procedure.create", claims, {"procedures": [{"id": x["id"], "name": x["name"]} for x in made]})
+            out = [self._public_proc(x) for x in made]
+            respond_json(self, 201, out if body.get("seed") == "all" else out[0])
+
+        def _get_procedure(self, span, claims, proc_id) -> None:
+            hit = self._visible_procedure(proc_id, claims)
+            if hit is not None:
+                respond_json(self, 200, self._public_proc(hit[0]))
+
+        def _patch_procedure(self, span, claims, proc_id) -> None:
+            hit = self._visible_procedure(proc_id, claims)
+            if hit is None:
+                return
+            proc, project = hit
+            body = self.read_json_body()
+            spec = procedures.normalize(body, proc)
+            changes = {k: v for k, v in spec.items() if proc.get(k) != v}
+            if changes:
+                repo.update_procedure(proc_id, {**changes, "updated_at": now_fn()})
+                self._event(project["id"], "procedure.update", claims, {"procedure_id": proc_id, "fields": sorted(changes)})
+            respond_json(self, 200, self._public_proc(repo.get_procedure(proc_id) or proc))
+
+        def _archive_procedure(self, span, claims, proc_id) -> None:
+            hit = self._visible_procedure(proc_id, claims)
+            if hit is None:
+                return
+            proc, project = hit
+            if proc["status"] != "archived":
+                repo.update_procedure(proc_id, {"status": "archived", "updated_at": now_fn()})
+                self._event(project["id"], "procedure.archive", claims, {"procedure_id": proc_id})
+            self.send_response(204)
+            self.end_headers()
+
+        def _create_test_run(self, span, claims, proc_id) -> None:
+            """Passive: "powered on / started at T" (started_at, default
+            the procedure's window before now); judged on history from T
+            over hours (default the procedure's window_hours), up to now."""
+            hit = self._visible_procedure(proc_id, claims)
+            if hit is None:
+                return
+            proc, project = hit
+            if project.get("archived_at") or proc["status"] == "archived":
+                respond_error(self, 409, "project or procedure is archived")
+                return
+            body = self.read_json_body()
+            now = now_fn()
+            hours = float(body.get("hours", proc["window_hours"]))
+            if not 0 < hours <= 744:
+                raise ValueError("hours must be in (0, 744]")
+            if body.get("started_at"):
+                start = datetime.fromisoformat(str(body["started_at"]).replace("Z", "+00:00"))
+                if start.tzinfo is None:
+                    raise ValueError("started_at needs a time zone (e.g. 2026-11-06T08:00:00Z)")
+            else:
+                start = now - timedelta(hours=hours)
+            if start >= now:
+                raise ValueError("started_at must be in the past: a passive test judges history that already exists")
+            end = min(start + timedelta(hours=hours), now)
+            sub = claims.get("sub")
+            try:
+                tr = runner.queue_test_run(repo, worker, project, proc, claims, start, end, now, sub, repo.user_email(sub))
+            except db.RunActive as exc:
+                respond_json(self, 409, {"error": "this procedure already has a test run in progress", "test_run_id": exc.run_id})
+                return
+            respond_json(self, 202, db.public_row(tr))
+
+        def _list_test_runs(self, span, claims, proc_id) -> None:
+            if self._visible_procedure(proc_id, claims) is None:
+                return
+            rows = [{k: v for k, v in db.public_row(r).items() if k not in ("equipment", "procedure")}
+                    for r in repo.list_test_runs(proc_id)]
+            respond_json(self, 200, rows)
+
+        def _get_test_run(self, span, claims, tr_id) -> None:
+            tr = repo.get_test_run(tr_id)
+            if tr is None or not self._visible(repo.get_project(tr["project_id"]), claims):
+                respond_error(self, 404, "no such test run")
+                return
+            scope = repo.scope_for(claims)
+            out = db.public_row(tr)
+            if out.get("equipment"):
+                out["equipment"] = [e for e in out["equipment"] if scope.allows(e["equip_uri"])]
+            if out.get("diff"):
+                out["diff"] = {**out["diff"], "changes": [c for c in out["diff"]["changes"] if scope.allows(c["equip_uri"])]}
+            respond_json(self, 200, out)
+
+        def _run_diff(self, span, claims, rid) -> None:
+            """Reconcile a run against an earlier one (default: the
+            project's previous completed run)."""
+            hit = self._visible_run(rid, claims)
+            if hit is None:
+                return
+            _, project = hit
+            against = parse_qs(urlparse(self.path).query).get("against", [None])[0]
+            if against:
+                other = repo.get_run(against)
+                if other is None or other["project_id"] != project["id"]:
+                    raise ValueError("against must be another run of this project")
+            else:
+                runs = repo.list_runs(project["id"], 200)  # newest first
+                older = runs[next((i for i, r in enumerate(runs) if r["id"] == rid), len(runs)) + 1:]
+                other = next((r for r in older if r["status"] == "completed"), None)
+            scope = repo.scope_for(claims)
+            cur = [r for r in repo.get_results(rid) if scope.allows(r["equip_uri"])]
+            prev = [r for r in repo.get_results(other["id"]) if scope.allows(r["equip_uri"])] if other else []
+            respond_json(self, 200, {"run_id": rid, "against": other["id"] if other else None,
+                                     **procedures.diff_results(prev, cur)})
+
         def _templates(self, span, claims) -> None:
             respond_json(self, 200, [t.as_dict() for t in tpl.load()])
 
@@ -800,7 +949,15 @@ def main() -> None:
     for r in repo.fail_interrupted_runs(now):
         repo.add_event(r["project_id"], "run.fail", None, None, {"run_id": r["id"], "error": db.INTERRUPTED}, now)
         print(f"commissioning run {r['id']} was interrupted by a restart; marked failed")
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(repo))
+    for r in repo.fail_interrupted_test_runs(now):
+        repo.add_event(r["project_id"], "test_run.fail", None, None, {"test_run_id": r["id"], "error": db.INTERRUPTED}, now)
+    clock = lambda: datetime.now(timezone.utc)
+    worker = runner.RunWorker(repo, clock)
+    # Scheduled procedures and project runs (Cx 6). One process runs the
+    # scheduler; a second commissioning_api would double-queue, which the
+    # one-active-run indexes turn into a skipped tick, not a duplicate.
+    runner.Scheduler(repo, worker, clock)
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(repo, worker=worker))
     print(f"commissioning API listening on {args.host}:{args.port}")
     server.serve_forever()
 

@@ -107,6 +107,17 @@ const ROUTES = [
   ["GET",    /^\/cx\/issues\/[^/]+\/events$/,                   "commissioning", "viewer"],
   ["POST",   /^\/cx\/issues\/[^/]+\/risk$/,                     "commissioning", "admin"],
   ["DELETE", /^\/cx\/risks\/[^/]+$/,                           "commissioning", "admin"],
+  // Cx 6 (Baler#42): test procedures (passive) and run diffs
+  ["GET",    /^\/cx\/procedure-templates$/,                   "commissioning", "viewer"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/procedures$/,             "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/procedures$/,             "commissioning", "operator"],
+  ["GET",    /^\/cx\/procedures\/[^/]+$/,                      "commissioning", "viewer"],
+  ["PATCH",  /^\/cx\/procedures\/[^/]+$/,                      "commissioning", "operator"],
+  ["DELETE", /^\/cx\/procedures\/[^/]+$/,                      "commissioning", "admin"],
+  ["GET",    /^\/cx\/procedures\/[^/]+\/runs$/,                 "commissioning", "viewer"],
+  ["POST",   /^\/cx\/procedures\/[^/]+\/runs$/,                 "commissioning", "operator"],
+  ["GET",    /^\/cx\/test-runs\/[^/]+$/,                       "commissioning", "viewer"],
+  ["GET",    /^\/cx\/runs\/[^/]+\/diff$/,                       "commissioning", "viewer"],
 
   // auth_api - POST /auth/login has its own exact-match nginx location
   // with no js_access at all (can't require a token to get a token), so

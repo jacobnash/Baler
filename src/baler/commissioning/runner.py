@@ -22,9 +22,9 @@ import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from baler.commissioning import engine, issues
+from baler.commissioning import db, engine, inventory, issues, phases, procedures
 from baler.scope import Scope
 
 log = logging.getLogger(__name__)
@@ -114,26 +114,240 @@ def reconcile_issues(repo, project_id: str, run_id: str | None, results: list[di
     return changes
 
 
+def project_scopes(repo, project: dict, claims: dict) -> tuple[list[Scope], list[str]]:
+    """The caller's own scope, plus the project site's topic prefixes."""
+    scopes = [repo.scope_for(claims)]
+    prefixes: list[str] = []
+    if project.get("site_id"):
+        site = repo.get_site(project["site_id"])
+        prefixes = list((site or {}).get("topic_prefixes") or [])
+        scopes.append(inventory.site_scope(prefixes))
+    return scopes, prefixes
+
+
+def scope_json(s: Scope) -> dict:
+    return {"prefixes": None if s.prefixes is None else list(s.prefixes), "exclude": list(s.exclude)}
+
+
+def engine_kwargs(settings: dict | None) -> dict:
+    """The per-project knobs a run takes from settings."""
+    s = settings or {}
+    out = {}
+    if s.get("gl36"):
+        out["gl36_settings"] = s["gl36"]
+    if s.get("ladder"):
+        out["ladder_config"] = s["ladder"]
+    if s.get("economizer"):
+        out["economizer_settings"] = s["economizer"]
+    return out
+
+
+def queue_run(repo, worker, project: dict, claims: dict, now: datetime, window_hours: float,
+              user_sub: str | None, user_email: str | None) -> dict:
+    """Record a queued verification run and hand it to the worker.
+    RunActive if the project already has one in flight."""
+    scopes, prefixes = project_scopes(repo, project, claims)
+    phase = phases.current(project["phases"])
+    run = {
+        "id": db.new_id(), "project_id": project["id"], "phase": phase, "status": "queued", "started_at": now,
+        "finished_at": None, "window_start": now - timedelta(hours=window_hours), "window_end": now,
+        "triggered_by": user_sub, "scope": {"caller": scope_json(scopes[0]), "site_prefixes": prefixes},
+        "summary": None, "progress": None, "error": None,
+    }
+    repo.create_run(run)
+    repo.add_event(project["id"], "run.create", user_sub, user_email,
+                   {"run_id": run["id"], "phase": phase, "window_hours": window_hours}, now)
+    worker.submit(RunJob(run["id"], project["id"], phase, scopes, now, window_hours, user_sub, user_email,
+                         engine_kwargs(project.get("settings"))))
+    return run
+
+
+# ------------------------------------------------------------ test runs (Cx 6)
+
+
+@dataclass
+class TestJob:
+    run_id: str
+    project_id: str
+    procedure: dict
+    scopes: list[Scope]
+    start: datetime
+    end: datetime
+    user_sub: str | None = None
+    user_email: str | None = None
+    engine_kwargs: dict = field(default_factory=dict)
+
+
+def queue_test_run(repo, worker, project: dict, proc: dict, claims: dict, start: datetime, end: datetime,
+                   now: datetime, user_sub: str | None, user_email: str | None) -> dict:
+    scopes, prefixes = project_scopes(repo, project, claims)
+    snapshot = {k: proc[k] for k in ("id", "name", "kind", "equip_class", "equip_uris", "steps", "window_hours")}
+    tr = {"id": db.new_id(), "project_id": project["id"], "procedure_id": proc["id"], "phase": phases.current(project["phases"]),
+          "status": "queued", "started_at": start, "window_end": end, "requested_at": now, "finished_at": None,
+          "triggered_by": user_sub, "scope": {"caller": scope_json(scopes[0]), "site_prefixes": prefixes},
+          "procedure": snapshot, "equipment": None, "summary": None, "previous_id": None, "diff": None, "error": None}
+    repo.create_test_run(tr)
+    repo.add_event(project["id"], "test_run.create", user_sub, user_email,
+                   {"test_run_id": tr["id"], "procedure_id": proc["id"], "procedure": proc["name"], "started_at": start.isoformat()}, now)
+    worker.submit(TestJob(tr["id"], project["id"], snapshot, scopes, start, end, user_sub, user_email,
+                          engine_kwargs(project.get("settings"))))
+    return tr
+
+
+def _range_points(proc: dict, equips: list[dict]) -> list[str]:
+    out: set[str] = set()
+    for st in proc["steps"]:
+        for c in st["criteria"]:
+            if "range" not in c:
+                continue
+            if c.get("point"):
+                out.add(c["point"])
+            else:
+                fam = procedures._family(c["point_class"])
+                out |= {p["id"] for e in equips for p in e["points"] if p.get("brickClass") in fam}
+    return sorted(out)
+
+
+def execute_test(repo, job: TestJob, clock: Callable[[], datetime], run_fn=engine.run) -> None:
+    """One passive test run to completion or failure. Never raises."""
+    try:
+        repo.update_test_run(job.run_id, {"status": "running"})
+        with repo.history() as h:
+            hist = procedures.ClippedHistory(h, job.end)
+            site = inventory.build(repo.store, job.scopes)
+            equips = [e for e in site if procedures.applies(job.procedure, e)]
+            hours = max((job.end - job.start).total_seconds() / 3600, 1 / 60)
+            _, results = run_fn(repo.store, hist, job.scopes, job.end, hours, equips=equips, site_equips=site,
+                                **job.engine_kwargs)
+            ids = _range_points(job.procedure, site)
+            series = hist.window(ids, job.start, job.end + timedelta(seconds=1)) if ids else {}
+        per = procedures.evaluate(job.procedure, equips, results, series)
+        prev = next((r for r in repo.list_test_runs(job.procedure["id"], 20)
+                     if r["id"] != job.run_id and r["status"] == "completed"), None)
+        summary = procedures.summarize(per)
+        summary["window_hours"] = round(hours, 3)
+        summary["partial"] = job.end > clock()
+        delta = procedures.diff(prev["equipment"] if prev else None, per)
+        repo.update_test_run(job.run_id, {"status": "completed", "finished_at": clock(), "equipment": per, "summary": summary,
+                                          "previous_id": prev["id"] if prev else None, "diff": delta})
+        repo.add_event(job.project_id, "test_run.complete", job.user_sub, job.user_email,
+                       {"test_run_id": job.run_id, "procedure": job.procedure["name"], "by_status": summary["by_status"],
+                        "diff": delta["counts"]}, clock())
+    except Exception as exc:  # noqa: BLE001 - recorded on the row, never fatal to the worker
+        log.error("cx test run %s failed:\n%s", job.run_id, traceback.format_exc())
+        try:
+            repo.update_test_run(job.run_id, {"status": "failed", "finished_at": clock(), "error": error_text(exc)})
+            repo.add_event(job.project_id, "test_run.fail", job.user_sub, job.user_email,
+                           {"test_run_id": job.run_id, "error": error_text(exc)}, clock())
+        except Exception:
+            log.exception("cx test run %s: could not record the failure", job.run_id)
+
+
 class RunWorker:
     def __init__(self, repo, clock: Callable[[], datetime], workers: int = WORKERS, run_fn=engine.run):
         self.repo = repo
         self.clock = clock
         self.run_fn = run_fn
-        self._queue: queue.Queue[RunJob] = queue.Queue()
+        self._queue: queue.Queue[RunJob | TestJob] = queue.Queue()
         for i in range(workers):
             threading.Thread(target=self._loop, name=f"cx-run-{i}", daemon=True).start()
 
-    def submit(self, job: RunJob) -> None:
+    def submit(self, job: RunJob | TestJob) -> None:
         self._queue.put(job)
 
     def _loop(self) -> None:
         while True:
             job = self._queue.get()
             try:
-                execute(self.repo, job, self.clock, self.run_fn)
+                if isinstance(job, TestJob):
+                    execute_test(self.repo, job, self.clock, self.run_fn)
+                else:
+                    execute(self.repo, job, self.clock, self.run_fn)
             finally:
                 self._queue.task_done()
 
     def join(self) -> None:
         """Block until everything submitted so far has finished (tests)."""
         self._queue.join()
+
+
+# ------------------------------------------------------------ scheduling
+
+
+def due(last: datetime | None, every_hours: float, now: datetime) -> bool:
+    return last is None or now - last >= timedelta(hours=every_hours)
+
+
+def schedule_tick(repo, worker, now: datetime) -> list[str]:
+    """Queue whatever is due: a procedure with schedule.every_hours, and a
+    project with settings.schedule.every_hours (a verification run). Runs
+    as the project's org (no user), on the project's site. Returns what
+    was queued (ids). Never raises for one bad project."""
+    queued: list[str] = []
+    projects: dict[str, dict | None] = {}
+
+    def project(pid: str) -> dict | None:
+        if pid not in projects:
+            projects[pid] = repo.get_project(pid)
+        return projects[pid]
+
+    for proc in repo.list_procedures(None):
+        sched = proc.get("schedule") or {}
+        p = project(proc["project_id"])
+        if proc["status"] != "active" or not sched.get("every_hours") or p is None or p.get("archived_at"):
+            continue
+        runs = repo.list_test_runs(proc["id"], 1)
+        last = runs[0]["requested_at"] if runs else None
+        if isinstance(last, str):
+            last = datetime.fromisoformat(last)
+        if not due(last, float(sched["every_hours"]), now):
+            continue
+        try:
+            tr = queue_test_run(repo, worker, p, proc, {"org_id": p["org_id"], "site_ids": []},
+                                now - timedelta(hours=float(proc["window_hours"])), now, now, "schedule", None)
+            queued.append(tr["id"])
+        except db.RunActive:
+            continue
+        except Exception:
+            log.exception("cx schedule: procedure %s", proc["id"])
+
+    for p in _scheduled_projects(repo):
+        sched = (p.get("settings") or {}).get("schedule") or {}
+        runs = repo.list_runs(p["id"], 1)
+        last = datetime.fromisoformat(runs[0]["started_at"]) if runs else None
+        if not due(last, float(sched["every_hours"]), now):
+            continue
+        try:
+            wh = engine.window_hours((p.get("settings") or {}).get("window_hours"))
+            run = queue_run(repo, worker, p, {"org_id": p["org_id"], "site_ids": []}, now, wh, "schedule", None)
+            queued.append(run["id"])
+        except db.RunActive:
+            continue
+        except Exception:
+            log.exception("cx schedule: project %s", p["id"])
+    return queued
+
+
+def _scheduled_projects(repo) -> list[dict]:
+    lister = getattr(repo, "list_scheduled_projects", None)
+    rows = lister() if lister else []
+    return [p for p in rows if not p.get("archived_at") and ((p.get("settings") or {}).get("schedule") or {}).get("every_hours")]
+
+
+class Scheduler:
+    """A daemon thread in commissioning_api: once a minute, schedule_tick."""
+
+    def __init__(self, repo, worker, clock: Callable[[], datetime], every_s: float = 60.0):
+        self.repo, self.worker, self.clock, self.every_s = repo, worker, clock, every_s
+        self._stop = threading.Event()
+        threading.Thread(target=self._loop, name="cx-schedule", daemon=True).start()
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.every_s):
+            try:
+                schedule_tick(self.repo, self.worker, self.clock())
+            except Exception:
+                log.exception("cx schedule tick failed")
+
+    def stop(self) -> None:
+        self._stop.set()

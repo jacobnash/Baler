@@ -40,20 +40,25 @@ def freshness_statement(now: datetime, window_h: float, n: int, fresh: int, stal
 def run(store, history: History, scopes: list[Scope], now: datetime, window_h: float = DEFAULT_WINDOW_HOURS,
         templates=None, ladder_config: dict | None = None,
         progress: Callable[[dict], None] | None = None, gl36_settings: dict | None = None,
-        economizer_settings: dict | None = None) -> tuple[dict, list[dict]]:
+        economizer_settings: dict | None = None, equips: list[dict] | None = None,
+        site_equips: list[dict] | None = None) -> tuple[dict, list[dict]]:
     """(summary, results). `progress`, if given, is told the stage and how
     many equipment are done; it must be cheap (it's called per equipment).
     `gl36_settings` (project settings `gl36`) adds ConStrain sequence items
     as gl36:<item> results (Cx 3, needs the cx-gl36 extra);
     `economizer_settings` (settings `economizer`) adds Baler's own
-    cx:econ_* checks. `ladder_config` is settings `ladder`."""
+    cx:econ_* checks. `ladder_config` is settings `ladder`.
+    `equips` skips the inventory read (a test procedure passes just the
+    equipment it applies to); `site_equips` is then the whole inventory,
+    where building-wide points like outdoor air temperature are found."""
     def report(stage: str, done: int = 0, total: int | None = None, points: int | None = None) -> None:
         if progress is not None:
             progress({"stage": stage, "equipment_done": done, "equipment_total": total, "points": points})
 
     templates = templates if templates is not None else tpl.load()
     report("inventory")
-    equips = inventory.build(store, scopes)
+    if equips is None:
+        equips = inventory.build(store, scopes)
     point_ids = sorted({p["id"] for e in equips for p in e["points"]})
     report("history", 0, len(equips), len(point_ids))
     latest = history.latest(point_ids) if point_ids else {}
@@ -77,12 +82,12 @@ def run(store, history: History, scopes: list[Scope], now: datetime, window_h: f
         from baler.commissioning import gl36  # pandas only when a project asks for it
 
         report("gl36", len(equips), len(equips), len(point_ids))
-        results.extend(gl36.run(equips, history, now, window, gl36_settings))
+        results.extend(gl36.run(equips, history, now, window, gl36_settings, site_equips))
     if economizer_settings:
         from baler.commissioning import economizer
 
         report("economizer", len(equips), len(equips), len(point_ids))
-        results.extend(economizer.run(equips, history, now, window, economizer_settings))
+        results.extend(economizer.run(equips, history, now, window, economizer_settings, site_equips))
 
     by_status = {s: 0 for s in checks.STATUSES}
     by_check: dict[str, dict[str, int]] = {}

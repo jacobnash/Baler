@@ -320,8 +320,11 @@ def check(item: Item, equip: dict, equips: list[dict], history: History, now: da
     return _result(equip["id"], item, "inconclusive", ev, symptom="ConStrain reported every sample untested")
 
 
-def run(equips: list[dict], history: History, now: datetime, window: timedelta, settings: dict) -> list[dict]:
-    """One gl36:<item> result per enabled item per equipment it applies to."""
+def run(equips: list[dict], history: History, now: datetime, window: timedelta, settings: dict,
+        site: list[dict] | None = None) -> list[dict]:
+    """One gl36:<item> result per enabled item per equipment it applies to.
+    `site` (default `equips`) is where building-wide roles like outdoor
+    air temperature are looked for."""
     out = []
     for item_id in sorted(settings):
         item = ITEMS[item_id]
@@ -329,7 +332,7 @@ def run(equips: list[dict], history: History, now: datetime, window: timedelta, 
             if not applies(item, e):
                 continue
             try:
-                out.append(check(item, e, equips, history, now, window, settings[item_id] or {}))
+                out.append(check(item, e, site or equips, history, now, window, settings[item_id] or {}))
             except Exception as exc:  # noqa: BLE001 - one item's bad data mustn't sink the whole run
                 out.append(_result(e["id"], item, "inconclusive", {"item": item.id, "error": f"{type(exc).__name__}: {exc}"[:500]},
                                    symptom="the check itself failed on this equipment's data"))

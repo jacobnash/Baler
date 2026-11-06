@@ -195,3 +195,34 @@ def test_issues_and_risks_round_trip(repo):
     assert repo.list_risks(pid) == [] and repo.get_risk(rid)["revoked_at"] is not None
     # closed: a new issue on the same check is allowed again
     repo.create_issue({**issue, "id": db.new_id()})
+
+
+def test_procedures_and_test_runs_round_trip(repo):
+    """Cx 6 (#42) on PgRepo: JSON columns, the one-active-test-run index,
+    scheduled-project listing."""
+    from baler.commissioning import procedures
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    pid = _new_project(repo, _org(repo, "proc"), now)
+    proc = {"id": db.new_id(), "project_id": pid, **procedures.from_seed("boiler_startup"), "created_by": "it",
+            "created_at": now, "updated_at": now}
+    repo.create_procedure(proc)
+    got = repo.get_procedure(proc["id"])
+    assert got["steps"] == proc["steps"] and got["schedule"] is None and got["template"] == "boiler_startup"
+    repo.update_procedure(proc["id"], {"schedule": {"every_hours": 6}, "updated_at": now})
+    assert repo.get_procedure(proc["id"])["schedule"] == {"every_hours": 6}
+    assert proc["id"] in {p["id"] for p in repo.list_procedures(None)}
+    tr = {"id": db.new_id(), "project_id": pid, "procedure_id": proc["id"], "phase": "startup", "status": "queued",
+          "started_at": now - timedelta(hours=2), "window_end": now, "requested_at": now, "finished_at": None,
+          "triggered_by": "it", "scope": {}, "procedure": {"id": proc["id"]}, "equipment": None, "summary": None,
+          "previous_id": None, "diff": None, "error": None}
+    repo.create_test_run(tr)
+    with pytest.raises(db.RunActive):
+        repo.create_test_run({**tr, "id": db.new_id()})
+    repo.update_test_run(tr["id"], {"status": "completed", "equipment": [{"equip_uri": "e", "steps": []}], "finished_at": now})
+    assert repo.get_test_run(tr["id"])["equipment"] == [{"equip_uri": "e", "steps": []}]
+    assert [r["id"] for r in repo.list_test_runs(proc["id"])] == [tr["id"]]
+    repo.update_project(pid, now, settings={"schedule": {"every_hours": 12}})
+    assert pid in {p["id"] for p in repo.list_scheduled_projects()}
+    repo.update_project(pid, now, archived_at=now)
+    assert pid not in {p["id"] for p in repo.list_scheduled_projects()}

@@ -34,6 +34,7 @@ tags:
   - name: Runs
   - name: Templates
   - name: Issues
+  - name: Procedures
 paths:
   /projects:
     get:
@@ -708,6 +709,212 @@ paths:
       responses:
         "204": { description: Revoked }
         "404": { $ref: "#/components/responses/NotFound" }
+  /procedure-templates:
+    get:
+      tags: [Procedures]
+      operationId: listCxProcedureTemplates
+      summary: Seed start-up and power-on procedures (AHU, VAV, FCU, chiller, boiler, pump)
+      responses:
+        "200":
+          description: Templates, in the same shape a project's procedure takes
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ProcedureSpec" }
+  /projects/{id}/procedures:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Procedures]
+      operationId: listCxProcedures
+      summary: The project's test procedures
+      parameters:
+        - { name: include_archived, in: query, schema: { type: boolean } }
+      responses:
+        "200":
+          description: Procedures
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Procedure" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Procedures]
+      operationId: createCxProcedure
+      summary: Add a procedure - your own, one seed template, or every seed (operator)
+      description: >-
+        Body is a procedure (ProcedureSpec), or `{"template": "<id>"}` (with
+        optional name, equip_uris, window_hours, schedule, status
+        overrides), or `{"seed": "all"}` to add every seed the project
+        doesn't have yet (answers a list).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - { $ref: "#/components/schemas/ProcedureSpec" }
+                - type: object
+                  required: [template]
+                  properties: { template: { type: string } }
+                - type: object
+                  required: [seed]
+                  properties: { seed: { type: string, enum: [all] } }
+      responses:
+        "201":
+          description: The procedure (or, for seed=all, the list added)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - { $ref: "#/components/schemas/Procedure" }
+                  - { type: array, items: { $ref: "#/components/schemas/Procedure" } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /procedures/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Procedures]
+      operationId: getCxProcedure
+      summary: A procedure
+      responses:
+        "200":
+          description: The procedure
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Procedure" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Procedures]
+      operationId: updateCxProcedure
+      summary: Change any field of a procedure (operator)
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProcedureSpec" }
+      responses:
+        "200":
+          description: The procedure
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Procedure" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Procedures]
+      operationId: archiveCxProcedure
+      summary: Archive a procedure; its test runs are kept (admin)
+      responses:
+        "204": { description: Archived }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /procedures/{id}/runs:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Procedures]
+      operationId: listCxTestRuns
+      summary: The procedure's test runs, newest first (without per-equipment detail)
+      responses:
+        "200":
+          description: Test runs
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/TestRun" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Procedures]
+      operationId: createCxTestRun
+      summary: Run the procedure passively over history (operator)
+      description: >-
+        "Powered on / started at T": `started_at` is T (default: `hours`
+        before now) and the procedure is judged on history from T for
+        `hours` (default the procedure's window_hours), cut off at now.
+        Nothing is commanded. Asynchronous like verification runs: 202,
+        then poll GET /test-runs/{id}. The result is diffed per equipment
+        and step against the procedure's previous completed test run.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                started_at: { type: string, format: date-time }
+                hours: { type: number, exclusiveMinimum: 0, maximum: 744 }
+      responses:
+        "202":
+          description: The queued test run
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TestRun" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Archived, or a test run of this procedure is already in progress (`test_run_id`)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+                  test_run_id: { type: [string, "null"] }
+  /test-runs/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Procedures]
+      operationId: getCxTestRun
+      summary: A test run with its per-equipment, per-step verdicts and the diff against the previous one
+      responses:
+        "200":
+          description: The test run
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TestRun" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /runs/{id}/diff:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Runs]
+      operationId: getCxRunDiff
+      summary: Reconcile a run against an earlier one, per check and subject
+      description: >-
+        States, from PR #5's reconcile: new, gone, resolved (now passes),
+        regressed (now fails), changed, still_failing. Default
+        `against`: the project's previous completed run.
+      parameters:
+        - { name: against, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: The diff
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run_id, against, counts, changes]
+                properties:
+                  run_id: { type: string }
+                  against: { type: [string, "null"] }
+                  counts: { type: object, additionalProperties: { type: integer } }
+                  changes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        check_id: { type: string }
+                        subject: { type: string }
+                        equip_uri: { type: [string, "null"] }
+                        before: { type: [string, "null"] }
+                        after: { type: [string, "null"] }
+                        state: { type: string }
+                        symptom: { type: [string, "null"] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /templates:
     get:
       tags: [Templates]
@@ -798,6 +1005,10 @@ components:
           example:
             hw_reset: { unit: F, temperature_air_outdoor_min: 20, temperature_air_outdoor_max: 60,
                         temperature_water_hot_setpoint_max: 180, temperature_water_hot_setpoint_min: 140 }
+        schedule:
+          type: [object, "null"]
+          description: A verification run this often, as the project's org on its site (Cx 6)
+          properties: { every_hours: { type: number, minimum: 1, maximum: 744 } }
         ladder:
           type: object
           description: >-
@@ -996,6 +1207,107 @@ components:
               cause: { type: string }
               distinguish: { type: string }
         evidence: { type: object }
+    Criterion:
+      type: object
+      description: >-
+        Either `check` (a Cx check id or prefix - `exists`, `live`,
+        `pair:`, `template:`, `gl36:hw_reset`, `cx:econ_*` - optionally
+        filtered by severity, pair_kind or point_class; `strict` counts
+        inconclusive as failing) or `range` ({min, max, unit}) over a
+        point_class's points or one named `point`, e.g. a derivation
+        output. A criterion matching nothing is not_applicable unless
+        `required`.
+      properties:
+        check: { type: string }
+        strict: { type: boolean }
+        severity: { type: string, enum: [required, expected, optional] }
+        pair_kind: { type: string, enum: [cmd_status, track] }
+        point_class: { type: string }
+        point: { type: string }
+        required: { type: boolean }
+        range:
+          type: object
+          properties:
+            min: { type: number }
+            max: { type: number }
+            unit: { type: string, enum: [C, F] }
+    ProcedureSpec:
+      type: object
+      required: [name, kind, equip_class, steps]
+      properties:
+        name: { type: string }
+        kind: { type: string, enum: [power_on, startup, functional, seasonal] }
+        equip_class: { type: string, description: Brick equipment class, subclass-aware }
+        equip_uris: { type: [array, "null"], items: { type: string } }
+        description: { type: string }
+        window_hours: { type: number }
+        schedule:
+          type: [object, "null"]
+          properties: { every_hours: { type: number, minimum: 1, maximum: 744 } }
+        status: { type: string, enum: [draft, active, archived] }
+        template: { type: [string, "null"] }
+        steps:
+          type: array
+          items:
+            type: object
+            required: [criteria]
+            properties:
+              id: { type: string }
+              title: { type: string }
+              instruction: { type: string }
+              criteria: { type: array, items: { $ref: "#/components/schemas/Criterion" } }
+    Procedure:
+      allOf:
+        - { $ref: "#/components/schemas/ProcedureSpec" }
+        - type: object
+          required: [id, project_id, created_at, updated_at]
+          properties:
+            id: { type: string }
+            project_id: { type: string }
+            created_by: { type: [string, "null"] }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+    TestRun:
+      type: object
+      required: [id, project_id, procedure_id, status, started_at, window_end, requested_at]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        procedure_id: { type: string }
+        phase: { type: [string, "null"] }
+        status: { type: string, enum: [queued, running, completed, failed] }
+        started_at: { type: string, format: date-time, description: '"Powered on / started at": the window starts here' }
+        window_end: { type: string, format: date-time }
+        requested_at: { type: string, format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+        triggered_by: { type: [string, "null"], description: "The user, or `schedule`" }
+        scope: { type: object }
+        procedure: { type: object, description: The procedure as it was run }
+        equipment:
+          type: [array, "null"]
+          items:
+            type: object
+            properties:
+              equip_uri: { type: string }
+              dis: { type: [string, "null"] }
+              status: { $ref: "#/components/schemas/Status" }
+              steps:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    title: { type: string }
+                    status: { $ref: "#/components/schemas/Status" }
+                    criteria: { type: array, items: { type: object } }
+        summary: { type: [object, "null"] }
+        previous_id: { type: [string, "null"] }
+        diff:
+          type: [object, "null"]
+          properties:
+            counts: { type: object, additionalProperties: { type: integer } }
+            changes: { type: array, items: { type: object } }
+        error: { type: [string, "null"] }
     IssueSeverity:
       type: [string, "null"]
       enum: [critical, major, minor, info, null]
