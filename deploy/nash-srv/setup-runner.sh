@@ -26,7 +26,9 @@
 
 set -euo pipefail
 
-TOKEN="${1:?Usage: sudo bash setup-runner.sh <RUNNER_REGISTRATION_TOKEN>}"
+# The token is only needed the first time (step 6 registers the runner);
+# re-running to update the deploy wrapper works without one.
+TOKEN="${1:-}"
 RUNNER_USER="github-runner"
 RUNNER_HOME="/home/${RUNNER_USER}"
 RUNNER_DIR="${RUNNER_HOME}/actions-runner-baler"
@@ -79,8 +81,31 @@ cat > "$WRAPPER" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd "${WORKDIR}"
-docker compose -f "${COMPOSE_BASE}" -f "${COMPOSE_OVERRIDE}" -f "${COMPOSE_WINDROW}" --env-file "${ENV_FILE}" pull --ignore-pull-failures
-docker compose -f "${COMPOSE_BASE}" -f "${COMPOSE_OVERRIDE}" -f "${COMPOSE_WINDROW}" --env-file "${ENV_FILE}" up -d --build
+DC=(docker compose -f "${COMPOSE_BASE}" -f "${COMPOSE_OVERRIDE}" -f "${COMPOSE_WINDROW}" --env-file "${ENV_FILE}")
+MARKER=/var/lib/baler/deployed-commit
+mkdir -p /var/lib/baler
+HEAD_SHA=\$(git -c safe.directory='*' rev-parse HEAD)
+PREV=\$(cat "\$MARKER" 2>/dev/null || true)
+# Fast path (#25): when everything that changed since the last deploy is
+# code or content the app containers bind-mount (.:/app) or read at
+# startup, restarting them is enough - no image rebuild, no recreate of
+# every container (~46s). Anything else (compose files, Dockerfile,
+# pyproject.toml, windrow/, no previous deploy recorded) takes the full path.
+FAST=0
+if [ -n "\$PREV" ] && git -c safe.directory='*' cat-file -e "\$PREV^{commit}" 2>/dev/null; then
+  CHANGED=\$(git -c safe.directory='*' diff --name-only "\$PREV" "\$HEAD_SHA")
+  if [ -n "\$CHANGED" ] && ! printf '%s\\n' "\$CHANGED" | grep -qvE '^(src/|ui/|gateway/|rules/|ontology/|docs-site/|tests/|todo/|scripts/|[^/]*\\.md\$)'; then
+    FAST=1
+  fi
+fi
+if [ "\$FAST" = 1 ]; then
+  echo "only bind-mounted code/content changed since \$PREV - restarting app services, no rebuild"
+  APPS=\$("\${DC[@]}" ps --services --status running | grep -vxE 'postgres|oxigraph|mosquitto|jaeger|grafana|gateway|windrow.*' || true)
+  [ -n "\$APPS" ] && "\${DC[@]}" restart \$APPS
+else
+  "\${DC[@]}" pull --ignore-pull-failures
+  "\${DC[@]}" up -d --build
+fi
 # The app containers bind-mount this checkout (.:/app) and run as root, so
 # anything they write into it (e.g. __pycache__/*.pyc) ends up root-owned -
 # the *next* actions/checkout runs as github-runner and can't git-clean
@@ -102,6 +127,7 @@ for i in \$(seq 1 30); do
   [ "\$code" != "000" ] && break
   sleep 1
 done
+echo "\$HEAD_SHA" > "\$MARKER"
 EOF
 chown root:root "$WRAPPER"
 chmod 755 "$WRAPPER"
@@ -121,6 +147,10 @@ echo "==> 6. Installing the GitHub Actions runner"
 if [ -f "${RUNNER_DIR}/.runner" ]; then
   echo "    ${RUNNER_DIR} is already configured - skipping (safe to re-run everything above)"
 else
+  if [ -z "$TOKEN" ]; then
+    echo "registering a new runner needs a token: sudo bash setup-runner.sh <RUNNER_REGISTRATION_TOKEN>" >&2
+    exit 1
+  fi
   mkdir -p "$RUNNER_DIR"
   chown "${RUNNER_USER}:${RUNNER_USER}" "$RUNNER_DIR"
   case "$(uname -m)" in
