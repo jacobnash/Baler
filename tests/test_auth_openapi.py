@@ -61,6 +61,29 @@ def _lookup(spec: dict, ref: str) -> dict:
     return node
 
 
+def _delete_test_orgs(conn) -> None:
+    """Run before AND after each test: a test org left behind with site
+    topic prefixes switches on site scoping for the whole shared DB, and
+    every later test that reads without a token then sees nothing (that
+    broke CI's integration job from fd6d208 on)."""
+    # FK-safe order (children before parents) - see test_auth.py's
+    # conn fixture for the same pattern/reasoning.
+    conn.execute("""
+        DELETE FROM user_sites WHERE user_id IN (
+            SELECT id FROM users WHERE org_id IN (SELECT id FROM orgs WHERE name LIKE 'OpenAPI Test Org%')
+        )
+    """)
+    conn.execute("""
+        DELETE FROM revoked_tokens WHERE jti IN (
+            SELECT jti FROM api_keys WHERE org_id IN (SELECT id FROM orgs WHERE name LIKE 'OpenAPI Test Org%')
+        )
+    """)
+    conn.execute("DELETE FROM api_keys WHERE org_id IN (SELECT id FROM orgs WHERE name LIKE 'OpenAPI Test Org%')")
+    conn.execute("DELETE FROM sites WHERE org_id IN (SELECT id FROM orgs WHERE name LIKE 'OpenAPI Test Org%')")
+    conn.execute("DELETE FROM users WHERE org_id IN (SELECT id FROM orgs WHERE name LIKE 'OpenAPI Test Org%')")
+    conn.execute("DELETE FROM orgs WHERE name LIKE 'OpenAPI Test Org%'")
+
+
 @pytest.fixture
 def live_server(monkeypatch):
     monkeypatch.setenv("BALER_JWT_SECRET", "test-jwt-secret-needs-32-bytes-minimum-for-hs256")
@@ -69,22 +92,7 @@ def live_server(monkeypatch):
     with ts_pool.connection() as conn:
         ensure_schema(conn)
         broker_accounts.ensure_schema(conn)
-        # FK-safe order (children before parents) - see test_auth.py's
-        # conn fixture for the same pattern/reasoning.
-        conn.execute("""
-            DELETE FROM user_sites WHERE user_id IN (
-                SELECT id FROM users WHERE org_id IN (SELECT id FROM orgs WHERE name LIKE 'OpenAPI Test Org%')
-            )
-        """)
-        conn.execute("""
-            DELETE FROM revoked_tokens WHERE jti IN (
-                SELECT jti FROM api_keys WHERE org_id IN (SELECT id FROM orgs WHERE name LIKE 'OpenAPI Test Org%')
-            )
-        """)
-        conn.execute("DELETE FROM api_keys WHERE org_id IN (SELECT id FROM orgs WHERE name LIKE 'OpenAPI Test Org%')")
-        conn.execute("DELETE FROM sites WHERE org_id IN (SELECT id FROM orgs WHERE name LIKE 'OpenAPI Test Org%')")
-        conn.execute("DELETE FROM users WHERE org_id IN (SELECT id FROM orgs WHERE name LIKE 'OpenAPI Test Org%')")
-        conn.execute("DELETE FROM orgs WHERE name LIKE 'OpenAPI Test Org%'")
+        _delete_test_orgs(conn)
     server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(ts_pool, broker=FAKE_BROKER))
     server.daemon_threads = True
     thread = Thread(target=server.serve_forever, daemon=True)
@@ -92,6 +100,8 @@ def live_server(monkeypatch):
     base_url = f"http://127.0.0.1:{server.server_address[1]}"
     yield base_url
     server.shutdown()
+    with ts_pool.connection() as conn:
+        _delete_test_orgs(conn)
     ts_pool.close()
 
 

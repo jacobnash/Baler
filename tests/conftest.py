@@ -27,3 +27,59 @@ def assert_matches_schema(instance, schema: dict, spec: dict) -> None:
         schema = {"$ref": f"spec{schema['$ref']}"}
     validator_cls = validator_for(schema)
     validator_cls(schema, registry=registry).validate(instance)
+
+
+# --- shared-DB hygiene for integration tests ---------------------------------
+#
+# Site scoping (#16) switches on for the whole database the moment any site
+# has a topic prefix: from then on a caller with no token sees nothing. Many
+# integration tests read without a token, so one test that leaves a prefixed
+# site behind silently empties every later test's results (CI's integration
+# job was red from fd6d208 to the fix for exactly this). After each
+# integration test, sites it created keep no prefixes, with a warning naming
+# the test, so a leak can't spread.
+
+import warnings  # noqa: E402
+
+import pytest  # noqa: E402
+
+
+def _site_ids(conn) -> set[str] | None:
+    try:
+        return {r[0] for r in conn.execute("SELECT id FROM sites").fetchall()}
+    except Exception:  # noqa: BLE001 - no sites table yet, or no DB: nothing to guard
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_site_prefixes(request):
+    if request.node.get_closest_marker("integration") is None:
+        yield
+        return
+    try:
+        from baler.timeseries import connect
+
+        conn = connect()
+    except Exception:  # noqa: BLE001 - DB unreachable: the test itself will say so
+        yield
+        return
+    before = _site_ids(conn)
+    try:
+        yield
+    finally:
+        try:
+            if before is not None:
+                leaked = conn.execute(
+                    "UPDATE sites SET topic_prefixes = '{}' WHERE cardinality(topic_prefixes) > 0 "
+                    "AND NOT (id = ANY(%s)) RETURNING name",
+                    (list(before),),
+                ).fetchall()
+                if leaked:
+                    warnings.warn(
+                        f"{request.node.nodeid} left site(s) {[r[0] for r in leaked]} with topic prefixes; "
+                        "cleared them so later tests aren't scoped (clean up in the test's teardown)",
+                        stacklevel=1,
+                    )
+        except Exception:  # noqa: BLE001 - the guard must never fail a test itself
+            pass
+        conn.close()
