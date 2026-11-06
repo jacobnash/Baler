@@ -298,6 +298,105 @@ paths:
                   role: { type: string }
         "401":
           $ref: "#/components/responses/Unauthorized"
+    get:
+      operationId: listUsers
+      tags: [Directory]
+      summary: The users in the caller's own org
+      description: admin-only. Never includes password hashes.
+      responses:
+        "200":
+          description: Users, by email.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    email: { type: string }
+                    role: { type: string }
+                    created_at: { type: string, format: date-time }
+                    site_ids: { type: array, items: { type: string } }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /users/{user_id}:
+    delete:
+      operationId: deleteUser
+      tags: [Directory]
+      summary: Remove a user from the caller's org
+      description: >-
+        admin-only, own org only. Also ends the user's live sessions at the
+        gateway (within its 30s denylist refresh). You can't delete your
+        own account.
+      parameters:
+        - { name: user_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204":
+          description: Deleted.
+        "400":
+          description: That's the caller's own account.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No such user in the caller's org.
+  /users/{user_id}/password:
+    put:
+      operationId: setUserPassword
+      tags: [Directory]
+      summary: Set a user's password (admin reset)
+      description: >-
+        admin-only, own org only. Ends every session the user had; they log
+        in again with the new password.
+      parameters:
+        - { name: user_id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string }
+      responses:
+        "204":
+          description: Changed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No such user in the caller's org.
+  /me/password:
+    post:
+      operationId: changeOwnPassword
+      tags: [Auth]
+      summary: Change your own password
+      description: >-
+        Any logged-in user (session tokens only, not API keys). Ends all of
+        your sessions, this one included, and returns a fresh token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string }
+                new_password: { type: string }
+      responses:
+        "200":
+          description: Changed; use the returned token from now on.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+        "400":
+          description: The caller is an API key.
+        "401":
+          description: Current password wrong, or no valid token.
   /openapi.yaml:
     get:
       operationId: getOpenApiSpec

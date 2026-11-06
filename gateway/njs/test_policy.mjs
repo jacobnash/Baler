@@ -128,4 +128,20 @@ check("windrow: site-restricted logins are kept out; whole-org logins and other 
     assert.equal(policy.scopeSatisfies("points", { site_ids: ["s1"] }), true);
 });
 
+check("user lifecycle routes: admin, except changing your own password", () => {
+    assert.equal(policy.resolveRoute("GET", "/auth/users").minRole, "admin");
+    assert.equal(policy.resolveRoute("DELETE", "/auth/users/u1").minRole, "admin");
+    assert.equal(policy.resolveRoute("PUT", "/auth/users/u1/password").minRole, "admin");
+    assert.equal(policy.resolveRoute("POST", "/auth/me/password").minRole, "viewer");
+});
+
+check("per-user session cutoff: parse denylist rows, reject older sessions only", () => {
+    assert.deepEqual(policy.parseUserCutoff("user:abc:1700000000"), { key: "user:abc", epoch: 1700000000 });
+    assert.equal(policy.parseUserCutoff("3f2a9c"), null);
+    assert.equal(policy.sessionCutOff({ iat: 99, exp: 99 + 43200 }, "100"), true);
+    assert.equal(policy.sessionCutOff({ iat: 100, exp: 100 + 43200 }, "100"), false); // a fresh login that second
+    assert.equal(policy.sessionCutOff({ iat: 99 }, undefined), false);
+    assert.equal(policy.sessionCutOff({ exp: 50 + 43200 }, "100"), true); // pre-iat token: iat = exp - TTL
+});
+
 console.log(`\n${passed} passed`);

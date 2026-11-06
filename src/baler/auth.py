@@ -118,6 +118,7 @@ def issue_session_token(user: dict, site_ids: list[str]) -> str:
         "site_ids": site_ids,
         "kind": "session",
         "jti": jti,
+        "iat": int(time.time()),
         "exp": int(time.time()) + SESSION_TTL_SECONDS,
     }
     return pyjwt.encode(claims, _jwt_secret(), algorithm="HS256")
@@ -227,6 +228,73 @@ def create_user(conn: psycopg.Connection, org_id: str, email: str, password: str
 def get_user_by_email(conn: psycopg.Connection, email: str) -> dict | None:
     row = conn.execute(
         "SELECT id, org_id, email, password_hash, role FROM users WHERE email = %s", (email,)
+    ).fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "org_id": row[1], "email": row[2], "password_hash": row[3], "role": row[4]}
+
+
+def list_users(conn: psycopg.Connection, org_id: str) -> list[dict]:
+    rows = conn.execute(
+        """SELECT u.id, u.email, u.role, u.created_at,
+                  COALESCE(array_agg(us.site_id) FILTER (WHERE us.site_id IS NOT NULL), '{}')
+           FROM users u LEFT JOIN user_sites us ON us.user_id = u.id
+           WHERE u.org_id = %s GROUP BY u.id ORDER BY u.email""",
+        (org_id,),
+    ).fetchall()
+    return [{"id": r[0], "email": r[1], "role": r[2], "created_at": r[3].isoformat(), "site_ids": list(r[4])}
+            for r in rows]
+
+
+# Sessions are stateless JWTs, so ending a user's sessions (deleted, or
+# password reset) is a cutoff in the denylist the gateway already polls:
+# "user:<id>:<epoch>" rejects that user's session tokens issued before
+# <epoch> (gateway/njs/main.js). Kept until every such token would have
+# expired anyway, then pruned like any session revocation.
+_USER_CUTOFF = "user:{}:{}"
+
+
+def end_user_sessions(conn: psycopg.Connection, user_id: str) -> None:
+    now = int(time.time())
+    conn.execute(
+        "INSERT INTO revoked_tokens (jti, revoked_at, expires_at) VALUES (%s, now(), now() + make_interval(secs => %s)) "
+        "ON CONFLICT (jti) DO NOTHING",
+        (_USER_CUTOFF.format(user_id, now), SESSION_TTL_SECONDS),
+    )
+    conn.execute("DELETE FROM revoked_tokens WHERE expires_at IS NOT NULL AND expires_at < now()")
+
+
+def delete_user(conn: psycopg.Connection, org_id: str, user_id: str) -> bool:
+    """Remove a user from `org_id` (only that org's users) and end their
+    live sessions. False when there's no such user in the org."""
+    with conn.transaction():
+        if not conn.execute("SELECT 1 FROM users WHERE id = %s AND org_id = %s", (user_id, org_id)).fetchone():
+            return False
+        conn.execute("DELETE FROM user_sites WHERE user_id = %s", (user_id,))
+        conn.execute("DELETE FROM users WHERE id = %s AND org_id = %s", (user_id, org_id))
+        end_user_sessions(conn, user_id)
+    return True
+
+
+def set_password(conn: psycopg.Connection, org_id: str, user_id: str, password: str) -> bool:
+    """New password for a user in `org_id`; every session they had ends
+    (they, or whoever had the old password, log in again)."""
+    if not password:
+        raise ValueError("password must not be empty")
+    with conn.transaction():
+        cur = conn.execute(
+            "UPDATE users SET password_hash = %s WHERE id = %s AND org_id = %s",
+            (hash_password(password), user_id, org_id),
+        )
+        if cur.rowcount == 0:
+            return False
+        end_user_sessions(conn, user_id)
+    return True
+
+
+def get_user(conn: psycopg.Connection, user_id: str) -> dict | None:
+    row = conn.execute(
+        "SELECT id, org_id, email, password_hash, role FROM users WHERE id = %s", (user_id,)
     ).fetchone()
     if not row:
         return None

@@ -72,6 +72,10 @@ const ROUTES = [
   ["POST",   /^\/auth\/sites$/,                      "auth", "admin"],
   ["PUT",    /^\/auth\/sites\/[^/]+\/topic-prefixes$/,   "auth", "admin"],
   ["POST",   /^\/auth\/users$/,                      "auth", "admin"],
+  ["GET",    /^\/auth\/users$/,                      "auth", "admin"],
+  ["DELETE", /^\/auth\/users\/[^/]+$/,                 "auth", "admin"],
+  ["PUT",    /^\/auth\/users\/[^/]+\/password$/,       "auth", "admin"],
+  ["POST",   /^\/auth\/me\/password$/,                "auth", "viewer"],
   // Public like /auth/login (not exempted via its own nginx location,
   // since unlike login it still needs js_access to run so the public
   // "no role" branch below actually executes) - a brand-new org has to
@@ -146,6 +150,31 @@ function resolveRoute(method, uri) {
     return { resource: row[2], minRole: row[3] };
 }
 
+// Matches auth.SESSION_TTL_SECONDS: a session token without `iat` (issued
+// before it was added) was issued at exp - this.
+const SESSION_TTL_SECONDS = 12 * 3600;
+
+/*
+ * "user:<id>:<epoch>" denylist rows (auth.end_user_sessions) ->
+ * {key: "user:<id>", epoch}, or null for an ordinary jti.
+ */
+function parseUserCutoff(jti) {
+    const m = /^(user:.+):(\d+)$/.exec(jti);
+    return m ? { key: m[1], epoch: Number(m[2]) } : null;
+}
+
+/*
+ * Whether a session token predates its user's cutoff (cached value from
+ * the "user:<id>" key, a string epoch, or undefined/null for none).
+ */
+function sessionCutOff(claims, cutoff) {
+    if (cutoff === undefined || cutoff === null || cutoff === "") {
+        return false;
+    }
+    const iat = typeof claims.iat === "number" ? claims.iat : claims.exp - SESSION_TTL_SECONDS;
+    return iat < Number(cutoff);
+}
+
 // Resources a site-restricted token can't reach at all: they span the
 // whole org and have no per-site filter to apply.
 const WHOLE_ORG = { devices: true };
@@ -171,4 +200,4 @@ function roleSatisfies(role, minRole) {
     return typeof have === "number" && typeof need === "number" && have >= need;
 }
 
-export default { ROLE_RANK, ROUTES, resolveRoute, roleSatisfies, scopeSatisfies, bearerFromHeader, isHaystackHandshake };
+export default { ROLE_RANK, ROUTES, resolveRoute, roleSatisfies, scopeSatisfies, parseUserCutoff, sessionCutOff, bearerFromHeader, isHaystackHandshake };

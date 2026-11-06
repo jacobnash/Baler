@@ -192,3 +192,46 @@ def test_revoke_api_key_marks_revoked_and_denylists_jti(conn):
 @pytest.mark.integration
 def test_revoke_api_key_returns_false_for_unknown_id(conn):
     assert revoke_api_key(conn, "does-not-exist") is False
+
+
+@pytest.mark.integration
+def test_list_users_is_org_scoped_and_has_no_hashes(conn):
+    from baler.auth import list_users
+
+    org = create_org(conn, "Test Org Users", "admin-u@test-auth.invalid", "pw")
+    create_user(conn, org["id"], "op-u@test-auth.invalid", "pw", "operator")
+    other = create_org(conn, "Test Org Users B", "admin-ub@test-auth.invalid", "pw")
+    users = list_users(conn, org["id"])
+    assert [u["email"] for u in users] == ["admin-u@test-auth.invalid", "op-u@test-auth.invalid"]
+    assert all("password_hash" not in u for u in users)
+    assert [u["email"] for u in list_users(conn, other["id"])] == ["admin-ub@test-auth.invalid"]
+
+
+@pytest.mark.integration
+def test_delete_user_only_in_own_org_and_ends_sessions(conn):
+    from baler.auth import delete_user
+
+    org = create_org(conn, "Test Org Del", "admin-d@test-auth.invalid", "pw")
+    other = create_org(conn, "Test Org Del B", "admin-db@test-auth.invalid", "pw")
+    victim = create_user(conn, org["id"], "gone@test-auth.invalid", "pw", "viewer")
+    assert delete_user(conn, other["id"], victim["id"]) is False  # not their org
+    assert get_user_by_email(conn, "gone@test-auth.invalid") is not None
+    assert delete_user(conn, org["id"], victim["id"]) is True
+    assert get_user_by_email(conn, "gone@test-auth.invalid") is None
+    cutoffs = conn.execute("SELECT jti FROM revoked_tokens WHERE jti LIKE %s", (f"user:{victim['id']}:%",)).fetchall()
+    assert len(cutoffs) == 1
+    conn.execute("DELETE FROM revoked_tokens WHERE jti LIKE 'user:%'")
+
+
+@pytest.mark.integration
+def test_set_password_changes_login_and_ends_sessions(conn):
+    from baler.auth import set_password
+
+    org = create_org(conn, "Test Org Pw", "admin-p@test-auth.invalid", "old-pw")
+    user = get_user_by_email(conn, "admin-p@test-auth.invalid")
+    assert set_password(conn, org["id"], "no-such-user", "x") is False
+    assert set_password(conn, org["id"], user["id"], "new-pw") is True
+    stored = get_user_by_email(conn, "admin-p@test-auth.invalid")["password_hash"]
+    assert verify_password("new-pw", stored) and not verify_password("old-pw", stored)
+    assert conn.execute("SELECT 1 FROM revoked_tokens WHERE jti LIKE %s", (f"user:{user['id']}:%",)).fetchone()
+    conn.execute("DELETE FROM revoked_tokens WHERE jti LIKE 'user:%'")

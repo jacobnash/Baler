@@ -83,6 +83,9 @@ def make_handler(ts_pool):
             if path == "/users":
                 self.handle_traced("auth_api.post_users", self._create_user)
                 return
+            if path == "/me/password":
+                self.handle_traced("auth_api.post_me_password", self._change_own_password)
+                return
             self.send_response(404)
             self.end_headers()
 
@@ -109,6 +112,9 @@ def make_handler(ts_pool):
             if path == "/me":
                 self.handle_traced("auth_api.get_me", self._get_me)
                 return
+            if path == "/users":
+                self.handle_traced("auth_api.get_users", self._list_users)
+                return
             self.send_response(404)
             self.end_headers()
 
@@ -121,6 +127,11 @@ def make_handler(ts_pool):
                 site_id = m.group(1)
                 self.handle_traced("auth_api.put_site_prefixes", lambda span: self._set_site_prefixes(site_id, span))
                 return
+            m = re.fullmatch(r"/users/([^/]+)/password", path)
+            if m:
+                user_id = m.group(1)
+                self.handle_traced("auth_api.put_user_password", lambda span: self._set_user_password(user_id, span))
+                return
             self.send_response(404)
             self.end_headers()
 
@@ -131,6 +142,11 @@ def make_handler(ts_pool):
             if path.startswith("/api-keys/"):
                 key_id = path[len("/api-keys/"):]
                 self.handle_traced("auth_api.delete_api_key", lambda span: self._delete_api_key(key_id, span))
+                return
+            m = re.fullmatch(r"/users/([^/]+)", path)
+            if m:
+                user_id = m.group(1)
+                self.handle_traced("auth_api.delete_user", lambda span: self._delete_user(user_id, span))
                 return
             self.send_response(404)
             self.end_headers()
@@ -248,6 +264,63 @@ def make_handler(ts_pool):
                 user = auth.create_user(conn, caller["org_id"], body["email"], body["password"], body["role"])
             span.set_attribute("new_user_id", user["id"])
             _respond_json(self, 201, user)
+
+        def _list_users(self, span) -> None:
+            caller = self._require_caller(span)
+            if not caller:
+                return
+            with ts_pool.connection() as conn:
+                users = auth.list_users(conn, caller["org_id"])
+            _respond_json(self, 200, users)
+
+        def _delete_user(self, user_id: str, span) -> None:
+            caller = self._require_caller(span)
+            if not caller:
+                return
+            span.set_attribute("target_user_id", user_id)
+            if user_id == caller["sub"]:
+                # an org's only admin deleting themselves locks everyone out
+                _respond_error(self, 400, "you can't delete your own account")
+                return
+            with ts_pool.connection() as conn:
+                found = auth.delete_user(conn, caller["org_id"], user_id)
+            if not found:
+                _respond_error(self, 404, "no such user in your org")
+                return
+            self.send_response(204)
+            self.end_headers()
+
+        def _set_user_password(self, user_id: str, span) -> None:
+            caller = self._require_caller(span)
+            if not caller:
+                return
+            span.set_attribute("target_user_id", user_id)
+            password = self.read_json_body()["password"]
+            with ts_pool.connection() as conn:
+                found = auth.set_password(conn, caller["org_id"], user_id, password)
+            if not found:
+                _respond_error(self, 404, "no such user in your org")
+                return
+            self.send_response(204)
+            self.end_headers()
+
+        def _change_own_password(self, span) -> None:
+            caller = self._require_caller(span)
+            if not caller:
+                return
+            if caller.get("kind") != "session":
+                _respond_error(self, 400, "only a logged-in user (not an API key) has a password to change")
+                return
+            body = self.read_json_body()
+            with ts_pool.connection() as conn:
+                user = auth.get_user(conn, caller["sub"])
+                if not user or not auth.verify_password(body["current_password"], user["password_hash"]):
+                    _respond_error(self, 401, "current password is wrong")
+                    return
+                auth.set_password(conn, user["org_id"], user["id"], body["new_password"])
+                # every session ended, this one included: hand back a fresh one
+                token = auth.issue_session_token(user, auth.user_site_ids(conn, user["id"]))
+            _respond_json(self, 200, {"token": token})
 
         def _get_revoked_jtis(self, span) -> None:
             with ts_pool.connection() as conn:

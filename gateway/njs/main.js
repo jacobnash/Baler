@@ -71,6 +71,13 @@ async function authorize(r) {
         return;
     }
 
+    // A user deleted, or their password reset, since this session token
+    // was issued (auth.end_user_sessions): it's over, though not expired.
+    if (claims.kind === "session" && policy.sessionCutOff(claims, ngx.shared.revoked.get("user:" + claims.sub))) {
+        r.return(401, "session ended - log in again\n");
+        return;
+    }
+
     if (!ratelimit.checkRateLimit(r, claims)) {
         r.headersOut["Retry-After"] = "60";
         r.return(429, "rate limit exceeded\n");
@@ -94,6 +101,16 @@ async function refreshRevoked(s) {
         ngx.shared.revoked.clear();
         // No for...of - njs 1.0.0 (bundled with nginx:alpine) doesn't support it.
         jtis.forEach(function (jti) {
+            // "user:<id>:<epoch>" is a per-user session cutoff: keep the
+            // newest epoch under "user:<id>" (policy.sessionCutOff).
+            const cut = policy.parseUserCutoff(jti);
+            if (cut) {
+                const prev = ngx.shared.revoked.get(cut.key);
+                if (!prev || Number(prev) < cut.epoch) {
+                    ngx.shared.revoked.set(cut.key, String(cut.epoch));
+                }
+                return;
+            }
             ngx.shared.revoked.set(jti, "1"); // string zone (default type) - value must be a string, not a number
         });
         ngx.log(ngx.INFO, `refreshRevoked: cached ${jtis.length} revoked jti(s)`);
