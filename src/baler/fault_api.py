@@ -16,11 +16,12 @@ from http.server import ThreadingHTTPServer
 from typing import cast
 from urllib.parse import parse_qs, urlparse
 
-from baler import docs_ui, gateway_auth, json_store, tracing
+from baler import auth, docs_ui, gateway_auth, json_store, tracing
 from baler.faults import (
     ack_fault,
     enable_webhook,
     ensure_schema,
+    fault_point_uri,
     list_faults,
     list_webhook_health,
     snooze_fault,
@@ -28,6 +29,7 @@ from baler.faults import (
 from baler.http_handler_base import BaseAPIHandler
 from baler.http_handler_base import respond_json as _respond_json
 from baler.schemas import CreateWebhookRequest, Webhook, WebhookHealth
+from baler.scope import request_scope
 from baler.timeseries import connect_pool
 from baler.webhooks import validate_url
 
@@ -190,6 +192,12 @@ def make_handler(rules_path: str, webhooks_path: str, ts_pool):
             self.send_response(204)
             self.end_headers()
 
+        def _in_scope(self, conn, fault_id: int) -> bool:
+            """A fault on another site's point is a 404, same as a missing
+            one, so its existence doesn't leak."""
+            uri = fault_point_uri(conn, fault_id)
+            return uri is not None and request_scope(conn, self.headers).allows(uri)
+
         def _ack_fault(self, fault_id: int, span) -> None:
             span.set_attribute("fault_id", fault_id)
             # X-User is gateway-set ("<sub>:<role>", see gateway/njs/main.js)
@@ -198,7 +206,7 @@ def make_handler(rules_path: str, webhooks_path: str, ts_pool):
             # level as any other audit-trail field this API already writes.
             acked_by = self.headers.get("X-User", "unknown")
             with ts_pool.connection() as conn:
-                found = ack_fault(conn, fault_id, acked_by, datetime.now(timezone.utc))
+                found = self._in_scope(conn, fault_id) and ack_fault(conn, fault_id, acked_by, datetime.now(timezone.utc))
             if not found:
                 self.send_response(404)
                 self.end_headers()
@@ -214,7 +222,7 @@ def make_handler(rules_path: str, webhooks_path: str, ts_pool):
                 raise ValueError("minutes must be a positive number")
             until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
             with ts_pool.connection() as conn:
-                found = snooze_fault(conn, fault_id, until)
+                found = self._in_scope(conn, fault_id) and snooze_fault(conn, fault_id, until)
             if not found:
                 self.send_response(404)
                 self.end_headers()
@@ -228,6 +236,8 @@ def make_handler(rules_path: str, webhooks_path: str, ts_pool):
             rule_id = query.get("rule_id", [None])[0]
             with ts_pool.connection() as conn:
                 faults = list_faults(conn, status=status, point_uri=point_uri, rule_id=rule_id)
+                scope = request_scope(conn, self.headers)
+            faults = [f for f in faults if scope.allows(f["point_uri"])]
             span.set_attribute("count", len(faults))
             _respond_json(self, 200, faults)
 
@@ -247,6 +257,7 @@ def main() -> None:
     ts_pool = connect_pool()
     with ts_pool.connection() as conn:
         ensure_schema(conn)
+        auth.ensure_schema(conn)  # sites.topic_prefixes, read by the scope checks
 
     server = ThreadingHTTPServer((args.host, args.port), make_handler(args.rules_file, args.webhooks_file, ts_pool))
     print(f"fault API listening on {args.host}:{args.port}")

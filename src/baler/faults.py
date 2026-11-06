@@ -78,6 +78,11 @@ def open_fault(
     return row[0] if row else None
 
 
+def fault_point_uri(conn: psycopg.Connection, fault_id: int) -> str | None:
+    row = conn.execute("SELECT point_uri FROM faults WHERE id = %s", (fault_id,)).fetchone()
+    return row[0] if row else None
+
+
 def ack_fault(conn: psycopg.Connection, fault_id: int, acked_by: str, now: datetime) -> bool:
     """True if a fault with this id exists (whether or not it was already
     acked - re-acking just updates who/when, same as SkySpark's console)."""

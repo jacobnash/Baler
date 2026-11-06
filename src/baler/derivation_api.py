@@ -23,6 +23,7 @@ from typing import cast
 from urllib.parse import unquote
 
 from baler import (
+    auth,
     derivation_engine,
     derivation_health,
     docs_ui,
@@ -34,6 +35,7 @@ from baler import (
 from baler.http_handler_base import BaseAPIHandler, respond_json
 from baler.remote_store import RemoteStore
 from baler.schemas import Derivation
+from baler.scope import request_scope
 from baler.timeseries import connect_pool
 
 tracer = tracing.get_tracer(__name__)
@@ -179,12 +181,19 @@ def make_handler(derivations_path: str, store, ts_pool):
             span.set_attribute("derivation_id", derivation["id"])
             with ts_pool.connection() as conn:
                 trace = derivation_engine.evaluate_derivations(store, conn, conn, conn, [derivation], dry_run=True)
+                scope = request_scope(conn, self.headers)
+            if not scope.unrestricted:
+                # Outputs are urn:point:computed/..., outside every site; a
+                # row belongs to the site of the equipment it attaches to.
+                trace = [t for t in trace if scope.allows(t.get("would_attach_to", ""))]
             span.set_attribute("target_count", len(trace))
             _respond_json(self, 200, trace)
 
         def _list_targets(self, derivation_id: str, span) -> None:
             with ts_pool.connection() as conn:
                 targets = derivation_health.list_targets(conn, derivation_id)
+                scope = request_scope(conn, self.headers)
+            targets = [t for t in targets if scope.allows(t["target_uri"])]
             span.set_attribute("count", len(targets))
             _respond_json(self, 200, targets)
 
@@ -192,7 +201,8 @@ def make_handler(derivations_path: str, store, ts_pool):
             span.set_attribute("derivation_id", derivation_id)
             span.set_attribute("target", target_uri)
             with ts_pool.connection() as conn:
-                target = derivation_health.enable_target(conn, derivation_id, target_uri)
+                allowed = request_scope(conn, self.headers).allows(target_uri)
+                target = derivation_health.enable_target(conn, derivation_id, target_uri) if allowed else None
             if target is None:
                 self.send_response(404)
                 self.end_headers()
@@ -228,6 +238,7 @@ def main() -> None:
     ts_pool = connect_pool()
     with ts_pool.connection() as conn:
         derivation_health.ensure_schema(conn)
+        auth.ensure_schema(conn)  # sites.topic_prefixes, read by the scope checks
 
     server = ThreadingHTTPServer((args.host, args.port), make_handler(args.derivations_file, store, ts_pool))
     print(f"derivation API listening on {args.host}:{args.port}")

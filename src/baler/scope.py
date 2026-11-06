@@ -114,5 +114,10 @@ def scope_for(conn, claims: dict | None) -> Scope:
     return Scope(tuple(sorted(prefixes)))
 
 
+def request_scope(conn, headers) -> Scope:
+    """The calling request's scope, from its own Authorization header."""
+    return scope_for(conn, claims_from_header(headers.get("Authorization")))
+
+
 # Shared immutable default for "no restriction" (Scope is frozen).
 EVERYTHING = Scope.everything()

@@ -11,21 +11,23 @@ import argparse
 import os
 from http.server import ThreadingHTTPServer
 
-from baler import docs_ui, gateway_auth, tracing
+from baler import auth, docs_ui, gateway_auth, tracing
 from baler.http_handler_base import BaseAPIHandler, respond_json
 from baler.remote_store import RemoteStore
+from baler.scope import request_scope
 from baler.shacl_validate import (
     graph_from_remote_store,
     load_shapes,
     validate_graph,
 )
+from baler.timeseries import connect_pool
 
 tracer = tracing.get_tracer(__name__)
 
 OPENAPI_SPEC_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "validate-api-openapi.yaml")
 
 
-def make_handler(store):
+def make_handler(store, ts_pool=None):
     class ValidateHandler(BaseAPIHandler):
         TRACER = tracer
         # ALLOWED_METHODS/ALLOWED_HEADERS match BaseAPIHandler's own
@@ -48,6 +50,14 @@ def make_handler(store):
                 data_graph = graph_from_remote_store(store)
                 span.set_attribute("triple_count", len(data_graph))
                 result = validate_graph(data_graph)
+                if ts_pool is not None:
+                    with ts_pool.connection() as conn:
+                        scope = request_scope(conn, self.headers)
+                    if not scope.unrestricted:
+                        # Only this caller's sites' violations, and whether
+                        # *those* conform - not a hint about anyone else's.
+                        mine = [v for v in result["violations"] if scope.allows(v["focus_node"])]
+                        result = {**result, "violations": mine, "conforms": not mine}
                 span.set_attribute("conforms", result["conforms"])
                 span.set_attribute("violation_count", len(result["violations"]))
                 # Conformance is data in the response, not an error status -
@@ -77,8 +87,11 @@ def main() -> None:
 
     store = RemoteStore()
     load_shapes()  # parse once at startup, not on the first request
+    ts_pool = connect_pool()
+    with ts_pool.connection() as conn:
+        auth.ensure_schema(conn)  # sites.topic_prefixes, read by the scope check
 
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(store))
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(store, ts_pool))
     print(f"validate API listening on {args.host}:{args.port}")
     server.serve_forever()
 

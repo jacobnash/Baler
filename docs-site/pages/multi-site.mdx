@@ -61,7 +61,21 @@ equip `urn:equip:fbf/hospital-a/...`.
   no one owns yet, including one another tenant's devices already publish
   under. Provision each site's prefixes when you create the site.
 
-Not scoped yet: fault, derivation and validate APIs. Those are a follow-up.
+Also scoped, by the same rule:
+
+- **Faults** (`/fault/faults`): the list shows only faults on your points; acking or snoozing
+  another site's fault is a 404.
+- **Derivations**: a derivation's targets list, dry-run trace and target enable cover only
+  equipment in your sites.
+- **Validation** (`/validate/validate`): only violations on your points and equipment, and
+  `conforms` describes those alone.
+
+Shared across the org (configuration, not site data): fault rules, webhooks and derivation
+definitions.
+
+Known gap: a derivation's output points (`urn:point:computed/...`) belong to no site prefix, so
+once scoping is on they don't appear in `/api` or `/ingest/his` reads. Read them unscoped (a
+single-tenant install) until computed points are scoped through the equipment they attach to.
 
 ## Why not a mesh network
 

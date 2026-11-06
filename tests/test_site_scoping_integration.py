@@ -98,3 +98,70 @@ def test_cannot_claim_a_prefix_overlapping_another_org(two_orgs):
     r = requests.post(f"{BASE}/auth/sites", headers=a["headers"], json={"name": "grab", "topic_prefixes": [parent]})
     assert r.status_code == 400, r.text
     assert "overlaps" in r.text
+
+
+def _seed_faults_and_targets(two_orgs):
+    """A fault and a derivation target on each org's point, straight into
+    Postgres (what fault_detector/derivation_engine would write)."""
+    from datetime import datetime, timezone
+
+    from baler import derivation_health, faults
+    from baler.timeseries import connect
+
+    conn = connect()
+    derivation_id = f"scope-{two_orgs['run']}"
+    ids = {}
+    for k in ("a", "b"):
+        uri = f"urn:point:{two_orgs[k]['topic']}"
+        ids[k] = faults.open_fault(conn, f"scope-rule-{two_orgs['run']}", uri, datetime.now(timezone.utc))
+        derivation_health.record_target_failure(conn, derivation_id, f"urn:equip:{two_orgs[k]['topic'].rsplit('/', 1)[0]}", "boom")
+    conn.close()
+    return ids, derivation_id
+
+
+@pytest.fixture(scope="module")
+def seeded(two_orgs):
+    from baler.timeseries import connect
+
+    ids, derivation_id = _seed_faults_and_targets(two_orgs)
+    yield ids, derivation_id
+    conn = connect()
+    conn.execute("DELETE FROM faults WHERE rule_id = %s", (f"scope-rule-{two_orgs['run']}",))
+    conn.execute("DELETE FROM derivation_target_health WHERE derivation_id = %s", (derivation_id,))
+    conn.close()
+
+
+def test_faults_list_and_ack_are_scoped(two_orgs, seeded):
+    ids, _ = seeded
+    a = two_orgs["a"]
+    r = requests.get(f"{BASE}/fault/faults", params={"rule_id": f"scope-rule-{two_orgs['run']}"}, headers=a["headers"])
+    assert r.status_code == 200, r.text
+    assert [f["id"] for f in r.json()] == [ids["a"]]
+    # Another org's fault is a 404, exactly like a missing one.
+    assert requests.post(f"{BASE}/fault/faults/{ids['b']}/ack", headers=a["headers"]).status_code == 404
+    assert requests.post(f"{BASE}/fault/faults/{ids['b']}/snooze", headers=a["headers"], json={"minutes": 5}).status_code == 404
+    assert requests.post(f"{BASE}/fault/faults/{ids['a']}/ack", headers=a["headers"]).status_code == 204
+
+
+def test_derivation_targets_are_scoped(two_orgs, seeded):
+    _, derivation_id = seeded
+    a, b = two_orgs["a"], two_orgs["b"]
+    r = requests.get(f"{BASE}/derivation/derivations/{derivation_id}/targets", headers=a["headers"])
+    assert r.status_code == 200, r.text
+    assert [t["target_uri"] for t in r.json()] == [f"urn:equip:{a['topic'].rsplit('/', 1)[0]}"]
+    theirs = requests.utils.quote(f"urn:equip:{b['topic'].rsplit('/', 1)[0]}", safe="")
+    r = requests.post(f"{BASE}/derivation/derivations/{derivation_id}/targets/{theirs}/enable", headers=a["headers"])
+    assert r.status_code == 404
+    # ...while the same call on its own target goes through (so the 404 above is the scope check).
+    mine = requests.utils.quote(f"urn:equip:{a['topic'].rsplit('/', 1)[0]}", safe="")
+    r = requests.post(f"{BASE}/derivation/derivations/{derivation_id}/targets/{mine}/enable", headers=a["headers"])
+    assert r.status_code == 200, r.text
+
+
+def test_validate_reports_only_own_sites_violations(two_orgs):
+    a, b = two_orgs["a"], two_orgs["b"]
+    r = requests.post(f"{BASE}/validate/validate", headers=a["headers"])
+    assert r.status_code == 200, r.text
+    nodes = [v["focus_node"] for v in r.json()["violations"]]
+    assert not any(b["topic"] in n for n in nodes), nodes
+    assert all(a["topic"].split("/")[0] in n for n in nodes), nodes
