@@ -14,7 +14,10 @@ from __future__ import annotations
 import contextlib
 import copy
 import json
+import threading
 from datetime import datetime
+
+import psycopg
 
 from baler import auth, ddl, json_store
 from baler import scope as scope_mod
@@ -63,15 +66,28 @@ CREATE TABLE IF NOT EXISTS cx_runs (
     id           TEXT PRIMARY KEY,
     project_id   TEXT NOT NULL REFERENCES cx_projects(id),
     phase        TEXT,
-    started_at   TIMESTAMPTZ NOT NULL,
-    finished_at  TIMESTAMPTZ NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'queued',  -- queued | running | completed | failed
+    started_at   TIMESTAMPTZ NOT NULL,      -- when it was asked for; the window ends here
+    finished_at  TIMESTAMPTZ,               -- NULL until completed or failed
     window_start TIMESTAMPTZ NOT NULL,
     window_end   TIMESTAMPTZ NOT NULL,
     triggered_by TEXT,
     scope        JSONB NOT NULL,            -- what was in scope, so a run is reproducible
-    summary      JSONB NOT NULL
+    summary      JSONB,                     -- NULL until completed
+    progress     JSONB,
+    error        TEXT
 );
 CREATE INDEX IF NOT EXISTS cx_runs_project ON cx_runs (project_id, started_at DESC);
+-- Runs became asynchronous (#57). Rows from before then were only ever
+-- written finished, so they backfill as completed.
+ALTER TABLE cx_runs ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completed';
+ALTER TABLE cx_runs ALTER COLUMN status SET DEFAULT 'queued';
+ALTER TABLE cx_runs ADD COLUMN IF NOT EXISTS progress JSONB;
+ALTER TABLE cx_runs ADD COLUMN IF NOT EXISTS error TEXT;
+ALTER TABLE cx_runs ALTER COLUMN finished_at DROP NOT NULL;
+ALTER TABLE cx_runs ALTER COLUMN summary DROP NOT NULL;
+-- One run in flight per project.
+CREATE UNIQUE INDEX IF NOT EXISTS cx_runs_one_active ON cx_runs (project_id) WHERE status IN ('queued', 'running');
 
 -- Immutable once written: later slices (issues, re-tests) cite results as evidence.
 CREATE TABLE IF NOT EXISTS cx_results (
@@ -88,6 +104,19 @@ CREATE TABLE IF NOT EXISTS cx_results (
 );
 CREATE INDEX IF NOT EXISTS cx_results_equip ON cx_results (run_id, equip_uri);
 """
+
+
+RUN_STATUSES = ("queued", "running", "completed", "failed")
+ACTIVE = ("queued", "running")
+INTERRUPTED = "interrupted: the commissioning API stopped before this run finished"
+
+
+class RunActive(Exception):
+    """The project already has a queued or running run."""
+
+    def __init__(self, run_id: str | None):
+        super().__init__("this project already has a run in progress")
+        self.run_id = run_id
 
 
 def ensure_schema(conn) -> None:
@@ -109,11 +138,15 @@ def _public_phase(p: dict) -> dict:
 
 def public_project(p: dict) -> dict:
     phases = sorted(p.get("phases", []), key=lambda x: x["position"])
+    current = next((x["key"] for x in phases if x["status"] == "active"), None)
     return {
         "id": p["id"], "org_id": p["org_id"], "site_id": p.get("site_id"), "name": p["name"],
         "settings": p.get("settings") or {}, "created_by": p.get("created_by"),
         "created_at": _iso(p["created_at"]), "updated_at": _iso(p["updated_at"]), "archived_at": _iso(p.get("archived_at")),
-        "current_phase": next((x["key"] for x in phases if x["status"] == "active"), None),
+        # `phase` is what POST /projects takes, so it's what clients read back
+        # (#57 found it null: only current_phase was returned).
+        "phase": current,
+        "current_phase": current,
         "phases": [_public_phase(x) for x in phases],
     }
 
@@ -139,6 +172,7 @@ class MemoryRepo:
         self.events: list[dict] = []
         self.runs: dict[str, dict] = {}
         self.results: dict[str, list[dict]] = {}
+        self._lock = threading.Lock()  # runs are written from the worker thread
 
     def scope_for(self, claims) -> Scope:
         return self._scope_fn(claims)
@@ -189,28 +223,70 @@ class MemoryRepo:
         return [{k: _iso(v) for k, v in e.items() if k != "project_id"} for e in reversed(rows)][:limit]
 
     def save_run(self, run: dict, results: list[dict]) -> None:
-        self.runs[run["id"]] = dict(run)
-        self.results[run["id"]] = [dict(r) for r in results]
+        """A finished run in one go (tests, imports)."""
+        with self._lock:
+            self.runs[run["id"]] = {"status": "completed", "progress": None, "error": None, **run}
+            self.results[run["id"]] = [dict(r) for r in results]
+
+    def create_run(self, run: dict) -> None:
+        with self._lock:
+            active = next((r["id"] for r in self.runs.values()
+                           if r["project_id"] == run["project_id"] and r["status"] in ACTIVE), None)
+            if active:
+                raise RunActive(active)
+            self.runs[run["id"]] = {"finished_at": None, "summary": None, "progress": None, "error": None, **run}
+
+    def set_run_status(self, run_id: str, status: str, progress: dict | None = None) -> None:
+        with self._lock:
+            self.runs[run_id]["status"] = status
+            self.runs[run_id]["progress"] = progress
+
+    def set_run_progress(self, run_id: str, progress: dict) -> None:
+        with self._lock:
+            self.runs[run_id]["progress"] = progress
+
+    def complete_run(self, run_id: str, finished_at: datetime, summary: dict, results: list[dict]) -> None:
+        with self._lock:
+            self.results[run_id] = [dict(r) for r in results]
+            self.runs[run_id].update(status="completed", finished_at=finished_at, summary=summary, progress=None)
+
+    def fail_run(self, run_id: str, finished_at: datetime, error: str) -> None:
+        with self._lock:
+            self.runs[run_id].update(status="failed", finished_at=finished_at, error=error)
+
+    def fail_interrupted_runs(self, now: datetime) -> list[dict]:
+        with self._lock:
+            hit = [r for r in self.runs.values() if r["status"] in ACTIVE]
+            for r in hit:
+                r.update(status="failed", finished_at=now, error=INTERRUPTED)
+            return [{"id": r["id"], "project_id": r["project_id"]} for r in hit]
 
     def list_runs(self, project_id: str, limit: int = 50) -> list[dict]:
-        rows = sorted((r for r in self.runs.values() if r["project_id"] == project_id),
-                      key=lambda r: r["started_at"], reverse=True)
-        return [public_run(r) for r in rows[:limit]]
+        with self._lock:
+            rows = sorted((r for r in self.runs.values() if r["project_id"] == project_id),
+                          key=lambda r: r["started_at"], reverse=True)
+            return [public_run(r) for r in rows[:limit]]
 
     def get_run(self, run_id: str) -> dict | None:
-        r = self.runs.get(run_id)
-        return None if r is None else public_run(r)
+        with self._lock:
+            r = self.runs.get(run_id)
+            return None if r is None else public_run(r)
 
     def get_results(self, run_id: str) -> list[dict]:
-        return [dict(r) for r in self.results.get(run_id, [])]
+        with self._lock:
+            return [dict(r) for r in self.results.get(run_id, [])]
 
 
 # ------------------------------------------------------------- postgres
 
 
 class PgRepo:
-    def __init__(self, pool, store):
+    def __init__(self, pool, store, run_pool=None):
+        """`run_pool` serves the run worker's history reads: runs are
+        background work, so they shouldn't inherit the request pool's
+        gateway statement timeout (#57). Defaults to `pool`."""
         self.pool = pool
+        self.run_pool = run_pool or pool
         self.store = store
 
     def scope_for(self, claims) -> Scope:
@@ -231,7 +307,7 @@ class PgRepo:
 
     @contextlib.contextmanager
     def history(self):
-        with self.pool.connection() as conn:
+        with self.run_pool.connection() as conn:
             yield PostgresHistory(conn)
 
     def create_project(self, project: dict) -> None:
@@ -308,24 +384,82 @@ class PgRepo:
                 " ORDER BY ts DESC, id DESC LIMIT %s", (project_id, limit)).fetchall()
         return [{"id": i, "ts": _iso(ts), "action": a, "user_sub": s, "user_email": e, "detail": d} for i, ts, a, s, e, d in rows]
 
-    _RUN_COLS = "id, project_id, phase, started_at, finished_at, window_start, window_end, triggered_by, scope, summary"
+    _RUN_COLS = ("id, project_id, phase, status, started_at, finished_at, window_start, window_end, triggered_by,"
+                 " scope, summary, progress, error")
+
+    @staticmethod
+    def _jsonb(v):
+        return None if v is None else json.dumps(v, default=str)
+
+    def _insert_run(self, conn, run: dict) -> None:
+        conn.execute(
+            f"INSERT INTO cx_runs ({self._RUN_COLS}) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (run["id"], run["project_id"], run.get("phase"), run.get("status", "queued"), run["started_at"],
+             run.get("finished_at"), run["window_start"], run["window_end"], run.get("triggered_by"),
+             json.dumps(run["scope"]), self._jsonb(run.get("summary")), self._jsonb(run.get("progress")), run.get("error")),
+        )
+
+    @staticmethod
+    def _insert_results(conn, run_id: str, results: list[dict]) -> None:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO cx_results (run_id, equip_uri, check_id, subject, status, severity, symptom, candidates, evidence)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                [(run_id, r["equip_uri"], r["check_id"], r["subject"], r["status"], r.get("severity"),
+                  r.get("symptom"), json.dumps(r.get("candidates") or []), json.dumps(r["evidence"], default=str))
+                 for r in results],
+            )
 
     def save_run(self, run: dict, results: list[dict]) -> None:
+        """A finished run in one go (tests, imports)."""
         with self.pool.connection() as conn, conn.transaction():
-            conn.execute(
-                f"INSERT INTO cx_runs ({self._RUN_COLS}) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                (run["id"], run["project_id"], run.get("phase"), run["started_at"], run["finished_at"],
-                 run["window_start"], run["window_end"], run.get("triggered_by"),
-                 json.dumps(run["scope"]), json.dumps(run["summary"], default=str)),
-            )
-            with conn.cursor() as cur:
-                cur.executemany(
-                    "INSERT INTO cx_results (run_id, equip_uri, check_id, subject, status, severity, symptom, candidates, evidence)"
-                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                    [(run["id"], r["equip_uri"], r["check_id"], r["subject"], r["status"], r.get("severity"),
-                      r.get("symptom"), json.dumps(r.get("candidates") or []), json.dumps(r["evidence"], default=str))
-                     for r in results],
-                )
+            self._insert_run(conn, {"status": "completed", **run})
+            self._insert_results(conn, run["id"], results)
+
+    def create_run(self, run: dict) -> None:
+        """Insert a queued run; RunActive if the project already has one
+        in flight (the partial unique index decides, so two API processes
+        can't both start one)."""
+        try:
+            with self.pool.connection() as conn, conn.transaction():
+                self._insert_run(conn, run)
+        except psycopg.errors.UniqueViolation as exc:
+            if "cx_runs_one_active" not in str(exc):
+                raise
+            with self.pool.connection() as conn:
+                row = conn.execute("SELECT id FROM cx_runs WHERE project_id = %s AND status IN ('queued', 'running')",
+                                   (run["project_id"],)).fetchone()
+            raise RunActive(row[0] if row else None) from exc
+
+    def set_run_status(self, run_id: str, status: str, progress: dict | None = None) -> None:
+        with self.pool.connection() as conn:
+            conn.execute("UPDATE cx_runs SET status = %s, progress = %s WHERE id = %s",
+                         (status, self._jsonb(progress), run_id))
+
+    def set_run_progress(self, run_id: str, progress: dict) -> None:
+        with self.pool.connection() as conn:
+            conn.execute("UPDATE cx_runs SET progress = %s WHERE id = %s AND status = 'running'",
+                         (self._jsonb(progress), run_id))
+
+    def complete_run(self, run_id: str, finished_at: datetime, summary: dict, results: list[dict]) -> None:
+        with self.run_pool.connection() as conn, conn.transaction():
+            self._insert_results(conn, run_id, results)
+            conn.execute("UPDATE cx_runs SET status = 'completed', finished_at = %s, summary = %s, progress = NULL"
+                         " WHERE id = %s", (finished_at, self._jsonb(summary), run_id))
+
+    def fail_run(self, run_id: str, finished_at: datetime, error: str) -> None:
+        with self.pool.connection() as conn:
+            conn.execute("UPDATE cx_runs SET status = 'failed', finished_at = %s, error = %s WHERE id = %s",
+                         (finished_at, error, run_id))
+
+    def fail_interrupted_runs(self, now: datetime) -> list[dict]:
+        """At startup: whatever was queued or running belonged to a process
+        that's gone (the queue is in memory), so it will never finish."""
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                "UPDATE cx_runs SET status = 'failed', finished_at = %s, error = %s"
+                " WHERE status IN ('queued', 'running') RETURNING id, project_id", (now, INTERRUPTED)).fetchall()
+        return [{"id": i, "project_id": p} for i, p in rows]
 
     def _runs(self, where: str, args: tuple) -> list[dict]:
         with self.pool.connection() as conn:

@@ -244,11 +244,17 @@ paths:
     post:
       tags: [Runs]
       operationId: createCxRun
-      summary: Run verification now (operator)
+      summary: Start a verification run (operator)
       description: >-
-        Synchronous. Inventory, template completeness and the verification
-        ladder (rung 1 existence, rung 2 liveness, rung 3 responsiveness)
-        over the trailing window, recorded against the current phase.
+        Asynchronous (Baler#57): records a `queued` run and answers 202
+        straight away; a background worker then runs inventory, template
+        completeness and the verification ladder (rung 1 existence, rung 2
+        liveness, rung 3 responsiveness) over the trailing window ending
+        now, recorded against the current phase. Poll `GET /runs/{id}`
+        until `status` is `completed` (summary and results filled in) or
+        `failed` (`error` says why). One run per project at a time: a
+        second request while one is queued or running gets 409 with that
+        run's id.
       requestBody:
         content:
           application/json:
@@ -259,18 +265,23 @@ paths:
                   type: number
                   description: Defaults to the project's settings.window_hours, else 24.
       responses:
-        "201":
-          description: The finished run (results via GET /runs/{id})
+        "202":
+          description: The queued run - poll GET /runs/{id}
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Run" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
-          description: The project is archived
+          description: The project is archived, or already has a run queued or running (`run_id` is that run)
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error: { type: string }
+                  run_id: { type: [string, "null"] }
   /runs/{id}:
     parameters:
       - name: id
@@ -281,6 +292,9 @@ paths:
       tags: [Runs]
       operationId: getCxRun
       summary: A run and its results
+      description: >-
+        Poll this after POST /projects/{id}/runs. `results` is empty until
+        `status` is `completed`.
       parameters:
         - { name: status, in: query, schema: { $ref: "#/components/schemas/Status" } }
         - { name: equip_uri, in: query, schema: { type: string } }
@@ -380,7 +394,7 @@ components:
         completed_at: { type: [string, "null"], format: date-time }
     Project:
       type: object
-      required: [id, org_id, site_id, name, settings, current_phase, phases, created_at, updated_at, archived_at]
+      required: [id, org_id, site_id, name, settings, phase, current_phase, phases, created_at, updated_at, archived_at]
       properties:
         id: { type: string }
         org_id: { type: string }
@@ -391,7 +405,10 @@ components:
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         archived_at: { type: [string, "null"], format: date-time }
-        current_phase: { type: [string, "null"] }
+        phase:
+          type: [string, "null"]
+          description: The active phase's key - the same field POST /projects takes.
+        current_phase: { type: [string, "null"], description: Same as `phase` (kept for existing clients) }
         phases:
           type: array
           items: { $ref: "#/components/schemas/Phase" }
@@ -435,13 +452,28 @@ components:
           items: { $ref: "#/components/schemas/InventoryPoint" }
     Run:
       type: object
-      required: [id, project_id, phase, started_at, finished_at, window_start, window_end, scope, summary]
+      required: [id, project_id, phase, status, started_at, finished_at, window_start, window_end, scope, summary, progress, error]
       properties:
         id: { type: string }
         project_id: { type: string }
-        phase: { type: [string, "null"] }
-        started_at: { type: string, format: date-time }
-        finished_at: { type: string, format: date-time }
+        phase: { type: [string, "null"], description: The project's phase when the run was requested }
+        status:
+          type: string
+          enum: [queued, running, completed, failed]
+          description: >-
+            A run still queued or running when the API restarts is marked
+            failed at startup (error starts with `interrupted`).
+        started_at: { type: string, format: date-time, description: When the run was requested; the window ends here }
+        finished_at: { type: [string, "null"], format: date-time, description: Null until completed or failed }
+        progress:
+          type: [object, "null"]
+          description: While running, roughly every 2 s; null otherwise
+          properties:
+            stage: { type: string, enum: [starting, inventory, history, checks] }
+            equipment_done: { type: integer }
+            equipment_total: { type: [integer, "null"] }
+            points: { type: [integer, "null"] }
+        error: { type: [string, "null"], description: Why it failed }
         window_start: { type: string, format: date-time }
         window_end: { type: string, format: date-time }
         triggered_by: { type: [string, "null"] }
@@ -449,7 +481,8 @@ components:
           type: object
           description: What was in scope, so the run is reproducible
         summary:
-          type: object
+          type: [object, "null"]
+          description: Null until completed
           required: [equipment, points, by_status, by_check, freshness]
           properties:
             ladder:

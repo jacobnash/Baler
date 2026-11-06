@@ -7,6 +7,7 @@ Oxigraph+Postgres and against rdflib+InMemoryHistory in tests.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timedelta
 
 from baler.commissioning import checks, inventory, ladder
@@ -37,11 +38,19 @@ def freshness_statement(now: datetime, window_h: float, n: int, fresh: int, stal
 
 
 def run(store, history: History, scopes: list[Scope], now: datetime, window_h: float = DEFAULT_WINDOW_HOURS,
-        templates=None, ladder_config: dict | None = None) -> tuple[dict, list[dict]]:
-    """(summary, results)."""
+        templates=None, ladder_config: dict | None = None,
+        progress: Callable[[dict], None] | None = None) -> tuple[dict, list[dict]]:
+    """(summary, results). `progress`, if given, is told the stage and how
+    many equipment are done; it must be cheap (it's called per equipment)."""
+    def report(stage: str, done: int = 0, total: int | None = None, points: int | None = None) -> None:
+        if progress is not None:
+            progress({"stage": stage, "equipment_done": done, "equipment_total": total, "points": points})
+
     templates = templates if templates is not None else tpl.load()
+    report("inventory")
     equips = inventory.build(store, scopes)
     point_ids = sorted({p["id"] for e in equips for p in e["points"]})
+    report("history", 0, len(equips), len(point_ids))
     latest = history.latest(point_ids) if point_ids else {}
     window = timedelta(hours=window_h)
     # window() is half-open on the end (point_history reads are); a sample
@@ -50,7 +59,8 @@ def run(store, history: History, scopes: list[Scope], now: datetime, window_h: f
 
     results: list[dict] = []
     without_template = []
-    for e in equips:
+    for i, e in enumerate(equips):
+        report("checks", i, len(equips), len(point_ids))
         exists = checks.existence(e, latest, now, window)
         results.extend(exists)
         results.extend(ladder.climb(e, exists, series, now, window, ladder_config))

@@ -13,6 +13,10 @@ read back are filtered by the reader's scope too.
 
 Every change to a project - created, renamed, phases edited, phase
 moved, run - is a cx_events row with who did it.
+
+Runs are asynchronous (#57): POST .../runs answers 202 with a queued run
+and commissioning.runner executes it in a worker thread; clients poll
+GET /runs/{id} until status is completed or failed.
 """
 
 from __future__ import annotations
@@ -25,7 +29,7 @@ from http.server import ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from baler import docs_ui, gateway_auth, tracing
-from baler.commissioning import db, engine, inventory, phases
+from baler.commissioning import db, engine, inventory, phases, runner
 from baler.commissioning import templates as tpl
 from baler.http_handler_base import BaseAPIHandler, respond_error, respond_json
 from baler.remote_store import RemoteStore
@@ -36,6 +40,7 @@ tracer = tracing.get_tracer(__name__)
 
 OPENAPI_SPEC_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "commissioning-api-openapi.yaml")
 PORT = 8009
+RUN_STATEMENT_TIMEOUT = "10min"
 
 _PROJECT = re.compile(r"/projects/([^/]+)")
 _PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|events|inventory|runs)")
@@ -56,8 +61,9 @@ def _check_settings(settings) -> dict:
     return settings
 
 
-def make_handler(repo, clock=None):
+def make_handler(repo, clock=None, worker=None):
     now_fn = clock or (lambda: datetime.now(timezone.utc))
+    worker = worker or runner.RunWorker(repo, now_fn)
 
     class CommissioningHandler(BaseAPIHandler):
         TRACER = tracer
@@ -294,21 +300,24 @@ def make_handler(repo, clock=None):
             wh = engine.window_hours(body.get("window_hours", (p.get("settings") or {}).get("window_hours")))
             scopes, prefixes = self._scopes(p, claims)
             started = now_fn()
-            with repo.history() as history:
-                summary, results = engine.run(repo.store, history, scopes, started, wh)
             phase = phases.current(p["phases"])
-            summary["phase"] = phase
-            summary["window_hours"] = wh
             run = {
-                "id": db.new_id(), "project_id": pid, "phase": phase, "started_at": started, "finished_at": now_fn(),
-                "window_start": started - timedelta(hours=wh), "window_end": started, "triggered_by": claims.get("sub"),
-                "scope": {"caller": _scope_json(scopes[0]), "site_prefixes": prefixes}, "summary": summary,
+                "id": db.new_id(), "project_id": pid, "phase": phase, "status": "queued", "started_at": started,
+                "finished_at": None, "window_start": started - timedelta(hours=wh), "window_end": started,
+                "triggered_by": claims.get("sub"), "scope": {"caller": _scope_json(scopes[0]), "site_prefixes": prefixes},
+                "summary": None, "progress": None, "error": None,
             }
-            repo.save_run(run, results)
-            self._event(pid, "run.create", claims, {"run_id": run["id"], "phase": phase, "by_status": summary["by_status"]})
+            try:
+                repo.create_run(run)
+            except db.RunActive as exc:
+                respond_json(self, 409, {"error": str(exc), "run_id": exc.run_id})
+                return
+            sub = claims.get("sub")
+            email = repo.user_email(sub)
+            repo.add_event(pid, "run.create", sub, email, {"run_id": run["id"], "phase": phase, "window_hours": wh}, now_fn())
+            worker.submit(runner.RunJob(run["id"], pid, phase, scopes, started, wh, sub, email))
             span.set_attribute("run_id", run["id"])
-            span.set_attribute("results", len(results))
-            respond_json(self, 201, db.public_run(run))
+            respond_json(self, 202, db.public_run(run))
 
         def _list_runs(self, span, claims, pid) -> None:
             if self._project(pid, claims) is not None:
@@ -346,7 +355,15 @@ def main() -> None:
     with ts_pool.connection() as conn:
         db.ensure_schema(conn)
     tpl.load()  # fail at startup, not on first request, if the shapes file is broken
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(db.PgRepo(ts_pool, RemoteStore())))
+    # Background runs read history on their own connections, with a bound
+    # well past the gateway's (it's the request that has 60 s, not the run).
+    run_pool = connect_pool(min_size=1, max_size=runner.WORKERS + 1, statement_timeout=RUN_STATEMENT_TIMEOUT)
+    repo = db.PgRepo(ts_pool, RemoteStore(), run_pool=run_pool)
+    now = datetime.now(timezone.utc)
+    for r in repo.fail_interrupted_runs(now):
+        repo.add_event(r["project_id"], "run.fail", None, None, {"run_id": r["id"], "error": db.INTERRUPTED}, now)
+        print(f"commissioning run {r['id']} was interrupted by a restart; marked failed")
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(repo))
     print(f"commissioning API listening on {args.host}:{args.port}")
     server.serve_forever()
 

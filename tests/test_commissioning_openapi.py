@@ -5,6 +5,8 @@ Runs the real handler on MemoryRepo: no services."""
 
 from __future__ import annotations
 
+import threading
+import time
 from http.server import ThreadingHTTPServer
 from threading import Thread
 
@@ -16,7 +18,7 @@ import yaml
 from conftest import assert_matches_schema, load_spec
 from openapi_spec_validator import validate
 
-from baler.commissioning import db
+from baler.commissioning import db, engine, runner
 from baler.commissioning_api import OPENAPI_SPEC_PATH, make_handler
 from baler.scope import Scope
 
@@ -53,15 +55,32 @@ def repo():
     return db.MemoryRepo(store=fx.store(), history=fx.history(), sites=SITES, scope_fn=_scope, users={"u-a": "a@example.com"})
 
 
-@pytest.fixture
-def base(monkeypatch, repo):
+def _serve(monkeypatch, repo, worker=None):
     monkeypatch.setenv("BALER_GATEWAY_SECRET", GATEWAY)
     monkeypatch.setenv("BALER_JWT_SECRET", JWT)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(repo, clock=lambda: fx.NOW))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(repo, clock=lambda: fx.NOW, worker=worker))
     server.daemon_threads = True
     Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.fixture
+def base(monkeypatch, repo):
+    server = _serve(monkeypatch, repo)
     yield f"http://127.0.0.1:{server.server_address[1]}"
     server.shutdown()
+
+
+def _wait(base, run_id, headers=None, timeout=10.0):
+    """Poll GET /runs/{id} the way a client does until the run is done."""
+    deadline = time.monotonic() + timeout
+    while True:
+        got = requests.get(f"{base}/runs/{run_id}", headers=headers or A)
+        assert got.status_code == 200, got.text
+        if got.json()["run"]["status"] in ("completed", "failed"):
+            return got
+        assert time.monotonic() < deadline, got.json()["run"]
+        time.sleep(0.02)
 
 
 def _h(org="org-a", sites=None, sub="u-a"):
@@ -103,7 +122,8 @@ def test_requires_gateway_and_token(base):
 def test_create_and_read_project(base, spec):
     p = _project(base)
     assert_matches_schema(p, _schema(spec, "/projects", "post", 201), spec)
-    assert p["current_phase"] == "startup" and p["org_id"] == "org-a"
+    # #57: `phase` is what the request sets, so it's what comes back
+    assert p["phase"] == p["current_phase"] == "startup" and p["org_id"] == "org-a"
     assert [x["key"] for x in p["phases"]][:3] == ["design", "construction", "startup"]
     got = requests.get(f"{base}/projects/{p['id']}", headers=A).json()
     assert got == p
@@ -184,16 +204,20 @@ def test_org_wide_project_uses_the_callers_scope(base):
 def test_run_round_trip(base, spec):
     p = _project(base, settings={"window_hours": 48})
     r = requests.post(f"{base}/projects/{p['id']}/runs", json={}, headers=A)
-    assert r.status_code == 201, r.text
+    assert r.status_code == 202, r.text
     run = r.json()
-    assert_matches_schema(run, _schema(spec, "/projects/{id}/runs", "post", 201), spec)
-    assert run["phase"] == "startup" and run["summary"]["window_hours"] == 48
+    assert_matches_schema(run, _schema(spec, "/projects/{id}/runs", "post", 202), spec)
+    assert run["status"] == "queued" and run["summary"] is None and run["finished_at"] is None
+    assert run["phase"] == "startup"
     assert run["scope"] == {"caller": {"prefixes": ["fbf/a", "fbf/a2"], "exclude": []}, "site_prefixes": ["fbf/a"]}
     assert run["window_start"] == "2026-11-04T12:00:00+00:00"
 
-    got = requests.get(f"{base}/runs/{run['id']}", headers=A)
-    assert got.status_code == 200
+    got = _wait(base, run["id"])
     assert_matches_schema(got.json(), _schema(spec, "/runs/{id}", "get", 200), spec)
+    done = got.json()["run"]
+    assert done["status"] == "completed" and done["error"] is None and done["progress"] is None
+    assert done["phase"] == "startup" and done["summary"]["phase"] == "startup" and done["summary"]["window_hours"] == 48
+    assert done["finished_at"] == "2026-11-06T12:00:00+00:00"
     results = got.json()["results"]
     assert {r["status"] for r in results} == {"pass", "fail", "inconclusive"}
     # 48h window: RAT (3 days old) still stale
@@ -203,10 +227,75 @@ def test_run_round_trip(base, spec):
     assert only_fail and all(r["status"] == "fail" and r["check_id"].startswith("template:") for r in only_fail)
 
     listed = requests.get(f"{base}/projects/{p['id']}/runs", headers=A).json()
-    assert [x["id"] for x in listed] == [run["id"]]
+    assert [(x["id"], x["status"]) for x in listed] == [(run["id"], "completed")]
     assert requests.get(f"{base}/runs/{run['id']}", headers=B).status_code == 404
     assert requests.get(f"{base}/runs/missing", headers=A).status_code == 404
-    assert requests.get(f"{base}/projects/{p['id']}/events", headers=A).json()[0]["action"] == "run.create"
+    events = requests.get(f"{base}/projects/{p['id']}/events", headers=A).json()
+    assert [e["action"] for e in events[:2]] == ["run.complete", "run.create"]
+    assert events[0]["detail"]["by_status"] == done["summary"]["by_status"] and events[0]["user_email"] == "a@example.com"
+
+
+class _Gate:
+    """engine.run that waits until released, then runs (or raises)."""
+
+    def __init__(self, error: Exception | None = None):
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.error = error
+
+    def __call__(self, *args, **kwargs):
+        self.started.set()
+        assert self.release.wait(10)
+        if self.error:
+            raise self.error
+        return engine.run(*args, **kwargs)
+
+
+def test_one_run_per_project_and_running_status(monkeypatch, repo, spec):
+    gate = _Gate()
+    server = _serve(monkeypatch, repo, runner.RunWorker(repo, lambda: fx.NOW, run_fn=gate))
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        p = _project(base)
+        first = requests.post(f"{base}/projects/{p['id']}/runs", json={}, headers=A).json()
+        assert gate.started.wait(5)
+        running = requests.get(f"{base}/runs/{first['id']}", headers=A).json()
+        assert_matches_schema(running, _schema(spec, "/runs/{id}", "get", 200), spec)
+        assert running["run"]["status"] == "running" and running["results"] == []
+        assert running["run"]["progress"]["stage"] == "starting"
+        again = requests.post(f"{base}/projects/{p['id']}/runs", json={}, headers=A)
+        assert again.status_code == 409 and again.json()["run_id"] == first["id"]
+        assert_matches_schema(again.json(), _schema(spec, "/projects/{id}/runs", "post", 409), spec)
+        other = _project(base, name="Other")  # another project isn't blocked
+        assert requests.post(f"{base}/projects/{other['id']}/runs", json={}, headers=A).status_code == 202
+        gate.release.set()
+        assert _wait(base, first["id"]).json()["run"]["status"] == "completed"
+        # done, so the project can run again
+        assert requests.post(f"{base}/projects/{p['id']}/runs", json={}, headers=A).status_code == 202
+    finally:
+        gate.release.set()
+        server.shutdown()
+
+
+def test_failed_run_records_the_error(monkeypatch, repo, spec):
+    gate = _Gate(error=RuntimeError("oxigraph unreachable"))
+    gate.release.set()
+    server = _serve(monkeypatch, repo, runner.RunWorker(repo, lambda: fx.NOW, run_fn=gate))
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        p = _project(base)
+        run = requests.post(f"{base}/projects/{p['id']}/runs", json={}, headers=A).json()
+        got = _wait(base, run["id"])
+        assert_matches_schema(got.json(), _schema(spec, "/runs/{id}", "get", 200), spec)
+        failed = got.json()["run"]
+        assert failed["status"] == "failed" and failed["error"] == "RuntimeError: oxigraph unreachable"
+        assert failed["finished_at"] is not None and failed["summary"] is None and got.json()["results"] == []
+        ev = requests.get(f"{base}/projects/{p['id']}/events", headers=A).json()[0]
+        assert ev["action"] == "run.fail" and ev["detail"]["run_id"] == run["id"]
+        # a failed run doesn't block the next
+        assert requests.post(f"{base}/projects/{p['id']}/runs", json={}, headers=A).status_code == 202
+    finally:
+        server.shutdown()
 
 
 def test_run_rejects_bad_window(base):

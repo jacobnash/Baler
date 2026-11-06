@@ -455,7 +455,10 @@ Smallest shippable slice, read-only towards the BAS, on existing data:
      (§7.3).
    - `report.py`: summary, coverage, freshness statement (from #5).
 2. **Service `commissioning_api` on port 8009**, routed at `/cx/`
-   (Q2). Synchronous `POST …/runs`. No daemon.
+   (Q2). ~~Synchronous `POST …/runs`. No daemon.~~ Runs became
+   asynchronous in #57 (55 s on nash-srv against a 60 s gateway timeout):
+   `POST …/runs` → 202 `queued`, worker threads in `commissioning_api`
+   (`commissioning/runner.py`), poll `GET /cx/runs/{id}`. Still no daemon.
 3. **Postgres tables** (§6.1): projects, runs, results, issues, issue
    events, risks.
 4. **UI `ui/cx.html` + `ui/cx.js`**: project list, run button, results
@@ -708,7 +711,7 @@ GET    /cx/projects                       viewer   (filtered to caller's org/sit
 POST   /cx/projects                       operator {site_id, name, phase}
 GET    /cx/projects/{id}                  viewer
 DELETE /cx/projects/{id}                  admin    (archive, not delete)
-POST   /cx/projects/{id}/runs             operator {window_hours?} -> run summary
+POST   /cx/projects/{id}/runs             operator {window_hours?} -> 202 queued run (#57); 409 if one is in flight
 GET    /cx/projects/{id}/runs             viewer
 GET    /cx/runs/{id}                      viewer   ?equip=&status=
 GET    /cx/runs/{id}/report               viewer   ?format=json|html
@@ -808,7 +811,7 @@ The author of every write is taken from the verified JWT (`sub`,
 | **Scope creep** into a CxAlloy competitor | Non-goals in §4. Export instead of rebuild. |
 | **Liability.** A Cx report is used contractually. | Language: evidence, not certification. Every result cites its data window. Signed acceptance stays human. |
 | **LLM hallucination** (Phase 4) | Proposals only, human accept. The #5 capture rule: never complete a partially legible value. |
-| **Performance.** A whole site's windows at once. | `read_range_many` with per-point limits and rollups for long windows. Run synchronously only up to N points, background beyond that (Phase 2). |
+| **Performance.** A whole site's windows at once. | `read_range_many` with per-point limits and rollups for long windows. Runs are background work since #57 (worker threads, own pool without the gateway statement timeout, interrupted runs failed at startup). |
 | **Global config files** (`rules.json`) are not org-scoped | Cx definitions live in Postgres with org_id. Don't add Cx checks to `rules.json`. |
 | **Another stale mega-PR** | Ship the MVP in three PRs that each stand alone (§5). |
 
