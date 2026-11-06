@@ -35,7 +35,7 @@ jobs:
       # Without openhay tests/test_haystack_api.py skips.
       - run: pip install -e ".[dev,validate]"
       - run: pytest -m "not integration"
-      - run: openapi-spec-validator openapi.yaml fault-api-openapi.yaml derivation-api-openapi.yaml validate-api-openapi.yaml auth-api-openapi.yaml haystack-api-openapi.yaml
+      - run: openapi-spec-validator openapi.yaml fault-api-openapi.yaml derivation-api-openapi.yaml validate-api-openapi.yaml auth-api-openapi.yaml haystack-api-openapi.yaml commissioning-api-openapi.yaml
       # Both blocking (PLAN.md Guardrails): ruff went 63 -> 0 and mypy
       # 19 -> 0 against the rule sets in ruff.toml/pyproject.toml, see
       # BASELINE.md. Fix or scoped-noqa-with-reason new findings; don't

@@ -70,11 +70,12 @@ CI/dev loop. `docker compose restart gateway` always fixes it.
 | `validate_api` | `POST /validate` — checks the live entity graph against Brick's own SHACL shapes (`pip install -e ".[validate]"`). | 8005 |
 | `auth_api` | Identity: `POST /login`, API-key issuance/revocation, org/site directory CRUD. See "Gateway auth" below. | 8006 |
 | `haystack_api` | The Project Haystack HTTP API at `/api/{project}/{op}`, so SkySpark, Haxall, nhaystack and pyhaystack clients can point here unchanged. It handles HELLO/SCRAM login with your normal email and password. See [`docs-site/pages/haystack-api.mdx`](docs-site/pages/haystack-api.mdx). | 8008 |
+| `commissioning_api` | Commissioning (Cx) projects with editable phases, a scoped Brick/Haystack inventory, SHACL expected-point templates (`ontology/cx-expected-points.ttl`) and verification runs. Plan: [`todo/commissioning-plan.md`](todo/commissioning-plan.md). | 8009 |
 
-None of the 7 HTTP APIs are exposed on the host directly — go through
+None of the 8 HTTP APIs are exposed on the host directly — go through
 the gateway at `localhost:8080` instead, prefixed by API name
 (`/ingest/*`, `/fault/*`, `/derivation/*`, `/validate/*`, `/auth/*`,
-`/ops/*`, and `/api/*` for Haystack). The
+`/ops/*`, `/cx/*`, and `/api/*` for Haystack). The
 demo browser UI (`ui/`) is served straight off the gateway at
 [`localhost:8080/ui/`](http://localhost:8080/ui/) — no separate
 `ui_server.py` needed for this path.

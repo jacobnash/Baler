@@ -157,4 +157,18 @@ check("per-user session cutoff: parse denylist rows, reject older sessions only"
     assert.equal(policy.sessionCutOff({ iat: 1700000000 }, "1700000000.512"), true); // old whole-second token
 });
 
+check("commissioning (/cx/): reads viewer, changes operator, archive admin, site logins allowed", () => {
+    assert.equal(policy.resolveRoute("GET", "/cx/projects").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/projects").minRole, "operator");
+    assert.equal(policy.resolveRoute("POST", "/cx/projects/p1/runs").minRole, "operator");
+    assert.equal(policy.resolveRoute("GET", "/cx/runs/r1").minRole, "viewer");
+    assert.equal(policy.resolveRoute("PUT", "/cx/projects/p1/phases").minRole, "operator");
+    assert.equal(policy.resolveRoute("DELETE", "/cx/projects/p1").minRole, "admin");
+    assert.equal(policy.resolveRoute("GET", "/cx/openapi.yaml").minRole, null);
+    assert.equal(policy.resolveRoute("DELETE", "/cx/runs/r1"), null);
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/runs/extra"), null);
+    // per-project tenancy is checked by commissioning_api, so not WHOLE_ORG
+    assert.equal(policy.scopeSatisfies("commissioning", { site_ids: ["s1"] }), true);
+});
+
 console.log(`\n${passed} passed`);

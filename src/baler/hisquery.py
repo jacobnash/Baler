@@ -600,6 +600,54 @@ def _xeto_specs() -> dict[str, list[str]]:
         return {}
 
 
+@lru_cache(maxsize=1)
+def _specs_by_size() -> list[tuple[str, frozenset[str]]]:
+    """ph Xeto specs, most required markers first (ties by name), so the
+    first one a record fits is the most specific."""
+    specs = _xeto_specs()
+    # Specs that differ only in non-marker slots (BoolPoint, NumberPoint and
+    # Point all need just `point`) can't be told apart by markers: keep the
+    # base one, the shortest name.
+    base: dict[frozenset[str], str] = {}
+    for q, m in sorted(specs.items(), key=lambda qm: (len(qm[0].split("::")[-1]), qm[0])):
+        base.setdefault(frozenset(m), q)
+    return sorted(((q, m) for m, q in base.items()), key=lambda qm: (-len(qm[1]), qm[0]))
+
+
+@lru_cache(maxsize=1)
+def markers_of_brick_class() -> dict[str, frozenset[str]]:
+    """Brick class -> the Haystack markers the mapping rules mint it from
+    (rules/haystack_*_to_brick.yaml reversed), spread over each class's
+    Brick aliases and subclasses: what a Brick-only record would carry as
+    Haystack tags."""
+    from baler import mapping
+
+    vocab = brick_vocab.load()
+    out: dict[str, frozenset[str]] = {}
+    for path in (mapping.DEFAULT_RULES_PATH, mapping.DEFAULT_RULES_PATH.replace("haystack_to_brick", "haystack_equip_to_brick")):
+        try:
+            rules = mapping.load_rules(path)
+        except FileNotFoundError:
+            continue
+        for rule in rules:
+            for cls in vocab.descendants(rule["brick_class"]) or {rule["brick_class"]}:
+                out.setdefault(cls, frozenset(rule["tags"]))
+    return out
+
+
+def xeto_spec_for(markers, brick_class: str | None = None) -> str | None:
+    """The most specific ph Xeto spec (Baler#22) for a record with these
+    Haystack markers, plus those its Brick class implies. Shared by
+    haystack_api's `spec` tag and the commissioning inventory, so Brick
+    and Haystack stay one model read two ways."""
+    have = set(markers)
+    if brick_class:
+        have |= markers_of_brick_class().get(brick_class, frozenset())
+    if not have:
+        return None
+    return next((q for q, need in _specs_by_size() if need <= have), None)
+
+
 def _looks_like_class(name: str) -> bool:
     """Brick classes are CapitalCase_With_Underscores; Haystack markers are
     lowerCamel with no underscores. So any uppercase letter *or* an

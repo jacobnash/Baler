@@ -72,6 +72,23 @@ const ROUTES = [
   ["PATCH",  /^\/ops\/sources\/[^/]+$/,                "ops", "admin"],
   ["DELETE", /^\/ops\/sources\/[^/]+$/,                "ops", "admin"],
 
+  // commissioning_api (Baler#37): reads viewer, changes operator,
+  // archiving a project admin. The backend also checks the caller's org
+  // and sites against the project itself.
+  ["GET",    /^\/cx\/projects$/,                              "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects$/,                              "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+$/,                        "commissioning", "viewer"],
+  ["PATCH",  /^\/cx\/projects\/[^/]+$/,                        "commissioning", "operator"],
+  ["DELETE", /^\/cx\/projects\/[^/]+$/,                        "commissioning", "admin"],
+  ["PUT",    /^\/cx\/projects\/[^/]+\/phases$/,                "commissioning", "operator"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/phase$/,                 "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/events$/,                "commissioning", "viewer"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/inventory$/,             "commissioning", "viewer"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/runs$/,                  "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/runs$/,                  "commissioning", "operator"],
+  ["GET",    /^\/cx\/runs\/[^/]+$/,                            "commissioning", "viewer"],
+  ["GET",    /^\/cx\/templates$/,                             "commissioning", "viewer"],
+
   // auth_api - POST /auth/login has its own exact-match nginx location
   // with no js_access at all (can't require a token to get a token), so
   // it deliberately has no row here.

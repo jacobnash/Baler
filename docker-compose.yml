@@ -271,6 +271,21 @@ services:
       <<: *http-api-healthcheck
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8007/openapi.yaml')"]
 
+  # Commissioning (Baler#32/#37): projects, phases, scoped inventory,
+  # SHACL expected-point templates, verification runs. Gateway /cx/.
+  # Creates cx_* tables at startup (after auth's orgs/sites).
+  commissioning_api:
+    build: .
+    command: python -m baler.commissioning_api
+    restart: unless-stopped  # connects eagerly in main() - same first-boot DB race as fault_api
+    environment: *daemon-env
+    volumes:
+      - .:/app
+    depends_on: *daemon-depends-on
+    healthcheck:
+      <<: *http-api-healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8009/openapi.yaml')"]
+
   # Project Haystack HTTP API at /api/{project}/{op} - what SkySpark,
   # Haxall, nhaystack and pyhaystack clients point at. Also issues session
   # JWTs via Haystack SCRAM login, so it reads BALER_JWT_SECRET.
@@ -399,6 +414,8 @@ services:
       ops_api:
         condition: service_healthy
       haystack_api:
+        condition: service_healthy
+      commissioning_api:
         condition: service_healthy
 
 # Explicit names so a rename of the checkout directory (= compose project)

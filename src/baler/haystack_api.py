@@ -39,7 +39,6 @@ Haystack 4 defs/libs ops.
 from __future__ import annotations
 
 import argparse
-import functools
 import os
 import threading
 import time as _time
@@ -49,11 +48,11 @@ from urllib.parse import parse_qsl, urlsplit
 
 import openhay as oh
 
-from baler import auth, brick_vocab, gateway_auth, hisquery, timeseries, tracing
+from baler import auth, gateway_auth, hisquery, timeseries, tracing
 from baler import point_write as pw
 from baler.http_handler_base import BaseAPIHandler
 from baler.scope import EVERYTHING, Scope, claims_from_header, scope_for
-from baler.timeseries import connect_pool
+from baler.timeseries import connect_pool, read_latest_many
 
 tracer = tracing.get_tracer(__name__)
 
@@ -332,51 +331,12 @@ def build_records(store, ts_conn, uris: list[str], values_only: bool = False) ->
     return out
 
 
-@functools.lru_cache(maxsize=1)
-def _specs_by_size() -> list[tuple[str, frozenset[str]]]:
-    """ph Xeto specs, most required markers first (ties by name), so the
-    first one a record fits is the most specific."""
-    specs = hisquery._xeto_specs()
-    # Specs that differ only in non-marker slots (BoolPoint, NumberPoint and
-    # Point all need just `point`) can't be told apart by markers: keep the
-    # base one, the shortest name.
-    base: dict[frozenset[str], str] = {}
-    for q, m in sorted(specs.items(), key=lambda qm: (len(qm[0].split("::")[-1]), qm[0])):
-        base.setdefault(frozenset(m), q)
-    return sorted(((q, m) for m, q in base.items()), key=lambda qm: (-len(qm[1]), qm[0]))
-
-
-@functools.lru_cache(maxsize=1)
-def _markers_of_brick_class() -> dict[str, frozenset[str]]:
-    """Brick class -> the Haystack markers the mapping rules mint it from
-    (rules/haystack_*_to_brick.yaml reversed): what a Brick-only record would
-    carry as Haystack tags."""
-    from baler import mapping
-
-    out: dict[str, frozenset[str]] = {}
-    for path in (mapping.DEFAULT_RULES_PATH, mapping.DEFAULT_RULES_PATH.replace("haystack_to_brick", "haystack_equip_to_brick")):
-        try:
-            rules = mapping.load_rules(path)
-        except FileNotFoundError:
-            continue
-        for rule in rules:
-            # the class, its aliases (brick:AHU) and subclasses (Rooftop_Unit)
-            vocab = brick_vocab.load()
-            for cls in vocab.descendants(rule["brick_class"]) or {rule["brick_class"]}:
-                out.setdefault(cls, frozenset(rule["tags"]))
-    return out
-
-
 def best_spec(rec: dict) -> str | None:
     """The most specific ph Xeto spec the record fits (Baler#22): its own
-    markers, plus those its Brick class implies."""
+    markers, plus those its Brick class implies (hisquery.xeto_spec_for)."""
     markers = {k for k, v in rec.items() if v is oh.MARKER}
     cls = rec.get("brickClass")
-    if isinstance(cls, str):
-        markers |= _markers_of_brick_class().get(cls, frozenset())
-    if not markers:
-        return None
-    return next((q for q, need in _specs_by_size() if need <= markers), None)
+    return hisquery.xeto_spec_for(markers, cls if isinstance(cls, str) else None)
 
 
 def _site_of(store, uris: list[str]) -> dict[str, str]:
@@ -408,25 +368,6 @@ def read_first_ts_many(conn, point_uris: list[str]) -> dict[str, datetime]:
         (point_uris,),
     )
     return dict(cur.fetchall())
-
-
-def read_latest_many(conn, point_uris: list[str]) -> dict[str, tuple[datetime, object]]:
-    if not point_uris:
-        return {}
-    cur = conn.execute(
-        """
-        SELECT u.uri, h.ts, h.value, h.value_text, h.value_bool
-        FROM unnest(%s::text[]) AS u(uri)
-        CROSS JOIN LATERAL (
-            -- one backward primary-key probe per point; DISTINCT ON sorted
-            -- every row of every point's history (>60s at 20M rows)
-            SELECT ts, value, value_text, value_bool FROM point_history
-            WHERE point_uri = u.uri ORDER BY ts DESC LIMIT 1
-        ) h
-        """,
-        (point_uris,),
-    )
-    return {uri: (ts, timeseries._row_to_value((v, vt, vb))) for uri, ts, v, vt, vb in cur.fetchall()}
 
 
 # ------------------------------------------------------------ live-tag filters

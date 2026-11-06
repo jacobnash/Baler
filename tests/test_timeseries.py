@@ -8,6 +8,7 @@ from baler.timeseries import (
     connect,
     delete_point_value,
     read_latest,
+    read_latest_many,
     read_range,
     write_point_value,
 )
@@ -82,3 +83,16 @@ def test_read_range_orders_by_time(conn):
 
     rows = read_range(conn, "urn:test-ts:temp", t1, t2)
     assert rows == [(t1, 0.0), (t2, 1.0)]
+
+
+@pytest.mark.integration
+def test_read_latest_many_one_query_per_batch(conn):
+    """Moved here from haystack_api (Baler#37) so commissioning shares it."""
+    t1 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    t2 = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    write_point_value(conn, "urn:test-ts:a", 1.0, t1)
+    write_point_value(conn, "urn:test-ts:a", 2.0, t2)
+    write_point_value(conn, "urn:test-ts:b", True, t1)
+    got = read_latest_many(conn, ["urn:test-ts:a", "urn:test-ts:b", "urn:test-ts:none"])
+    assert got == {"urn:test-ts:a": (t2, 2.0), "urn:test-ts:b": (t1, True)}
+    assert read_latest_many(conn, []) == {}

@@ -18,3 +18,10 @@ project bumps its Brick version.
 Loaded by `src/baler/shacl_validate.py` (`load_shapes`) to
 structurally validate the live entity graph against Brick's own SHACL
 shapes — see `validate_api.py` (`POST /validate`).
+
+`cx-expected-points.ttl` — Baler's own SHACL shapes (not vendored): the
+points commissioning expects on an AHU, VAV, FCU, chiller, boiler and
+pump (Baler#37). Valid SHACL for pyshacl as-is; read by
+`src/baler/commissioning/templates.py`, which evaluates the same shapes
+subclass-aware and with a Haystack-marker fallback. Edit to change what
+"complete" means - see the conventions at the top of the file.

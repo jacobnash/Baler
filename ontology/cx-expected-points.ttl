@@ -1,0 +1,195 @@
+# Commissioning expected-point templates (Baler#32, Cx 1 / #37).
+#
+# One NodeShape per equipment class: the points a commissioning agent
+# expects to find on it before anything else can be verified. Plain
+# SHACL - pyshacl validates a data graph against this file as-is - and
+# also read by src/baler/commissioning/templates.py, which evaluates the
+# same shapes subclass-aware (via the vendored Brick ontology) and falls
+# back to Haystack markers for points with no Brick class.
+#
+# Conventions the Python reader relies on (keep to them when editing):
+#   - each requirement is a sh:PropertyShape with sh:path brick:hasPoint,
+#     sh:qualifiedMinCount 1, and a sh:qualifiedValueShape that is either
+#     [ sh:class X ] or [ sh:or ( [ sh:class X ] [ sh:class Y ] ... ) ];
+#   - sh:severity sh:Violation = required, sh:Warning = expected;
+#   - sh:name is the plain-English label shown in reports.
+# Classes come from rules/haystack_*_to_brick.yaml where possible, so
+# what Baler's own mapping mints is what these shapes look for.
+
+@prefix brick: <https://brickschema.org/schema/Brick#> .
+@prefix cx:    <urn:baler:cx#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sh:    <http://www.w3.org/ns/shacl#> .
+
+# ---------------------------------------------------------------- AHU
+
+cx:AHU_ExpectedPoints a sh:NodeShape ;
+    rdfs:label "Air handling unit" ;
+    sh:targetClass brick:Air_Handling_Unit ;
+    sh:property cx:AHU_SAT, cx:AHU_SATSP, cx:AHU_FanStatus, cx:AHU_FanCommand,
+        cx:AHU_RAT, cx:AHU_MAT, cx:AHU_OAT .
+
+cx:AHU_SAT a sh:PropertyShape ; sh:name "supply air temperature" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Violation ;
+    sh:qualifiedValueShape [ sh:class brick:Supply_Air_Temperature_Sensor ] ;
+    sh:message "no supply air temperature sensor" .
+
+cx:AHU_SATSP a sh:PropertyShape ; sh:name "supply air temperature setpoint" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Warning ;
+    sh:qualifiedValueShape [ sh:class brick:Supply_Air_Temperature_Setpoint ] ;
+    sh:message "no supply air temperature setpoint" .
+
+cx:AHU_FanStatus a sh:PropertyShape ; sh:name "supply fan status" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Violation ;
+    sh:qualifiedValueShape [ sh:class brick:Fan_Status ] ;
+    sh:message "no fan status" .
+
+cx:AHU_FanCommand a sh:PropertyShape ; sh:name "supply fan command" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Warning ;
+    sh:qualifiedValueShape [ sh:class brick:Fan_Command ] ;
+    sh:message "no fan command" .
+
+cx:AHU_RAT a sh:PropertyShape ; sh:name "return air temperature" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Warning ;
+    sh:qualifiedValueShape [ sh:class brick:Return_Air_Temperature_Sensor ] ;
+    sh:message "no return air temperature sensor" .
+
+cx:AHU_MAT a sh:PropertyShape ; sh:name "mixed air temperature" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Warning ;
+    sh:qualifiedValueShape [ sh:class brick:Mixed_Air_Temperature_Sensor ] ;
+    sh:message "no mixed air temperature sensor" .
+
+cx:AHU_OAT a sh:PropertyShape ; sh:name "outside air temperature" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Warning ;
+    sh:qualifiedValueShape [ sh:class brick:Outside_Air_Temperature_Sensor ] ;
+    sh:message "no outside air temperature sensor (an AHU may share a building OAT - confirm)" .
+
+# ---------------------------------------------------------------- VAV
+
+cx:VAV_ExpectedPoints a sh:NodeShape ;
+    rdfs:label "VAV box" ;
+    sh:targetClass brick:Variable_Air_Volume_Box ;
+    sh:property cx:VAV_ZAT, cx:VAV_ZATSP, cx:VAV_Damper, cx:VAV_Flow .
+
+cx:VAV_ZAT a sh:PropertyShape ; sh:name "zone air temperature" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Violation ;
+    sh:qualifiedValueShape [ sh:class brick:Zone_Air_Temperature_Sensor ] ;
+    sh:message "no zone air temperature sensor" .
+
+cx:VAV_ZATSP a sh:PropertyShape ; sh:name "zone air temperature setpoint" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Warning ;
+    sh:qualifiedValueShape [ sh:class brick:Zone_Air_Temperature_Setpoint ] ;
+    sh:message "no zone air temperature setpoint" .
+
+cx:VAV_Damper a sh:PropertyShape ; sh:name "damper position" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Violation ;
+    sh:qualifiedValueShape [ sh:or ( [ sh:class brick:Damper_Position_Command ] [ sh:class brick:Damper_Position_Sensor ] ) ] ;
+    sh:message "no damper position (command or feedback)" .
+
+cx:VAV_Flow a sh:PropertyShape ; sh:name "airflow" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Warning ;
+    sh:qualifiedValueShape [ sh:class brick:Air_Flow_Sensor ] ;
+    sh:message "no airflow sensor (pressure-independent boxes need one)" .
+
+# ---------------------------------------------------------------- FCU
+
+cx:FCU_ExpectedPoints a sh:NodeShape ;
+    rdfs:label "Fan coil unit" ;
+    sh:targetClass brick:Fan_Coil_Unit ;
+    sh:property cx:FCU_ZAT, cx:FCU_ZATSP, cx:FCU_FanStatus, cx:FCU_FanCommand, cx:FCU_Valve .
+
+cx:FCU_ZAT a sh:PropertyShape ; sh:name "zone air temperature" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Violation ;
+    sh:qualifiedValueShape [ sh:class brick:Zone_Air_Temperature_Sensor ] ;
+    sh:message "no zone air temperature sensor" .
+
+cx:FCU_ZATSP a sh:PropertyShape ; sh:name "zone air temperature setpoint" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Warning ;
+    sh:qualifiedValueShape [ sh:class brick:Zone_Air_Temperature_Setpoint ] ;
+    sh:message "no zone air temperature setpoint" .
+
+cx:FCU_FanStatus a sh:PropertyShape ; sh:name "fan status" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Violation ;
+    sh:qualifiedValueShape [ sh:class brick:Fan_Status ] ;
+    sh:message "no fan status" .
+
+cx:FCU_FanCommand a sh:PropertyShape ; sh:name "fan command" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Warning ;
+    sh:qualifiedValueShape [ sh:class brick:Fan_Command ] ;
+    sh:message "no fan command" .
+
+cx:FCU_Valve a sh:PropertyShape ; sh:name "valve position" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Warning ;
+    sh:qualifiedValueShape [ sh:or ( [ sh:class brick:Valve_Position_Command ] [ sh:class brick:Valve_Position_Sensor ] ) ] ;
+    sh:message "no valve position (command or feedback)" .
+
+# ---------------------------------------------------------------- Chiller
+
+cx:Chiller_ExpectedPoints a sh:NodeShape ;
+    rdfs:label "Chiller" ;
+    sh:targetClass brick:Chiller ;
+    sh:property cx:Chiller_CHWS, cx:Chiller_CHWR, cx:Chiller_Enable, cx:Chiller_Status .
+
+cx:Chiller_CHWS a sh:PropertyShape ; sh:name "chilled water supply temperature" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Violation ;
+    sh:qualifiedValueShape [ sh:class brick:Chilled_Water_Supply_Temperature_Sensor ] ;
+    sh:message "no chilled water supply (leaving) temperature sensor" .
+
+cx:Chiller_CHWR a sh:PropertyShape ; sh:name "chilled water return temperature" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Warning ;
+    sh:qualifiedValueShape [ sh:class brick:Chilled_Water_Return_Temperature_Sensor ] ;
+    sh:message "no chilled water return (entering) temperature sensor" .
+
+cx:Chiller_Enable a sh:PropertyShape ; sh:name "enable command" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Warning ;
+    sh:qualifiedValueShape [ sh:or ( [ sh:class brick:Enable_Command ] [ sh:class brick:Start_Stop_Command ] [ sh:class brick:On_Off_Command ] ) ] ;
+    sh:message "no enable / start-stop command" .
+
+cx:Chiller_Status a sh:PropertyShape ; sh:name "run status" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Violation ;
+    sh:qualifiedValueShape [ sh:class brick:Run_Status ] ;
+    sh:message "no run status" .
+
+# ---------------------------------------------------------------- Boiler
+
+cx:Boiler_ExpectedPoints a sh:NodeShape ;
+    rdfs:label "Boiler" ;
+    sh:targetClass brick:Boiler ;
+    sh:property cx:Boiler_HWS, cx:Boiler_HWR, cx:Boiler_Enable, cx:Boiler_Status .
+
+cx:Boiler_HWS a sh:PropertyShape ; sh:name "hot water supply temperature" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Violation ;
+    sh:qualifiedValueShape [ sh:class brick:Hot_Water_Supply_Temperature_Sensor ] ;
+    sh:message "no hot water supply (leaving) temperature sensor" .
+
+cx:Boiler_HWR a sh:PropertyShape ; sh:name "hot water return temperature" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Warning ;
+    sh:qualifiedValueShape [ sh:class brick:Hot_Water_Return_Temperature_Sensor ] ;
+    sh:message "no hot water return temperature sensor" .
+
+cx:Boiler_Enable a sh:PropertyShape ; sh:name "enable command" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Warning ;
+    sh:qualifiedValueShape [ sh:or ( [ sh:class brick:Enable_Command ] [ sh:class brick:Start_Stop_Command ] [ sh:class brick:On_Off_Command ] ) ] ;
+    sh:message "no enable / start-stop command" .
+
+cx:Boiler_Status a sh:PropertyShape ; sh:name "run status" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Violation ;
+    sh:qualifiedValueShape [ sh:class brick:Run_Status ] ;
+    sh:message "no run status" .
+
+# ---------------------------------------------------------------- Pump
+
+cx:Pump_ExpectedPoints a sh:NodeShape ;
+    rdfs:label "Pump" ;
+    sh:targetClass brick:Pump ;
+    sh:property cx:Pump_Status, cx:Pump_Command .
+
+cx:Pump_Status a sh:PropertyShape ; sh:name "pump status" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Violation ;
+    sh:qualifiedValueShape [ sh:or ( [ sh:class brick:Pump_Status ] [ sh:class brick:Run_Status ] ) ] ;
+    sh:message "no pump (run) status" .
+
+cx:Pump_Command a sh:PropertyShape ; sh:name "pump command" ;
+    sh:path brick:hasPoint ; sh:qualifiedMinCount 1 ; sh:severity sh:Warning ;
+    sh:qualifiedValueShape [ sh:or ( [ sh:class brick:Pump_Command ] [ sh:class brick:Start_Stop_Command ] [ sh:class brick:On_Off_Command ] [ sh:class brick:Enable_Command ] ) ] ;
+    sh:message "no pump command" .

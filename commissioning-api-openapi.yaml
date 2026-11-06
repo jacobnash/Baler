@@ -1,0 +1,504 @@
+openapi: 3.1.0
+info:
+  title: Baler Commissioning API
+  version: 0.1.0
+  description: |
+    Commissioning (Cx) projects for a site: first-class, editable phases,
+    a scoped equipment inventory read Brick-first and Haystack/Xeto-second,
+    SHACL expected-point templates (`ontology/cx-expected-points.ttl`), and
+    dated, reproducible verification runs. Slice Cx 1 (Baler#37) of the
+    plan in `todo/commissioning-plan.md`.
+
+    Every route needs a token whose org owns the project; a site-restricted
+    login sees only projects on its own sites. Inventory and results are
+    filtered by the caller's site scope inside the graph query. Roles are
+    enforced by the gateway (`gateway/njs/policy.js`): reads are viewer,
+    writes operator, archiving admin. Every change is recorded in the
+    project's events.
+
+    A check result is `pass`, `fail`, `inconclusive` (no data - never
+    reported as a pass) or `not_applicable`. Failures name a certain
+    symptom and candidate causes, each with what would tell it apart.
+servers:
+  - url: http://localhost:8080/cx
+    description: >-
+      Via the gateway (docker-compose) - the externally-reachable path.
+      Every route is JWT-verified in nginx (gateway/njs/).
+  - url: http://localhost:8009
+    description: >-
+      Direct - only from inside the Docker network or bare-metal; also
+      needs the X-Gateway-Secret header the gateway adds.
+tags:
+  - name: Projects
+  - name: Phases
+  - name: Runs
+  - name: Templates
+paths:
+  /projects:
+    get:
+      tags: [Projects]
+      operationId: listCxProjects
+      summary: Projects of the caller's org (and sites)
+      parameters:
+        - name: include_archived
+          in: query
+          schema: { type: string, enum: ["true", "false"] }
+      responses:
+        "200":
+          description: Projects, oldest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Project" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [Projects]
+      operationId: createCxProject
+      summary: Create a project (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, phase]
+              properties:
+                name: { type: string }
+                site_id:
+                  type: [string, "null"]
+                  description: >-
+                    A site of the caller's org. Omit for an org-wide project
+                    (not allowed for a site-restricted login).
+                phase:
+                  type: string
+                  description: Key of the current phase. Always stated.
+                phases:
+                  type: array
+                  description: >-
+                    The project's own phase list, in order. Defaults to design,
+                    construction, startup, functional, acceptance, warranty,
+                    operations.
+                  items: { $ref: "#/components/schemas/PhaseInput" }
+                settings: { $ref: "#/components/schemas/Settings" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /projects/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Projects]
+      operationId: getCxProject
+      summary: One project, with its phases
+      responses:
+        "200":
+          description: The project
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Projects]
+      operationId: updateCxProject
+      summary: Rename or change settings (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                settings: { $ref: "#/components/schemas/Settings" }
+      responses:
+        "200":
+          description: The updated project
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Projects]
+      operationId: archiveCxProject
+      summary: Archive a project (admin). Runs and events are kept.
+      responses:
+        "204": { description: Archived }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/phases:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    put:
+      tags: [Phases]
+      operationId: replaceCxPhases
+      summary: Replace the phase list - rename, reorder, add, remove, skip (operator)
+      description: >-
+        Timestamps of phases that already existed are kept. Exactly one
+        phase must remain active; move the current phase with
+        POST .../phase.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phases]
+              properties:
+                phases:
+                  type: array
+                  items: { $ref: "#/components/schemas/PhaseInput" }
+      responses:
+        "200":
+          description: The updated project
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/phase:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Phases]
+      operationId: setCxPhase
+      summary: Make a phase current (operator)
+      description: >-
+        Moving forward completes the phase being left; moving back returns
+        it to pending.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key]
+              properties:
+                key: { type: string }
+                note: { type: string }
+      responses:
+        "200":
+          description: The updated project
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/events:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Projects]
+      operationId: listCxEvents
+      summary: The project's audit trail, newest first
+      responses:
+        "200":
+          description: Events
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Event" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/inventory:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Projects]
+      operationId: getCxInventory
+      summary: Live, scoped equipment and points, with the templates that apply
+      responses:
+        "200":
+          description: Inventory
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [equipment]
+                properties:
+                  equipment:
+                    type: array
+                    items: { $ref: "#/components/schemas/InventoryEquip" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/runs:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Runs]
+      operationId: listCxRuns
+      summary: The project's runs, newest first
+      responses:
+        "200":
+          description: Runs
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Run" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Runs]
+      operationId: createCxRun
+      summary: Run verification now (operator)
+      description: >-
+        Synchronous. Inventory, template completeness and rung-1 existence
+        over the trailing window, recorded against the current phase.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                window_hours:
+                  type: number
+                  description: Defaults to the project's settings.window_hours, else 24.
+      responses:
+        "201":
+          description: The finished run (results via GET /runs/{id})
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Run" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The project is archived
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /runs/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Runs]
+      operationId: getCxRun
+      summary: A run and its results
+      parameters:
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/Status" } }
+        - { name: equip_uri, in: query, schema: { type: string } }
+        - name: check_id
+          in: query
+          description: Prefix match, e.g. `template:` or `exists`
+          schema: { type: string }
+      responses:
+        "200":
+          description: Run and results
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run, results]
+                properties:
+                  run: { $ref: "#/components/schemas/Run" }
+                  results:
+                    type: array
+                    items: { $ref: "#/components/schemas/Result" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /templates:
+    get:
+      tags: [Templates]
+      operationId: listCxTemplates
+      summary: Expected-point templates, from ontology/cx-expected-points.ttl
+      responses:
+        "200":
+          description: Templates
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Template" }
+  /openapi.yaml:
+    get:
+      operationId: getCxOpenAPI
+      summary: This OpenAPI document
+      responses:
+        "200": { description: YAML OpenAPI spec }
+  /docs:
+    get:
+      operationId: getCxDocs
+      summary: Interactive docs for this API
+      responses:
+        "200": { description: HTML }
+components:
+  parameters:
+    ProjectId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+  responses:
+    BadRequest:
+      description: Invalid input
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Not via the gateway, or no verifiable token with an org
+    NotFound:
+      description: No such project/run, or not visible to the caller
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    Status:
+      type: string
+      enum: [pass, fail, inconclusive, not_applicable]
+    Settings:
+      type: object
+      properties:
+        window_hours: { type: number, exclusiveMinimum: 0, maximum: 744 }
+      additionalProperties: true
+    PhaseInput:
+      type: object
+      required: [key]
+      properties:
+        key: { type: string, pattern: "^[a-z][a-z0-9_-]{0,39}$" }
+        name: { type: string }
+        status: { type: string, enum: [pending, active, complete, skipped] }
+    Phase:
+      type: object
+      required: [key, name, position, status, started_at, completed_at]
+      properties:
+        key: { type: string }
+        name: { type: string }
+        position: { type: integer }
+        status: { type: string, enum: [pending, active, complete, skipped] }
+        started_at: { type: [string, "null"], format: date-time }
+        completed_at: { type: [string, "null"], format: date-time }
+    Project:
+      type: object
+      required: [id, org_id, site_id, name, settings, current_phase, phases, created_at, updated_at, archived_at]
+      properties:
+        id: { type: string }
+        org_id: { type: string }
+        site_id: { type: [string, "null"] }
+        name: { type: string }
+        settings: { $ref: "#/components/schemas/Settings" }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        archived_at: { type: [string, "null"], format: date-time }
+        current_phase: { type: [string, "null"] }
+        phases:
+          type: array
+          items: { $ref: "#/components/schemas/Phase" }
+    Event:
+      type: object
+      required: [id, ts, action, detail]
+      properties:
+        id: { type: integer }
+        ts: { type: string, format: date-time }
+        action: { type: string }
+        user_sub: { type: [string, "null"] }
+        user_email: { type: [string, "null"] }
+        detail: { type: object }
+    InventoryPoint:
+      type: object
+      required: [id, dis, brickClass, tags, spec]
+      properties:
+        id: { type: string }
+        point: { type: string }
+        dis: { type: string }
+        unit: { type: [string, "null"] }
+        kind: { type: [string, "null"] }
+        brickClass: { type: [string, "null"] }
+        tags: { type: array, items: { type: string }, description: Haystack markers }
+        equip: { type: [string, "null"] }
+        equipDis: { type: [string, "null"] }
+        spec: { type: [string, "null"], description: The ph Xeto spec the point fits }
+    InventoryEquip:
+      type: object
+      required: [id, dis, brickClass, brickClasses, tags, spec, points]
+      properties:
+        id: { type: string }
+        dis: { type: string }
+        brickClass: { type: [string, "null"] }
+        brickClasses: { type: array, items: { type: string } }
+        tags: { type: array, items: { type: string } }
+        spec: { type: [string, "null"] }
+        templates: { type: array, items: { type: string } }
+        points:
+          type: array
+          items: { $ref: "#/components/schemas/InventoryPoint" }
+    Run:
+      type: object
+      required: [id, project_id, phase, started_at, finished_at, window_start, window_end, scope, summary]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        phase: { type: [string, "null"] }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
+        triggered_by: { type: [string, "null"] }
+        scope:
+          type: object
+          description: What was in scope, so the run is reproducible
+        summary:
+          type: object
+          required: [equipment, points, by_status, by_check, freshness]
+          properties:
+            equipment: { type: integer }
+            points: { type: integer }
+            equipment_with_template: { type: integer }
+            equipment_without_template: { type: array, items: { type: object } }
+            unclassified_points: { type: integer }
+            by_status: { type: object, additionalProperties: { type: integer } }
+            by_check: { type: object }
+            required_missing: { type: integer }
+            freshness: { type: string }
+            phase: { type: [string, "null"] }
+            window_hours: { type: number }
+    Result:
+      type: object
+      required: [equip_uri, check_id, subject, status, evidence]
+      properties:
+        equip_uri: { type: string }
+        check_id:
+          type: string
+          description: "`exists`, or `template:<requirement>`"
+        subject: { type: string, description: Point or equipment the result is about }
+        status: { $ref: "#/components/schemas/Status" }
+        severity: { type: [string, "null"], enum: [required, expected, optional, null] }
+        symptom: { type: [string, "null"] }
+        candidates:
+          type: array
+          items:
+            type: object
+            properties:
+              cause: { type: string }
+              distinguish: { type: string }
+        evidence: { type: object }
+    Template:
+      type: object
+      required: [id, label, target_class, requirements]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        target_class: { type: string }
+        requirements:
+          type: array
+          items:
+            type: object
+            required: [id, name, classes, severity]
+            properties:
+              id: { type: string }
+              name: { type: string }
+              classes: { type: array, items: { type: string } }
+              severity: { type: string, enum: [required, expected, optional] }
+              message: { type: string }
+              haystack_markers: { type: array, items: { type: string } }
+              xeto_spec: { type: [string, "null"] }

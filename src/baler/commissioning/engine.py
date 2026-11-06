@@ -1,0 +1,79 @@
+"""
+One commissioning run: inventory -> checks -> summary, deterministic
+given the same graph, history and clock. No I/O of its own beyond what
+it's handed (a store, a History, scopes), so it runs the same against
+Oxigraph+Postgres and against rdflib+InMemoryHistory in tests.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+from baler.commissioning import checks, inventory
+from baler.commissioning import templates as tpl
+from baler.commissioning.history import History
+from baler.scope import Scope
+
+DEFAULT_WINDOW_HOURS = 24.0
+MAX_WINDOW_HOURS = 24.0 * 31
+
+
+def window_hours(value) -> float:
+    if value is None:
+        return DEFAULT_WINDOW_HOURS
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= MAX_WINDOW_HOURS:
+        raise ValueError(f"window_hours must be a number in (0, {MAX_WINDOW_HOURS:g}]")
+    return float(value)
+
+
+def freshness_statement(now: datetime, window_h: float, n: int, fresh: int, stale: int, never: int) -> str:
+    """What was actually observed - never "all good" when what is meant
+    is "nothing new came in" (#5)."""
+    stamp = now.strftime("%Y-%m-%d %H:%M UTC")
+    if n == 0:
+        return f"as of {stamp}: no points in scope - nothing could be verified"
+    return (f"as of {stamp}: {fresh} of {n} points reported in the last {window_h:g} h, "
+            f"{stale} stale, {never} never reported")
+
+
+def run(store, history: History, scopes: list[Scope], now: datetime, window_h: float = DEFAULT_WINDOW_HOURS,
+        templates=None) -> tuple[dict, list[dict]]:
+    """(summary, results)."""
+    templates = templates if templates is not None else tpl.load()
+    equips = inventory.build(store, scopes)
+    point_ids = sorted({p["id"] for e in equips for p in e["points"]})
+    latest = history.latest(point_ids) if point_ids else {}
+    window = timedelta(hours=window_h)
+
+    results: list[dict] = []
+    without_template = []
+    for e in equips:
+        results.extend(checks.existence(e, latest, now, window))
+        if tpl.templates_for(e["brickClasses"], templates):
+            results.extend(checks.template_completeness(e, templates))
+        else:
+            without_template.append({"id": e["id"], "brickClass": e["brickClass"]})
+
+    by_status = {s: 0 for s in checks.STATUSES}
+    by_check: dict[str, dict[str, int]] = {}
+    for r in results:
+        by_status[r["status"]] += 1
+        family = r["check_id"].split(":", 1)[0]
+        by_check.setdefault(family, {s: 0 for s in checks.STATUSES})[r["status"]] += 1
+    exists = [r for r in results if r["check_id"] == "exists"]
+    fresh = sum(1 for r in exists if r["status"] == "pass")
+    stale = sum(1 for r in exists if r["status"] == "fail")
+    never = sum(1 for r in exists if r["status"] == "inconclusive")
+    summary = {
+        "equipment": len(equips),
+        "points": len(point_ids),
+        "equipment_with_template": len(equips) - len(without_template),
+        "equipment_without_template": without_template[:100],
+        "unclassified_points": sum(1 for e in equips for p in e["points"] if not p["brickClass"]),
+        "by_status": by_status,
+        "by_check": by_check,
+        "required_missing": sum(1 for r in results if r["check_id"].startswith("template:")
+                                and r["status"] == "fail" and r["severity"] == "required"),
+        "freshness": freshness_statement(now, window_h, len(point_ids), fresh, stale, never),
+    }
+    return summary, results
