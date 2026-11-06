@@ -9,7 +9,9 @@ import pathlib
 import re
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-LOCATIONS = set(re.findall(r"location\s+(?:=\s*)?(/[a-z]*/?)", (ROOT / "gateway" / "nginx.conf").read_text()))
+_CONF = (ROOT / "gateway" / "nginx.conf").read_text()
+LOCATIONS = set(re.findall(r"location\s+(?:=\s*)?(/[a-z]*/?)", _CONF)) | set(
+    re.findall(r"location\s+~\s+\^(/[a-z]+)", _CONF))  # regex locations, e.g. ~ ^/docs/?$
 API_PREFIXES = {"/ingest/", "/fault/", "/windrow/", "/derivation/", "/validate/", "/ops/", "/cx/", "/auth/"}
 
 
@@ -28,5 +30,6 @@ def test_every_absolute_ui_link_hits_a_gateway_location():
 def test_api_links_go_to_docs_not_bare_paths():
     bad = [(f, h) for f, h in _absolute_links()
            if any(h.startswith(p) for p in API_PREFIXES) and not h.endswith(("/docs", "/openapi.yaml"))]
+    assert "/docs" in LOCATIONS, "the site docs redirect (gateway/nginx.conf) is gone"
     assert not bad, f"API links should open the API's docs page: {bad}"
     assert not [(f, h) for f, h in _absolute_links() if h.startswith("/api/")], "/api/ is the Haystack API"
