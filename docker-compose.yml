@@ -3,6 +3,11 @@
 # are variables, so an install made under the old name keeps its .env and
 # its data unchanged - see deploy/MIGRATING-TO-BALER.md.
 x-daemon-env: &daemon-env
+  # Bytecode caches go inside the container, not into the bind-mounted
+  # checkout (.:/app): containers run as root, so __pycache__ written there
+  # is root-owned and the next deploy's actions/checkout can't clean it
+  # (EACCES) - the #25 fast path's `restart` made that race routine (#29).
+  PYTHONPYCACHEPREFIX: /tmp/pycache
   BALER_PG_DSN: postgresql://${BALER_PG_USER:-baler}:${POSTGRES_PASSWORD:-${BALER_PG_USER:-baler}}@postgres:5432/${BALER_PG_DB:-baler}
   OXIGRAPH_URL: http://oxigraph:7878
   MQTT_HOST: mosquitto
