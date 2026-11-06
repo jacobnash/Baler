@@ -46,6 +46,10 @@ services:
       --state-file /app/state/windrow-connections.json
       --devices-state-file /app/state/windrow-devices.json
       --modbus-state-file /app/state/windrow-modbus-connections.json
+    environment:
+      # Only requests the gateway forwarded (its /windrow/ route checks the
+      # login and role, then adds X-Gateway-Secret) - Baler#14.
+      WINDROW_GATEWAY_SECRET: ${BALER_GATEWAY_SECRET:-${TIMBERDOODLE_GATEWAY_SECRET:?set BALER_GATEWAY_SECRET in .env}}
     networks:
       bacnet-mock:
         ipv4_address: 172.30.0.11
