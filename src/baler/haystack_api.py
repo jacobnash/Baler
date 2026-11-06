@@ -208,6 +208,7 @@ def build_records(store, ts_conn, uris: list[str]) -> dict[str, dict]:
     )
     recs: dict[str, dict] = {}
     classes: dict[str, list[str]] = {}
+    stored_site: dict[str, object] = {}  # a siteRef tag (Haystack imports), used when the graph has none
     units: dict[str, dict[str, str]] = {}
     for row in rows:
         s, p, o = str(row.s), str(row.p), row.o
@@ -220,6 +221,8 @@ def build_records(store, ts_conn, uris: list[str]) -> dict[str, dict]:
             rec[str(o)] = oh.MARKER
         elif p.startswith(HAYSTACK_NS) and not is_iri:
             tag = p[len(HAYSTACK_NS):]
+            if tag == "siteRef":
+                stored_site[s] = _literal(o, getattr(row, "dt", None))
             if tag not in _RECOMPUTED_TAGS:
                 val = _literal(o, getattr(row, "dt", None))
                 if tag in rec and isinstance(val, oh.Ref):
@@ -243,6 +246,7 @@ def build_records(store, ts_conn, uris: list[str]) -> dict[str, dict]:
             # this API instead of querying the graph directly.
             rec.setdefault(_BRICK_LINK_TAGS[p], []).append(oh.Ref(uri_to_ref(str(o))))
 
+    sites = _site_of(store, uris)
     for s, by_tag in units.items():
         for tag, unit in by_tag.items():
             v = recs.get(s, {}).get(tag)
@@ -263,6 +267,12 @@ def build_records(store, ts_conn, uris: list[str]) -> dict[str, dict]:
         cls = sorted(classes.get(uri, []), key=lambda c: (not c.startswith(BRICK_NS), c))
         if cls:
             rec["brickClass"] = hisquery._local_name(cls[0])
+        if BRICK_NS + "Site" in classes.get(uri, []):
+            rec["site"] = oh.MARKER
+        if uri in sites:
+            rec["siteRef"] = oh.Ref(uri_to_ref(sites[uri]), hisquery._local_name(sites[uri]))
+        elif isinstance(stored_site.get(uri), oh.Ref):
+            rec["siteRef"] = stored_site[uri]
         if uri in latest:
             ts, val = latest[uri]
             unit, label = labels.get(uri, (None, None))
@@ -285,6 +295,21 @@ def build_records(store, ts_conn, uris: list[str]) -> dict[str, dict]:
             rec["mod"] = ts
         rec.setdefault("tz", DEFAULT_TZ)
         out[uri] = rec
+    return out
+
+
+def _site_of(store, uris: list[str]) -> dict[str, str]:
+    """Each entity's Brick Site (hisquery.SITE_MEMBER), in one query."""
+    if not uris:
+        return {}
+    values = " ".join(f"<{hisquery._uri(u)}>" for u in uris)
+    rows = store.query(
+        hisquery.PREFIXES
+        + f"SELECT ?e ?site WHERE {{ VALUES ?e {{ {values} }} ?site a brick:Site . ?site {hisquery.SITE_MEMBER} ?e }}"
+    )
+    out: dict[str, str] = {}
+    for r in rows:
+        out.setdefault(str(r.e), str(r.site))
     return out
 
 
@@ -438,12 +463,25 @@ class Backend:
         return [recs.get(u) for u in uris]  # out-of-scope ids read as missing, never as "forbidden"
 
     def nav(self, nav_id: str | None, scope: Scope = EVERYTHING) -> list[dict]:
-        """equip -> point. (Sites aren't modelled as graph entities yet.)"""
+        """site -> equip -> point, like Haxall. Sites are Brick Sites; equips
+        that no site reaches are listed at the root beside them."""
         if nav_id is None:
             rows = self.store.query(
-                "SELECT DISTINCT ?s WHERE { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), \"urn:equip:\")) }"
+                hisquery.PREFIXES
+                + "SELECT DISTINCT ?s WHERE { { ?s a brick:Site } UNION { ?s ?p ?o . "
+                "FILTER(STRSTARTS(STR(?s), \"urn:equip:\")) "
+                f"FILTER NOT EXISTS {{ ?site a brick:Site . ?site {hisquery.SITE_MEMBER} ?s }} }} }}"
             )
             uris = scope.filter(sorted({str(r.s) for r in rows}))
+        elif _kind_of(ref_to_uri(nav_id)) != "equip" and list(self.store.query(
+                hisquery.PREFIXES + f"SELECT ?t WHERE {{ <{hisquery._uri(ref_to_uri(nav_id))}> a brick:Site . BIND(1 AS ?t) }}")):
+            site = hisquery._uri(ref_to_uri(nav_id))
+            rows = self.store.query(
+                hisquery.PREFIXES
+                + f"SELECT DISTINCT ?e WHERE {{ <{site}> {hisquery.SITE_MEMBER} ?e . "
+                "FILTER(STRSTARTS(STR(?e), \"urn:equip:\")) }"
+            )
+            uris = scope.filter(sorted({str(r.e) for r in rows}))
         else:
             equip = ref_to_uri(nav_id)
             rows = self.store.query(
@@ -459,7 +497,7 @@ class Backend:
             rec = recs.get(u)
             if rec is None:
                 continue
-            if "equip" in rec:
+            if "equip" in rec or "site" in rec:
                 rec["navId"] = uri_to_ref(u)
             out.append(rec)
         return out

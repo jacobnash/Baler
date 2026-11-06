@@ -612,3 +612,45 @@ def test_live_tags_filter_on_point_history(monkeypatch):
     assert names("not (his and curVal > 70°F) and point") == ["cold", "idle"]
     assert names("equip or curVal > 70°F") == ["ahu-1", "hot"]
     assert len(names("his", limit=1)) == 1
+
+
+def test_site_ref_from_brick_containment():
+    """siteRef comes from Brick structure (Site > Building > Floor, an AHU
+    feeding the floor, its points); nav goes site -> equip -> point, like
+    Haxall's."""
+    store = Store()
+    g = store.graph
+    site, bld, fl = URIRef("urn:location:site-1"), URIRef("urn:location:site/b1"), URIRef("urn:location:f1")
+    ahu, orphan, p = URIRef("urn:equip:w/ahu-1"), URIRef("urn:equip:w/orphan"), URIRef("urn:point:w/ahu-1/sat")
+    for u, c in [(site, BRICK.Site), (bld, BRICK.Building), (fl, BRICK.Floor)]:
+        g.add((u, RDF.type, c))
+    g.add((site, BRICK.hasPart, bld))
+    g.add((bld, BRICK.hasPart, fl))
+    g.add((ahu, BRICK.feeds, fl))
+    g.add((ahu, BRICK.hasPoint, p))
+    g.add((p, BRICK.isPointOf, ahu))
+    g.add((orphan, BRICK.hasPoint, URIRef("urn:point:w/o/x")))
+
+    class Pool:
+        @contextmanager
+        def connection(self):
+            yield None
+
+    be = ha.Backend(store, Pool())
+    recs = ha.build_records(store, None, [str(site), str(ahu), str(p), str(orphan)])
+    assert recs[str(site)]["site"] == oh.MARKER
+    assert recs[str(ahu)]["siteRef"].id == ha.uri_to_ref(str(site))
+    assert recs[str(p)]["siteRef"].id == ha.uri_to_ref(str(site))
+    assert "siteRef" not in recs[str(orphan)]
+
+    def ids(flt):
+        return sorted(ha.ref_to_uri(r["id"].id) for r in be.read_filter(flt, None))
+
+    assert ids("site") == [str(site)]
+    assert ids(f"point and siteRef==@{ha.uri_to_ref(str(site))}") == [str(p)]
+    assert ids("point and siteRef->site") == [str(p)]
+    assert ids("equip and not siteRef") == [str(orphan)]
+
+    assert [ha.ref_to_uri(r["navId"]) for r in be.nav(None)] == [str(orphan), str(site)]
+    assert [ha.ref_to_uri(r["navId"]) for r in be.nav(ha.uri_to_ref(str(site)))] == [str(ahu)]
+    assert [ha.ref_to_uri(r["id"].id) for r in be.nav(ha.uri_to_ref(str(ahu)))] == [str(p)]

@@ -324,7 +324,12 @@ readAll(point and not equipRef->vav).hisRead(today)
 - **equipRef** follows the point's `brick:isPointOf` edge, so it works for every point in the graph,
   not only Haystack-sourced ones. A point whose equip hasn't been linked yet is followed through
   its raw `equipRef` tag instead.
-- **Any other ref tag** (`siteRef`, `spaceRef`, a custom `fooRef`) is followed through its raw
+- **siteRef** also follows Brick structure: the `brick:Site` that reaches the entity through
+  `hasPart` (Site > Building > Floor > Zone, or equipment's own parts), backwards along `feeds`
+  (an AHU feeds a Floor, a VAV a Zone) and on to `hasPoint`. That's the `siteRef` `/api` shows on
+  every record, and `nav` walks site → equip → point the same way. A raw `siteRef` tag (Haystack
+  imports) still counts when no Brick Site reaches the entity.
+- **Any other ref tag** (`spaceRef`, a custom `fooRef`) is followed through its raw
   Haystack value: a `urn:...` ref names the entity directly, a bare id resolves to the
   Haystack-sourced record with that id.
 - The far end is tested with the full filter vocabulary, so `equipRef->ahu` also matches points on

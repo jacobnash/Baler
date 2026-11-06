@@ -565,9 +565,16 @@ def _rule_classes_by_tag() -> dict[str, frozenset[str]]:
 # graph structure too is what makes `point and equipRef==@x` behave the
 # way a SkySpark user expects regardless of which source the data came
 # from.
+# An entity's site, from Brick structure: the Site reaches it through
+# containment (Site > Building > Floor > Zone, or equipment's own parts),
+# backwards along feeds (an AHU feeds a Floor; a VAV feeds a Zone), and on
+# to points. What /api presents as siteRef (haystack_api.build_records).
+SITE_MEMBER = "(brick:hasPart|^brick:feeds|brick:hasPoint)+"
+
 _STRUCTURAL_ALIASES = {
     "point": ["?s a td:RawPoint", "?s brick:isPointOf ?{v}"],
     "equipRef": ["?s brick:isPointOf ?{v}"],  # what /api presents as equipRef
+    "siteRef": ["?{v} a brick:Site . ?{v} " + SITE_MEMBER + " ?s"],
     "equip": ["?s brick:hasPoint ?{v}"],
     "site": ["?s a brick:Site"],
 }
@@ -839,6 +846,9 @@ class _Compiler:
             parts = [self._flag(f"?s haystack:{node.name} ?{v} . FILTER(STR(?{v}) = {_sparql_string(node.value.id)})")]
             if node.name == "equipRef":
                 parts.append(self._flag(f"?s brick:isPointOf <{_uri(ref_to_equip_uri(node.value.id))}>"))
+            if node.name == "siteRef" and node.value.id.startswith("urn:"):
+                site = _uri(node.value.id)
+                parts.append(self._flag(f"<{site}> a brick:Site . <{site}> {SITE_MEMBER} ?s"))
             e = self._any(parts)
             return e if node.op == "==" else f"({self._has_value(node.name)} && !{e})"
 
@@ -907,6 +917,8 @@ class _Compiler:
             x = self._var()
             alts = [alt[:-1] + f" FILTER NOT EXISTS {{ ?{a} brick:isPointOf ?{x} }} }}" for alt in alts]
             alts.append(f"{{ ?{a} brick:isPointOf ?{b} }}")
+        if name == "siteRef":
+            alts.append(f"{{ ?{b} a brick:Site . ?{b} {SITE_MEMBER} ?{a} }}")
         return " UNION ".join(alts)
 
     def _path(self, node: Path, mode: str = "match") -> str:
