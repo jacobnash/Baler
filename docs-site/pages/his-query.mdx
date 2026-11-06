@@ -303,13 +303,32 @@ for API clients and scripts that don't say. Set it to the zone the *building* is
 multi-site deployment spanning zones should pass `tz` per request instead (see
 [Multi-site](/multi-site)).
 
+## Tag paths
+
+`a->b` follows the ref tag `a` and tests `b` on the entity it points at, the same as Haystack:
+
+```
+readAll(point and equipRef->ahu).hisRead(today)
+readAll(temp and equipRef->dis == "AHU-1").hisRead(yesterday)
+readAll(point and not equipRef->vav).hisRead(today)
+```
+
+- **equipRef** follows the point's `brick:isPointOf` edge, so it works for every point in the graph,
+  not only Haystack-sourced ones. A point whose equip hasn't been linked yet is followed through
+  its raw `equipRef` tag instead.
+- **Any other ref tag** (`siteRef`, `spaceRef`, a custom `fooRef`) is followed through its raw
+  Haystack value: a `urn:...` ref names the entity directly, a bare id resolves to the
+  Haystack-sourced record with that id.
+- The far end is tested with the full filter vocabulary, so `equipRef->ahu` also matches points on
+  equipment typed `brick:Rooftop_Unit` that carry no `ahu` marker.
+- A path that can't be followed (no such ref) is false, and `not` of it is true, as in Haystack.
+- Paths can chain: `equipRef->siteRef->dis == "HQ"`.
+
 ## What is and isn't supported
 
 Supported: the grammar above, exactly. Not supported, and each one is an explicit 400 naming
 what was rejected, never a silent approximation:
 
-- **Tag paths** (`equipRef->dis == "AHU-1"`, `siteRef->geoCity`). Match on the entity's own tags,
-  or on its Brick class, and let the equipment→point expansion do the walk for you.
 - **Arithmetic and every other Axon function** — no `hisFoldAll`, `hisInterpolate`, `hisClip`,
   `.map(...)`, no `toDateSpan`, no lambdas. There are two calls, `hisRead` and `hisRollup`, and
   that's the whole library. Anything computed from history belongs in a

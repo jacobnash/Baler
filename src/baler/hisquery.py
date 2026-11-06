@@ -40,8 +40,11 @@ In Axon, `read(ahu).hisRead(today)` is an error (an equip rec has no
 history); here it's the whole reason to have the feature - "show me this
 AHU" shouldn't require the user to know the equipRef syntax first.
 
-Not Axon, and not pretending to be: no `->` tag paths (`equipRef->dis`),
-no arithmetic, no functions beyond hisRead/hisRollup, no unit conversion
+Tag paths follow refs: `equipRef->ahu`, `equipRef->siteRef->dis == "HQ"`.
+A hop follows the graph edge when there is one (equipRef is
+brick:isPointOf) and the raw Haystack ref tag otherwise.
+
+Not Axon, and not pretending to be: no arithmetic, no functions beyond hisRead/hisRollup, no unit conversion
 on comparisons (`temp > 72°F` compares the bare number). Each of those
 produces an explicit parse error naming what isn't supported, never a
 silent wrong answer.
@@ -163,6 +166,15 @@ class Cmp:
     name: str
     op: str
     value: object  # str | float | int | bool | Ref
+
+
+@dataclass(frozen=True)
+class Path:
+    """`equipRef->siteRef->dis == "HQ"`: follow each ref tag in `hops`,
+    then test `leaf` (a Has or Cmp) on the entity at the end."""
+
+    hops: tuple[str, ...]
+    leaf: object
 
 
 @dataclass(frozen=True)
@@ -331,14 +343,19 @@ class Parser:
             got = tok.value or "end of input"
             raise HisQueryError(f"expected a tag name but found {got!r} at position {tok.pos}")
         name = self._advance().value
-        if self._at("ARROW"):
-            raise HisQueryError(
-                f"tag paths ('{name}->...') aren't supported at position {self._peek().pos}; filter on the tag directly"
-            )
+        hops: list[str] = []
+        while self._at("ARROW"):
+            self._advance()
+            tok = self._peek()
+            if tok.kind != "NAME":
+                raise HisQueryError(f"expected a tag name after '->' at position {tok.pos}")
+            hops.append(name)
+            name = self._advance().value
+        leaf: object = Has(name)
         if self._at("OP"):
             op = self._advance().value
-            return Cmp(name, op, self._parse_value())
-        return Has(name)
+            leaf = Cmp(name, op, self._parse_value())
+        return Path(tuple(hops), leaf) if hops else leaf
 
     def _parse_value(self):
         tok = self._advance()
@@ -601,19 +618,20 @@ class _Compiler:
     `!BOUND`, and a comparison on a missing tag is unbound, i.e. false -
     Haystack's semantics for free."""
 
-    def __init__(self, graph: GraphVocab | None = None):
+    def __init__(self, graph: GraphVocab | None = None, prefix: str = ""):
         self.n = 0
+        self.prefix = prefix  # keeps a path leaf's variables apart from ours
         self.graph = graph or GraphVocab()
         self.flags: list[tuple[str, str]] = []  # (flag var, pattern that binds ?s)
 
     def _var(self) -> str:
         self.n += 1
-        return f"v{self.n}"
+        return f"{self.prefix}v{self.n}"
 
     def _flag(self, pattern: str) -> str:
         """Register a subject-set and return the boolean expression that
         tests membership."""
-        m = f"m{len(self.flags) + 1}"
+        m = f"{self.prefix}m{len(self.flags) + 1}"
         self.flags.append((m, pattern))
         return f"BOUND(?{m})"
 
@@ -625,6 +643,8 @@ class _Compiler:
             return self._has(node.name)
         if isinstance(node, Cmp):
             return self._cmp(node)
+        if isinstance(node, Path):
+            return self._path(node)
         if isinstance(node, Not):
             return f"(!{self.expr(node.node)})"
         if isinstance(node, And):
@@ -707,6 +727,49 @@ class _Compiler:
         return self._flag(f"?s haystack:{node.name} ?{v} . FILTER(?{v} {_SPARQL_OPS[node.op]} {_sparql_literal(node.value)})")
 
 
+    def _hop(self, name: str, a: str, b: str) -> str:
+        """?a's ref tag `name` points at ?b. A ref is stored either as a
+        graph edge (equipRef is brick:isPointOf once link_equip_ref
+        resolves it) or as the raw Haystack literal, which names the
+        entity directly (`urn:...`) or by Haystack id, the way
+        ref_to_equip_uri resolves it."""
+        r = self._var()
+        alts = [
+            f'{{ ?{a} haystack:{name} ?{r} . FILTER(STRSTARTS(STR(?{r}), "urn:")) BIND(IRI(STR(?{r})) AS ?{b}) }}',
+            (
+                f'{{ ?{a} haystack:{name} ?{r} . FILTER(!STRSTARTS(STR(?{r}), "urn:"))'
+                f' BIND(IRI(CONCAT("urn:equip:haystack:", STR(?{r}))) AS ?{b}) }}'
+            ),
+        ]
+        if name == "equipRef":
+            alts.append(f"{{ ?{a} brick:isPointOf ?{b} }}")
+        return " UNION ".join(alts)
+
+    def _path(self, node: Path) -> str:
+        """The hops walk from ?s to the path's end; the leaf compiles on its
+        own (a full filter, flags and all) and is then rebound from ?s to
+        that end. Everything stays in one flag group, so `not` over a path
+        is just !BOUND, and a missing ref is false, as in Haystack. The
+        leaf's variables are prefixed and its ?s renamed rather than relying
+        on subquery scoping, which rdflib doesn't implement."""
+        end = self._var()
+        inner = _Compiler(self.graph, prefix=f"{end}_")
+        rebind = lambda text: re.sub(r"\?s\b", f"?{end}", text)
+        body = rebind(inner.expr(node.leaf))
+        hops, cur = [], "s"
+        for i, name in enumerate(node.hops):
+            nxt = end if i == len(node.hops) - 1 else self._var()
+            hops.append(self._hop(name, cur, nxt))
+            cur = nxt
+        leaf = "".join(
+            f" OPTIONAL {{ {{ SELECT DISTINCT ?{end} (true AS ?{m}) WHERE {{ {rebind(pat)} }} }} }}"
+            for m, pat in inner.flags
+        )
+        # BOUND(end): an unbound end would join every leaf flag (Oxigraph
+        # leaves a BIND unbound on an IRI it can't build).
+        return self._flag(" ".join(f"{{ {h} }}" for h in hops) + leaf + f" FILTER(BOUND(?{end}) && {body})")
+
+
 def _uri(text: str) -> str:
     if any(c in text for c in "<> \"{}|\\^`"):
         raise HisQueryError(f"invalid characters in ref {text!r}")
@@ -747,6 +810,8 @@ def _has_names(node) -> list[str]:
         return [node.name]
     if isinstance(node, Not):
         return _has_names(node.node)
+    if isinstance(node, Path):
+        return _has_names(node.leaf)
     if isinstance(node, (And, Or)):
         return _has_names(node.left) + _has_names(node.right)
     return []

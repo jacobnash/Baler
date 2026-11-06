@@ -140,6 +140,18 @@ def test_read_filter_matches_brick_classes_too(backend):
     assert [r["id"].id for r in backend.read_filter("Air_Handling_Unit", None)] == [ha.uri_to_ref(AHU)]
 
 
+def test_read_filter_follows_tag_paths_and_takes_its_own_ref_ids(backend):
+    dis = lambda f: sorted(r["dis"] for r in backend.read_filter(f, None) if "dis" in r)
+    assert dis('equipRef->dis == "AHU-1"') == ["Discharge Air Temp"]
+    assert len(backend.read_filter("point and equipRef->ahu", None)) == 2
+    assert backend.read_filter("point and not equipRef->ahu", None) == []
+    # The ids records carry (~XX-escaped) work in filters, not just raw URIs.
+    ahu_id = backend.read_filter("ahu", None)[0]["id"].id
+    assert "~" in ahu_id
+    assert len(backend.read_filter(f"equipRef == @{ahu_id}", None)) == 2
+    assert len(backend.read_filter(f"equipRef->id == @{ahu_id}", None)) == 2
+
+
 def test_read_limit_and_bool_curval(backend):
     pts = backend.read_filter("point or fan", None)
     fan = next(r for r in pts if "fan" in r)

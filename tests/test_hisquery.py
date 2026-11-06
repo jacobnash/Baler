@@ -90,7 +90,8 @@ def test_and_binds_tighter_than_or_and_not_tighter_than_and():
         ("ahu and", "expected a tag name"),
         ("ahu or (vav", "expected ')'"),
         ("ahu)", "unexpected ')'"),
-        ("ahu->dis == \"x\"", "tag paths"),
+        ("equipRef-> == 1", "tag name after '->'"),
+        ("temp and equipRef->(vav)", "tag name after '->'"),
         ("readAll(ahu).foo()", "unsupported function 'foo'"),
         ("readAll(ahu).hisRead()", "needs a span"),
         ("readAll(ahu).hisRead(nope)", "unknown span 'nope'"),
@@ -299,6 +300,13 @@ def _match(graph, text):
         ("id == @urn:equip:fbf/vav-1", [VAV]),
         ("equipRef == @urn:equip:fbf/ahu-1", [DAT, FAN]),  # full URI -> brick:isPointOf
         ("equipRef == @VAV-9", [HX_ZT]),  # bare Haystack id -> equipRef literal
+        # --- tag paths: follow the ref, test the far end ---
+        ("equipRef->vav", [ZT, HX_ZT]),  # ZT via brick:isPointOf; HX_ZT via its raw equipRef literal
+        ("equipRef->ahu", [DAT, FAN, B_ZT, B_FAN, WHEEL, BYPASS]),  # Brick-typed equips count, as for `ahu`
+        ('equipRef->dis == "VAV 1"', [ZT]),
+        ("equipRef->id == @urn:equip:fbf/ahu-1", [DAT, FAN]),
+        ("point and not equipRef->ahu", [ZT, HX_ZT]),  # Haystack: a missing path is false, so `not` is true
+        ("equipRef->siteRef->dis", []),  # no site links in this graph
         # --- the same words also reach Brick-only entities (B_*: typed, never tagged) ---
         ("ahu", ALL_AHUS),  # marker on AHU; Brick tag:AHU on RTU (via Rooftop_Unit <- Air_Handling_Unit) and on the extension's AHUs
         ("temp and air", [DAT, B_ZT]),  # `temp` is Haystack for Brick's tag:Temperature
@@ -347,6 +355,23 @@ def _match(graph, text):
 )
 def test_compiled_filter_selects_the_right_entities(graph, text, expected):
     assert _match(graph, text) == sorted(str(u) for u in expected)
+
+
+def test_compiled_filters_agree_on_oxigraph(graph):
+    """Unit tests run on rdflib; production runs Oxigraph, and the two
+    differ at the edges (rdflib doesn't scope subquery variables; Oxigraph
+    leaves BIND(IRI(..)) unbound on a relative IRI). Every filter case
+    above must select the same subjects on both."""
+    ox = pytest.importorskip("pyoxigraph")
+    oxs = ox.Store()
+    oxs.load(graph.graph.serialize(format="nt").encode(), ox.RdfFormat.N_TRIPLES)
+    vocab = h.graph_vocab(graph)
+    cases = test_compiled_filter_selects_the_right_entities.pytestmark[0].args[1]
+    for text, _ in cases:
+        q = h.compile_filter(h.parse_query(text).filter, vocab)
+        on_oxigraph = sorted(r["s"].value for r in oxs.query(q))
+        on_rdflib = sorted(str(r.s) for r in graph.query(q))
+        assert on_oxigraph == on_rdflib, text
 
 
 def test_ontology_subjects_are_never_entities(graph):

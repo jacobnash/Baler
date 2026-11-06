@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0", "phable>=0.1.29", "openapi-spec-validator>=0.7.0", "jsonschema>=4.0.0", "ruff>=0.16.0", "mypy>=2.0.0", "radon>=6.0.0", "pytest-cov>=7.0.0"]
+dev = ["pytest>=8.0.0", "phable>=0.1.29", "openapi-spec-validator>=0.7.0", "jsonschema>=4.0.0", "ruff>=0.16.0", "mypy>=2.0.0", "radon>=6.0.0", "pytest-cov>=7.0.0", "pyoxigraph>=0.5.0"]
 llm = ["anthropic>=0.69.0", "pydantic>=2.0.0"]
 validate = ["pyshacl>=0.30.0"]
 # haystack_api.py (Project Haystack HTTP API). Built from source with

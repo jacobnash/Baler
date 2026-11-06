@@ -111,6 +111,20 @@ def uri_to_ref(uri: str) -> str:
     return "".join(out)
 
 
+def _decode_refs(node):
+    """A filter's @refs are ids as this API hands them out (`~XX`-escaped
+    URIs); the graph wants the URIs. Unescaped ids pass through unchanged."""
+    if isinstance(node, hisquery.Cmp) and isinstance(node.value, hisquery.Ref):
+        return hisquery.Cmp(node.name, node.op, hisquery.Ref(ref_to_uri(node.value.id)))
+    if isinstance(node, hisquery.Path):
+        return hisquery.Path(node.hops, _decode_refs(node.leaf))
+    if isinstance(node, hisquery.Not):
+        return hisquery.Not(_decode_refs(node.node))
+    if isinstance(node, (hisquery.And, hisquery.Or)):
+        return type(node)(_decode_refs(node.left), _decode_refs(node.right))
+    return node
+
+
 def ref_to_uri(ref: str) -> str:
     ref = ref.lstrip("@")
     raw = bytearray()
@@ -265,7 +279,7 @@ class Backend:
             raise OpError(f"filter: {exc}") from exc
         if q.span_text is not None or q.rollup is not None or q.mode != "readAll":
             raise OpError("read takes a plain Haystack filter, not a hisRead/hisRollup expression")
-        uris = scope.filter(hisquery.match_entities(self.store, q.filter))
+        uris = scope.filter(hisquery.match_entities(self.store, _decode_refs(q.filter)))
         if limit is not None:
             uris = uris[:limit]
         with self._conn() as conn:
