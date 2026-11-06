@@ -108,13 +108,14 @@ services:
       retries: 20
 
   jaeger:
-    image: jaegertracing/all-in-one:1.76.0
-    environment:
-      COLLECTOR_OTLP_ENABLED: "true"
-      # Default in-memory storage has no cap (0 = unlimited) - left running
-      # for days this grows without bound; it hit 26GB (85% of nash-srv's
-      # RAM, on a box shared with other projects) before this was set.
-      MEMORY_MAX_TRACES: "50000"
+    # Jaeger v2 (OpenTelemetry Collector based; v1 all-in-one is superseded -
+    # Baler#26). Same UI (16686) and OTLP HTTP (4318) ports. In-memory
+    # storage needs a cap: uncapped, v1 hit 26GB (85% of nash-srv's RAM, on
+    # a box shared with other projects) - jaeger/config.yaml sets 50000 traces.
+    image: jaegertracing/jaeger:2.23.0
+    command: ["--config", "/etc/jaeger/config.yaml"]
+    volumes:
+      - ./jaeger/config.yaml:/etc/jaeger/config.yaml:ro
     ports:
       - "16686:16686" # UI
       - "4318:4318" # OTLP HTTP
