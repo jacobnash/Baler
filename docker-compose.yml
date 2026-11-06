@@ -306,8 +306,12 @@ services:
       # Cx works.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       BALER_CX_MODEL: ${BALER_CX_MODEL:-}
+      # Mirrored faults (Cx 8) fire webhooks.json's webhooks, like fault_detector
+      BALER_DATA_DIR: /data
+    extra_hosts: *host-gateway
     volumes:
       - .:/app
+      - baler-data:/data
     depends_on: *daemon-depends-on
     healthcheck:
       <<: *http-api-healthcheck

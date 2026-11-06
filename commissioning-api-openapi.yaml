@@ -36,6 +36,7 @@ tags:
   - name: Issues
   - name: Procedures
   - name: Spec
+  - name: Faults
 paths:
   /projects:
     get:
@@ -1187,6 +1188,91 @@ paths:
       responses:
         "204": { description: Undone }
         "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/faults:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Faults]
+      operationId: listCxMirroredFaults
+      summary: Open faults this project mirrored into the shared faults table
+      description: >-
+        Opt in with settings.fault_mirroring. Rule ids are `cx:<check_id>`
+        and every fault is on a real urn:point:/urn:equip: URI, so the
+        Alarms page, fault_api's scope filter and webhooks treat it like
+        any other fault.
+      responses:
+        "200":
+          description: Faults
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: integer }
+                    rule_id: { type: string }
+                    point_uri: { type: string }
+                    status: { type: string }
+                    started_at: { type: string, format: date-time }
+                    ended_at: { type: [string, "null"], format: date-time }
+                    detail: { type: [object, "null"] }
+                    severity: { type: string }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/faults/ingest:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Faults]
+      operationId: ingestCxFaults
+      summary: Faults into the issues log (operator)
+      description: >-
+        `{"source": "fault_detector"}` takes the open faults on this
+        project's equipment from the shared faults table (never Cx's own
+        cx: mirrors) and closes issues whose fault has since resolved.
+        `{"source": "<tool>", "items": [...]}` takes an outside FDD tool's
+        faults. Issues get source `fdd:<source>` and the fault's id, so a
+        repeat ingest doesn't duplicate. Faults on equipment outside the
+        project (or the caller's scope) are counted, not imported.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source]
+              properties:
+                source: { type: string, pattern: "^[a-z0-9][a-z0-9_.-]{0,40}$" }
+                items:
+                  type: array
+                  items:
+                    type: object
+                    required: [id]
+                    properties:
+                      id: { type: string }
+                      point_uri: { type: string }
+                      equip_uri: { type: string }
+                      rule: { type: string }
+                      title: { type: string }
+                      message: { type: string }
+                      severity: { type: string, enum: [critical, warning, info] }
+                      started_at: { type: string }
+      responses:
+        "200":
+          description: What changed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [source, created, reopened, resolved, outside_project]
+                properties:
+                  source: { type: string }
+                  created: { type: integer }
+                  reopened: { type: integer }
+                  resolved: { type: integer }
+                  outside_project: { type: integer }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /templates:
     get:
       tags: [Templates]
@@ -1277,6 +1363,20 @@ components:
           example:
             hw_reset: { unit: F, temperature_air_outdoor_min: 20, temperature_air_outdoor_max: 60,
                         temperature_water_hot_setpoint_max: 180, temperature_water_hot_setpoint_min: 140 }
+        fault_mirroring:
+          type: object
+          description: >-
+            Cx 8: mirror failing checks into the shared faults table as
+            `cx:<check_id>` on real URIs. `equipment` confirmed (default:
+            only equipment a person confirmed against the spec) or all;
+            `checks` id prefixes (default exists, live, pair:, gl36:, cx:,
+            ladder); `severity` of the faults. Accepted risks suppress it.
+          properties:
+            enabled: { type: boolean }
+            equipment: { type: string, enum: [confirmed, all] }
+            checks: { type: array, items: { type: string } }
+            severity: { type: string, enum: [critical, warning, info] }
+          additionalProperties: false
         schedule:
           type: [object, "null"]
           description: A verification run this often, as the project's org on its site (Cx 6)

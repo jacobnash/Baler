@@ -130,6 +130,9 @@ const ROUTES = [
   ["GET",    /^\/cx\/projects\/[^/]+\/alignment$/,              "commissioning", "viewer"],
   ["POST",   /^\/cx\/projects\/[^/]+\/alignment\/decisions$/,   "commissioning", "operator"],
   ["DELETE", /^\/cx\/mappings\/[^/]+$/,                        "commissioning", "operator"],
+  // Cx 8 (Baler#44): mirrored faults; FDD faults into the issues log
+  ["GET",    /^\/cx\/projects\/[^/]+\/faults$/,                 "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/faults\/ingest$/,          "commissioning", "operator"],
 
   // auth_api - POST /auth/login has its own exact-match nginx location
   // with no js_access at all (can't require a token to get a token), so

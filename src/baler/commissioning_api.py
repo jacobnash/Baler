@@ -40,6 +40,7 @@ from baler.commissioning import (
     inventory,
     issues,
     ladder,
+    mirror,
     phases,
     procedures,
     report,
@@ -59,7 +60,7 @@ PORT = 8009
 RUN_STATEMENT_TIMEOUT = "10min"
 
 _PROJECT = re.compile(r"/projects/([^/]+)")
-_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|events|inventory|runs|gaps|issues|risks|procedures)")
+_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest)")
 _PROJECT_ISSUES = re.compile(r"/projects/([^/]+)/issues/(import|export)")
 _RUN_ISSUES = re.compile(r"/runs/([^/]+)/issues")
 _ISSUE = re.compile(r"/issues/([^/]+)")
@@ -90,6 +91,8 @@ def _check_settings(settings) -> dict:
         ladder.validate_settings(settings["ladder"])
     if "economizer" in settings:
         economizer.validate_settings(settings["economizer"])
+    if "fault_mirroring" in settings:
+        mirror.validate_settings(settings["fault_mirroring"])
     if settings.get("schedule") is not None:
         sched = settings["schedule"]
         every = sched.get("every_hours") if isinstance(sched, dict) else None
@@ -174,6 +177,8 @@ def make_handler(repo, clock=None, worker=None):
                     ("GET", "risks"): ("list_risks", self._list_risks),
                     ("GET", "procedures"): ("list_procedures", self._list_procedures),
                     ("POST", "procedures"): ("create_procedure", self._create_procedure),
+                    ("GET", "faults"): ("project_faults", self._project_faults),
+                    ("POST", "faults/ingest"): ("ingest_faults", self._ingest_faults),
                 }
                 hit = table.get((method, sub))
                 return None if hit is None else (hit[0], lambda span, claims: hit[1](span, claims, pid))
@@ -1194,6 +1199,93 @@ def make_handler(repo, clock=None, worker=None):
             self.send_response(204)
             self.end_headers()
 
+        # ----------------------------------------------------- faults (Cx 8)
+
+        def _project_faults(self, span, claims, pid) -> None:
+            """Open faults this project mirrored (rule ids cx:<check>)."""
+            if self._project(pid, claims) is None:
+                return
+            scope = repo.scope_for(claims)
+            keys = set(repo.open_mirrored_faults(pid))
+            rows = [db.public_row(f) for f in repo.list_faults(True) if (f["rule_id"], f["point_uri"]) in keys
+                    and scope.allows(f["point_uri"])]
+            respond_json(self, 200, rows)
+
+        def _ingest_faults(self, span, claims, pid) -> None:
+            """Faults into the issues log. {"source": "fault_detector"}
+            pulls the open faults on this project's equipment from the
+            shared faults table (not cx: mirrors), and closes issues whose
+            fault has since resolved. {"source": "<tool>", "items": [...]}
+            takes an outside FDD tool's faults ({id, point_uri or
+            equip_uri, title, message, severity, started_at})."""
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            body = self.read_json_body()
+            source = str(body.get("source") or "")
+            if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,40}", source):
+                raise ValueError("source names the fault source: fault_detector, or your FDD tool (lowercase)")
+            scopes, _ = self._scopes(p, claims)
+            equips = inventory.build(repo.store, scopes)
+            equip_of = {pt["id"]: e["id"] for e in equips for pt in e["points"]}
+            equip_ids = {e["id"] for e in equips}
+            now = now_fn()
+            tag = f"fdd:{source}"
+            if source == "fault_detector":
+                if body.get("items") is not None:
+                    raise ValueError("fault_detector faults are read from the faults table; send no items")
+                items = [f for f in repo.list_faults(True) if not f["rule_id"].startswith(mirror.RULE_PREFIX)]
+            else:
+                items = body.get("items")
+                if not isinstance(items, list) or len(items) > 5000:
+                    raise ValueError("items is a list of at most 5000 faults")
+                norm = []
+                for i, it in enumerate(items):
+                    if not isinstance(it, dict) or not it.get("id"):
+                        raise ValueError(f"item {i + 1} needs an id")
+                    uri = it.get("point_uri") or it.get("equip_uri")
+                    if not isinstance(uri, str):
+                        raise TypeError(f"item {i + 1} needs a point_uri or equip_uri")
+                    norm.append({"id": str(it["id"])[:200], "rule_id": str(it.get("rule") or it.get("rule_id") or "")[:200],
+                                 "point_uri": uri, "severity": it.get("severity"), "started_at": it.get("started_at"),
+                                 "title": it.get("title"), "detail": {"message": it.get("message")}})
+                items = norm
+            created = updated = 0
+            outside = 0
+            for f in items:
+                uri = f["point_uri"]
+                equip = equip_of.get(uri) or (uri if uri in equip_ids else None)
+                if equip is None:
+                    outside += 1  # not this project's equipment (or not in the caller's scope)
+                    continue
+                prior = repo.find_issue_by_source(pid, tag, str(f["id"]))
+                if prior is None:
+                    issue = mirror.issue_from_fault(f, equip, tag, pid, db.new_id, now, claims.get("sub"))
+                    repo.create_issue(issue)
+                    self._issue_event(issue["id"], "import", claims, {"source": tag, "source_id": str(f["id"])})
+                    created += 1
+                elif prior["status"] == "closed":
+                    repo.update_issue(prior["id"], {"status": "open", "closed_at": None, "updated_at": now})
+                    self._issue_event(prior["id"], "fault.reopened", claims, {"source": tag})
+                    updated += 1
+            resolved = 0
+            if source == "fault_detector":
+                active = [i for i in repo.list_issues(pid, ("open", "in_progress", "ready_for_retest")) if i["source"] == tag]
+                if active:
+                    still = {str(f["id"]) for f in items}
+                    gone = [i for i in active if i["source_id"] not in still]
+                    ended = {str(f["id"]): f for f in repo.list_faults(False, [i["source_id"] for i in gone])}
+                    for i in gone:
+                        f = ended.get(i["source_id"])
+                        if f is not None and f.get("ended_at") is not None:
+                            repo.update_issue(i["id"], {"status": "closed", "closed_at": now, "updated_at": now})
+                            self._issue_event(i["id"], "fault.resolved", claims, {"source": tag, "fault_id": i["source_id"]})
+                            resolved += 1
+            self._event(pid, "faults.ingest", claims, {"source": tag, "created": created, "reopened": updated, "resolved": resolved,
+                                                       "outside_project": outside})
+            respond_json(self, 200, {"source": tag, "created": created, "reopened": updated, "resolved": resolved,
+                                     "outside_project": outside})
+
         def _templates(self, span, claims) -> None:
             respond_json(self, 200, [t.as_dict() for t in tpl.load()])
 
@@ -1224,6 +1316,12 @@ def main() -> None:
         repo.add_event(r["project_id"], "test_run.fail", None, None, {"test_run_id": r["id"], "error": db.INTERRUPTED}, now)
     clock = lambda: datetime.now(timezone.utc)
     worker = runner.RunWorker(repo, clock)
+    # Mirrored faults (Cx 8) fire the same webhooks fault_detector's do.
+    from baler import fault_detector, json_store
+
+    webhooks_path = json_store.data_file("webhooks.json")
+    worker.notify = lambda event, rule_id, uri, status, detail: fault_detector._fire_webhooks(
+        webhooks_path, event, rule_id, uri, status, detail)
     # Scheduled procedures and project runs (Cx 6). One process runs the
     # scheduler; a second commissioning_api would double-queue, which the
     # one-active-run indexes turn into a skipped tick, not a duplicate.

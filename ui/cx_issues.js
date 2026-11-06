@@ -7,7 +7,22 @@ const ISSUE_STATUS_LABEL = {
 };
 const issueState = { list: [], current: null };
 
-const cxProjectHooks = [() => loadIssues(), () => loadRisks()];
+const cxProjectHooks = [() => loadIssues(), () => loadRisks(), () => loadMirrorStatus()];
+
+async function loadMirrorStatus() {
+  const el_ = $("mirror-status");
+  const cfg = (cx.project.settings || {}).fault_mirroring || {};
+  if (!cfg.enabled) {
+    el_.textContent = "Fault mirroring is off for this project (settings.fault_mirroring).";
+    return;
+  }
+  try {
+    const faults = await cxApi("GET", `/projects/${cx.project.id}/faults`);
+    el_.textContent = `Fault mirroring is on (${cfg.equipment === "all" ? "all equipment" : "confirmed equipment"}): ${faults.length} open fault${faults.length === 1 ? "" : "s"} on the Alarms page from this project.`;
+  } catch (err) {
+    el_.textContent = err.message;
+  }
+}
 
 const cxResultActions = [
   (card, r) => {
@@ -248,6 +263,15 @@ async function importIssues(ev) {
 }
 
 $("issues-filter").addEventListener("change", loadIssues);
+$("ingest-faults-btn").addEventListener("click", async () => {
+  try {
+    const got = await cxApi("POST", `/projects/${cx.project.id}/faults/ingest`, { source: "fault_detector" });
+    flash($("issues-status"), `faults: ${got.created} new issues, ${got.resolved} closed (fault resolved), ${got.reopened} reopened`);
+    await Promise.all([loadIssues(), loadEvents()]);
+  } catch (err) {
+    alert(err.message);
+  }
+});
 $("new-issue-btn").addEventListener("click", newIssue);
 $("issues-from-run-btn").addEventListener("click", issuesFromRun);
 $("issue-form").addEventListener("submit", saveIssue);

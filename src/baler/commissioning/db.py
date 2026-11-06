@@ -306,9 +306,10 @@ class RunActive(Exception):
 def ensure_schema(conn) -> None:
     auth.ensure_schema(conn)  # orgs/sites (+ sites.topic_prefixes) first: cx_projects references them
     ddl.run(conn, SCHEMA)
-    from baler import record_edit
+    from baler import faults, record_edit
 
     record_edit.ensure_schema(conn)  # Cx 7 write-back logs to record_edits
+    faults.ensure_schema(conn)  # Cx 8 mirrors into the shared faults table
 
 
 def new_id() -> str:
@@ -371,6 +372,7 @@ class MemoryRepo:
         self.test_runs: dict[str, dict] = {}
         self._rows: dict[str, dict[str, dict]] = {}
         self.edits: list[dict] = []
+        self.faults: list[dict] = []  # the shared faults table (Cx 8)
         self._lock = threading.Lock()  # runs are written from the worker thread
 
     def scope_for(self, claims) -> Scope:
@@ -636,6 +638,36 @@ class MemoryRepo:
         changed = record_edit.apply_edit(self.store, uri, body)
         self.edits.append({"uri": uri, "action": "update", "user_sub": user_sub, "user_email": user_email, "detail": changed})
         return changed
+
+    # -------------------------------------------- shared faults (Cx 8)
+
+    def open_fault(self, rule_id: str, point_uri: str, started_at: datetime, detail: dict, severity: str) -> int | None:
+        with self._lock:
+            if any(f["rule_id"] == rule_id and f["point_uri"] == point_uri and f["ended_at"] is None for f in self.faults):
+                return None
+            fid = len(self.faults) + 1
+            self.faults.append({"id": fid, "rule_id": rule_id, "point_uri": point_uri, "status": "open", "started_at": started_at,
+                                "ended_at": None, "detail": detail, "severity": severity})
+            return fid
+
+    def close_fault(self, rule_id: str, point_uri: str, ended_at: datetime) -> int | None:
+        with self._lock:
+            for f in self.faults:
+                if f["rule_id"] == rule_id and f["point_uri"] == point_uri and f["ended_at"] is None:
+                    f.update(ended_at=ended_at, status="resolved")
+                    return f["id"]
+            return None
+
+    def open_mirrored_faults(self, project_id: str) -> list[tuple[str, str]]:
+        with self._lock:
+            return [(f["rule_id"], f["point_uri"]) for f in self.faults if f["ended_at"] is None
+                    and f["rule_id"].startswith("cx:") and (f["detail"] or {}).get("project_id") == project_id]
+
+    def list_faults(self, open_only: bool = True, ids: list | None = None) -> list[dict]:
+        with self._lock:
+            want = None if ids is None else {int(i) for i in ids}
+            return [dict(f) for f in self.faults if (not open_only or f["ended_at"] is None)
+                    and (want is None or f["id"] in want)]
 
 
 # ------------------------------------------------------------- postgres
@@ -1047,3 +1079,37 @@ class PgRepo:
         with self.pool.connection() as conn:
             record_edit.log_edit(conn, uri, "update", user_sub, user_email, {**changed, "via": "commissioning"})
         return changed
+
+    # -------------------------------------------- shared faults (Cx 8)
+
+    def open_fault(self, rule_id: str, point_uri: str, started_at: datetime, detail: dict, severity: str) -> int | None:
+        from baler import faults
+
+        with self.pool.connection() as conn:
+            return faults.open_fault(conn, rule_id, point_uri, started_at, detail, severity)
+
+    def close_fault(self, rule_id: str, point_uri: str, ended_at: datetime) -> int | None:
+        from baler import faults
+
+        with self.pool.connection() as conn:
+            return faults.close_fault(conn, rule_id, point_uri, ended_at)
+
+    def open_mirrored_faults(self, project_id: str) -> list[tuple[str, str]]:
+        with self.pool.connection() as conn:
+            rows = conn.execute("SELECT rule_id, point_uri FROM faults WHERE ended_at IS NULL AND rule_id LIKE 'cx:%%'"
+                                " AND detail->>'project_id' = %s", (project_id,)).fetchall()
+        return [(r, u) for r, u in rows]
+
+    def list_faults(self, open_only: bool = True, ids: list | None = None) -> list[dict]:
+        clauses, args = [], []
+        if open_only:
+            clauses.append("ended_at IS NULL")
+        if ids is not None:
+            clauses.append("id = ANY(%s)")
+            args.append([int(i) for i in ids])
+        where = " AND ".join(clauses) or "TRUE"
+        with self.pool.connection() as conn:
+            rows = conn.execute(f"SELECT id, rule_id, point_uri, status, started_at, ended_at, detail, severity FROM faults"
+                                f" WHERE {where} ORDER BY id", tuple(args)).fetchall()
+        keys = ("id", "rule_id", "point_uri", "status", "started_at", "ended_at", "detail", "severity")
+        return [dict(zip(keys, r, strict=True)) for r in rows]

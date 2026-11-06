@@ -154,6 +154,7 @@
           </select></label>
           <button type="button" id="new-issue-btn" data-min-role="operator">New issue</button>
           <button type="button" id="import-issues-btn" data-min-role="operator">Import…</button>
+          <button type="button" id="ingest-faults-btn" data-min-role="operator" title="Open faults from the fault detector on this project's equipment become issues">Pull in open faults</button>
           <label>Export <select id="export-shape">
             <option value="baler">Baler</option>
             <option value="cxalloy">CxAlloy</option>
@@ -163,6 +164,7 @@
           <button type="button" id="export-json-btn">JSON</button>
           <span id="issues-status" class="hint"></span>
         </div>
+        <p class="hint" id="mirror-status"></p>
         <table>
           <thead><tr><th>Status</th><th>Issue</th><th>Equipment</th><th>Severity</th><th>Assignee</th><th>Source</th><th>Updated</th></tr></thead>
           <tbody id="issues-body"></tbody>

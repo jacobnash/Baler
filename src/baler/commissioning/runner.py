@@ -24,7 +24,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from baler.commissioning import db, engine, inventory, issues, phases, procedures
+from baler.commissioning import (
+    db,
+    engine,
+    inventory,
+    issues,
+    mirror,
+    phases,
+    procedures,
+)
 from baler.scope import Scope
 
 log = logging.getLogger(__name__)
@@ -51,7 +59,7 @@ def error_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"[:MAX_ERROR]
 
 
-def execute(repo, job: RunJob, clock: Callable[[], datetime], run_fn=engine.run) -> None:
+def execute(repo, job: RunJob, clock: Callable[[], datetime], run_fn=engine.run, notify=None) -> None:
     """Run one job to completion or failure. Never raises: every outcome
     lands on the run row and as a cx_events row."""
     last = [0.0]
@@ -79,6 +87,14 @@ def execute(repo, job: RunJob, clock: Callable[[], datetime], run_fn=engine.run)
             reconcile_issues(repo, job.project_id, job.run_id, results, clock())
         except Exception:  # the run itself stands; the next run reconciles again
             log.exception("cx run %s: issue reconcile failed", job.run_id)
+        try:
+            project = repo.get_project(job.project_id)
+            if project and ((project.get("settings") or {}).get("fault_mirroring") or {}).get("enabled"):
+                got = mirror.apply(repo, project, job.run_id, results, clock(), notify)
+                if got["opened"] or got["closed"]:
+                    repo.add_event(job.project_id, "faults.mirror", None, None, {"run_id": job.run_id, **got}, clock())
+        except Exception:
+            log.exception("cx run %s: fault mirroring failed", job.run_id)
     except Exception as exc:  # noqa: BLE001 - a failing run is recorded on its row, never fatal to the worker
         log.error("cx run %s failed:\n%s", job.run_id, traceback.format_exc())
         try:
@@ -292,6 +308,7 @@ class RunWorker:
         self.run_fn = run_fn
         self._queue: queue.Queue[RunJob | TestJob | ExtractJob] = queue.Queue()
         self.extract_fn = None  # tests swap the Claude call
+        self.notify = None  # fault webhooks for mirrored faults (commissioning_api sets fault_detector's)
         for i in range(workers):
             threading.Thread(target=self._loop, name=f"cx-run-{i}", daemon=True).start()
 
@@ -307,7 +324,7 @@ class RunWorker:
                 elif isinstance(job, ExtractJob):
                     execute_extract(self.repo, job, self.clock, self.extract_fn)
                 else:
-                    execute(self.repo, job, self.clock, self.run_fn)
+                    execute(self.repo, job, self.clock, self.run_fn, self.notify)
             finally:
                 self._queue.task_done()
 

@@ -254,3 +254,23 @@ def test_spec_rows_round_trip(repo):
     assert repo.delete_rows("cx_mappings", id=m["id"]) == 1
     with pytest.raises(ValueError):
         repo.find_rows("cx_spec_items", nope=1)
+
+
+def test_mirrored_faults_round_trip(repo):
+    """Cx 8 (#44) on PgRepo: open/close in the shared faults table, the
+    per-project mirror lookup, ids. Removes its own fault rows."""
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    pid = _new_project(repo, _org(repo, "mirror"), now)
+    uri = f"urn:point:cx-it-mirror/{pid}/sat"
+    try:
+        fid = repo.open_fault("cx:exists", uri, now, {"project_id": pid, "source": "commissioning"}, "warning")
+        assert fid is not None
+        assert repo.open_fault("cx:exists", uri, now, {"project_id": pid}, "warning") is None  # already open
+        assert repo.open_mirrored_faults(pid) == [("cx:exists", uri)]
+        assert [f["id"] for f in repo.list_faults(True, [str(fid)])] == [fid]
+        assert repo.close_fault("cx:exists", uri, now) == fid
+        assert repo.open_mirrored_faults(pid) == []
+        assert repo.list_faults(False, [fid])[0]["ended_at"] is not None
+    finally:
+        with repo.pool.connection() as conn:
+            conn.execute("DELETE FROM faults WHERE point_uri = %s", (uri,))
