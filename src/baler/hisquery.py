@@ -668,6 +668,12 @@ class _Compiler:
     def _has(self, name: str) -> str:
         vocab = brick_vocab.load()
         parts = [self._flag(f"?s haystack:hasTag {_sparql_string(name)}")]
+        if re.fullmatch(r"[a-z][A-Za-z0-9_]*", name):
+            # A tag with a value (dis:"AHU-1", curVal:72) is present too, not
+            # just markers - the Haystack meaning of a bare name. Valued tags
+            # live as haystack:<name> literals (ingest._write_tags).
+            v = self._var()
+            parts.append(self._flag(f"?s haystack:{name} ?{v}"))
         if _looks_like_class(name):
             canonical = vocab.canonical_class(name)
             # Air_Handling_Unit also finds Rooftop_Unit, DOAS, ... and

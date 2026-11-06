@@ -28,10 +28,6 @@ V = vectors.load("haxall/testHaystack-4.0.6")
 
 # case id -> why Baler differs from the reference today
 KNOWN_GAPS: dict[str, str] = {
-    'FilterTest.testInclude:dis': 'has/missing only see marker tags: a tag with a value (dis:"a", foo:12) does not count as present',
-    'FilterTest.testInclude:foo': 'has/missing only see marker tags: a tag with a value (dis:"a", foo:12) does not count as present',
-    'FilterTest.testInclude:not dis': 'has/missing only see marker tags: a tag with a value (dis:"a", foo:12) does not count as present',
-    'FilterTest.testInclude:not foo': 'has/missing only see marker tags: a tag with a value (dis:"a", foo:12) does not count as present',
     'FilterTest.testInclude:date==2016-01-02': 'no date literals in the grammar',
     'FilterTest.testInclude:date != 2016-01-02': 'no date literals in the grammar',
     'FilterTest.testInclude:date < 2016-01-04': 'no date literals in the grammar',
@@ -42,8 +38,6 @@ KNOWN_GAPS: dict[str, str] = {
     'FilterTest.testInclude:foo > 12': 'comparisons across kinds (Str vs Number) are not false',
     'FilterTest.testInclude:date >= 2016-01-02': 'no date literals in the grammar',
     'FilterTest.testInclude:foo >= 12': 'comparisons across kinds (Str vs Number) are not false',
-    'FilterTest.testInclude:(dis=="c" or num==30) and not foo': 'has/missing only see marker tags: a tag with a value (dis:"a", foo:12) does not count as present',
-    'FilterTest.testInclude:(num==30 and foo) or (num <= 10)': 'has/missing only see marker tags: a tag with a value (dis:"a", foo:12) does not count as present',
     'FilterTest.testInclude:ref->thru': 'nested Dict values are stored as a JSON string, so paths into them fail',
     'FilterTest.testInclude:ref->thru=="e"': 'nested Dict values are stored as a JSON string, so paths into them fail',
     'FilterTest.testInclude:^foo-bar': 'no ^symbol (def conjunct) terms in the grammar',
@@ -65,7 +59,6 @@ KNOWN_GAPS: dict[str, str] = {
     'FilterTest.testIncludeNumbers:dis >  75': 'units are ignored in comparisons (the unit is stored apart from the number); mixed kinds compare',
     'FilterTest.testIncludeList:ref==@a': 'Ref lists are stored as a JSON string by the Haystack import, so list membership and paths through lists fail',
     'FilterTest.testIncludeList:ref->dis=="a"': 'Ref lists are stored as a JSON string by the Haystack import, so list membership and paths through lists fail',
-    'FilterTest.testIncludeList:refx': 'Ref lists are stored as a JSON string by the Haystack import, so list membership and paths through lists fail',
     'FilterTest.testIncludeList:refx==@c': 'Ref lists are stored as a JSON string by the Haystack import, so list membership and paths through lists fail',
     'FilterTest.testIncludeList:refx->dis=="c"': 'Ref lists are stored as a JSON string by the Haystack import, so list membership and paths through lists fail',
     'FilterTest.testIncludeList:refx->ref': 'Ref lists are stored as a JSON string by the Haystack import, so list membership and paths through lists fail',
