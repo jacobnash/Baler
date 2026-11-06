@@ -35,9 +35,9 @@ def _cleanup():
 
 def _org(label: str, prefix: str, marker: str) -> dict:
     email = f"admin-{label}@scope-test.invalid"
-    r = _post_with_retry(f"{BASE}/auth/orgs", json={"name": f"{ORG_PREFIX} {label}", "admin_email": email, "admin_password": "pw-" + label * 8})
+    r = _post_with_retry(f"{BASE}/auth/orgs", json={"name": f"{ORG_PREFIX} {label}", "admin_email": email, "admin_password": "pw-" + label * 12})
     assert r.status_code == 201, r.text
-    r = _post_with_retry(f"{BASE}/auth/login", json={"email": email, "password": "pw-" + label * 8})
+    r = _post_with_retry(f"{BASE}/auth/login", json={"email": email, "password": "pw-" + label * 12})
     assert r.status_code == 200, r.text
     h = {"Authorization": f"Bearer {r.json()['token']}"}
     r = requests.post(f"{BASE}/auth/sites", headers=h, json={"name": f"site {label}", "topic_prefixes": [prefix]})

@@ -140,10 +140,10 @@ def test_full_org_login_me_flow_matches_documented_schemas(live_server, spec):
 def test_api_key_issue_list_revoke_flow_matches_documented_schemas(live_server, spec):
     org_resp = requests.post(
         f"{live_server}/orgs",
-        json={"name": "OpenAPI Test Org Keys", "admin_email": "admin2@openapi-test.invalid", "admin_password": "pw-123456"},
+        json={"name": "OpenAPI Test Org Keys", "admin_email": "admin2@openapi-test.invalid", "admin_password": "pw-123456-long-enough"},
     )
     org_resp.json()
-    login = requests.post(f"{live_server}/login", json={"email": "admin2@openapi-test.invalid", "password": "pw-123456"}).json()
+    login = requests.post(f"{live_server}/login", json={"email": "admin2@openapi-test.invalid", "password": "pw-123456-long-enough"}).json()
     auth_headers = {**GW_HEADERS, "Authorization": f"Bearer {login['token']}"}
 
     create_resp = requests.post(f"{live_server}/api-keys", headers=auth_headers, json={"role": "service"})
@@ -172,9 +172,9 @@ def test_api_key_issue_list_revoke_flow_matches_documented_schemas(live_server, 
 def test_logout_is_idempotent(live_server):
     requests.post(
         f"{live_server}/orgs",
-        json={"name": "OpenAPI Test Org Logout", "admin_email": "admin3@openapi-test.invalid", "admin_password": "pw-123456"},
+        json={"name": "OpenAPI Test Org Logout", "admin_email": "admin3@openapi-test.invalid", "admin_password": "pw-123456-long-enough"},
     )
-    login = requests.post(f"{live_server}/login", json={"email": "admin3@openapi-test.invalid", "password": "pw-123456"}).json()
+    login = requests.post(f"{live_server}/login", json={"email": "admin3@openapi-test.invalid", "password": "pw-123456-long-enough"}).json()
     auth_headers = {**GW_HEADERS, "Authorization": f"Bearer {login['token']}"}
 
     first = requests.post(f"{live_server}/logout", headers=auth_headers)

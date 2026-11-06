@@ -164,8 +164,9 @@ def create_org(conn: psycopg.Connection, name: str, admin_email: str, admin_pass
     first admin", so org creation carries its own."""
     org_id = json_store.new_id()
     now = datetime.now(timezone.utc)
-    conn.execute("INSERT INTO orgs (id, name, created_at) VALUES (%s, %s, %s)", (org_id, name, now))
-    user = create_user(conn, org_id, admin_email, admin_password, "admin")
+    with conn.transaction():  # a taken admin email leaves no empty org behind
+        conn.execute("INSERT INTO orgs (id, name, created_at) VALUES (%s, %s, %s)", (org_id, name, now))
+        user = create_user(conn, org_id, admin_email, admin_password, "admin")
     return {"id": org_id, "name": name, "admin_user_id": user["id"]}
 
 
@@ -215,19 +216,100 @@ def set_site_prefixes(conn: psycopg.Connection, org_id: str, site_id: str, topic
 # --- users ---
 
 
+# Roles a person can hold. "service" (rank of operator, see the gateway's
+# policy.ROLE_RANK) is for API keys only, never a login.
+USER_ROLES = ("viewer", "operator", "admin")
+MIN_PASSWORD_LENGTH = 12
+
+
+class EmailTaken(ValueError):
+    """The email is in use. Emails are unique across every org, so the
+    message never says where - that would reveal another org's users."""
+
+
+class LastAdmin(ValueError):
+    """The change would leave the org with no admin."""
+
+
+def normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def check_new_password(password) -> None:
+    """For passwords set through the API (not existing accounts)."""
+    if not isinstance(password, str) or len(password) < MIN_PASSWORD_LENGTH:
+        raise ValueError(f"password must be at least {MIN_PASSWORD_LENGTH} characters")
+
+
+def _check_role(role) -> str:
+    if role not in USER_ROLES:
+        raise ValueError(f"role must be one of {', '.join(USER_ROLES)}")
+    return role
+
+
 def create_user(conn: psycopg.Connection, org_id: str, email: str, password: str, role: str) -> dict:
+    _check_role(role)
+    email = normalize_email(email)
+    if not email or "@" not in email:
+        raise ValueError("email must be an email address")
     user_id = json_store.new_id()
     now = datetime.now(timezone.utc)
-    conn.execute(
-        "INSERT INTO users (id, org_id, email, password_hash, role, created_at) VALUES (%s, %s, %s, %s, %s, %s)",
-        (user_id, org_id, email, hash_password(password), role, now),
-    )
+    try:
+        with conn.transaction():
+            conn.execute(
+                "INSERT INTO users (id, org_id, email, password_hash, role, created_at) VALUES (%s, %s, %s, %s, %s, %s)",
+                (user_id, org_id, email, hash_password(password), role, now),
+            )
+    except psycopg.errors.UniqueViolation as exc:
+        raise EmailTaken("that email can't be used") from exc
     return {"id": user_id, "org_id": org_id, "email": email, "role": role}
+
+
+def list_sites(conn: psycopg.Connection, org_id: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT id, name, topic_prefixes FROM sites WHERE org_id = %s ORDER BY name", (org_id,)
+    ).fetchall()
+    return [{"id": r[0], "name": r[1], "topic_prefixes": list(r[2] or [])} for r in rows]
+
+
+def _admin_count(conn: psycopg.Connection, org_id: str) -> int:
+    row = conn.execute("SELECT count(*) FROM users WHERE org_id = %s AND role = 'admin'", (org_id,)).fetchone()
+    return int(row[0]) if row else 0
+
+
+def update_user(conn: psycopg.Connection, org_id: str, user_id: str,
+                role: str | None = None, site_ids: list[str] | None = None) -> dict | None:
+    """Change a user's role and/or the sites they're limited to (empty =
+    the whole org). Both live in their session tokens, so their sessions
+    end. None when there's no such user in the org."""
+    if role is not None:
+        _check_role(role)
+    if site_ids is not None:
+        if not isinstance(site_ids, list) or not all(isinstance(x, str) for x in site_ids):
+            raise ValueError("site_ids must be a list of site ids")
+        known = {s["id"] for s in list_sites(conn, org_id)}
+        unknown = sorted(set(site_ids) - known)
+        if unknown:
+            raise ValueError(f"no such site in your org: {', '.join(unknown)}")
+    with conn.transaction():
+        row = conn.execute("SELECT role FROM users WHERE id = %s AND org_id = %s FOR UPDATE", (user_id, org_id)).fetchone()
+        if not row:
+            return None
+        if role is not None and row[0] == "admin" and role != "admin" and _admin_count(conn, org_id) <= 1:
+            raise LastAdmin("the org's last admin can't be demoted")
+        if role is not None:
+            conn.execute("UPDATE users SET role = %s WHERE id = %s", (role, user_id))
+        if site_ids is not None:
+            conn.execute("DELETE FROM user_sites WHERE user_id = %s", (user_id,))
+            for sid in sorted(set(site_ids)):
+                conn.execute("INSERT INTO user_sites (user_id, site_id) VALUES (%s, %s)", (user_id, sid))
+        end_user_sessions(conn, user_id)
+    return {"id": user_id, "role": role or row[0], "site_ids": user_site_ids(conn, user_id)}
 
 
 def get_user_by_email(conn: psycopg.Connection, email: str) -> dict | None:
     row = conn.execute(
-        "SELECT id, org_id, email, password_hash, role FROM users WHERE email = %s", (email,)
+        "SELECT id, org_id, email, password_hash, role FROM users WHERE lower(email) = %s", (normalize_email(email),)
     ).fetchone()
     if not row:
         return None
@@ -268,8 +350,11 @@ def delete_user(conn: psycopg.Connection, org_id: str, user_id: str) -> bool:
     """Remove a user from `org_id` (only that org's users) and end their
     live sessions. False when there's no such user in the org."""
     with conn.transaction():
-        if not conn.execute("SELECT 1 FROM users WHERE id = %s AND org_id = %s", (user_id, org_id)).fetchone():
+        row = conn.execute("SELECT role FROM users WHERE id = %s AND org_id = %s FOR UPDATE", (user_id, org_id)).fetchone()
+        if not row:
             return False
+        if row[0] == "admin" and _admin_count(conn, org_id) <= 1:
+            raise LastAdmin("the org's last admin can't be deleted")
         conn.execute("DELETE FROM user_sites WHERE user_id = %s", (user_id,))
         conn.execute("DELETE FROM users WHERE id = %s AND org_id = %s", (user_id, org_id))
         end_user_sessions(conn, user_id)

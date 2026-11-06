@@ -35,7 +35,7 @@ OPENAPI_SPEC_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "auth-ap
 def make_handler(ts_pool):
     class AuthHandler(BaseAPIHandler):
         TRACER = tracer
-        ALLOWED_METHODS = "GET, POST, PUT, DELETE, OPTIONS"
+        ALLOWED_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
         ALLOWED_HEADERS = "Content-Type, Authorization"
 
         def _require_gateway(self) -> bool:
@@ -115,6 +115,9 @@ def make_handler(ts_pool):
             if path == "/users":
                 self.handle_traced("auth_api.get_users", self._list_users)
                 return
+            if path == "/sites":
+                self.handle_traced("auth_api.get_sites", self._list_sites)
+                return
             self.send_response(404)
             self.end_headers()
 
@@ -131,6 +134,18 @@ def make_handler(ts_pool):
             if m:
                 user_id = m.group(1)
                 self.handle_traced("auth_api.put_user_password", lambda span: self._set_user_password(user_id, span))
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_PATCH(self):
+            if not self._require_gateway():
+                return
+            path = urlparse(self.path).path
+            m = re.fullmatch(r"/users/([^/]+)", path)
+            if m:
+                user_id = m.group(1)
+                self.handle_traced("auth_api.patch_user", lambda span: self._update_user(user_id, span))
                 return
             self.send_response(404)
             self.end_headers()
@@ -225,8 +240,13 @@ def make_handler(ts_pool):
 
         def _create_org(self, span) -> None:
             body = self.read_json_body()
-            with ts_pool.connection() as conn:
-                org = auth.create_org(conn, body["name"], body["admin_email"], body["admin_password"])
+            auth.check_new_password(body["admin_password"])
+            try:
+                with ts_pool.connection() as conn:
+                    org = auth.create_org(conn, body["name"], body["admin_email"], body["admin_password"])
+            except auth.EmailTaken as exc:
+                _respond_error(self, 409, str(exc))
+                return
             span.set_attribute("org_id", org["id"])
             _respond_json(self, 201, org)
 
@@ -260,8 +280,16 @@ def make_handler(ts_pool):
             if not caller:
                 return
             body = self.read_json_body()
-            with ts_pool.connection() as conn:
-                user = auth.create_user(conn, caller["org_id"], body["email"], body["password"], body["role"])
+            auth.check_new_password(body["password"])
+            try:
+                with ts_pool.connection() as conn:
+                    user = auth.create_user(conn, caller["org_id"], body["email"], body["password"], body["role"])
+                    if body.get("site_ids"):
+                        auth.update_user(conn, caller["org_id"], user["id"], site_ids=body["site_ids"])
+                        user["site_ids"] = auth.user_site_ids(conn, user["id"])
+            except auth.EmailTaken as exc:
+                _respond_error(self, 409, str(exc))
+                return
             span.set_attribute("new_user_id", user["id"])
             _respond_json(self, 201, user)
 
@@ -282,8 +310,12 @@ def make_handler(ts_pool):
                 # an org's only admin deleting themselves locks everyone out
                 _respond_error(self, 400, "you can't delete your own account")
                 return
-            with ts_pool.connection() as conn:
-                found = auth.delete_user(conn, caller["org_id"], user_id)
+            try:
+                with ts_pool.connection() as conn:
+                    found = auth.delete_user(conn, caller["org_id"], user_id)
+            except auth.LastAdmin as exc:
+                _respond_error(self, 409, str(exc))
+                return
             if not found:
                 _respond_error(self, 404, "no such user in your org")
                 return
@@ -296,6 +328,7 @@ def make_handler(ts_pool):
                 return
             span.set_attribute("target_user_id", user_id)
             password = self.read_json_body()["password"]
+            auth.check_new_password(password)
             with ts_pool.connection() as conn:
                 found = auth.set_password(conn, caller["org_id"], user_id, password)
             if not found:
@@ -312,6 +345,7 @@ def make_handler(ts_pool):
                 _respond_error(self, 400, "only a logged-in user (not an API key) has a password to change")
                 return
             body = self.read_json_body()
+            auth.check_new_password(body["new_password"])
             with ts_pool.connection() as conn:
                 user = auth.get_user(conn, caller["sub"])
                 if not user or not auth.verify_password(body["current_password"], user["password_hash"]):
@@ -321,6 +355,36 @@ def make_handler(ts_pool):
                 # every session ended, this one included: hand back a fresh one
                 token = auth.issue_session_token(user, auth.user_site_ids(conn, user["id"]))
             _respond_json(self, 200, {"token": token})
+
+        def _list_sites(self, span) -> None:
+            caller = self._require_caller(span)
+            if not caller:
+                return
+            with ts_pool.connection() as conn:
+                sites = auth.list_sites(conn, caller["org_id"])
+            _respond_json(self, 200, sites)
+
+        def _update_user(self, user_id: str, span) -> None:
+            caller = self._require_caller(span)
+            if not caller:
+                return
+            span.set_attribute("target_user_id", user_id)
+            body = self.read_json_body()
+            if "role" not in body and "site_ids" not in body:
+                raise ValueError("nothing to change: send role and/or site_ids")
+            if user_id == caller["sub"] and body.get("role", caller["role"]) != caller["role"]:
+                _respond_error(self, 400, "you can't change your own role")
+                return
+            try:
+                with ts_pool.connection() as conn:
+                    user = auth.update_user(conn, caller["org_id"], user_id, body.get("role"), body.get("site_ids"))
+            except auth.LastAdmin as exc:
+                _respond_error(self, 409, str(exc))
+                return
+            if user is None:
+                _respond_error(self, 404, "no such user in your org")
+                return
+            _respond_json(self, 200, user)
 
         def _get_revoked_jtis(self, span) -> None:
             with ts_pool.connection() as conn:

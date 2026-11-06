@@ -235,3 +235,43 @@ def test_set_password_changes_login_and_ends_sessions(conn):
     assert verify_password("new-pw", stored) and not verify_password("old-pw", stored)
     assert conn.execute("SELECT 1 FROM revoked_tokens WHERE jti LIKE %s", (f"user:{user['id']}:%",)).fetchone()
     conn.execute("DELETE FROM revoked_tokens WHERE jti LIKE 'user:%'")
+
+
+@pytest.mark.integration
+def test_create_user_rules(conn):
+    from baler.auth import EmailTaken
+
+    org = create_org(conn, "Test Org Rules", "Admin-R@Test-Auth.invalid ", "pw")
+    assert get_user_by_email(conn, "admin-r@test-auth.invalid")["id"] == org["admin_user_id"]  # stored normalised
+    assert get_user_by_email(conn, " ADMIN-R@test-auth.INVALID")["id"] == org["admin_user_id"]  # login normalises too
+    with pytest.raises(ValueError):
+        create_user(conn, org["id"], "svc@test-auth.invalid", "pw", "service")  # API-key-only role
+    with pytest.raises(EmailTaken) as exc:
+        create_user(conn, org["id"], "ADMIN-R@test-auth.invalid", "pw", "viewer")
+    assert "org" not in str(exc.value)  # says nothing about where it's taken
+
+
+@pytest.mark.integration
+def test_update_user_role_sites_and_last_admin_guard(conn):
+    from baler.auth import LastAdmin, delete_user, update_user
+
+    org = create_org(conn, "Test Org Upd", "admin-up@test-auth.invalid", "pw")
+    site = create_site(conn, org["id"], "Building U")
+    other = create_org(conn, "Test Org Upd B", "admin-upb@test-auth.invalid", "pw")
+    other_site = create_site(conn, other["id"], "Elsewhere")
+    user = create_user(conn, org["id"], "op-up@test-auth.invalid", "pw", "operator")
+
+    assert update_user(conn, org["id"], user["id"], role="viewer", site_ids=[site["id"]]) == {
+        "id": user["id"], "role": "viewer", "site_ids": [site["id"]]}
+    assert user_site_ids(conn, user["id"]) == [site["id"]]
+    with pytest.raises(ValueError):
+        update_user(conn, org["id"], user["id"], site_ids=[other_site["id"]])  # not this org's site
+    assert update_user(conn, other["id"], user["id"], role="admin") is None  # not this org's user
+    with pytest.raises(LastAdmin):
+        update_user(conn, org["id"], org["admin_user_id"], role="viewer")
+    with pytest.raises(LastAdmin):
+        delete_user(conn, org["id"], org["admin_user_id"])
+    update_user(conn, org["id"], user["id"], role="admin")
+    assert delete_user(conn, org["id"], org["admin_user_id"]) is True  # another admin remains
+    conn.execute("DELETE FROM user_sites WHERE user_id = %s", (user["id"],))
+    conn.execute("DELETE FROM revoked_tokens WHERE jti LIKE 'user:%'")

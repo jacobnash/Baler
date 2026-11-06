@@ -196,6 +196,26 @@ paths:
                   name: { type: string }
                   admin_user_id: { type: string }
   /sites:
+    get:
+      operationId: listSites
+      tags: [Directory]
+      summary: The caller's org's sites
+      description: admin-only. For picking the sites a user is limited to.
+      responses:
+        "200":
+          description: Sites, by name.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    name: { type: string }
+                    topic_prefixes: { type: array, items: { type: string } }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
     post:
       operationId: createSite
       tags: [Directory]
@@ -281,9 +301,13 @@ paths:
               type: object
               required: [email, password, role]
               properties:
-                email: { type: string, format: email }
-                password: { type: string }
+                email: { type: string, format: email, description: Trimmed and lower-cased. }
+                password: { type: string, minLength: 12 }
                 role: { type: string, enum: [admin, operator, viewer] }
+                site_ids:
+                  type: array
+                  items: { type: string }
+                  description: Limit the user to these sites (from GET /sites). Omit or empty for the whole org.
       responses:
         "201":
           description: Created.
@@ -296,8 +320,13 @@ paths:
                   org_id: { type: string }
                   email: { type: string }
                   role: { type: string }
+                  site_ids: { type: array, items: { type: string } }
+        "400":
+          description: Bad role (only admin, operator, viewer), email, password (12+ characters) or site.
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: That email can't be used (it's already taken; emails are unique across all orgs).
     get:
       operationId: listUsers
       tags: [Directory]
@@ -321,6 +350,47 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
   /users/{user_id}:
+    patch:
+      operationId: updateUser
+      tags: [Directory]
+      summary: Change a user's role and/or sites
+      description: >-
+        admin-only, own org only. Both are carried in the user's session
+        token, so their sessions end and they log in again. You can't change
+        your own role, and the org's last admin can't be demoted.
+      parameters:
+        - { name: user_id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role: { type: string, enum: [admin, operator, viewer] }
+                site_ids:
+                  type: array
+                  items: { type: string }
+                  description: Empty = the whole org.
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  role: { type: string }
+                  site_ids: { type: array, items: { type: string } }
+        "400":
+          description: Nothing to change, a bad role or site, or your own role.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No such user in the caller's org.
+        "409":
+          description: It would leave the org with no admin.
     delete:
       operationId: deleteUser
       tags: [Directory]
@@ -336,6 +406,8 @@ paths:
           description: Deleted.
         "400":
           description: That's the caller's own account.
+        "409":
+          description: That's the org's last admin.
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
