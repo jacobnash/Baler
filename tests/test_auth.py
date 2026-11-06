@@ -262,7 +262,7 @@ def test_update_user_role_sites_and_last_admin_guard(conn):
     user = create_user(conn, org["id"], "op-up@test-auth.invalid", "pw", "operator")
 
     assert update_user(conn, org["id"], user["id"], role="viewer", site_ids=[site["id"]]) == {
-        "id": user["id"], "role": "viewer", "site_ids": [site["id"]]}
+        "id": user["id"], "role": "viewer", "site_ids": [site["id"]], "disabled": False}
     assert user_site_ids(conn, user["id"]) == [site["id"]]
     with pytest.raises(ValueError):
         update_user(conn, org["id"], user["id"], site_ids=[other_site["id"]])  # not this org's site
