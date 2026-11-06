@@ -293,9 +293,14 @@ def read_latest_many(conn, point_uris: list[str]) -> dict[str, tuple[datetime, o
         return {}
     cur = conn.execute(
         """
-        SELECT DISTINCT ON (point_uri) point_uri, ts, value, value_text, value_bool
-        FROM point_history WHERE point_uri = ANY(%s)
-        ORDER BY point_uri, ts DESC
+        SELECT u.uri, h.ts, h.value, h.value_text, h.value_bool
+        FROM unnest(%s::text[]) AS u(uri)
+        CROSS JOIN LATERAL (
+            -- one backward primary-key probe per point; DISTINCT ON sorted
+            -- every row of every point's history (>60s at 20M rows)
+            SELECT ts, value, value_text, value_bool FROM point_history
+            WHERE point_uri = u.uri ORDER BY ts DESC LIMIT 1
+        ) h
         """,
         (point_uris,),
     )
@@ -1018,7 +1023,7 @@ def main() -> None:
     args = parser.parse_args()
 
     tracing.init_tracing("baler-haystack-api")
-    ts_pool = connect_pool()
+    ts_pool = connect_pool(statement_timeout=timeseries.GATEWAY_STATEMENT_TIMEOUT)
     with ts_pool.connection() as conn:
         # Idempotent; also guarantees sites.topic_prefixes exists for
         # scope_for even if auth_api hasn't started yet.

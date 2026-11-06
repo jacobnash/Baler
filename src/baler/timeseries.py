@@ -31,8 +31,21 @@ CREATE TABLE IF NOT EXISTS point_history (
 );
 """
 
+# read_point_labels' lookup: only derivation_engine sets unit/label, so on a
+# raw point "newest row with a unit or label" would otherwise walk its whole
+# history to find nothing. Small: it indexes the labelled rows only.
+LABELS_INDEX = """
+CREATE INDEX IF NOT EXISTS point_history_labelled
+ON point_history (point_uri, ts DESC) WHERE unit IS NOT NULL OR label IS NOT NULL
+"""
 
-def _setup(conn: psycopg.Connection) -> None:
+# For pools serving requests through the gateway: below nginx's 60s proxy
+# timeout, so a query the gateway has already given up on stops instead of
+# running on with nobody waiting for the answer.
+GATEWAY_STATEMENT_TIMEOUT = os.environ.get("BALER_PG_STATEMENT_TIMEOUT", "55s")
+
+
+def _setup(conn: psycopg.Connection, statement_timeout: str | None = None) -> None:
     """Runs on every fresh connection, pooled or not - idempotent, same as
     CREATE TABLE IF NOT EXISTS."""
     # The hypertable is why we run the TimescaleDB image - a plain
@@ -42,7 +55,8 @@ def _setup(conn: psycopg.Connection) -> None:
     # that already exist under the plain-table schema; idempotent like
     # the CREATE TABLE. Under ddl's lock: every service runs this on
     # every new connection.
-    ddl.run(conn, SCHEMA, "SELECT create_hypertable('point_history', 'ts', if_not_exists => TRUE, migrate_data => TRUE)")
+    ddl.run(conn, SCHEMA, "SELECT create_hypertable('point_history', 'ts', if_not_exists => TRUE, migrate_data => TRUE)",
+            LABELS_INDEX)
     # Real tradeoff, taken deliberately: every INSERT otherwise waits on a
     # full WAL fsync before returning. Scoped to this connection only (a
     # session-level SET, not a postgresql.conf edit) - other clients
@@ -52,6 +66,8 @@ def _setup(conn: psycopg.Connection) -> None:
     # corruption risk, a durability-window risk, and one this point-history
     # table (telemetry, not financial records) can afford.
     conn.execute("SET synchronous_commit = off")
+    if statement_timeout:
+        conn.execute("SELECT set_config('statement_timeout', %s, false)", (statement_timeout,))
 
 
 def connect(dsn: str = DEFAULT_DSN) -> psycopg.Connection:
@@ -60,7 +76,8 @@ def connect(dsn: str = DEFAULT_DSN) -> psycopg.Connection:
     return conn
 
 
-def connect_pool(dsn: str = DEFAULT_DSN, min_size: int = 2, max_size: int = 10) -> ConnectionPool:
+def connect_pool(dsn: str = DEFAULT_DSN, min_size: int = 2, max_size: int = 10,
+                 statement_timeout: str | None = None) -> ConnectionPool:
     """One connection per request instead of one shared connection for
     every concurrent request - psycopg.Connection isn't safe for
     concurrent use from multiple threads, and a single shared connection
@@ -72,7 +89,7 @@ def connect_pool(dsn: str = DEFAULT_DSN, min_size: int = 2, max_size: int = 10) 
         min_size=min_size,
         max_size=max_size,
         kwargs={"autocommit": True},
-        configure=_setup,
+        configure=_setup if statement_timeout is None else lambda c: _setup(c, statement_timeout),
         open=True,
     )
     pool.wait()
@@ -173,7 +190,8 @@ def read_range_many(
 
 
 def read_point_labels(conn: psycopg.Connection, point_uris: list[str]) -> dict[str, tuple[str | None, str | None]]:
-    """Latest (unit, label) recorded alongside each point's samples. Only
+    """(One index probe per point - DISTINCT ON sorted every row of every
+    point's history, minutes at 20M rows.) Latest (unit, label) recorded alongside each point's samples. Only
     derivation_engine writes these columns (ingest_reading leaves them
     null) - so this is how a computed point, which has no haystack:dis/
     haystack:unit tags in the graph, still gets a display name and unit
@@ -182,9 +200,13 @@ def read_point_labels(conn: psycopg.Connection, point_uris: list[str]) -> dict[s
         return {}
     cur = conn.execute(
         """
-        SELECT DISTINCT ON (point_uri) point_uri, unit, label FROM point_history
-        WHERE point_uri = ANY(%s) AND (unit IS NOT NULL OR label IS NOT NULL)
-        ORDER BY point_uri, ts DESC
+        SELECT u.uri, h.unit, h.label
+        FROM unnest(%s::text[]) AS u(uri)
+        CROSS JOIN LATERAL (
+            SELECT unit, label FROM point_history
+            WHERE point_uri = u.uri AND (unit IS NOT NULL OR label IS NOT NULL)
+            ORDER BY ts DESC LIMIT 1
+        ) h
         """,
         (point_uris,),
     )

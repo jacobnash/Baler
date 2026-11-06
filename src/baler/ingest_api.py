@@ -29,7 +29,12 @@ from baler.ingest import (
 from baler.mapping import reclassify
 from baler.remote_store import RemoteStore
 from baler.scope import claims_from_header, scope_for
-from baler.timeseries import connect_pool, delete_point_value, read_range
+from baler.timeseries import (
+    GATEWAY_STATEMENT_TIMEOUT,
+    connect_pool,
+    delete_point_value,
+    read_range,
+)
 
 tracer = tracing.get_tracer(__name__)
 
@@ -311,7 +316,7 @@ def main() -> None:
     tracing.init_tracing("baler-ingest-api")
 
     store = RemoteStore()
-    ts_pool = connect_pool()
+    ts_pool = connect_pool(statement_timeout=GATEWAY_STATEMENT_TIMEOUT)
     with ts_pool.connection() as conn:
         auth.ensure_schema(conn)  # sites.topic_prefixes, read by the /his and /history scope check
 

@@ -4,6 +4,12 @@
 # floor is no newer than the runtime image's.
 FROM rust:1-slim-bookworm AS openhay
 ARG OPENHAY_REF=main
+# The clone below is cached by its command text, which never changes for a
+# branch ref - so a rebuild kept serving a stale openhay (nash-srv ran a
+# pre-eb89b9e build that failed whole grids on an unknown unit). ADD of the
+# ref's commit JSON is re-fetched every build and busts the cache only when
+# the ref moves.
+ADD https://api.github.com/repos/jacobnash/openhay/commits/${OPENHAY_REF} /openhay-ref.json
 RUN apt-get update && apt-get install -y --no-install-recommends git python3 python3-pip \
     && pip3 install --break-system-packages --no-cache-dir "maturin>=1.5,<2" \
     && git clone --depth 1 --branch "$OPENHAY_REF" https://github.com/jacobnash/openhay /openhay \
