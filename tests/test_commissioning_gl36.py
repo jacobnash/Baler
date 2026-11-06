@@ -148,3 +148,17 @@ def test_a_crashing_item_is_inconclusive_not_fatal(equips, monkeypatch):
     monkeypatch.setattr(gl36, "check", boom)
     [r] = gl36.run(equips, hx.history(), hx.NOW, DAY, {"hw_reset": hx.HW_RESET_F})
     assert r["status"] == "inconclusive" and "KeyError" in r["evidence"]["error"]
+
+
+def test_project_pass_threshold(equips):
+    """settings.gl36.<item>.max_fail_fraction: 0 is ConStrain's own rule;
+    above the share of failing steps, the item passes with a note."""
+    strict = gl36.run(equips, hx.history(reset=False), hx.NOW, DAY, {"hw_reset": hx.HW_RESET_F})[0]
+    frac = strict["evidence"]["tested_fail_fraction"]
+    assert strict["status"] == "fail" and strict["evidence"]["max_fail_fraction"] == 0 and 0 < frac < 0.5
+    loose = gl36.run(equips, hx.history(reset=False), hx.NOW, DAY, {"hw_reset": hx.HW_RESET_F | {"max_fail_fraction": 0.5}})[0]
+    assert loose["status"] == "pass" and loose["evidence"]["constrain_verdict"] is False and "max_fail_fraction" in loose["evidence"]["note"]
+    tight = gl36.run(equips, hx.history(reset=False), hx.NOW, DAY, {"hw_reset": hx.HW_RESET_F | {"max_fail_fraction": frac / 2}})[0]
+    assert tight["status"] == "fail"
+    with pytest.raises(ValueError):
+        gl36.validate_settings({"hw_reset": {"max_fail_fraction": 1}})

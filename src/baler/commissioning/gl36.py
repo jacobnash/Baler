@@ -113,7 +113,10 @@ def available() -> bool:
 
 def validate_settings(settings) -> dict:
     """Project settings `gl36`: {item_id: {param: number, ..., "unit": "C"|"F",
-    "step_minutes": n}}.
+    "step_minutes": n, "max_fail_fraction": f}}. max_fail_fraction is the
+    project's pass threshold: the item still passes when no more than that
+    share of tested steps failed. 0 (the default) is ConStrain's own rule,
+    any failing step fails the item.
     A key enables that item. Raises ValueError/TypeError."""
     if not isinstance(settings, dict):
         raise TypeError("gl36 must be an object of {item: parameters}")
@@ -130,6 +133,9 @@ def validate_settings(settings) -> dict:
             elif name == "step_minutes":
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not 1 <= value <= 60:
                     raise ValueError(f"gl36.{key}.step_minutes must be a number in [1, 60]")
+            elif name == "max_fail_fraction":
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value < 1:
+                    raise ValueError(f"gl36.{key}.max_fail_fraction must be a number in [0, 1)")
             elif name not in item.params:
                 raise ValueError(f"gl36.{key} takes {', '.join(item.params) or 'no parameters'}, not {name!r}")
             elif isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -290,10 +296,17 @@ def check(item: Item, equip: dict, equips: list[dict], history: History, now: da
     verdict, detail = checker.get_checks
     result = checker.result
     failed = result[result == False]  # element-wise, as upstream does
+    threshold = float(settings.get("max_fail_fraction", 0))
     ev.update(passed=detail["Pass #"], failed=detail["Fail #"], untested=detail["Untested #"],
               fail_fraction=round(detail["Fail #"] / max(detail["Sample #"], 1), 4),
-              first_failures=[ts.isoformat() for ts in list(failed.index)[:MAX_FAILURES_LISTED]])
+              first_failures=[ts.isoformat() for ts in list(failed.index)[:MAX_FAILURES_LISTED]],
+              tested_fail_fraction=round(detail["Fail #"] / max(detail["Pass #"] + detail["Fail #"], 1), 4),
+              constrain_verdict=verdict if isinstance(verdict, bool) else str(verdict), max_fail_fraction=threshold)
     if verdict is True:
+        return _result(equip["id"], item, "pass", ev)
+    if verdict is False and detail["Pass #"] and ev["tested_fail_fraction"] <= threshold:
+        ev["note"] = (f"ConStrain fails it ({detail['Fail #']} failing steps); within this project's "
+                      f"max_fail_fraction {threshold:g}, so it passes here")
         return _result(equip["id"], item, "pass", ev)
     if verdict is False:
         return _result(equip["id"], item, "fail", ev,

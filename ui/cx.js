@@ -12,10 +12,10 @@ const CX_URL = cxParams.get("cx") || "/cx";
 const CX_INGEST_URL = cxParams.get("ingest") || "/ingest";
 const ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
 const STATUS_ORDER = { fail: 0, inconclusive: 1, pass: 2, not_applicable: 3 };
-const FAMILY_ORDER = ["exists", "live", "pair", "ladder", "template", "gl36"];
+const FAMILY_ORDER = ["exists", "live", "pair", "ladder", "template", "gl36", "cx"];
 const FAMILY_LABEL = {
   exists: "1 · reporting", live: "2 · live", pair: "3 · pairs", ladder: "ladder",
-  template: "expected points", gl36: "GL36 / 90.1",
+  template: "expected points", gl36: "GL36 / 90.1", cx: "economizer",
 };
 
 const cx = {

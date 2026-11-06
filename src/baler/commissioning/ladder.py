@@ -37,6 +37,43 @@ DEFAULTS = {
     "tail_fraction": 0.25,  # "recently froze" = flat for the trailing quarter of the window
 }
 
+# Per-project overrides (settings.ladder): any DEFAULTS key, plus
+# `tolerances` {pair key: number} for a pair's own tolerance.
+_BOUNDS = {"min_samples": (1, 10000), "flat_epsilon": (0, 1e6), "pair_tolerance_minutes": (0.1, 1440),
+           "status_agreement_min": (0, 1), "tail_fraction": (0.01, 1)}
+
+
+def validate_settings(cfg) -> dict:
+    """settings.ladder: raises ValueError/TypeError on anything unknown or
+    out of range, so a typo can't silently fall back to the default."""
+    if not isinstance(cfg, dict):
+        raise TypeError("ladder must be an object")
+    pairs = {p.key: p for p in PAIRS}
+    for k, v in cfg.items():
+        if k == "tolerances":
+            if not isinstance(v, dict):
+                raise TypeError("ladder.tolerances must be an object of {pair: number}")
+            for pk, tol in v.items():
+                if pk not in pairs:
+                    raise ValueError(f"unknown pair {pk!r} (known: {', '.join(sorted(pairs))})")
+                if isinstance(tol, bool) or not isinstance(tol, (int, float)) or tol < 0:
+                    raise ValueError(f"ladder.tolerances.{pk} must be a number >= 0")
+            continue
+        if k not in _BOUNDS:
+            raise ValueError(f"unknown ladder setting {k!r} (known: {', '.join(sorted([*_BOUNDS, 'tolerances']))})")
+        lo, hi = _BOUNDS[k]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
+            raise ValueError(f"ladder.{k} must be a number in [{lo:g}, {hi:g}]")
+    return cfg
+
+
+def effective(cfg: dict | None = None) -> dict:
+    """DEFAULTS with a project's overrides, and every pair's tolerance."""
+    out = {**DEFAULTS, **{k: v for k, v in (cfg or {}).items() if k != "tolerances"}}
+    out["tolerances"] = {p.key: (cfg or {}).get("tolerances", {}).get(p.key, p.tolerance) for p in PAIRS if p.kind != "cmd_status"}
+    return out
+
+
 ROLES = ("sensor", "setpoint", "command", "status")
 _ROLE_MARKERS = {"sensor": "sensor", "setpoint": "sp", "command": "cmd"}
 
@@ -246,13 +283,14 @@ def responsiveness(equip: dict, series: dict, cfg: dict, now: datetime, window: 
             symptom = None if ok else f"{pair.label.split(' follows')[0]} disagreed with its command in {1 - agree:.0%} of {len(pairs)} paired samples"
             cands, sensor = STATUS_CANDIDATES, b
         else:
+            tolerance = (cfg.get("tolerances") or {}).get(pair.key, pair.tolerance)
             err = (mean(abs(x - y) / y for _, x, y in pairs) if pair.kind == "track_rel"
                    else mean(abs(x - y) for _, x, y in pairs))
-            ok = err <= pair.tolerance
+            ok = err <= tolerance
             unit = "of setpoint" if pair.kind == "track_rel" else ("degF" if pair.temperature else (a.get("unit") or ""))
             shown = f"{err:.0%}" if pair.kind == "track_rel" else f"{err:.2f} {unit}".strip()
-            ev = {"pair": pair.label, "paired_samples": len(pairs), "mean_error": round(err, 4), "tolerance": pair.tolerance}
-            symptom = None if ok else f"{pair.label.split(' tracks')[0]} averaged {shown} from its setpoint over {len(pairs)} paired samples (tolerance {pair.tolerance:g})"
+            ev = {"pair": pair.label, "paired_samples": len(pairs), "mean_error": round(err, 4), "tolerance": tolerance}
+            symptom = None if ok else f"{pair.label.split(' tracks')[0]} averaged {shown} from its setpoint over {len(pairs)} paired samples (tolerance {tolerance:g})"
             cands, sensor = TRACK_CANDIDATES, a
         if ok:
             out.append(_res(equip["id"], check, subject, "pass", ev, rung=3))

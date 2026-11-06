@@ -179,6 +179,23 @@ On `tests/cx_hospital.py` (24 h, OAT 15–65 F):
 
 ## Decisions for Jacob
 
+**Taken as defaults on 2026-11-06 (reversible; Jacob didn't answer them
+explicitly):**
+
+- The Docker image installs `cx-gl36` (pandas), so projects can enable
+  items live.
+- Pass/fail policy is per project: `settings.gl36.<item>.max_fail_fraction`
+  (share of tested steps allowed to fail; default 0, ConStrain's own
+  rule). The verdict upstream gave is kept in `evidence.constrain_verdict`.
+  The rung-3 tolerances are per project too (`settings.ladder`, defaults
+  unchanged).
+- Our own economizer checks: `commissioning/economizer.py`,
+  `cx:econ_high_limit` (90.1 6.5.1.1.3 fixed dry-bulb) and
+  `cx:econ_integrated` (90.1 6.5.1.3), enabled with
+  `settings.economizer`. Not in the vendored package.
+
+The original questions:
+
 - Ship vendored (as built) or not at all. A dependency is impossible
   while upstream pins brickschema 0.7.1.
 - Put `cx-gl36` (pandas) into the Docker image so projects can enable

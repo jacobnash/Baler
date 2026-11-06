@@ -32,10 +32,12 @@ from urllib.parse import parse_qs, urlparse
 from baler import docs_ui, gateway_auth, tracing
 from baler.commissioning import (
     db,
+    economizer,
     engine,
     gl36,
     inventory,
     issues,
+    ladder,
     phases,
     report,
     runner,
@@ -76,7 +78,24 @@ def _check_settings(settings) -> dict:
         engine.window_hours(settings["window_hours"])
     if "gl36" in settings:
         gl36.validate_settings(settings["gl36"])
+    if "ladder" in settings:
+        ladder.validate_settings(settings["ladder"])
+    if "economizer" in settings:
+        economizer.validate_settings(settings["economizer"])
     return settings
+
+
+def engine_kwargs(settings: dict | None) -> dict:
+    """The per-project knobs a run takes from settings."""
+    s = settings or {}
+    out = {}
+    if s.get("gl36"):
+        out["gl36_settings"] = s["gl36"]
+    if s.get("ladder"):
+        out["ladder_config"] = s["ladder"]
+    if s.get("economizer"):
+        out["economizer_settings"] = s["economizer"]
+    return out
 
 
 def make_handler(repo, clock=None, worker=None):
@@ -369,9 +388,8 @@ def make_handler(repo, clock=None, worker=None):
             sub = claims.get("sub")
             email = repo.user_email(sub)
             repo.add_event(pid, "run.create", sub, email, {"run_id": run["id"], "phase": phase, "window_hours": wh}, now_fn())
-            gl36_settings = (p.get("settings") or {}).get("gl36")
             worker.submit(runner.RunJob(run["id"], pid, phase, scopes, started, wh, sub, email,
-                                        {"gl36_settings": gl36_settings} if gl36_settings else {}))
+                                        engine_kwargs(p.get("settings"))))
             span.set_attribute("run_id", run["id"])
             respond_json(self, 202, db.public_run(run))
 

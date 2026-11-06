@@ -32,7 +32,7 @@ RUN pip install --no-cache-dir /wheels/openhay-*.whl
 # installed editable against a placeholder; the real src/ lands on top.
 COPY pyproject.toml ./
 RUN mkdir -p src/baler && touch src/baler/__init__.py \
-    && pip install --no-cache-dir -e ".[validate]"
+    && pip install --no-cache-dir -e ".[validate,cx-gl36]"
 COPY src/ ./src/
 
 # No ENTRYPOINT/CMD - each daemon service in docker-compose.yml supplies its
@@ -40,3 +40,5 @@ COPY src/ ./src/
 # `validate` (pyshacl) is included here because validate_api.py runs as one
 # of the daemons sharing this same image - the extras split in pyproject.toml
 # is about the bare-metal/local dev install, not this containerized one.
+# `cx-gl36` (pandas, ~75 MB) lets a commissioning project enable the vendored
+# ConStrain items (settings.gl36) live; without it that PATCH answers 400.

@@ -786,10 +786,63 @@ components:
             properties:
               unit: { type: string, enum: [C, F] }
               step_minutes: { type: number, minimum: 1, maximum: 60 }
+              max_fail_fraction:
+                type: number
+                minimum: 0
+                exclusiveMaximum: 1
+                description: >-
+                  The project's pass threshold: the item passes while no more
+                  than this share of tested steps fail. 0 (default) is
+                  ConStrain's own rule - any failing step fails it.
             additionalProperties: { type: number }
           example:
             hw_reset: { unit: F, temperature_air_outdoor_min: 20, temperature_air_outdoor_max: 60,
                         temperature_water_hot_setpoint_max: 180, temperature_water_hot_setpoint_min: 140 }
+        ladder:
+          type: object
+          description: >-
+            Rung 2-3 knobs for this project (defaults in
+            commissioning/ladder.py DEFAULTS): min_samples, flat_epsilon,
+            pair_tolerance_minutes, status_agreement_min, tail_fraction, and
+            `tolerances` {pair key: number} overriding a pair's own tolerance
+            (zone_air_temperature and supply_air_temperature 3 degF,
+            supply_air_static_pressure 0.3, air_flow 0.2 of setpoint).
+          properties:
+            min_samples: { type: number, minimum: 1 }
+            flat_epsilon: { type: number, minimum: 0 }
+            pair_tolerance_minutes: { type: number, minimum: 0.1, maximum: 1440 }
+            status_agreement_min: { type: number, minimum: 0, maximum: 1 }
+            tail_fraction: { type: number, minimum: 0.01, maximum: 1 }
+            tolerances: { type: object, additionalProperties: { type: number, minimum: 0 } }
+          additionalProperties: false
+        economizer:
+          type: object
+          description: >-
+            Baler's own air-side economizer checks (`cx:econ_high_limit`,
+            90.1 6.5.1.1.3; `cx:econ_integrated`, 90.1 6.5.1.3) on every
+            AHU. `high_limit` is the climate zone's fixed dry-bulb limit.
+            Points are found by Brick class, markers or name, and can be
+            bound explicitly per equipment in `points`.
+          required: [high_limit]
+          properties:
+            high_limit: { type: number }
+            unit: { type: string, enum: [C, F] }
+            min_position: { type: number, minimum: 0, maximum: 100, description: "Damper minimum, % open (default 20)" }
+            position_tolerance: { type: number }
+            temperature_tolerance: { type: number }
+            cooling_threshold: { type: number, description: "Cooling output above this (%) counts as on; binary points use on/off" }
+            max_fail_fraction: { type: number, minimum: 0, maximum: 0.999 }
+            step_minutes: { type: number, minimum: 1, maximum: 60 }
+            checks: { type: array, items: { type: string, enum: [high_limit, integrated] } }
+            points:
+              type: object
+              additionalProperties:
+                type: object
+                properties:
+                  oat: { type: string }
+                  oa_damper: { type: string }
+                  cooling: { type: string }
+                  rat: { type: string }
       additionalProperties: true
     PhaseInput:
       type: object
@@ -885,7 +938,7 @@ components:
           type: [object, "null"]
           description: While running, roughly every 2 s; null otherwise
           properties:
-            stage: { type: string, enum: [starting, inventory, history, checks, gl36] }
+            stage: { type: string, enum: [starting, inventory, history, checks, gl36, economizer] }
             equipment_done: { type: integer }
             equipment_total: { type: [integer, "null"] }
             points: { type: [integer, "null"] }

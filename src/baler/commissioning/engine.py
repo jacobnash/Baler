@@ -39,11 +39,14 @@ def freshness_statement(now: datetime, window_h: float, n: int, fresh: int, stal
 
 def run(store, history: History, scopes: list[Scope], now: datetime, window_h: float = DEFAULT_WINDOW_HOURS,
         templates=None, ladder_config: dict | None = None,
-        progress: Callable[[dict], None] | None = None, gl36_settings: dict | None = None) -> tuple[dict, list[dict]]:
+        progress: Callable[[dict], None] | None = None, gl36_settings: dict | None = None,
+        economizer_settings: dict | None = None) -> tuple[dict, list[dict]]:
     """(summary, results). `progress`, if given, is told the stage and how
     many equipment are done; it must be cheap (it's called per equipment).
     `gl36_settings` (project settings `gl36`) adds ConStrain sequence items
-    as gl36:<item> results (Cx 3, needs the cx-gl36 extra)."""
+    as gl36:<item> results (Cx 3, needs the cx-gl36 extra);
+    `economizer_settings` (settings `economizer`) adds Baler's own
+    cx:econ_* checks. `ladder_config` is settings `ladder`."""
     def report(stage: str, done: int = 0, total: int | None = None, points: int | None = None) -> None:
         if progress is not None:
             progress({"stage": stage, "equipment_done": done, "equipment_total": total, "points": points})
@@ -75,6 +78,11 @@ def run(store, history: History, scopes: list[Scope], now: datetime, window_h: f
 
         report("gl36", len(equips), len(equips), len(point_ids))
         results.extend(gl36.run(equips, history, now, window, gl36_settings))
+    if economizer_settings:
+        from baler.commissioning import economizer
+
+        report("economizer", len(equips), len(equips), len(point_ids))
+        results.extend(economizer.run(equips, history, now, window, economizer_settings))
 
     by_status = {s: 0 for s in checks.STATUSES}
     by_check: dict[str, dict[str, int]] = {}
