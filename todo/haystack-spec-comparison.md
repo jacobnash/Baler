@@ -142,6 +142,34 @@ Delete "Spec Probe Org" and "Matrix Test Org" (via the Postgres DSN above). Run
 `docker rm -f haxall-spec`, and remove your clone, venv and image if you built one. Leave the
 baler stack exactly as you found it.
 
+## The reference source as the oracle (cloud session, in parallel)
+
+The reference sources are open, so expected behavior comes from the reference code and tests,
+not just the prose spec:
+[haxall/haxall](https://github.com/haxall/haxall),
+[Project-Haystack/xeto](https://github.com/Project-Haystack/xeto),
+[Project-Haystack/haystack-defs](https://github.com/Project-Haystack/haystack-defs) and
+[fantom-lang/fantom](https://github.com/fantom-lang/fantom).
+All are AFL-3.0.
+
+- **Test vectors:** haxall's `src/test/testHaystack` has FilterTest, ZincTest, NumberTest,
+  TrioTest, DateSpanTest, SpanTest, RefTest and CoordTest. Port their *cases*, inputs and expected
+  results as data, into openhay's test suite, and run every codec and the filter evaluator
+  against them. Do the same for Baler's filter compiler where the semantics overlap.
+- **Op behavior:** `src/ext/hxApi/fan/PhApiFuncs.fan` (nav, hisRead single and batch, hisWrite
+  single and batch, watches), `src/ext/hxPoint/fan/WriteMgr.fan` (priority array, level 8
+  duration) and `ApiDispatchV4Ops.fan` (ops, close). Each Phase 2 item gets a "reference says"
+  line citing the file and function.
+- **Haystack 5:** haxall has an `ApiDispatchV5` (Xeto protocol). Add it to the comparison scope,
+  next to the Xeto converter work, which reads its libs (`ph`, `ph.points`, `ph.equips.x`, ...)
+  from the xeto repo.
+
+**License hygiene:** AFL-3.0 is permissive, but the FSF considers it GPL-incompatible.
+- Never copy Fantom code into Baler (AGPL) or openhay (BSD).
+- Port test *cases* as data or independently written assertions. Keep them in openhay under
+  `vectors/haxall/`, with the AFL notice and the source path and commit of each.
+- Reimplement behavior from the spec and from what the reference shows it does.
+
 ## Gaps already known from the code (confirm them live)
 
 - `ops` returns name/summary rows, not op defs.
