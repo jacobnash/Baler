@@ -42,7 +42,7 @@ import argparse
 import os
 import threading
 import time as _time
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from http.server import ThreadingHTTPServer
 from urllib.parse import parse_qsl, urlsplit
 
@@ -61,6 +61,8 @@ DEFAULT_TZ = os.environ.get("BALER_TZ") or "UTC"
 HIS_LIMIT = hisquery.MAX_LIMIT
 
 HAYSTACK_NS = "urn:baler:haystack#"
+HUNIT_NS = "urn:baler:haystack-unit#"
+XSD = "http://www.w3.org/2001/XMLSchema#"
 BRICK_NS = hisquery.BRICK_NS
 TD_NS = "urn:baler:td#"
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
@@ -159,9 +161,25 @@ def _kind_of(uri: str) -> str | None:
     return None
 
 
-def _literal(value):
+def _literal(value, datatype: str | None = None):
     """A stored literal -> a Haystack value. RemoteStore already hands back
-    int/float/str; rdflib (tests, in-memory Store) hands back Literals."""
+    int/float/str; rdflib (tests, in-memory Store) hands back Literals. The
+    datatype (projected by build_records' query, so it survives either
+    store) restores what ingest typed: Refs, dates and times."""
+    dt = str(datatype or "")
+    if dt == HAYSTACK_NS + "Ref":
+        rid = str(value)
+        return oh.Ref(uri_to_ref(rid if rid.startswith("urn:") else f"urn:equip:haystack:{rid}"))
+    if dt in (XSD + "date", XSD + "time", XSD + "dateTime"):
+        if hasattr(value, "toPython"):
+            value = value.toPython()
+        if isinstance(value, str):
+            parse = {XSD + "date": date.fromisoformat, XSD + "time": time.fromisoformat,
+                     XSD + "dateTime": datetime.fromisoformat}[dt]
+            value = parse(value.replace("Z", "+00:00"))
+        if isinstance(value, datetime) and value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value
     if hasattr(value, "toPython"):
         value = value.toPython()
     if isinstance(value, bool):
@@ -180,24 +198,33 @@ def build_records(store, ts_conn, uris: list[str]) -> dict[str, dict]:
         return {}
     values = " ".join(f"<{hisquery._uri(u)}>" for u in uris)
     rows = store.query(
-        f"""SELECT ?s ?p ?o (isIRI(?o) AS ?iri) WHERE {{
+        f"""SELECT ?s ?p ?o (isIRI(?o) AS ?iri) (DATATYPE(?o) AS ?dt) WHERE {{
             VALUES ?s {{ {values} }}
             ?s ?p ?o .
         }}"""
     )
     recs: dict[str, dict] = {}
     classes: dict[str, list[str]] = {}
+    units: dict[str, dict[str, str]] = {}
     for row in rows:
         s, p, o = str(row.s), str(row.p), row.o
         is_iri = getattr(row, "iri", False)
         is_iri = is_iri if isinstance(is_iri, bool) else str(is_iri).lower() in ("true", "1")
         rec = recs.setdefault(s, {})
-        if p == HAYSTACK_NS + "hasTag":
+        if p.startswith(HUNIT_NS):
+            units.setdefault(s, {})[p[len(HUNIT_NS):]] = str(o)
+        elif p == HAYSTACK_NS + "hasTag":
             rec[str(o)] = oh.MARKER
         elif p.startswith(HAYSTACK_NS) and not is_iri:
             tag = p[len(HAYSTACK_NS):]
             if tag not in _RECOMPUTED_TAGS:
-                rec[tag] = _literal(o)
+                val = _literal(o, getattr(row, "dt", None))
+                if tag in rec and isinstance(val, oh.Ref):
+                    # a Ref list is stored one triple per Ref
+                    prev = rec[tag]
+                    rec[tag] = (prev if isinstance(prev, list) else [prev]) + [val]
+                else:
+                    rec[tag] = val
             elif tag == "unit":
                 rec["unit"] = str(_literal(o))
         elif p == RDF_TYPE:
@@ -206,6 +233,12 @@ def build_records(store, ts_conn, uris: list[str]) -> dict[str, dict]:
                 classes.setdefault(s, []).append(o)
         elif p == BRICK_NS + "isPointOf":
             rec["equipRef"] = oh.Ref(uri_to_ref(str(o)))
+
+    for s, by_tag in units.items():
+        for tag, unit in by_tag.items():
+            v = recs.get(s, {}).get(tag)
+            if isinstance(v, oh.Number):
+                recs[s][tag] = oh.Number(v.val, unit)
 
     latest = read_latest_many(ts_conn, [u for u in uris if _kind_of(u) == "point"]) if ts_conn is not None else {}
     labels = timeseries.read_point_labels(ts_conn, list(latest)) if latest else {}

@@ -412,3 +412,29 @@ def test_scope_applies_through_dispatch_and_watches(backend):
     req = oh.Grid.from_rows([{"id": oh.Ref(ha.uri_to_ref(DAT))}], meta={"watchDis": "t"})
     assert ha.dispatch(backend, "watchSub", req, other).rows == []
     assert ha.dispatch(backend, "read", oh.Grid.from_rows([{"filter": "temp"}]), other).rows == []
+
+
+def test_records_keep_haystack_types_from_an_import(tmp_path, monkeypatch):
+    """Values stored by haystack_import come back out of /api as the same
+    Haystack types: Numbers with units, Refs and Ref lists, dates."""
+    from baler import haystack_import as hi
+
+    store = Store()
+    ts = FakeTS()
+    monkeypatch.setattr(ha, "read_latest_many", ts.latest)
+    monkeypatch.setattr(ha.timeseries, "read_point_labels", ts.labels)
+    (tmp_path / "r.zinc").write_text(
+        'ver:"3.0"\nid,dis,equip,ahu,area,since,feeds\n'
+        '@e1,"AHU-1",M,M,1200ft²,2021-05-04,\n'
+        '@e2,"AHU-2",M,M,,,[@e1]\n'
+    )
+    hi.import_file(store, None, str(tmp_path / "r.zinc"), "src")
+    backend = ha.Backend(store, ts)
+    recs = {r["dis"]: r for r in backend.read_filter("ahu", None)}
+    assert recs["AHU-1"]["area"] == oh.Number(1200.0, "ft²")
+    assert str(recs["AHU-1"]["since"]) == "2021-05-04"
+    feeds = recs["AHU-2"]["feeds"]
+    assert isinstance(feeds, oh.Ref) and ha.ref_to_uri(feeds.id) == "urn:equip:haystack:src:e1"
+    assert [r["dis"] for r in backend.read_filter('feeds->dis == "AHU-1"', None)] == ["AHU-2"]
+    assert [r["dis"] for r in backend.read_filter("area > 1000ft²", None)] == ["AHU-1"]
+    assert backend.read_filter("area > 1000", None) == []  # units must match

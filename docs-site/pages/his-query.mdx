@@ -24,8 +24,9 @@ source   := ("read" | "readAll") "(" filter ")"
 call     := "hisRead" "(" span ")"
           | "hisRollup" "(" fold "," interval ")"
 filter   := term (("and" | "or") term)*
-term     := "(" filter ")" | "not" term | name cmpOp value | name
-value    := "string" | number | true | false | @ref
+term     := "(" filter ")" | "not" term | path cmpOp value | path | ^symbol
+path     := name ("->" name)*
+value    := "string" | number[unit] | true | false | @ref | YYYY-MM-DD | hh:mm[:ss]
 ```
 
 Some real ones:
@@ -173,9 +174,16 @@ as-is; `id == @some-id` matches the entity's own id (and it's the only thing `id
 to — `id == 5` is a parse error). Ref-valued tags compare by id too: `siteRef == @site1`, and
 `equipRef == @ahu-1` also matches through the graph's own `brick:isPointOf` edge, so it works for
 points whose source never sent an `equipRef` tag. A comparison on a tag the entity doesn't have
-is false, as in Haystack (`x != 1` doesn't match recs with no `x`). Numbers compare as bare
-numbers, with no unit conversion — `temp > 72°F` and `temp > 72` are the same comparison; the
-unit is accepted and ignored.
+is false, as in Haystack (`x != 1` doesn't match recs with no `x`), and so is a comparison
+between different kinds (`foo < "c"` never matches a number). **Numbers compare only with the
+same unit**, as in Haystack: `temp > 72°F` matches `75°F` but not a unitless `75`, and
+`temp > 72` matches only unitless values. There's no unit conversion (`2min` is not `120s`).
+A bare name matches a tag with any value, not only markers: `dis` matches every record with a
+`dis`. Dates and times compare as dates and times (`installed < 2020-01-01`, `ts->time >=
+08:00`), and `^hot-water` is shorthand for `hot and water`.
+
+These rules are checked against haxall's own filter test cases on every build
+(`tests/test_haxall_filter_vectors.py`, run on both rdflib and Oxigraph).
 
 **`read` vs `readAll`.** `readAll(filter)` returns every match. `read(filter)` takes the first
 match only, and if nothing matches it's a **404**, the same as Axon's `UnknownRecErr` — a
@@ -333,8 +341,8 @@ what was rejected, never a silent approximation:
   `.map(...)`, no `toDateSpan`, no lambdas. There are two calls, `hisRead` and `hisRollup`, and
   that's the whole library. Anything computed from history belongs in a
   [Derivation](/derivation), which writes a real point you can then `hisRead` like any other.
-- **Unit-aware comparisons.** `temp > 72°F` compares the number 72 against stored values; the
-  unit is parsed and ignored, not converted.
+- **Unit conversion.** `temp > 22°C` doesn't match `75°F`; units must be identical.
+- **Paths into nested dicts** (`ref->thru` where `ref` is a Dict) and `ts->tz`.
 - **Time-of-day spans** (`hisRead(2026-09-03T08:00..2026-09-03T17:00)`) — spans are whole local
   days.
 - **Writes.** There is no `hisWrite` here; that's [`POST /ingest/history`](/api/ingest) or the

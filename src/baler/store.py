@@ -26,6 +26,9 @@ TD = Namespace("urn:baler:td#")
 # Haystack source actually sent, independent of whether mapping.py can
 # classify them into Brick yet.
 HAYSTACK = Namespace("urn:baler:haystack#")
+# The unit of a Number-valued tag: <entity> HUNIT:<tag> "°F", next to the
+# HAYSTACK:<tag> number itself (a literal can't carry a unit).
+HUNIT = Namespace("urn:baler:haystack-unit#")
 
 # Per-deployment extension namespace for Haystack concepts that have no
 # Brick equivalent - mapping.py falls back to this (subClassOf the nearest

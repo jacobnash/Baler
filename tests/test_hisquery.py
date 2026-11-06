@@ -65,9 +65,9 @@ def test_date_month_year_and_range_spans_parse():
         ("not (a or b)", h.Not(h.Or(h.Has("a"), h.Has("b")))),
         ('dis == "Zone Temp"', h.Cmp("dis", "==", "Zone Temp")),
         ('dis != "x\\"y"', h.Cmp("dis", "!=", 'x"y')),
-        ("temp > 72", h.Cmp("temp", ">", 72)),
-        ("temp >= 72.5°F", h.Cmp("temp", ">=", 72.5)),
-        ("area < -5", h.Cmp("area", "<", -5)),
+        ("temp > 72", h.Cmp("temp", ">", h.Num(72.0))),
+        ("temp >= 72.5°F", h.Cmp("temp", ">=", h.Num(72.5, "°F"))),
+        ("area < -5", h.Cmp("area", "<", h.Num(-5.0))),
         ("equipRef == @AHU-1", h.Cmp("equipRef", "==", h.Ref("AHU-1"))),
         ("id == @urn:point:fbf/mock-ahu-1/analogValue,1", h.Cmp("id", "==", h.Ref("urn:point:fbf/mock-ahu-1/analogValue,1"))),
         ("cur == true", h.Cmp("cur", "==", True)),
@@ -294,7 +294,9 @@ def _match(graph, text):
         ("discharge or fan", [DAT, FAN, B_FAN]),  # B_FAN: Fan_Status carries Brick tag:Fan
         ("temp > 70", [ZT]),
         ("temp > 80", []),
-        ("temp != 72.5", []),  # a missing tag never satisfies a comparison
+        # Haystack != (haxall FilterNe): the tag is present and isn't that value.
+        # DAT's temp is a marker, B_ZT has temp via its Brick class; ZT's is 72.5.
+        ("temp != 72.5", [DAT, B_ZT]),
         ('dis == "Fan Status"', [FAN]),
         ('kind == "Bool"', [FAN]),
         ("id == @urn:equip:fbf/vav-1", [VAV]),

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from rdflib import OWL, RDF, Literal, URIRef
 
 from baler import timeseries, tracing
-from baler.store import BRICK, HAYSTACK, TD
+from baler.store import BRICK, HAYSTACK, HUNIT, TD
 
 tracer = tracing.get_tracer(__name__)
 
@@ -69,17 +69,43 @@ def _write_tags(store, uri: URIRef, tags: dict) -> None:
         if value is True:
             triples.append((uri, HAYSTACK.hasTag, Literal(tag)))
         else:
-            # Haystack4 tags can carry nested Dict/List values (e.g. an
-            # XStr or Coord surfaced by the bridge's generic exporter) -
-            # rdflib's Literal() doesn't reject those, but it stores
-            # Python repr (single-quoted, not valid JSON) rather than
-            # erroring, which is a worse silent trap than serializing
-            # explicitly here.
-            if isinstance(value, (dict, list)):
-                value = json.dumps(value)
-            triples.append((uri, HAYSTACK[tag], Literal(value)))
+            triples.extend((uri, p, o) for p, o in _tag_triples(tag, value))
 
     store.add_many(triples)  # one round trip for every tag instead of one per tag
+
+
+def _hay_type(value) -> str | None:
+    """'Number'/'Ref' for openhay values (haystack_import passes them through
+    typed), without importing openhay here - it's an optional extra."""
+    t = type(value)
+    return t.__name__ if t.__module__.startswith("openhay") else None
+
+
+def _tag_triples(tag: str, value):
+    """(predicate, object) pairs for one valued tag, typed so filters can
+    compare with Haystack semantics:
+      - Number: an xsd:double, plus HUNIT:<tag> holding its unit if any
+      - Ref: a HAYSTACK.Ref-typed literal of the id; a *list* of Refs is one
+        triple per Ref (so `ref==@a` and `ref->dis` check every element)
+      - date/time/dateTime: xsd typed
+      - other dicts/lists: JSON text (rdflib would otherwise store Python
+        repr, which isn't valid JSON), as before
+    Plain JSON values (MQTT tags, haystack_puller) keep their old shape."""
+    kind = _hay_type(value)
+    if kind == "Number":
+        out = [(HAYSTACK[tag], Literal(float(value.val)))]
+        if value.unit:
+            out.append((HUNIT[tag], Literal(value.unit)))
+        return out
+    if kind == "Ref":
+        return [(HAYSTACK[tag], Literal(value.id, datatype=HAYSTACK.Ref))]
+    if isinstance(value, list) and value and all(_hay_type(v) == "Ref" for v in value):
+        return [(HAYSTACK[tag], Literal(v.id, datatype=HAYSTACK.Ref)) for v in value]
+    if kind is not None:  # Uri, Symbol, XStr, Coord: their text
+        return [(HAYSTACK[tag], Literal(str(getattr(value, "val", value))))]
+    if isinstance(value, (dict, list)):
+        return [(HAYSTACK[tag], Literal(json.dumps(value, default=str)))]
+    return [(HAYSTACK[tag], Literal(value))]
 
 
 def ingest_tags(store, topic: str, tags: dict, ts: float | None = None) -> URIRef:

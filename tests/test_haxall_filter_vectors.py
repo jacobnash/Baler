@@ -28,54 +28,9 @@ V = vectors.load("haxall/testHaystack-4.0.6")
 
 # case id -> why Baler differs from the reference today
 KNOWN_GAPS: dict[str, str] = {
-    'FilterTest.testInclude:date==2016-01-02': 'no date literals in the grammar',
-    'FilterTest.testInclude:date != 2016-01-02': 'no date literals in the grammar',
-    'FilterTest.testInclude:date < 2016-01-04': 'no date literals in the grammar',
-    'FilterTest.testInclude:foo < "c"': 'comparisons across kinds (Str vs Number) are not false',
-    'FilterTest.testInclude:date <= 2016-01-02': 'no date literals in the grammar',
-    'FilterTest.testInclude:foo <= "baz"': 'comparisons across kinds (Str vs Number) are not false',
-    'FilterTest.testInclude:date > 2016-01-02': 'no date literals in the grammar',
-    'FilterTest.testInclude:foo > 12': 'comparisons across kinds (Str vs Number) are not false',
-    'FilterTest.testInclude:date >= 2016-01-02': 'no date literals in the grammar',
-    'FilterTest.testInclude:foo >= 12': 'comparisons across kinds (Str vs Number) are not false',
-    'FilterTest.testInclude:ref->thru': 'nested Dict values are stored as a JSON string, so paths into them fail',
-    'FilterTest.testInclude:ref->thru=="e"': 'nested Dict values are stored as a JSON string, so paths into them fail',
-    'FilterTest.testInclude:^foo-bar': 'no ^symbol (def conjunct) terms in the grammar',
-    'FilterTest.testInclude:^foo': 'no ^symbol (def conjunct) terms in the grammar',
-    'FilterTest.testInclude:^foo-thru': 'no ^symbol (def conjunct) terms in the grammar',
-    'FilterTest.testIncludeNumbers:num==75': 'units are ignored in comparisons (the unit is stored apart from the number); mixed kinds compare',
-    'FilterTest.testIncludeNumbers:num==75°F': 'units are ignored in comparisons (the unit is stored apart from the number); mixed kinds compare',
-    'FilterTest.testIncludeNumbers:num==75°C': 'units are ignored in comparisons (the unit is stored apart from the number); mixed kinds compare',
-    'FilterTest.testIncludeNumbers:num > 70': 'units are ignored in comparisons (the unit is stored apart from the number); mixed kinds compare',
-    'FilterTest.testIncludeNumbers:num > 70°F': 'units are ignored in comparisons (the unit is stored apart from the number); mixed kinds compare',
-    'FilterTest.testIncludeNumbers:num >= 70°F': 'units are ignored in comparisons (the unit is stored apart from the number); mixed kinds compare',
-    'FilterTest.testIncludeNumbers:num >= 75°F': 'units are ignored in comparisons (the unit is stored apart from the number); mixed kinds compare',
-    'FilterTest.testIncludeNumbers:num <  80°F': 'units are ignored in comparisons (the unit is stored apart from the number); mixed kinds compare',
-    'FilterTest.testIncludeNumbers:num <= 80°F': 'units are ignored in comparisons (the unit is stored apart from the number); mixed kinds compare',
-    'FilterTest.testIncludeNumbers:num <= 75°F': 'units are ignored in comparisons (the unit is stored apart from the number); mixed kinds compare',
-    'FilterTest.testIncludeNumbers:num > 70°C': 'units are ignored in comparisons (the unit is stored apart from the number); mixed kinds compare',
-    'FilterTest.testIncludeNumbers:num > 1min': 'units are ignored in comparisons (the unit is stored apart from the number); mixed kinds compare',
-    'FilterTest.testIncludeNumbers:num > 60sec': 'units are ignored in comparisons (the unit is stored apart from the number); mixed kinds compare',
-    'FilterTest.testIncludeNumbers:dis >  75': 'units are ignored in comparisons (the unit is stored apart from the number); mixed kinds compare',
-    'FilterTest.testIncludeList:ref==@a': 'Ref lists are stored as a JSON string by the Haystack import, so list membership and paths through lists fail',
-    'FilterTest.testIncludeList:ref->dis=="a"': 'Ref lists are stored as a JSON string by the Haystack import, so list membership and paths through lists fail',
-    'FilterTest.testIncludeList:refx==@c': 'Ref lists are stored as a JSON string by the Haystack import, so list membership and paths through lists fail',
-    'FilterTest.testIncludeList:refx->dis=="c"': 'Ref lists are stored as a JSON string by the Haystack import, so list membership and paths through lists fail',
-    'FilterTest.testIncludeList:refx->ref': 'Ref lists are stored as a JSON string by the Haystack import, so list membership and paths through lists fail',
-    'FilterTest.testIncludeList:refx->ref==@a': 'Ref lists are stored as a JSON string by the Haystack import, so list membership and paths through lists fail',
-    'FilterTest.testIncludeList:refx->air': 'Ref lists are stored as a JSON string by the Haystack import, so list membership and paths through lists fail',
-    'FilterTest.testIncludeList:refx->water': 'Ref lists are stored as a JSON string by the Haystack import, so list membership and paths through lists fail',
-    'FilterTest.testIncludeList:not refx->air': 'Ref lists are stored as a JSON string by the Haystack import, so list membership and paths through lists fail',
-    'FilterTest.testIncludeDateTime:ts==2020-09-02': 'no date literals in the grammar',
-    'FilterTest.testIncludeDateTime:ts->bad == 2020-09-02': 'no date literals in the grammar',
-    'FilterTest.testIncludeDateTime:ts->date==2020-09-02': 'no date literals in the grammar',
-    'FilterTest.testIncludeDateTime:ts->date <= 2020-09-02': 'no date literals in the grammar',
-    'FilterTest.testIncludeDateTime:ts->date >= 2020-09-02': 'no date literals in the grammar',
-    'FilterTest.testIncludeDateTime:ts->date->foo >= 2020-09-02': 'no date literals in the grammar',
-    'FilterTest.testIncludeDateTime:ts->time == 02:00': 'no time literals in the grammar',
-    'FilterTest.testIncludeDateTime:ts->time <= 03:00': 'no time literals in the grammar',
-    'FilterTest.testIncludeDateTime:ts->time > 03:00': 'no time literals in the grammar',
-    'FilterTest.testIncludeDateTime:ts->tz == "New_York"': 'no DateTime virtual paths (ts->tz)',
+    'FilterTest.testInclude:ref->thru': 'nested Dict values are stored as JSON text, so paths into them fail (Baler#10)',
+    'FilterTest.testInclude:ref->thru=="e"': 'nested Dict values are stored as JSON text, so paths into them fail (Baler#10)',
+    'FilterTest.testIncludeDateTime:ts->tz == "New_York"': 'DateTime tags are stored as xsd:dateTime, which keeps the offset but not the Haystack tz name',
 }
 
 
@@ -111,6 +66,27 @@ def test_filter_matches_reference(records, case, key, request):
     q = hisquery.parse_query(case["filter"])
     got = sorted(by_uri[u] for u in hisquery.match_entities(store, q.filter) if u in by_uri)
     assert got == sorted(case["expected"])
+    # Production runs Oxigraph, not rdflib: same answer there too.
+    oxs = _oxigraph(store)
+    if oxs is not None:
+        sparql = hisquery.compile_filter(q.filter, hisquery.graph_vocab(store))
+        on_ox = sorted(by_uri[r["s"].value] for r in oxs.query(sparql) if r["s"].value in by_uri)
+        assert on_ox == got, "Oxigraph disagrees with rdflib"
+
+
+_OX: dict[int, object] = {}
+
+
+def _oxigraph(store):
+    try:
+        import pyoxigraph as ox
+    except ImportError:
+        return None
+    if id(store) not in _OX:
+        oxs = ox.Store()
+        oxs.load(store.graph.serialize(format="nt").encode(), ox.RdfFormat.N_TRIPLES)
+        _OX[id(store)] = oxs
+    return _OX[id(store)]
 
 
 def test_known_gaps_name_real_cases():

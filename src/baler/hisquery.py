@@ -44,10 +44,16 @@ Tag paths follow refs: `equipRef->ahu`, `equipRef->siteRef->dis == "HQ"`.
 A hop follows the graph edge when there is one (equipRef is
 brick:isPointOf) and the raw Haystack ref tag otherwise.
 
-Not Axon, and not pretending to be: no arithmetic, no functions beyond hisRead/hisRollup, no unit conversion
-on comparisons (`temp > 72°F` compares the bare number). Each of those
-produces an explicit parse error naming what isn't supported, never a
-silent wrong answer.
+Comparisons follow Haystack's rules (checked against haxall's own
+FilterTest cases, tests/test_haxall_filter_vectors.py): never true on a
+missing tag, never across kinds (a Str vs a Number), and Numbers only with
+an identical unit - `temp > 72°F` doesn't match a unitless 72, and there's
+no unit conversion. Date and time literals, `^symbol` terms and
+`ts->date` / `ts->time` on DateTimes work too.
+
+Not Axon, and not pretending to be: no arithmetic, no functions beyond
+hisRead/hisRollup. Those produce an explicit parse error naming what isn't
+supported, never a silent wrong answer.
 """
 
 from __future__ import annotations
@@ -100,7 +106,9 @@ _TOKEN_RE = re.compile(
     r"""
       (?P<DATE>\d{4}-\d{2}-\d{2})
     | (?P<MONTH>\d{4}-\d{2})(?![\d-])
-    | (?P<NUMBER>-?\d+(?:\.\d+)?)(?P<UNIT>[A-Za-z°%][A-Za-z0-9°%/_]*)?
+    | (?P<TIME>\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)
+    | (?P<NUMBER>-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?P<UNIT>[A-Za-z°%$£€_/\u0080-\uffff][A-Za-z0-9°%$£€_/\u0080-\uffff]*)?
+    | (?P<SYMBOL>\^[A-Za-z_][A-Za-z0-9_:\-]*)
     | (?P<STRING>"(?:[^"\\]|\\.)*")
     | (?P<REF>@[A-Za-z0-9_:~./,\-]+)
     | (?P<RANGE>\.\.)
@@ -154,6 +162,25 @@ def tokenize(source: str) -> list[Token]:
 @dataclass(frozen=True)
 class Ref:
     id: str
+
+
+@dataclass(frozen=True)
+class Num:
+    """A Number literal: `72`, `72°F`. Haystack compares numbers only when
+    their units are identical (no conversion)."""
+
+    val: float
+    unit: str | None = None
+
+
+@dataclass(frozen=True)
+class DateLit:
+    text: str  # YYYY-MM-DD
+
+
+@dataclass(frozen=True)
+class TimeLit:
+    text: str  # hh:mm:ss[.fff]
 
 
 @dataclass(frozen=True)
@@ -339,6 +366,14 @@ class Parser:
         if tok.kind == "not":
             self._advance()
             return Not(self._parse_term())
+        if tok.kind == "SYMBOL":
+            # ^hot-water: a def conjunct - every part present as a tag
+            self._advance()
+            parts = tok.value[1:].split("-")
+            node: object = Has(parts[0])
+            for part in parts[1:]:
+                node = And(node, Has(part))
+            return node
         if tok.kind != "NAME":
             got = tok.value or "end of input"
             raise HisQueryError(f"expected a tag name but found {got!r} at position {tok.pos}")
@@ -362,9 +397,14 @@ class Parser:
         if tok.kind == "STRING":
             return _unescape_string(tok.value[1:-1])
         if tok.kind == "NUMBER":
-            # A unit suffix (72°F) is accepted and ignored - the store holds
-            # bare numbers; no unit conversion happens on comparison.
-            return float(tok.value) if "." in tok.value else int(tok.value)
+            return Num(float(tok.value), tok.unit)
+        if tok.kind == "DATE":
+            return DateLit(tok.value)
+        if tok.kind == "TIME":
+            parts = tok.value.split(":")
+            hh = parts[0].zfill(2)
+            ss = parts[2] if len(parts) > 2 else "00"
+            return TimeLit(f"{hh}:{parts[1]}:{ss}")
         if tok.kind == "true":
             return True
         if tok.kind == "false":
@@ -374,7 +414,7 @@ class Parser:
         if tok.kind == "null":
             raise HisQueryError(f"comparing to null isn't supported at position {tok.pos}; use 'not <tag>' for a missing tag")
         got = tok.value or "end of input"
-        raise HisQueryError(f"expected a value (string, number, true/false, or @ref) but found {got!r} at position {tok.pos}")
+        raise HisQueryError(f"expected a value (string, number, date, time, true/false, or @ref) but found {got!r} at position {tok.pos}")
 
 
 def _unescape_string(body: str) -> str:
@@ -395,6 +435,8 @@ def parse_query(source: str) -> Query:
 # --- filter -> SPARQL ----------------------------------------------------
 
 PREFIXES = """PREFIX haystack: <urn:baler:haystack#>
+PREFIX hunit: <urn:baler:haystack-unit#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 PREFIX brick: <https://brickschema.org/schema/Brick#>
 PREFIX proj: <urn:baler:proj#>
 PREFIX td: <urn:baler:td#>
@@ -478,6 +520,7 @@ def _rule_classes_by_tag() -> dict[str, frozenset[str]]:
 # from.
 _STRUCTURAL_ALIASES = {
     "point": ["?s a td:RawPoint", "?s brick:isPointOf ?{v}"],
+    "equipRef": ["?s brick:isPointOf ?{v}"],  # what /api presents as equipRef
     "equip": ["?s brick:hasPoint ?{v}"],
     "site": ["?s a brick:Site"],
 }
@@ -491,6 +534,8 @@ def _sparql_string(value: str) -> str:
 def _sparql_literal(value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, Num):
+        return repr(value.val)
     if isinstance(value, (int, float)):
         return repr(value)
     return _sparql_string(str(value))
@@ -646,7 +691,13 @@ class _Compiler:
         if isinstance(node, Path):
             return self._path(node)
         if isinstance(node, Not):
-            return f"(!{self.expr(node.node)})"
+            inner = node.node
+            if isinstance(inner, Path) and isinstance(inner.leaf, Has):
+                # Haystack's `not a->b`: true if the path leads nowhere, or
+                # leads (through any Ref of a list) to a record without b -
+                # not merely "no Ref leads to one with b".
+                return f"((!{self._path(inner, mode='reach')}) || {self._path(inner, mode='lacking')})"
+            return f"(!{self.expr(inner)})"
         if isinstance(node, And):
             return f"({self.expr(node.left)} && {self.expr(node.right)})"
         if isinstance(node, Or):
@@ -725,12 +776,44 @@ class _Compiler:
             if node.name == "equipRef":
                 parts.append(self._flag(f"?s brick:isPointOf <{_uri(ref_to_equip_uri(node.value.id))}>"))
             e = self._any(parts)
-            return e if node.op == "==" else f"(!{e})"
+            return e if node.op == "==" else f"({self._has_value(node.name)} && !{e})"
 
         v = self._var()
+        op = _SPARQL_OPS[node.op]
         # A comparison on a missing tag is false in Haystack (so `x != 1`
-        # doesn't match recs with no x at all) - an unbound flag is exactly that.
-        return self._flag(f"?s haystack:{node.name} ?{v} . FILTER(?{v} {_SPARQL_OPS[node.op]} {_sparql_literal(node.value)})")
+        # doesn't match recs with no x at all) - an unbound flag is exactly
+        # that. It's also false across kinds (`foo < "c"` vs a Number) and
+        # across units (`75°F` is not `75`): each value kind gets a typed test.
+        val = node.value
+        if node.op == "!=":
+            # != : the tag exists, and it isn't an equal value of this kind
+            eq = self._cmp(Cmp(node.name, "==", val))
+            return f"({self._has_value(node.name)} && !{eq})"
+        if isinstance(val, Num):
+            u = self._var()
+            if val.unit:
+                # the tag's own unit, or (older data) the entity's point unit
+                unit_ok = (f"(EXISTS {{ ?s hunit:{node.name} {_sparql_string(val.unit)} }} || "
+                           f"(NOT EXISTS {{ ?s hunit:{node.name} ?{u} }} && "
+                           f"EXISTS {{ ?s haystack:unit {_sparql_string(val.unit)} }}))")
+            else:
+                unit_ok = f"NOT EXISTS {{ ?s hunit:{node.name} ?{u} }}"
+            return self._flag(f"?s haystack:{node.name} ?{v} . FILTER(isNumeric(?{v}) && ?{v} {op} {val.val!r} && {unit_ok})")
+        if isinstance(val, (DateLit, TimeLit)):
+            dtype, shape = ("date", "^[0-9]{4}-[0-9]{2}-[0-9]{2}$") if isinstance(val, DateLit) else ("time", "^[0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?$")
+            # typed xsd values, or ISO text from older imports - ISO sorts the
+            # same lexically, so STR() comparison covers both
+            typed = f"(DATATYPE(?{v}) = xsd:{dtype} || (DATATYPE(?{v}) = xsd:string && REGEX(STR(?{v}), {_sparql_string(shape)})))"
+            return self._flag(f"?s haystack:{node.name} ?{v} . FILTER({typed} && STR(?{v}) {op} {_sparql_string(val.text)})")
+        if isinstance(val, bool):
+            return self._flag(f"?s haystack:{node.name} ?{v} . FILTER(DATATYPE(?{v}) = xsd:boolean && ?{v} {op} {_sparql_literal(val)})")
+        # strings
+        return self._flag(f"?s haystack:{node.name} ?{v} . FILTER(DATATYPE(?{v}) = xsd:string && STR(?{v}) {op} {_sparql_literal(val)})")
+
+    def _has_value(self, name: str) -> str:
+        # Haystack's `!=` needs the tag present, in any form Baler recognizes
+        # as that tag (a marker, a value, a Brick class/tag, a structural link).
+        return self._has(name)
 
 
     def _hop(self, name: str, a: str, b: str) -> str:
@@ -740,24 +823,44 @@ class _Compiler:
         entity directly (`urn:...`) or by Haystack id, the way
         ref_to_equip_uri resolves it."""
         r = self._var()
+        # Only values shaped like a Ref id are followed (not JSON text from a
+        # stored list/dict), and a branch whose IRI didn't build is dropped
+        # right there: Oxigraph leaves BIND(IRI(..)) unbound instead of
+        # failing, and an unbound end would then join every leaf flag.
+        ref_like = f'REGEX(STR(?{r}), "^[A-Za-z0-9_:.~/-]+$")'
         alts = [
-            f'{{ ?{a} haystack:{name} ?{r} . FILTER(STRSTARTS(STR(?{r}), "urn:")) BIND(IRI(STR(?{r})) AS ?{b}) }}',
+            (f'{{ ?{a} haystack:{name} ?{r} . FILTER({ref_like} && STRSTARTS(STR(?{r}), "urn:"))'
+             f' BIND(IRI(STR(?{r})) AS ?{b}) FILTER(BOUND(?{b})) }}'),
             (
-                f'{{ ?{a} haystack:{name} ?{r} . FILTER(!STRSTARTS(STR(?{r}), "urn:"))'
-                f' BIND(IRI(CONCAT("urn:equip:haystack:", STR(?{r}))) AS ?{b}) }}'
+                f'{{ ?{a} haystack:{name} ?{r} . FILTER({ref_like} && !STRSTARTS(STR(?{r}), "urn:"))'
+                f' BIND(IRI(CONCAT("urn:equip:haystack:", STR(?{r}))) AS ?{b}) FILTER(BOUND(?{b})) }}'
             ),
         ]
         if name == "equipRef":
+            # The graph link is the equipRef (it's what /api presents); a raw
+            # equipRef literal only counts until link_equip_ref has resolved
+            # one - otherwise a stale source id would lead somewhere else.
+            x = self._var()
+            alts = [alt[:-1] + f" FILTER NOT EXISTS {{ ?{a} brick:isPointOf ?{x} }} }}" for alt in alts]
             alts.append(f"{{ ?{a} brick:isPointOf ?{b} }}")
         return " UNION ".join(alts)
 
-    def _path(self, node: Path) -> str:
+    def _path(self, node: Path, mode: str = "match") -> str:
         """The hops walk from ?s to the path's end; the leaf compiles on its
         own (a full filter, flags and all) and is then rebound from ?s to
         that end. Everything stays in one flag group, so `not` over a path
         is just !BOUND, and a missing ref is false, as in Haystack. The
         leaf's variables are prefixed and its ?s renamed rather than relying
         on subquery scoping, which rdflib doesn't implement."""
+        if (len(node.hops) == 1 and isinstance(node.leaf, Cmp) and node.leaf.name in ("date", "time")
+                and isinstance(node.leaf.value, (DateLit, TimeLit))):
+            # ts->date / ts->time: the local date or time of a DateTime tag
+            # (stored as xsd:dateTime, whose text keeps the local offset)
+            dt = self._var()
+            start, size = (1, 10) if node.leaf.name == "date" else (12, 8)
+            op = _SPARQL_OPS[node.leaf.op]
+            return self._flag(f"?s haystack:{node.hops[0]} ?{dt} . FILTER(DATATYPE(?{dt}) = xsd:dateTime && "
+                              f"SUBSTR(STR(?{dt}), {start}, {size}) {op} {_sparql_string(node.leaf.value.text)})")
         end = self._var()
         inner = _Compiler(self.graph, prefix=f"{end}_")
         rebind = lambda text: re.sub(r"\?s\b", f"?{end}", text)
@@ -771,9 +874,13 @@ class _Compiler:
             f" OPTIONAL {{ {{ SELECT DISTINCT ?{end} (true AS ?{m}) WHERE {{ {rebind(pat)} }} }} }}"
             for m, pat in inner.flags
         )
+        walk = " ".join(f"{{ {h} }}" for h in hops)
+        if mode == "reach":  # the path leads to some record at all
+            return self._flag(walk + f" FILTER(BOUND(?{end}))")
+        test = f"!({body})" if mode == "lacking" else body
         # BOUND(end): an unbound end would join every leaf flag (Oxigraph
         # leaves a BIND unbound on an IRI it can't build).
-        return self._flag(" ".join(f"{{ {h} }}" for h in hops) + leaf + f" FILTER(BOUND(?{end}) && {body})")
+        return self._flag(walk + leaf + f" FILTER(BOUND(?{end}) && {test})")
 
 
 def _uri(text: str) -> str:

@@ -71,8 +71,35 @@ def plain(v):
     return v
 
 
+def _typed(v):
+    """What ingest stores for a value: Numbers (with unit), Refs and Ref
+    lists, dates and times stay typed (see ingest._tag_triples); the rest
+    takes the plain shape the puller uses."""
+    if isinstance(v, (oh.Number, oh.Ref, date, dtime)):  # datetime is a date
+        return v
+    if isinstance(v, list) and v and all(isinstance(x, oh.Ref) for x in v):
+        return v
+    return plain(v)
+
+
+def _namespaced(row: dict, source_id: str) -> dict:
+    """Every Ref (and Ref list) points at another record from the same
+    source, so it gets the same source prefix the ids got - otherwise
+    siteRef/spaceRef/custom refs would point at nothing."""
+    def ns(r):
+        return oh.Ref(f"{source_id}:{r.id}")
+    out = {}
+    for k, v in row.items():
+        if isinstance(v, oh.Ref):
+            v = ns(v)
+        elif isinstance(v, list) and v and all(isinstance(x, oh.Ref) for x in v):
+            v = [ns(x) for x in v]
+        out[k] = v
+    return out
+
+
 def _row(rec: dict) -> dict:
-    return {k: p for k, v in rec.items() if (p := plain(v)) is not None}
+    return {k: p for k, v in rec.items() if (p := _typed(v)) is not None}
 
 
 def is_history(grid: oh.Grid) -> bool:
@@ -88,7 +115,7 @@ def import_records(store, rows: list[dict], source_id: str) -> dict[str, int]:
         for rec in rows:
             if not isinstance(rec.get("id"), oh.Ref) or not ("equip" in rec or "site" in rec):
                 continue
-            uri = ingest_haystack_equip_tags(store, f"{source_id}:{rec['id'].id}", _row(rec))
+            uri = ingest_haystack_equip_tags(store, f"{source_id}:{rec['id'].id}", _namespaced(_row(rec), source_id))
             mapping.classify_point(store, uri, rules=equip_rules)
             counts["equip"] += 1
         for rec in rows:
@@ -97,9 +124,7 @@ def import_records(store, rows: list[dict], source_id: str) -> dict[str, int]:
                 continue
             if "point" not in rec:
                 continue
-            row = _row(rec)
-            if "equipRef" in row:
-                row["equipRef"] = f"{source_id}:{row['equipRef']}"
+            row = _namespaced(_row(rec), source_id)
             uri = ingest_tags(store, f"haystack/{source_id}/{rec['id'].id}", row)
             link_equip_ref(store, uri)
             mapping.classify_point_with_fallback(store, uri)
