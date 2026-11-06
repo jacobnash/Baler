@@ -103,6 +103,19 @@ jobs:
       # Integration tests only: the unit job runs the rest, and re-running all
       # of them here was most of this job's ~5 min of pytest (#27).
       - run: pytest -m integration --cov=baler --cov-report=term-missing
+      # Regression guard for #29: the app containers run as root with the
+      # checkout bind-mounted, so any directory they create in it is
+      # root-owned, and on nash-srv the next actions/checkout can't clean it
+      # and the deploy dies with EACCES. Root-owned *files* in runner-owned
+      # directories are still deletable, so only directories are checked.
+      - name: Containers left no root-owned directories in the checkout
+        run: |
+          found=$(find . -path ./.git -prune -o -type d ! -user "$(id -u)" -print)
+          if [ -n "$found" ]; then
+            echo "::error::containers created directories the runner user can't delete (#29):"
+            echo "$found" | head -50
+            exit 1
+          fi
       - if: always()
         run: docker compose logs
 
