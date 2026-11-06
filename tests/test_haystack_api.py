@@ -81,6 +81,8 @@ class FakeTS:
             rows = []
         elif sql.lstrip().startswith("DELETE FROM revoked_tokens"):
             rows = []
+        elif "FROM users WHERE id" in sql:
+            rows = [(params[0], "org-1", f"{params[0]}@acme.example", "x", "operator")] if params[0] == "user-1" else []
         elif "FROM revoked_tokens" in sql:
             rows = [(1,)] if params[0] in self.__dict__.get("revoked", set()) else []
         else:
@@ -186,6 +188,10 @@ def test_nav_equip_then_points(backend):
     assert [r["navId"] for r in top] == [ha.uri_to_ref(AHU)]
     kids = backend.nav(top[0]["navId"])
     assert sorted(r["id"].id for r in kids) == sorted([ha.uri_to_ref(DAT), ha.uri_to_ref(FAN)])
+    # navId is a Str in the spec; a client sending it back as a Ref works too
+    for nav_id in (top[0]["navId"], oh.Ref(top[0]["navId"])):
+        g = ha.dispatch(backend, "nav", oh.Grid.from_rows([{"navId": nav_id}]))
+        assert sorted(r["id"].id for r in g.rows) == sorted([ha.uri_to_ref(DAT), ha.uri_to_ref(FAN)])
 
 
 # --- history --------------------------------------------------------------
@@ -293,7 +299,7 @@ def test_point_write_routes_to_owning_windrow_and_records_level(writable):
     assert len(arr.rows) == 17  # 1-16 plus 17, the default
     assert arr.col_names == ["level", "levelDis", "val", "valDis", "who", "expires"]
     eight = arr.rows[7]
-    assert eight["level"] == oh.Number(8) and eight["val"] == oh.Number(72.5) and eight["who"] == "user-1"
+    assert eight["level"] == oh.Number(8) and eight["val"] == oh.Number(72.5) and eight["who"] == "user-1@acme.example"
     assert eight["levelDis"] == "8 (manual)" and arr.rows[16]["levelDis"] == "def"
     assert "val" not in arr.rows[15] and "expires" not in eight  # no duration = permanent
 

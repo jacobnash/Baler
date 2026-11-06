@@ -464,6 +464,18 @@ class Backend:
             out.append(rec)
         return out
 
+    def display_name(self, user_id: str | None) -> str:
+        """`who` for a write that didn't name one: the user's email (what a
+        person reading the priority array recognises), not their id."""
+        if not user_id:
+            return "baler"
+        try:
+            with self._conn() as conn:
+                user = auth.get_user(conn, user_id)
+        except Exception:  # noqa: BLE001 - a lookup failure must not block the write
+            user = None
+        return user["email"] if user else user_id
+
     def _writable_point(self, ref: oh.Ref, scope: Scope) -> tuple[str, dict]:
         uri = ref_to_uri(ref.id)
         rec = self.read_ids([ref], scope)[0]
@@ -834,6 +846,8 @@ def dispatch(backend: Backend, op: str, req: oh.Grid, scope: Scope = EVERYTHING,
         return _ids_grid(backend.read_ids(refs, scope))
     if op == "nav":
         nav_id = row.get("navId")
+        # a Str per the spec; some clients send the Ref they were handed
+        nav_id = nav_id.id if isinstance(nav_id, oh.Ref) else nav_id
         return _rows_grid(backend.nav(str(nav_id) if nav_id else None, scope))
     if op == "hisRead":
         if "range" in req.meta:  # batch: meta range, one id row per point
@@ -891,7 +905,7 @@ def dispatch(backend: Backend, op: str, req: oh.Grid, scope: Scope = EVERYTHING,
             return backend.point_write_array(ref, scope)
         user_sub = (caller or {}).get("sub")
         raw_who = row.get("who")
-        who: str = raw_who if isinstance(raw_who, str) else (user_sub or "baler")
+        who: str = raw_who if isinstance(raw_who, str) else backend.display_name(user_sub)
         duration = row.get("duration")
         backend.point_write(ref, int(level.val), row.get("val"), who, user_sub, scope,
                             duration_s=_duration_secs(duration) if duration is not None else None)
