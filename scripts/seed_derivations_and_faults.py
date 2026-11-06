@@ -344,7 +344,9 @@ DERIVATIONS = [
                 "expected": 2 / 3,
             }
         ],
-        "output": {"brick_class": None, "unit": "fraction", "label": "Fan Duty Cycle"},
+        # 0..1 - Haystack has no "fraction" unit, and an unknown unit made
+        # whole /api grids fail before openhay learned to drop it.
+        "output": {"brick_class": None, "unit": None, "label": "Fan Duty Cycle"},
         "depends_on": [],
     },
     {
