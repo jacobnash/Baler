@@ -390,3 +390,20 @@ to close — see `todo/skyspark-haxall-migration-gaps.md` in the repo.
   end-to-end against live Oxigraph and Postgres (`pytest -m integration`).
 - `gateway/njs/policy.js` — the `GET /ingest/his` → `viewer` row.
 - `ui/his.html`, `ui/his.js`, `ui/his.css` — the page; `ui/app.js` for the tree/detail deep links.
+
+## How rollups stay fast
+
+`point_history` has two TimescaleDB continuous aggregates, created on first
+start: `point_history_5m` and `point_history_1h`. They hold sum, count, min
+and max per point per bucket, and are refreshed every 5 and 30 minutes over
+the last 35 days. A rollup reads from the coarsest one that gives the exact
+same answer as folding raw samples:
+- its bucket divides the requested interval;
+- the span starts on one of its boundaries;
+- the span is within the last 30 days.
+
+The newest partial bucket, and anything not yet materialized, comes from raw
+rows at query time, so results are never stale. Anything else, such as
+calendar (month/year) rollups, odd intervals or older spans, folds raw samples
+as before. A day of 600 points at 10-second samples folds from about 150k
+pre-summed rows instead of 5M raw ones.

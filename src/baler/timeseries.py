@@ -7,7 +7,7 @@ float column would lose that.
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import psycopg
 from psycopg_pool import ConnectionPool
@@ -39,6 +39,48 @@ CREATE INDEX IF NOT EXISTS point_history_labelled
 ON point_history (point_uri, ts DESC) WHERE unit IS NOT NULL OR label IS NOT NULL
 """
 
+# Pre-folded rollups (#51/#54): TimescaleDB continuous aggregates of
+# point_history in 5-minute buckets, and 1-hour buckets built on those. Each
+# keeps sum/count/min/max (avg = sum/count), which recombine exactly into any
+# coarser bucket, so read_rollup can fold a day of 5M raw samples from ~150k
+# pre-summed rows instead. materialized_only = false: anything newer than the
+# last refresh is folded from raw rows at query time, so results are never
+# stale. Refreshed every 5/30 minutes over the last ROLLUP_WINDOW_DAYS + 5
+# days; older spans keep using raw rows (never materialized there).
+ROLLUP_VIEWS = (("point_history_1h", 3600), ("point_history_5m", 300))
+ROLLUP_WINDOW_DAYS = 30
+_V = "COALESCE(value, value_bool::int::float8)"
+ROLLUP_DDL = (
+    f"""CREATE MATERIALIZED VIEW IF NOT EXISTS point_history_5m
+    WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+    SELECT point_uri, time_bucket(INTERVAL '5 minutes', ts) AS bucket,
+           sum({_V}) AS vsum, count({_V}) AS vcount, min({_V}) AS vmin, max({_V}) AS vmax
+    FROM point_history GROUP BY point_uri, bucket WITH NO DATA""",
+    """CREATE MATERIALIZED VIEW IF NOT EXISTS point_history_1h
+    WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+    SELECT point_uri, time_bucket(INTERVAL '1 hour', bucket) AS bucket,
+           sum(vsum) AS vsum, sum(vcount) AS vcount, min(vmin) AS vmin, max(vmax) AS vmax
+    FROM point_history_5m GROUP BY point_uri, time_bucket(INTERVAL '1 hour', bucket) WITH NO DATA""",
+    f"""SELECT add_continuous_aggregate_policy('point_history_5m', if_not_exists => true,
+        start_offset => INTERVAL '{ROLLUP_WINDOW_DAYS + 5} days', end_offset => INTERVAL '5 minutes',
+        schedule_interval => INTERVAL '5 minutes')""",
+    f"""SELECT add_continuous_aggregate_policy('point_history_1h', if_not_exists => true,
+        start_offset => INTERVAL '{ROLLUP_WINDOW_DAYS + 5} days', end_offset => INTERVAL '1 hour',
+        schedule_interval => INTERVAL '30 minutes')""",
+)
+
+
+def _ensure_rollup_views(conn: psycopg.Connection) -> None:
+    """Only on TimescaleDB, and only until they exist (a cheap catalog check
+    on every other connection)."""
+    row = conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'), "
+        "to_regclass('point_history_1h') IS NOT NULL"
+    ).fetchone()
+    if row and row[0] and not row[1]:
+        ddl.run(conn, *ROLLUP_DDL)
+
+
 # For pools serving requests through the gateway: below nginx's 60s proxy
 # timeout, so a query the gateway has already given up on stops instead of
 # running on with nobody waiting for the answer.
@@ -57,6 +99,7 @@ def _setup(conn: psycopg.Connection, statement_timeout: str | None = None) -> No
     # every new connection.
     ddl.run(conn, SCHEMA, "SELECT create_hypertable('point_history', 'ts', if_not_exists => TRUE, migrate_data => TRUE)",
             LABELS_INDEX)
+    _ensure_rollup_views(conn)
     # Real tradeoff, taken deliberately: every INSERT otherwise waits on a
     # full WAL fsync before returning. Scoped to this connection only (a
     # session-level SET, not a postgresql.conf edit) - other clients
@@ -250,6 +293,67 @@ _FOLD_SQL = {
 }
 
 
+# Folds over pre-summed parts (vsum, vcount, vmin, vmax) - the same answers
+# _FOLD_SQL gives over raw samples.
+_PART_FOLD_SQL = {
+    "avg": "SUM(vsum) / NULLIF(SUM(vcount), 0)",
+    "min": "MIN(vmin)",
+    "max": "MAX(vmax)",
+    "sum": "SUM(vsum)",
+    "count": "SUM(vcount)",
+}
+_views_present: bool | None = None
+
+
+def _rollup_view_for(conn, start_ts: datetime, end_ts: datetime, interval_seconds: int | None) -> tuple[str, int] | None:
+    """The coarsest pre-folded view that gives exactly the raw answer: its
+    bucket divides the interval, the span starts on one of its boundaries
+    (so no bucket straddles two output buckets), and the span is inside the
+    window the refresh policy keeps materialized."""
+    global _views_present
+    if not interval_seconds or start_ts.tzinfo is None:
+        return None
+    if start_ts < datetime.now(timezone.utc) - timedelta(days=ROLLUP_WINDOW_DAYS) or end_ts <= start_ts:
+        return None
+    if _views_present is not True:
+        row = conn.execute("SELECT to_regclass('point_history_1h') IS NOT NULL").fetchone()
+        _views_present = bool(row and row[0])
+        if not _views_present:
+            return None
+    start_epoch = start_ts.timestamp()
+    for view, size in ROLLUP_VIEWS:
+        if interval_seconds % size == 0 and start_epoch % size == 0:
+            return view, size
+    return None
+
+
+def _read_rollup_from_view(conn, view: str, size: int, point_uris: list[str], start_ts: datetime,
+                           end_ts: datetime, fold: str, interval_seconds: int) -> list[tuple]:
+    """Whole buckets from the view up to the last full one before end_ts,
+    then the raw samples after it (the tail of a "today" span), folded
+    together into date_bin buckets aligned to start_ts."""
+    aligned_end = datetime.fromtimestamp(end_ts.timestamp() // size * size, tz=timezone.utc)
+    aligned_end = max(aligned_end, start_ts)
+    return conn.execute(
+        f"""
+        SELECT point_uri, date_bin(make_interval(secs => %s), b, %s) AS bucket, {_PART_FOLD_SQL[fold]} AS agg
+        FROM (
+            SELECT point_uri, bucket AS b, vsum, vcount::bigint AS vcount, vmin, vmax FROM {view}
+            WHERE point_uri = ANY(%s) AND bucket >= %s AND bucket < %s
+            UNION ALL
+            SELECT point_uri, ts, v, 1::bigint, v, v FROM (
+                SELECT point_uri, ts, {_V} AS v FROM point_history
+                WHERE point_uri = ANY(%s) AND ts >= %s AND ts < %s
+            ) raw WHERE v IS NOT NULL
+        ) parts
+        GROUP BY point_uri, 2
+        HAVING SUM(vcount) > 0
+        ORDER BY point_uri, 2
+        """,
+        (interval_seconds, start_ts, point_uris, start_ts, aligned_end, point_uris, aligned_end, end_ts),
+    ).fetchall()
+
+
 def read_rollup(
     conn: psycopg.Connection,
     point_uris: list[str],
@@ -272,6 +376,13 @@ def read_rollup(
         return {}
     if fold not in _FOLD_SQL:
         raise ValueError(f"unknown fold {fold!r}")
+    view = _rollup_view_for(conn, start_ts, end_ts, interval_seconds) if interval_months is None else None
+    if view is not None:
+        out: dict[str, list] = {uri: [] for uri in point_uris}
+        for point_uri, bucket, agg in _read_rollup_from_view(conn, view[0], view[1], point_uris, start_ts, end_ts,
+                                                             fold, int(interval_seconds or 0)):
+            out[point_uri].append((bucket, float(agg) if agg is not None else None))
+        return out
     if interval_months is not None:
         unit = _CALENDAR_TRUNC.get(interval_months)
         if unit is None:
@@ -297,7 +408,7 @@ def read_rollup(
         """,
         (*bucket_params, point_uris, start_ts, end_ts),
     )
-    out: dict[str, list] = {uri: [] for uri in point_uris}
+    out = {uri: [] for uri in point_uris}
     for point_uri, bucket, agg in cur.fetchall():
         out[point_uri].append((bucket, float(agg) if agg is not None else None))
     return out
