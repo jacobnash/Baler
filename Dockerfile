@@ -24,14 +24,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM python:3.12-slim
 
-# Bytecode goes to a cache inside the container, never into /app. Compose
-# bind-mounts the checkout there (.:/app) and these containers run as root,
-# so a __pycache__/ written into it is root-owned, and the next deploy's
-# actions/checkout (running as github-runner on nash-srv) can't delete it:
-# EACCES, deploy dead before it starts (#29). The wrapper's post-deploy
-# chown can't fix this on its own: services keep importing after it runs.
-ENV PYTHONPYCACHEPREFIX=/tmp/pycache
-
 WORKDIR /app
 COPY --from=openhay /wheels /wheels
 RUN pip install --no-cache-dir /wheels/openhay-*.whl

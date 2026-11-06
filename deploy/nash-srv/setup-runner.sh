@@ -114,8 +114,8 @@ fi
 # actions/checkout runs as github-runner and can't git-clean it, failing
 # the whole next deploy with EACCES before it even starts. This chown is
 # only a safety net: it races services that are still starting, so the real
-# fix is that they don't write there at all (PYTHONPYCACHEPREFIX in the
-# Dockerfile, #29).
+# fix is that they don't write there at all (PYTHONPYCACHEPREFIX in
+# docker-compose.yml's shared daemon env, #29).
 chown -R "${RUNNER_USER}:${RUNNER_USER}" "${WORKDIR}"
 # Gateway caches upstream addresses at its own startup - if a backend got
 # recreated above without gateway also restarting, its routes 404/502 even
