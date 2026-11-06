@@ -259,22 +259,40 @@ provisionForm.addEventListener("submit", async (ev) => {
 
 // --- polling ---
 
+// One refresh at a time: with Windrow slow (15s+ per list) a 5s interval
+// stacked requests up behind each other (#34).
+let loadInFlight = false;
+
 async function loadAll() {
   if (credentialDialog.open || provisionDialog.open) return; // don't clobber a form the human is mid-editing
+  if (loadInFlight) return;
+  loadInFlight = true;
   try {
-    const [devices, connections, modbusConnections] = await Promise.all([
+    // allSettled, not all: one list timing out (Windrow's /connections can
+    // take 15s+) must not blank the other two (#34). A list that fails keeps
+    // what it showed last.
+    const [devices, connections, modbusConnections] = await Promise.allSettled([
       windrow("GET", "/devices"),
       windrow("GET", "/connections"),
       windrow("GET", "/modbus/connections"),
     ]);
-    renderDevices(devices);
-    renderConnections(connections);
-    renderModbusConnections(modbusConnections);
-    statusEl.textContent = `${devices.length} known devices, ${connections.length + modbusConnections.length} connections`;
-  } catch (err) {
-    // A 502 here means the gateway has no Windrow behind it (a deploy that
-    // doesn't run windrow_api); 403s carry the gateway's own reason.
-    statusEl.textContent = `Can't load devices from ${WINDROW_API_URL}: ${err.message}`;
+    if (devices.status === "fulfilled") renderDevices(devices.value);
+    if (connections.status === "fulfilled") renderConnections(connections.value);
+    if (modbusConnections.status === "fulfilled") renderModbusConnections(modbusConnections.value);
+    const failed = [["devices", devices], ["BACnet connections", connections], ["Modbus connections", modbusConnections]]
+      .filter(([, r]) => r.status === "rejected");
+    const parts = [];
+    if (devices.status === "fulfilled") parts.push(`${devices.value.length} known devices`);
+    const conns = [connections, modbusConnections].filter((r) => r.status === "fulfilled");
+    if (conns.length) parts.push(`${conns.reduce((n, r) => n + r.value.length, 0)} connections`);
+    if (failed.length) {
+      // A 502 means the gateway has no Windrow behind it (a deploy that
+      // doesn't run windrow_api); 403s carry the gateway's own reason.
+      parts.push(`couldn't load ${failed.map(([name, r]) => `${name} (${r.reason.message})`).join(", ")} from ${WINDROW_API_URL}`);
+    }
+    statusEl.textContent = parts.join(", ");
+  } finally {
+    loadInFlight = false;
   }
 }
 
