@@ -91,15 +91,25 @@ const ROUTES = [
   ["POST",   /^\/api\/(?:[^/]+\/)?(about|ops|formats|read|nav|hisRead|watchSub|watchUnsub|watchPoll|close|defs|libs|filetypes)$/, "haystack", "viewer"],
   ["POST",   /^\/api\/(?:[^/]+\/)?(hisWrite|pointWrite|invokeAction)$/,                                         "haystack", "operator"],
 
-  // windrow_api (the Devices page): BACnet/Modbus connections, discovery,
-  // device credentials. Reads for any role; every change is admin-only.
-  // WHOLE_ORG below also keeps site-restricted logins out entirely -
-  // Windrow has no notion of orgs or sites to filter by (Baler#14).
-  ["GET",    /^\/windrow\/.+$/,                    "devices", "viewer"],
-  ["POST",   /^\/windrow\/.+$/,                    "devices", "admin"],
-  ["PATCH",  /^\/windrow\/.+$/,                    "devices", "admin"],
-  ["PUT",    /^\/windrow\/.+$/,                    "devices", "admin"],
-  ["DELETE", /^\/windrow\/.+$/,                    "devices", "admin"],
+  // windrow_api (the Devices page): exactly the routes ui/devices.js uses.
+  // Reads for any role; every change is admin-only. Anything else Windrow
+  // serves - POST /write (a raw BACnet WriteProperty that bypasses Baler's
+  // pointWrite priority array and its record), the /discover and
+  // /modbus/discover network sweeps - has no row, so it's refused here.
+  // WHOLE_ORG below also keeps site-restricted logins out (Baler#14).
+  ["GET",    /^\/windrow\/devices$/,                                       "devices", "viewer"],
+  ["GET",    /^\/windrow\/connections$/,                                   "devices", "viewer"],
+  ["GET",    /^\/windrow\/modbus\/connections$/,                           "devices", "viewer"],
+  ["POST",   /^\/windrow\/learn$/,                                         "devices", "admin"],
+  ["POST",   /^\/windrow\/connections$/,                                   "devices", "admin"],
+  ["POST",   /^\/windrow\/modbus\/connections$/,                           "devices", "admin"],
+  ["POST",   /^\/windrow\/devices\/[^/]+\/recheck-credentials$/,           "devices", "admin"],
+  ["PATCH",  /^\/windrow\/devices\/[^/]+$/,                                "devices", "admin"],
+  ["PATCH",  /^\/windrow\/devices\/[^/]+\/credential$/,                    "devices", "admin"],
+  ["PATCH",  /^\/windrow\/connections\/[^/]+\/credential$/,                "devices", "admin"],
+  ["PATCH",  /^\/windrow\/modbus\/connections\/[^/]+\/credential$/,        "devices", "admin"],
+  ["DELETE", /^\/windrow\/connections\/[^/]+$/,                            "devices", "admin"],
+  ["DELETE", /^\/windrow\/modbus\/connections\/[^/]+$/,                    "devices", "admin"],
 
   // public on every service - no token required
   ["GET",    /^\/[a-z]+\/(openapi\.yaml|docs)$/,     null, null],

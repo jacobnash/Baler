@@ -118,7 +118,14 @@ check("windrow (Devices page): reads for any role, every change admin-only", () 
     assert.equal(policy.resolveRoute("PATCH", "/windrow/devices/1234/credential").minRole, "admin");
     assert.equal(policy.resolveRoute("DELETE", "/windrow/connections/bacnet-1").minRole, "admin");
     assert.equal(policy.resolveRoute("POST", "/windrow/learn").minRole, "admin");
+    assert.equal(policy.resolveRoute("PATCH", "/windrow/modbus/connections/m1/credential").minRole, "admin");
+    assert.equal(policy.resolveRoute("POST", "/windrow/devices/d1/recheck-credentials").minRole, "admin");
     assert.equal(policy.resolveRoute("GET", "/windrow/"), null);
+    // not used by the Devices page, so not reachable through the gateway at all
+    assert.equal(policy.resolveRoute("POST", "/windrow/write"), null); // raw BACnet write, bypasses pointWrite
+    assert.equal(policy.resolveRoute("POST", "/windrow/discover"), null);
+    assert.equal(policy.resolveRoute("POST", "/windrow/modbus/discover"), null);
+    assert.equal(policy.resolveRoute("GET", "/windrow/openapi.yaml").minRole, null); // the public spec row
 });
 
 check("windrow: site-restricted logins are kept out; whole-org logins and other resources aren't", () => {
