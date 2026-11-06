@@ -8,6 +8,8 @@ const FAULT_API_URL = params.get("fault") || "/fault";
 const statusEl = document.getElementById("status");
 const statusFilterEl = document.getElementById("status-filter");
 const tbodyEl = document.querySelector("#faults-table tbody");
+const faultsCountEl = document.getElementById("faults-count");
+const rulesCountEl = document.getElementById("rules-count");
 
 const REFRESH_INTERVAL_MS = 5000;
 let refreshTimer = null;
@@ -72,7 +74,7 @@ function renderFaults(faults) {
     });
 
     tbodyEl.appendChild(
-      el("tr", {}, [
+      el("tr", { className: "fault-row" }, [
         el("td", {}, [el("span", { className: `badge severity-${fault.severity}`, textContent: fault.severity })]),
         truncatedCell(fault.rule_id),
         truncatedCell(fault.point_uri),
@@ -85,6 +87,15 @@ function renderFaults(faults) {
     );
   }
   if (!faults.length) tbodyEl.appendChild(el("tr", {}, [el("td", { colSpan: 8, className: "hint", textContent: "No faults." })]));
+  // The count is the rows just drawn, never a second tally (Baler#63) -
+  // and it sits on this table's own heading, so it can't be read as a
+  // count of every row on the page (the Rules table has rows too).
+  const n = tbodyEl.querySelectorAll("tr.fault-row").length;
+  const open = faults.filter((f) => f.status === "open").length;
+  const which = statusFilterEl.value;
+  const text = which ? `${n} ${which} fault${n === 1 ? "" : "s"}` : `${n} fault${n === 1 ? "" : "s"} (${open} open)`;
+  faultsCountEl.textContent = which ? `(${n} ${which})` : `(${n}, ${open} open)`;
+  statusEl.textContent = text;
 }
 
 async function loadFaults() {
@@ -93,8 +104,6 @@ async function loadFaults() {
     const status = statusFilterEl.value;
     const faults = await faultApi("GET", status ? `/faults?status=${status}` : "/faults");
     renderFaults(faults);
-    const openCount = faults.filter((f) => f.status === "open").length;
-    statusEl.textContent = `${faults.length} faults (${openCount} open)`;
   } catch (err) {
     statusEl.textContent = `failed to reach fault API: ${err.message}`;
   }
@@ -303,6 +312,7 @@ function renderRules(rules) {
       ]),
     );
   }
+  rulesCountEl.textContent = `(${rules.length})`;
   if (!rules.length) rulesTbodyEl.appendChild(el("tr", {}, [el("td", { colSpan: 6, className: "hint", textContent: "No rules yet." })]));
 }
 
