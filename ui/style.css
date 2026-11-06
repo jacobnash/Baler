@@ -194,3 +194,10 @@ dialog menu { display: flex; gap: 0.5rem; padding: 0; margin: 0.75rem 0 0; }
 .rec-add input { flex: 1; }
 button.danger { margin-left: auto; color: var(--color-critical, #c53030); }
 .field-error { color: var(--color-critical, #c53030); font-size: 0.8rem; }
+
+/* Commissioning status dot (app.js tree, cx.html) */
+.cx-dot { display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%; margin: 0 0.3rem; vertical-align: middle; border: 1px solid var(--border); text-decoration: none; }
+.cx-dot.st-fail { background: var(--color-critical); }
+.cx-dot.st-pass { background: var(--color-success); }
+.cx-dot.st-inconclusive { background: var(--color-warning); }
+.cx-dot.st-not_applicable { background: var(--muted); }

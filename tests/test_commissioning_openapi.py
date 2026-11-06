@@ -319,3 +319,61 @@ def test_templates(base, spec):
     assert r.status_code == 200
     assert_matches_schema(r.json(), _schema(spec, "/templates", "get", 200), spec)
     assert len(r.json()) == 6
+
+
+# ------------------------------------------------------------ Cx 5 (#41)
+
+
+def _completed_run(base, headers=A, **project):
+    p = _project(base, headers=headers, **project)
+    run = requests.post(f"{base}/projects/{p['id']}/runs", json={}, headers=headers).json()
+    _wait(base, run["id"], headers)
+    return p, run
+
+
+def test_report_json_and_html(base, spec):
+    _, run = _completed_run(base)
+    r = requests.get(f"{base}/runs/{run['id']}/report", headers=A)
+    assert r.status_code == 200
+    assert_matches_schema(r.json(), _schema(spec, "/runs/{id}/report", "get", 200), spec)
+    eq = r.json()["equipment"]
+    assert {e["equip_uri"] for e in eq} == {fx.AHU, fx.VAV, fx.MTR}
+    order = {"fail": 0, "inconclusive": 1, "pass": 2, "not_applicable": 3}
+    assert [order[e["status"]] for e in eq] == sorted(order[e["status"]] for e in eq)  # failures first
+    h = requests.get(f"{base}/runs/{run['id']}/report", params={"format": "html"}, headers=A)
+    assert h.status_code == 200 and h.headers["Content-Type"].startswith("text/html")
+    assert "default-src 'none'" in h.headers["Content-Security-Policy"]
+    assert "<script" not in h.text and "Building A" in h.text and fx.AHU in h.text
+    assert requests.get(f"{base}/runs/{run['id']}/report", params={"format": "pdf"}, headers=A).status_code == 400
+    assert requests.get(f"{base}/runs/{run['id']}/report", headers=B).status_code == 404
+
+
+def test_report_html_escapes(base):
+    _, run = _completed_run(base, name="<script>alert(1)</script>")
+    h = requests.get(f"{base}/runs/{run['id']}/report", params={"format": "html"}, headers=A).text
+    assert "<script>alert" not in h and "&lt;script&gt;" in h
+
+
+def test_equipment_status(base, spec):
+    assert requests.get(f"{base}/equipment-status", headers=A).json() == {}
+    _, run = _completed_run(base)
+    r = requests.get(f"{base}/equipment-status", headers=A)
+    assert_matches_schema(r.json(), _schema(spec, "/equipment-status", "get", 200), spec)
+    got = r.json()
+    assert set(got) == {fx.AHU, fx.VAV, fx.MTR}
+    assert got[fx.AHU]["run_id"] == run["id"] and got[fx.AHU]["project"] == "Building A"
+    assert got[fx.AHU]["status"] == "fail"  # RAT is stale
+    assert requests.get(f"{base}/equipment-status", headers=B).json() == {}
+    assert requests.get(f"{base}/equipment-status", headers=A2_ONLY).json() == {}
+
+
+def test_gaps(base, spec):
+    p = _project(base)
+    r = requests.get(f"{base}/projects/{p['id']}/gaps", headers=A)
+    assert r.status_code == 200
+    assert_matches_schema(r.json(), _schema(spec, "/projects/{id}/gaps", "get", 200), spec)
+    rows = {(g["equip_uri"], g["template"]): g for g in r.json()["equipment"]}
+    ahu = rows[(fx.AHU, "AHU_ExpectedPoints")]
+    assert ahu["matched"] < ahu["expected"] and ahu["missing"]
+    assert [w["id"] for w in r.json()["without_template"]] == [fx.MTR]
+    assert requests.get(f"{base}/projects/{p['id']}/gaps", headers=B).status_code == 404

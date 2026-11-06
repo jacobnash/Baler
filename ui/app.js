@@ -167,10 +167,40 @@ function hisLink(uri, text = "📈") {
   return a;
 }
 
+// Cx verdict per equipment from the latest commissioning run
+// (commissioning_api GET /cx/equipment-status). Optional: a deployment
+// without Cx, or a 403, just shows no dots.
+const CX_API_URL = params.get("cx") || "/cx";
+let cxStatus = {};
+
+async function loadCxStatus() {
+  try {
+    const res = await fetch(`${CX_API_URL}/equipment-status`, { headers: authHeaders() });
+    cxStatus = res.ok ? await res.json() : {};
+  } catch {
+    cxStatus = {};
+  }
+}
+
+function cxDot(uri) {
+  const s = cxStatus[uri];
+  if (!s) return null;
+  const a = document.createElement("a");
+  a.className = `cx-dot st-${s.status}`;
+  a.href = `cx.html?project=${encodeURIComponent(s.project_id)}&run=${encodeURIComponent(s.run_id)}&equip=${encodeURIComponent(uri)}`;
+  const c = s.counts || {};
+  a.title = `Commissioning (${s.project}): ${s.status} - ${c.fail || 0} fail, ${c.inconclusive || 0} inconclusive, ${c.pass || 0} pass`;
+  a.setAttribute("aria-label", a.title);
+  a.addEventListener("click", (ev) => ev.stopPropagation());
+  return a;
+}
+
 function buildEquipNode(equip, label) {
   const equipDetails = document.createElement("details");
   const equipSummary = document.createElement("summary");
   equipSummary.textContent = `${label} `;
+  const dot = cxDot(equip.uri);
+  if (dot) equipSummary.appendChild(dot);
   equipSummary.appendChild(hisLink(equip.uri));
   if (canEditRecords()) {
     equipSummary.appendChild(recordEditButton(equip, () => init()));
@@ -410,7 +440,7 @@ function renderHistoryInto(container, history, unit = "") {
 // see index.html's script tags for load order.
 
 async function init() {
-  await recordRoleKnown(); // record_edit.js: operators and admins get Edit buttons
+  await Promise.all([recordRoleKnown(), loadCxStatus()]); // record_edit.js: operators and admins get Edit buttons
   try {
     const { byType, equips } = await loadEquipment();
     statusEl.textContent = byType.size === 0 ? "connected, but no equipment visible yet" : `${byType.size} equipment classes`;

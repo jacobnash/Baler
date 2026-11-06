@@ -75,7 +75,7 @@ Each slice is a GitHub issue, and each is independently mergeable.
 | Cx 2 ✅ | #38 | Ladder rungs 1–3 over trends; stale/stuck predicates shared with `fault_detector`; port #5 ladder and points tests and `cx_fixtures` | Cx 1 |
 | Cx 3 ✅ | #39 | PNNL ConStrain spike: GL36 items over Baler history, `gl36:<item>` results. As built: vendored subset (ConStrain can't co-install - rdflib 6 pin), `commissioning/gl36.py`, `cx-gl36` extra; write-up `todo/cx3-constrain-gl36-spike.md` | Cx 1 |
 | Cx 4 | #40 | Issues log (close on evidence), accepted risks, CSV/JSON import of external issues and punch items, export | Cx 1 |
-| Cx 5 | #41 | UI: `cx.html`, phase bar, runs grid, tree badge, printable report | Cx 1 |
+| Cx 5 ✅ | #41 | UI: `cx.html`, phase bar, runs grid, tree badge, printable report. As built: `ui/cx.html`/`cx.js`/`cx.css`; `GET /cx/runs/{id}/report?format=json\|html` (`commissioning/report.py`, CSP `default-src 'none'`), `GET /cx/projects/{id}/gaps`, `GET /cx/equipment-status` (the tree's dot) | Cx 1 |
 | Cx 6 | #42 | Start-up / power-on and functional test procedures as data; passive execution on demand, then scheduled; run diff (reconcile) | Cx 2, Cx 4 |
 | Cx 7 | #43 | Spec ingestion: Claude PDF extraction as proposals, CSV/XLSX; spec↔device alignment; `record_edit` write-back | Cx 1, Cx 4 |
 | Cx 8 | #44 | Opt-in fault mirroring (real URIs); ingest of faults as Cx issues | Cx 2, Cx 4 |

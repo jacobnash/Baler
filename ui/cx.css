@@ -1,0 +1,60 @@
+/* Commissioning page - additive to console.css */
+
+.cx-main table { border-collapse: collapse; }
+.cx-main th, .cx-main td { text-align: left; padding: 0.25rem 0.5rem; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
+.cx-main tr.selected td { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.cx-main tbody tr.clickable { cursor: pointer; }
+.cx-sub { font-size: 0.9rem; margin: 0.75rem 0 0.4rem; }
+label.inline { display: inline-flex; gap: 0.3rem; align-items: center; }
+
+.phase-bar { display: flex; flex-wrap: wrap; gap: 0; list-style: none; margin: 0.25rem 0; padding: 0; }
+.phase-bar li button {
+  font: inherit; font-size: 0.8rem; cursor: pointer;
+  border: 1px solid var(--border); background: transparent; color: inherit;
+  padding: 0.35rem 0.8rem 0.35rem 1rem; margin-right: -1px;
+  clip-path: polygon(0 0, calc(100% - 0.5rem) 0, 100% 50%, calc(100% - 0.5rem) 100%, 0 100%, 0.5rem 50%);
+}
+.phase-bar li:first-child button { clip-path: polygon(0 0, calc(100% - 0.5rem) 0, 100% 50%, calc(100% - 0.5rem) 100%, 0 100%); padding-left: 0.7rem; }
+.phase-bar li.complete button { background: color-mix(in srgb, var(--color-success) 18%, transparent); }
+.phase-bar li.skipped button { opacity: 0.5; text-decoration: line-through; }
+.phase-bar li.active button { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
+.phase-bar li button:disabled { cursor: default; }
+
+.chip {
+  display: inline-block; min-width: 1.6rem; text-align: center;
+  font-size: 0.75rem; border-radius: var(--radius-pill); padding: 0 0.4rem; margin: 0 0.1rem;
+  border: 1px solid var(--border);
+}
+.chip-fail { background: color-mix(in srgb, var(--color-critical) 25%, transparent); }
+.chip-inconclusive { background: color-mix(in srgb, var(--color-warning) 22%, transparent); }
+.chip-pass { background: color-mix(in srgb, var(--color-success) 20%, transparent); }
+.chip-not_applicable { opacity: 0.6; }
+.st-fail { color: var(--color-critical); font-weight: 600; }
+.st-pass { color: var(--color-success); }
+.st-inconclusive { color: var(--color-warning); }
+
+.cx-grid-wrap { overflow-x: auto; }
+.cx-grid td.cell { cursor: pointer; white-space: nowrap; }
+.cx-grid td.cell:hover { outline: 1px solid var(--accent); }
+.cx-grid th.equip { max-width: 22rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: normal; }
+.cx-grid thead th { font-size: 0.75rem; }
+
+.cx-drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(36rem, 100vw);
+  overflow-y: auto; padding: 0.75rem 1rem; z-index: 10;
+  background: Canvas; color: CanvasText; border-left: 1px solid var(--border);
+  box-shadow: -4px 0 16px rgba(0, 0, 0, 0.15);
+}
+.cx-drawer .toolbar { justify-content: space-between; }
+.cx-result { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.5rem 0.6rem; margin-bottom: 0.6rem; font-size: 0.85rem; }
+.cx-result h4 { margin: 0 0 0.3rem; font-size: 0.85rem; word-break: break-all; }
+.cx-result ul { margin: 0.3rem 0 0.3rem 1.1rem; padding: 0; }
+.cx-result pre { font-size: 0.72rem; white-space: pre-wrap; word-break: break-word; max-height: 14rem; overflow: auto; }
+.cx-result canvas { display: block; width: 100%; max-width: 32rem; height: 90px; border: 1px solid var(--border); border-radius: var(--radius-sm); margin: 0.3rem 0; }
+
+.cx-events { list-style: none; padding: 0; margin: 0; max-height: 16rem; overflow-y: auto; }
+.cx-events li { padding: 0.15rem 0; }
+
+.phase-edit input, .phase-edit select { font: inherit; font-size: 0.8rem; }
+#settings-json { width: 100%; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.8rem; }
+

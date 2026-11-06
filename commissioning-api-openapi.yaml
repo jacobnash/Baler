@@ -316,6 +316,98 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/Result" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /runs/{id}/report:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Runs]
+      operationId: getCxRunReport
+      summary: The run as a report - JSON, or a printable HTML page
+      description: >-
+        Per equipment, failures first, with symptoms and candidate causes,
+        plus the project's issues log once it has one. `format=html` is a
+        single self-contained page (no script, nothing loaded) meant for
+        printing or saving as PDF from the browser.
+      parameters:
+        - name: format
+          in: query
+          schema: { type: string, enum: [json, html], default: json }
+      responses:
+        "200":
+          description: The report
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Report" }
+            text/html:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/gaps:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Templates]
+      operationId: getCxGaps
+      summary: Inventory gaps against the expected-point templates, now
+      description: >-
+        Evaluates the current inventory against
+        `ontology/cx-expected-points.ttl` without starting a run: per
+        equipment and template, the requirements nothing satisfies.
+      responses:
+        "200":
+          description: Gaps
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [equipment, without_template]
+                properties:
+                  equipment:
+                    type: array
+                    items:
+                      type: object
+                      required: [equip_uri, dis, template, matched, expected, missing]
+                      properties:
+                        equip_uri: { type: string }
+                        dis: { type: string }
+                        brickClass: { type: [string, "null"] }
+                        template: { type: string }
+                        matched: { type: integer }
+                        expected: { type: integer }
+                        missing:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              id: { type: string }
+                              name: { type: string }
+                              classes: { type: array, items: { type: string } }
+                              severity: { type: string }
+                              message: { type: string }
+                  without_template:
+                    type: array
+                    items: { type: object }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /equipment-status:
+    get:
+      tags: [Runs]
+      operationId: getCxEquipmentStatus
+      summary: One Cx verdict per equipment, from each visible project's latest completed run
+      description: >-
+        What the equipment tree's Cx dot shows. Keyed by equipment URI; any
+        failing check makes the equipment `fail`. Filtered by the caller's
+        scope.
+      responses:
+        "200":
+          description: Equipment URI to verdict
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: { $ref: "#/components/schemas/EquipVerdict" }
   /templates:
     get:
       tags: [Templates]
@@ -546,6 +638,34 @@ components:
               cause: { type: string }
               distinguish: { type: string }
         evidence: { type: object }
+    EquipVerdict:
+      type: object
+      required: [status, counts]
+      properties:
+        status: { $ref: "#/components/schemas/Status" }
+        counts: { type: object, additionalProperties: { type: integer } }
+        highest_rung_passed: { type: [integer, "null"] }
+        run_id: { type: string }
+        project_id: { type: string }
+        project: { type: string }
+        finished_at: { type: [string, "null"] }
+    Report:
+      type: object
+      required: [project, run, equipment, issues]
+      properties:
+        project: { type: object }
+        run: { $ref: "#/components/schemas/Run" }
+        equipment:
+          type: array
+          items:
+            allOf:
+              - { $ref: "#/components/schemas/EquipVerdict" }
+              - type: object
+                required: [equip_uri, results]
+                properties:
+                  equip_uri: { type: string }
+                  results: { type: array, items: { $ref: "#/components/schemas/Result" } }
+        issues: { type: array, items: { type: object } }
     Template:
       type: object
       required: [id, label, target_class, requirements]

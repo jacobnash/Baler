@@ -180,6 +180,11 @@ check("commissioning (/cx/): reads viewer, changes operator, archive admin, site
     assert.equal(policy.resolveRoute("GET", "/cx/openapi.yaml").minRole, null);
     assert.equal(policy.resolveRoute("DELETE", "/cx/runs/r1"), null);
     assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/runs/extra"), null);
+    // Cx 5 UI reads
+    assert.equal(policy.resolveRoute("GET", "/cx/runs/r1/report").minRole, "viewer");
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/gaps").minRole, "viewer");
+    assert.equal(policy.resolveRoute("GET", "/cx/equipment-status").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/runs/r1/report"), null);
     // per-project tenancy is checked by commissioning_api, so not WHOLE_ORG
     assert.equal(policy.scopeSatisfies("commissioning", { site_ids: ["s1"] }), true);
 });

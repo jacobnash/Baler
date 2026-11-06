@@ -90,6 +90,10 @@ const ROUTES = [
   ["POST",   /^\/cx\/projects\/[^/]+\/runs$/,                  "commissioning", "operator"],
   ["GET",    /^\/cx\/runs\/[^/]+$/,                            "commissioning", "viewer"],
   ["GET",    /^\/cx\/templates$/,                             "commissioning", "viewer"],
+  // Cx 5 (Baler#41): the UI's reads
+  ["GET",    /^\/cx\/runs\/[^/]+\/report$/,                     "commissioning", "viewer"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/gaps$/,                   "commissioning", "viewer"],
+  ["GET",    /^\/cx\/equipment-status$/,                      "commissioning", "viewer"],
 
   // auth_api - POST /auth/login has its own exact-match nginx location
   // with no js_access at all (can't require a token to get a token), so

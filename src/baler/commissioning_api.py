@@ -29,7 +29,7 @@ from http.server import ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from baler import docs_ui, gateway_auth, tracing
-from baler.commissioning import db, engine, gl36, inventory, phases, runner
+from baler.commissioning import db, engine, gl36, inventory, phases, report, runner
 from baler.commissioning import templates as tpl
 from baler.http_handler_base import BaseAPIHandler, respond_error, respond_json
 from baler.remote_store import RemoteStore
@@ -43,8 +43,9 @@ PORT = 8009
 RUN_STATEMENT_TIMEOUT = "10min"
 
 _PROJECT = re.compile(r"/projects/([^/]+)")
-_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|events|inventory|runs)")
+_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|events|inventory|runs|gaps)")
 _RUN = re.compile(r"/runs/([^/]+)")
+_RUN_REPORT = re.compile(r"/runs/([^/]+)/report")
 
 
 def _scope_json(s: Scope) -> dict:
@@ -110,6 +111,8 @@ def make_handler(repo, clock=None, worker=None):
                 return {"GET": ("list_projects", self._list_projects), "POST": ("create_project", self._create_project)}.get(method)
             if path == "/templates" and method == "GET":
                 return "templates", self._templates
+            if path == "/equipment-status" and method == "GET":
+                return "equipment_status", self._equipment_status
             m = _PROJECT_SUB.fullmatch(path)
             if m:
                 pid, sub = m.group(1), m.group(2)
@@ -120,6 +123,7 @@ def make_handler(repo, clock=None, worker=None):
                     ("GET", "inventory"): ("inventory", self._inventory),
                     ("POST", "runs"): ("create_run", self._create_run),
                     ("GET", "runs"): ("list_runs", self._list_runs),
+                    ("GET", "gaps"): ("gaps", self._gaps),
                 }
                 hit = table.get((method, sub))
                 return None if hit is None else (hit[0], lambda span, claims: hit[1](span, claims, pid))
@@ -129,6 +133,10 @@ def make_handler(repo, clock=None, worker=None):
                 hit = {"GET": ("get_project", self._get_project), "PATCH": ("patch_project", self._patch_project),
                        "DELETE": ("archive_project", self._archive_project)}.get(method)
                 return None if hit is None else (hit[0], lambda span, claims: hit[1](span, claims, pid))
+            m = _RUN_REPORT.fullmatch(path)
+            if m and method == "GET":
+                rid = m.group(1)
+                return "run_report", lambda span, claims: self._run_report(span, claims, rid)
             m = _RUN.fullmatch(path)
             if m and method == "GET":
                 rid = m.group(1)
@@ -340,6 +348,84 @@ def make_handler(repo, clock=None, worker=None):
                     want = q[key][0]
                     results = [r for r in results if (r[key] == want if key != "check_id" else r[key].startswith(want))]
             respond_json(self, 200, {"run": run, "results": results})
+
+        def _visible_run(self, rid: str, claims: dict) -> tuple[dict, dict] | None:
+            run = repo.get_run(rid)
+            project = repo.get_project(run["project_id"]) if run else None
+            if run is None or project is None or not self._visible(project, claims):
+                respond_error(self, 404, "no such run")
+                return None
+            return run, project
+
+        def _run_report(self, span, claims, rid) -> None:
+            hit = self._visible_run(rid, claims)
+            if hit is None:
+                return
+            run, project = hit
+            fmt = parse_qs(urlparse(self.path).query).get("format", ["json"])[0]
+            if fmt not in ("json", "html"):
+                raise ValueError("format must be json or html")
+            scope = repo.scope_for(claims)
+            results = [r for r in repo.get_results(rid) if scope.allows(r["equip_uri"])]
+            issues = [i for i in self._report_issues(project["id"]) if not i.get("equip_uri") or scope.allows(i["equip_uri"])]
+            rep = report.build(db.public_project(project), run, results, issues)
+            if fmt == "json":
+                respond_json(self, 200, rep)
+                return
+            body = report.html(rep).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            # The page is the caller's data; nothing else may run in it.
+            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _report_issues(self, project_id: str) -> list[dict]:
+            lister = getattr(repo, "list_issues", None)
+            return lister(project_id) if lister else []
+
+        def _equipment_status(self, span, claims) -> None:
+            """One verdict per equipment from each visible project's latest
+            completed run (the equipment tree's Cx dot)."""
+            scope = repo.scope_for(claims)
+            out: dict[str, dict] = {}
+            for p in repo.list_projects(claims["org_id"]):
+                if not self._visible(p, claims):
+                    continue
+                run = next((r for r in repo.list_runs(p["id"], 20) if r["status"] == "completed"), None)
+                if run is None:
+                    continue
+                results = [r for r in repo.get_results(run["id"]) if scope.allows(r["equip_uri"])]
+                for equip, s in report.equipment_summary(results).items():
+                    prior = out.get(equip)
+                    if prior is None or prior["finished_at"] < run["finished_at"]:
+                        out[equip] = {**s, "run_id": run["id"], "project_id": p["id"], "project": p["name"],
+                                      "finished_at": run["finished_at"]}
+            respond_json(self, 200, out)
+
+        def _gaps(self, span, claims, pid) -> None:
+            """Today's inventory against the expected-point templates,
+            without a run: what's missing, per equipment."""
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            scopes, _ = self._scopes(p, claims)
+            templates = tpl.load()
+            rows, without = [], []
+            for e in inventory.build(repo.store, scopes):
+                applicable = tpl.templates_for(e["brickClasses"], templates)
+                if not applicable:
+                    without.append({"id": e["id"], "dis": e["dis"], "brickClass": e["brickClass"]})
+                    continue
+                for t in applicable:
+                    outcomes = tpl.evaluate(t, e["points"])
+                    missing = [{"id": o["requirement"].id, "name": o["requirement"].name,
+                                "classes": list(o["requirement"].classes), "severity": o["requirement"].severity,
+                                "message": o["requirement"].message} for o in outcomes if not o["matched"]]
+                    rows.append({"equip_uri": e["id"], "dis": e["dis"], "brickClass": e["brickClass"], "template": t.id,
+                                 "matched": len(outcomes) - len(missing), "expected": len(outcomes), "missing": missing})
+            respond_json(self, 200, {"equipment": rows, "without_template": without})
 
         def _templates(self, span, claims) -> None:
             respond_json(self, 200, [t.as_dict() for t in tpl.load()])

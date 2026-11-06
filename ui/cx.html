@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Baler — Commissioning</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="console.css" />
+  <link rel="stylesheet" href="cx.css" />
+</head>
+<body>
+  <header>
+    <h1>Commissioning</h1>
+    <span id="status">connecting…</span>
+    <nav class="top-nav">
+      <a href="index.html">Equipment tree</a>
+      <a href="his.html">Query</a>
+      <a href="alarms.html">Alarms</a>
+      <a href="derivations.html">Derivations</a>
+      <a href="devices.html">Devices</a>
+      <a href="cx.html">Commissioning</a>
+      <a href="ops.html">Ops</a>
+    </nav>
+  </header>
+  <div id="login-gate" class="login-gate">
+    <form id="login-form">
+      <h2>Sign in</h2>
+      <label>Email <input type="email" id="login-email" autocomplete="username" required /></label>
+      <label>Password <input type="password" id="login-password" autocomplete="current-password" required /></label>
+      <button type="submit">Sign in</button>
+      <p id="login-error" class="hint" hidden></p>
+    </form>
+  </div>
+  <main id="main" class="console-main cx-main" style="display: none">
+    <section id="projects-section">
+      <h2>Projects</h2>
+      <div class="toolbar">
+        <button type="button" id="new-project-btn" data-min-role="operator">New project</button>
+        <label class="inline"><input type="checkbox" id="show-archived" /> Show archived</label>
+        <span id="projects-status" class="hint"></span>
+      </div>
+      <table>
+        <thead><tr><th>Project</th><th>Site</th><th>Phase</th><th>Created</th></tr></thead>
+        <tbody id="projects-body"></tbody>
+      </table>
+    </section>
+
+    <div id="project-view" hidden>
+      <section>
+        <h2 id="project-title"></h2>
+        <p class="hint" id="project-meta"></p>
+        <div class="toolbar">
+          <button type="button" id="rename-project-btn" data-min-role="operator">Rename</button>
+          <button type="button" id="settings-btn" data-min-role="operator">Settings</button>
+          <button type="button" id="archive-project-btn" data-min-role="admin">Archive</button>
+        </div>
+        <h3 class="cx-sub">Phases</h3>
+        <ol id="phase-bar" class="phase-bar" aria-label="Commissioning phases"></ol>
+        <div class="toolbar">
+          <button type="button" id="edit-phases-btn" data-min-role="operator">Edit phases</button>
+          <span class="hint">Click a phase to make it current.</span>
+        </div>
+      </section>
+
+      <section>
+        <h2>Runs</h2>
+        <div class="toolbar">
+          <button type="button" id="run-btn" data-min-role="operator">Run verification</button>
+          <label>Window (hours) <input type="number" id="run-window" min="1" max="744" step="1" placeholder="24" /></label>
+          <span id="run-status" class="hint"></span>
+        </div>
+        <table>
+          <thead><tr><th>Started</th><th>Phase</th><th>Status</th><th>Fail</th><th>Inconclusive</th><th>Pass</th><th></th></tr></thead>
+          <tbody id="runs-body"></tbody>
+        </table>
+      </section>
+
+      <section id="results-section" hidden>
+        <h2 id="results-title">Results</h2>
+        <p class="hint" id="results-freshness"></p>
+        <div class="toolbar">
+          <label>Show <select id="results-filter">
+            <option value="">all equipment</option>
+            <option value="fail">equipment with failures</option>
+            <option value="inconclusive">failures or inconclusive</option>
+          </select></label>
+          <button type="button" id="report-btn">Printable report</button>
+        </div>
+        <div class="cx-grid-wrap"><table id="results-grid" class="cx-grid"></table></div>
+        <p class="hint">Each cell counts results: <span class="chip chip-fail">fail</span> <span class="chip chip-inconclusive">inconclusive</span> <span class="chip chip-pass">pass</span>. Inconclusive means no evidence either way; it is never a pass. Click a cell for the evidence.</p>
+      </section>
+
+      <section>
+        <h2>Inventory gaps</h2>
+        <p class="hint">Today's equipment against the expected-point templates (ontology/cx-expected-points.ttl), without a run.</p>
+        <div class="toolbar"><button type="button" id="gaps-btn">Check now</button><span id="gaps-status" class="hint"></span></div>
+        <table>
+          <thead><tr><th>Equipment</th><th>Template</th><th>Coverage</th><th>Missing</th></tr></thead>
+          <tbody id="gaps-body"></tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>Activity</h2>
+        <ul id="events-list" class="cx-events hint"></ul>
+      </section>
+    </div>
+  </main>
+
+  <aside id="drawer" class="cx-drawer" hidden aria-label="Evidence">
+    <div class="toolbar"><strong id="drawer-title"></strong><button type="button" id="drawer-close">Close</button></div>
+    <div id="drawer-body"></div>
+  </aside>
+
+  <dialog id="project-dialog">
+    <form id="project-form" method="dialog">
+      <h3>New project</h3>
+      <label>Name <input type="text" id="project-name" required /></label>
+      <label>Site <select id="project-site"></select></label>
+      <label>Starting phase <select id="project-phase"></select></label>
+      <p id="project-error" class="field-error" hidden></p>
+      <menu>
+        <button type="submit" value="save">Create</button>
+        <button type="button" id="project-cancel">Cancel</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="phases-dialog">
+    <form id="phases-form" method="dialog">
+      <h3>Edit phases</h3>
+      <p class="hint">Order is the list order. Keys are permanent ids; names are what people read. Exactly one phase stays current.</p>
+      <table class="phase-edit">
+        <thead><tr><th>Key</th><th>Name</th><th>Status</th><th></th></tr></thead>
+        <tbody id="phases-edit-body"></tbody>
+      </table>
+      <div class="toolbar"><button type="button" id="phase-add">Add phase</button></div>
+      <p id="phases-error" class="field-error" hidden></p>
+      <menu>
+        <button type="submit" value="save">Save</button>
+        <button type="button" id="phases-cancel">Cancel</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="settings-dialog">
+    <form id="settings-form" method="dialog">
+      <h3>Project settings</h3>
+      <p class="hint">JSON: <code>window_hours</code>, <code>gl36</code> items, and the other keys the Commissioning API documents.</p>
+      <textarea id="settings-json" rows="14" cols="60" spellcheck="false"></textarea>
+      <p id="settings-error" class="field-error" hidden></p>
+      <menu>
+        <button type="submit" value="save">Save</button>
+        <button type="button" id="settings-cancel">Cancel</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <script src="auth.js"></script>
+  <script src="chart.js"></script>
+  <script src="cx.js"></script>
+</body>
+</html>
