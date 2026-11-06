@@ -117,3 +117,36 @@ def test_healthy_building_is_all_green(mock_probe, mock_building):
     doc = ops_status.collect_status()
     assert doc["summary"] == "ok"
     assert doc["attention"] == []
+
+
+class _RowsConn:
+    def __init__(self, rows):
+        self.rows = rows
+        self.sql = None
+
+    def execute(self, sql):
+        self.sql = sql
+        rows = self.rows
+
+        class _Cur:
+            def fetchall(self):
+                return rows
+
+            def fetchone(self):
+                return (len(rows),)
+
+        return _Cur()
+
+
+def test_building_counts_only_what_the_caller_may_see():
+    """Ops' open-fault count used to cover every org while Alarms shows only
+    your own - a mismatch, and a leak of other orgs' numbers."""
+    from baler.ops_status import _count_visible
+    from baler.scope import Scope
+
+    rows = [("urn:point:fbf/mine/a",), ("urn:point:fbf/mine/b",), ("urn:point:fbf/theirs/c",), (None,)]
+    assert _count_visible(_RowsConn(rows), "SELECT point_uri FROM faults", Scope(("fbf/mine",))) == 2
+    assert _count_visible(_RowsConn(rows), "SELECT point_uri FROM faults", Scope(None, ("fbf/theirs",))) == 2
+    conn = _RowsConn(rows)
+    assert _count_visible(conn, "SELECT point_uri FROM faults", Scope.everything()) == 4
+    assert conn.sql.startswith("SELECT COUNT(*)")  # unscoped: counted in SQL, no rows shipped

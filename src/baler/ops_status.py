@@ -159,7 +159,18 @@ def _postgres_ok() -> tuple[str, str | None]:
         return "down", str(exc)
 
 
-def _building_signals() -> dict[str, Any]:
+def _count_visible(conn, sql: str, scope) -> int:
+    """COUNT of rows whose first column (a point/equip URI) the caller may
+    see. Without site scoping that's a plain COUNT; with it, the URIs are
+    filtered like every other read, so Ops doesn't show (or leak) other
+    orgs' fault and point counts (Alarms already only shows your own)."""
+    if scope is None or scope.unrestricted:
+        row = conn.execute(f"SELECT COUNT(*) FROM ({sql}) q").fetchone()
+        return int(row[0]) if row else 0
+    return sum(1 for (uri,) in conn.execute(sql).fetchall() if uri and scope.allows(uri))
+
+
+def _building_signals(scope=None) -> dict[str, Any]:
     out: dict[str, Any] = {
         "last_ingest_at": None,
         "points_seen_last_hour": 0,
@@ -175,25 +186,18 @@ def _building_signals() -> dict[str, Any]:
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=timezone.utc)
                 out["last_ingest_at"] = ts.astimezone(timezone.utc).isoformat()
-            count_row = conn.execute(
-                "SELECT COUNT(DISTINCT point_uri) FROM point_history "
-                "WHERE ts > now() - interval '1 hour'"
-            ).fetchone()
-            out["points_seen_last_hour"] = int(count_row[0]) if count_row else 0
+            out["points_seen_last_hour"] = _count_visible(
+                conn, "SELECT DISTINCT point_uri FROM point_history WHERE ts > now() - interval '1 hour'", scope)
             try:
-                fault_row = conn.execute(
-                    "SELECT COUNT(*) FROM faults WHERE status = 'open'"
-                ).fetchone()
-                out["open_faults"] = int(fault_row[0]) if fault_row else 0
+                out["open_faults"] = _count_visible(
+                    conn, "SELECT point_uri FROM faults WHERE status = 'open'", scope)
             except psycopg.Error:
-                pass
+                conn.rollback()
             try:
-                der_row = conn.execute(
-                    "SELECT COUNT(*) FROM derivation_target_health WHERE disabled = TRUE"
-                ).fetchone()
-                out["disabled_derivation_targets"] = int(der_row[0]) if der_row else 0
+                out["disabled_derivation_targets"] = _count_visible(
+                    conn, "SELECT target_uri FROM derivation_target_health WHERE disabled = TRUE", scope)
             except psycopg.Error:
-                pass
+                conn.rollback()
             try:
                 org_row = conn.execute("SELECT COUNT(*) FROM orgs").fetchone()
                 out["org_count"] = int(org_row[0]) if org_row else 0
@@ -299,8 +303,9 @@ def _rank_summary(states: list[str]) -> str:
     return "ok"
 
 
-def collect_status() -> dict[str, Any]:
-    building = _building_signals()
+def collect_status(scope=None) -> dict[str, Any]:
+    """`scope`: the caller's site scope (scope.scope_for); None = everything."""
+    building = _building_signals(scope)
 
     direct = [c for c in COMPONENTS if not str(c["probe"]).startswith("inferred_")]
     inferred = [c for c in COMPONENTS if str(c["probe"]).startswith("inferred_")]

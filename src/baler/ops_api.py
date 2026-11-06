@@ -156,7 +156,11 @@ def make_handler(ts_pool=None, store=None):
             self.end_headers()
 
         def _get_status(self, span) -> None:
-            payload = collect_status()
+            scope = None
+            if ts_pool is not None:
+                with ts_pool.connection() as conn:
+                    scope = scope_for(conn, claims_from_header(self.headers.get("Authorization")))
+            payload = collect_status(scope)
             span.set_attribute("summary", payload["summary"])
             span.set_attribute("attention_count", len(payload["attention"]))
             respond_json(self, 200, payload)
