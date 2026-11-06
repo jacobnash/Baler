@@ -16,9 +16,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # `haystack` builds openhay (Rust core) from source - runners ship
-      # with a Rust toolchain. Without it tests/test_haystack_api.py skips.
-      - run: pip install -e ".[dev,validate,haystack]"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      # openhay's Rust build is the slow part of the install (~1 min): build
+      # its wheel once per openhay commit and cache it (#23).
+      - id: openhay
+        run: echo "sha=$(git ls-remote https://github.com/jacobnash/openhay refs/heads/main | cut -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: openhay-wheel
+        with:
+          path: openhay-wheel
+          key: openhay-wheel-${{ steps.openhay.outputs.sha }}
+      - if: steps.openhay-wheel.outputs.cache-hit != 'true'
+        run: pip wheel --no-deps -w openhay-wheel "openhay @ git+https://github.com/jacobnash/openhay@${{ steps.openhay.outputs.sha }}#subdirectory=crates/openhay-py"
+      - run: pip install openhay-wheel/openhay-*.whl
+      # Not the `haystack` extra: that's openhay alone, already installed from
+      # the cached wheel, and pip would rebuild it from git (a different URL).
+      # Without openhay tests/test_haystack_api.py skips.
+      - run: pip install -e ".[dev,validate]"
       - run: pytest -m "not integration"
       - run: openapi-spec-validator openapi.yaml fault-api-openapi.yaml derivation-api-openapi.yaml validate-api-openapi.yaml auth-api-openapi.yaml haystack-api-openapi.yaml
       # Both blocking (PLAN.md Guardrails): ruff went 63 -> 0 and mypy
@@ -62,6 +77,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - run: pip install -e ".[dev,validate]"
       - run: docker compose up -d --build
       - name: Wait for postgres to be healthy
@@ -103,7 +120,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev,validate,haystack]"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      # openhay's Rust build is the slow part of the install (~1 min): build
+      # its wheel once per openhay commit and cache it (#23).
+      - id: openhay
+        run: echo "sha=$(git ls-remote https://github.com/jacobnash/openhay refs/heads/main | cut -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: openhay-wheel
+        with:
+          path: openhay-wheel
+          key: openhay-wheel-${{ steps.openhay.outputs.sha }}
+      - if: steps.openhay-wheel.outputs.cache-hit != 'true'
+        run: pip wheel --no-deps -w openhay-wheel "openhay @ git+https://github.com/jacobnash/openhay@${{ steps.openhay.outputs.sha }}#subdirectory=crates/openhay-py"
+      - run: pip install openhay-wheel/openhay-*.whl
+      - run: pip install -e ".[dev,validate]"  # openhay: the cached wheel above
       - run: docker build -t haxall:ci -f windrow/docker/haxall.Dockerfile windrow/docker
       - run: >-
           docker run -d --name haxall -p 8280:8080 haxall:ci sh -c

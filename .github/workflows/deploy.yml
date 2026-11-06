@@ -17,6 +17,13 @@ on:
 permissions:
   contents: read
 
+# One deploy at a time, and only the newest waiting one: a burst of pushes
+# deploys once (the running deploy finishes; older queued ones are dropped
+# in favour of the latest), instead of one full deploy per commit (#23).
+concurrency:
+  group: deploy-nash-srv
+  cancel-in-progress: false
+
 jobs:
   deploy:
     # The head_repository check matters now that the repo is public: without
@@ -37,6 +44,8 @@ jobs:
           # windrow/ is a public submodule now - checkout can clone it directly,
           # no separate step or deploy key needed.
           submodules: true
+          # full history, so the docs step can diff against the last build
+          fetch-depth: 0
 
       - name: Deploy stack
         # The only command this runner user can run as root - see
@@ -67,8 +76,19 @@ jobs:
           fi
 
       - name: Build and publish docs
+        # Only when docs-site/ changed since the commit the published docs were
+        # built from (~100s saved on every code-only deploy, #23). No marker
+        # yet, or an unknown commit: build.
         run: |
+          set -euo pipefail
+          marker=/var/www/timberdoodle-docs/.built-from
+          if [ -f "$marker" ] && git cat-file -e "$(cat "$marker")^{commit}" 2>/dev/null \
+             && git diff --quiet "$(cat "$marker")" HEAD -- docs-site/; then
+            echo "docs-site/ unchanged since $(cat "$marker") - skipping the docs build"
+            exit 0
+          fi
           cd docs-site
           npm ci
           npm run build
           cp -r dist/. /var/www/timberdoodle-docs/
+          git rev-parse HEAD > "$marker"

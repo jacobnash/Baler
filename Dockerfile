@@ -1,19 +1,25 @@
+# syntax=docker/dockerfile:1.7
+# (1.7 for ADD of a git URL - see the openhay stage.)
+
 # openhay (the Rust-core Haystack library haystack_api.py speaks the wire
 # protocol through) has no PyPI release yet, so build its abi3 wheel from
 # source in a throwaway Rust stage. bookworm here so the wheel's glibc
 # floor is no newer than the runtime image's.
 FROM rust:1-slim-bookworm AS openhay
 ARG OPENHAY_REF=main
-# The clone below is cached by its command text, which never changes for a
-# branch ref - so a rebuild kept serving a stale openhay (nash-srv ran a
-# pre-eb89b9e build that failed whole grids on an unknown unit). ADD of the
-# ref's commit JSON is re-fetched every build and busts the cache only when
-# the ref moves.
-ADD https://api.github.com/repos/jacobnash/openhay/commits/${OPENHAY_REF} /openhay-ref.json
-RUN apt-get update && apt-get install -y --no-install-recommends git python3 python3-pip \
-    && pip3 install --break-system-packages --no-cache-dir "maturin>=1.5,<2" \
-    && git clone --depth 1 --branch "$OPENHAY_REF" https://github.com/jacobnash/openhay /openhay \
-    && cd /openhay/crates/openhay-py \
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip \
+    && pip3 install --break-system-packages --no-cache-dir "maturin>=1.5,<2"
+# BuildKit resolves the ref to a commit and caches this layer by that commit:
+# a rebuild reuses the wheel until openhay actually moves, and a moved ref is
+# always picked up. (A `git clone` RUN was cached by its text, so it served a
+# stale openhay; the GitHub API workaround that replaced it was unauthenticated
+# and rate-limited to 60 requests an hour - #23.)
+ADD https://github.com/jacobnash/openhay.git#${OPENHAY_REF} /openhay
+# Cargo's registry and build dir persist between builds on the same host, so
+# a moved ref recompiles only what changed.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/openhay/target \
+    cd /openhay/crates/openhay-py \
     && maturin build --release --interpreter python3 --out /wheels
 
 FROM python:3.12-slim
@@ -21,9 +27,13 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY --from=openhay /wheels /wheels
 RUN pip install --no-cache-dir /wheels/openhay-*.whl
+# Dependencies before code: this layer depends only on pyproject.toml, so a
+# .py change doesn't reinstall every dependency (#23). The package is
+# installed editable against a placeholder; the real src/ lands on top.
 COPY pyproject.toml ./
+RUN mkdir -p src/baler && touch src/baler/__init__.py \
+    && pip install --no-cache-dir -e ".[validate]"
 COPY src/ ./src/
-RUN pip install --no-cache-dir -e ".[validate]"
 
 # No ENTRYPOINT/CMD - each daemon service in docker-compose.yml supplies its
 # own `command: python -m baler.<module>` against this one image.
