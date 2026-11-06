@@ -17,6 +17,25 @@ const detailEl = document.getElementById("detail");
 // point's tag list.
 const STRUCTURAL_TAGS = new Set(["id", "dis", "equipRef", "siteRef", "brickClass", "brickHasPart", "brickFeeds", "tz", "mod"]);
 
+// Haystack equipment-type markers, most specific first, for grouping equips
+// that carry Haystack tags but no Brick class (e.g. a Windrow/Haystack
+// import that was never Brick-classified).
+const EQUIP_KIND_TAGS = [
+  ["ahu", "AHU"], ["rtu", "RTU"], ["mau", "MAU"], ["doas", "DOAS"], ["fcu", "FCU"], ["vav", "VAV"],
+  ["chiller", "Chiller"], ["boiler", "Boiler"], ["coolingTower", "Cooling Tower"],
+  ["heatExchanger", "Heat Exchanger"], ["pump", "Pump"], ["fan", "Fan"], ["meter", "Meter"],
+  ["tank", "Tank"], ["valve", "Valve"], ["damper", "Damper"], ["vfd", "VFD"],
+];
+
+const isMarker = (v) => v && v._kind === "marker";
+
+// Brick class if the graph has one, else the Haystack equip-type marker.
+function equipKind(rec) {
+  if (typeof rec.brickClass === "string") return rec.brickClass;
+  const hit = EQUIP_KIND_TAGS.find(([tag]) => isMarker(rec[tag]));
+  return hit ? hit[1] : null;
+}
+
 class SessionExpired extends Error {}
 
 // GET /api/read?filter=... -> the grid's rows (Hayson, the API's JSON default).
@@ -78,7 +97,7 @@ async function loadEquipment() {
   const equips = (await haystackRead("equip")).map(entity);
   const byType = new Map();
   for (const e of equips) {
-    const label = e.brickClass || "Unclassified";
+    const label = equipKind(e.rec) || "Unclassified";
     if (!byType.has(label)) byType.set(label, []);
     byType.get(label).push(e);
   }
@@ -236,18 +255,21 @@ async function renderLocationSection(equips) {
           const ahus = fedBy.get(child.id) || [];
           const floorNode = node(`${child.dis} (fed by ${ahus.map((e) => e.dis).join(", ") || "?"})`);
           const floorList = document.createElement("ul");
-          for (const ahu of ahus) floorList.appendChild(li(buildEquipNode(ahu, `${ahu.dis} (AHU)`)));
+          for (const ahu of ahus) floorList.appendChild(li(buildEquipNode(ahu, `${ahu.dis} (${equipKind(ahu.rec) || "AHU"})`)));
           for (const zone of parts(child, "Zone")) {
             const zoneNode = node(zone.dis);
             const zoneList = document.createElement("ul");
-            for (const vav of fedBy.get(zone.id) || []) zoneList.appendChild(li(buildEquipNode(vav, `${vav.dis} (VAV)`)));
+            for (const vav of fedBy.get(zone.id) || []) {
+              zoneList.appendChild(li(buildEquipNode(vav, `${vav.dis} (${equipKind(vav.rec) || "VAV"})`)));
+            }
             zoneNode.appendChild(zoneList);
             floorList.appendChild(li(zoneNode));
           }
           floorNode.appendChild(floorList);
           buildingList.appendChild(li(floorNode));
         } else if (child.rec.equip) {
-          const label = child.brickClass ? `${child.dis} (${child.brickClass})` : child.dis;
+          const kind = equipKind(child.rec);
+          const label = kind ? `${child.dis} (${kind})` : child.dis;
           buildingList.appendChild(li(buildEquipNode(child, label)));
         }
       }
