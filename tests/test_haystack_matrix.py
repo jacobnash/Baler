@@ -57,10 +57,25 @@ def _skip_or_fail(why):
 # ----------------------------------------------------------------- clients
 
 
+def _login(make, attempts: int = 6, wait: float = 7.0):
+    """The gateway rate-limits /api logins per IP (30 req/min, burst 15;
+    gateway/nginx.conf haystack_login) and one SCRAM login is 3 requests,
+    so the matrix's ~8 logins in a few seconds get 429s. Back off and
+    retry instead of loosening the production limit. (phable surfaces a 429
+    as a Hello parse error, so retry on any login failure.)"""
+    for i in range(attempts):
+        try:
+            return make()
+        except Exception:
+            if i == attempts - 1:
+                raise
+            time.sleep(wait)
+
+
 class OpenhayClient:
     def __init__(self, base, user, pw, fmt):
         self.base, self.user, self.pw, self.fmt = base, user, pw, fmt
-        self.c = oh.Client(base, user=user, password=pw, format=fmt)
+        self.c = _login(lambda: oh.Client(base, user=user, password=pw, format=fmt))
 
     def his_read_range(self, ref, rng):
         return [r["val"].val for r in self.c.call("hisRead", oh.Grid.from_rows([{"id": ref, "range": rng}])).rows]
@@ -75,7 +90,7 @@ class OpenhayClient:
 
     def close_then_reuse(self):
         """A fresh session: close it, then the same token must be refused."""
-        c = oh.Client(self.base, user=self.user, password=self.pw, format=self.fmt)
+        c = _login(lambda: oh.Client(self.base, user=self.user, password=self.pw, format=self.fmt))
         token = c.token
         c.call("close")
         stale = oh.Client(self.base, bearer=token, format=self.fmt)
@@ -122,8 +137,11 @@ class OpenhayClient:
 
 class PhableClient:
     def __init__(self, base, user, pw, fmt):
-        self.ctx = phable.open_haystack_client(base, user, pw, content_type=fmt)
-        self.c = self.ctx.__enter__()
+        def enter():
+            ctx = phable.open_haystack_client(base, user, pw, content_type=fmt)
+            return ctx, ctx.__enter__()  # the SCRAM login happens here
+
+        self.ctx, self.c = _login(enter)
 
     @staticmethod
     def _ref(ref):
