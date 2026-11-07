@@ -5,9 +5,13 @@ clean_session) broker session drops the old subscription on every
 reconnect, and there's no other code path that restores it.
 """
 
+import json
+
 import pytest
+from rdflib import RDF, URIRef
 
 from baler.mqtt_listener import make_on_connect
+from baler.store import BRICK, PROJ, TD, Store
 
 
 class FakeClient:
@@ -62,3 +66,71 @@ def test_a_data_error_while_handling_is_skipped(monkeypatch):
     monkeypatch.setattr(mqtt_listener, "ingest_reading", boom, raising=False)
     on_message = mqtt_listener.make_on_message(store=None, ts_conn=None)
     on_message(None, None, _Msg("fbf/site/ahu/sat", b'{"value": 1, "ts": 1}'))  # logged, not raised
+
+
+# --- what a Windrow edge node publishes (Baler#81, #82) ---------------------
+
+
+def _envelope(value) -> bytes:
+    return json.dumps({"value": value, "ts": 1_800_000_000}).encode()
+
+
+def _types(store, uri) -> set[str]:
+    return {str(o) for o in store.graph.objects(URIRef(uri), RDF.type)}
+
+
+def test_bacnet_binary_states_are_stored_as_bools(monkeypatch):
+    """A BACnet binary-value arrives as "active"/"inactive" (#81): stored as
+    a Bool it charts, rolls up and counts like Modbus's 0/1 does."""
+    from baler import mqtt_listener
+
+    written = []
+    monkeypatch.setattr(mqtt_listener, "ingest_reading", lambda store, conn, topic, value, ts: written.append(value))
+    on_message = mqtt_listener.make_on_message(store=None, ts_conn=None)
+    for v in ("active", "inactive", "standby", 71.2, 1):
+        on_message(None, None, _Msg("fbf/home/bacnet/fan_status", _envelope(v)))
+    assert written == [True, False, "standby", 71.2, 1]
+
+
+def _listener(store):
+    from baler import mqtt_listener
+
+    return mqtt_listener.make_on_message(store=store, ts_conn=None)
+
+
+def test_edge_point_and_equip_tags_are_classified_on_arrival():
+    """#82: tags over MQTT used to wait for a manual autotag run."""
+    store = Store()
+    on_message = _listener(store)
+    on_message(None, None, _Msg("fbf/home/weather/equip/tags", _envelope(json.dumps(
+        {"tags": {"weatherStation": True, "dis": "Pi weather"}, "points": ["temp"]}))))
+    on_message(None, None, _Msg("fbf/home/bacnet/zone_temp/tags", _envelope(json.dumps(
+        {"zone": True, "air": True, "temp": True, "sensor": True, "unit": "°F"}))))
+    on_message(None, None, _Msg("fbf/home/bacnet/fan_status/tags", _envelope(json.dumps(
+        {"fan": True, "run": True, "sensor": True}))))
+    assert str(BRICK.Weather_Station) in _types(store, "urn:equip:fbf/home/weather")
+    assert str(BRICK.Zone_Air_Temperature_Sensor) in _types(store, "urn:point:fbf/home/bacnet/zone_temp")
+    assert str(BRICK.Fan_Status) in _types(store, "urn:point:fbf/home/bacnet/fan_status")
+
+
+def test_no_markers_means_no_class_and_no_fallback_guess():
+    store = Store()
+    on_message = _listener(store)
+    on_message(None, None, _Msg("fbf/home/bacnet/equip/tags", _envelope(json.dumps({"tags": {}, "points": ["x"]}))))
+    on_message(None, None, _Msg("fbf/home/bacnet/x/tags", _envelope(json.dumps({"zone": True}))))
+    assert _types(store, "urn:equip:fbf/home/bacnet") == set()
+    assert _types(store, "urn:point:fbf/home/bacnet/x") == set()
+
+
+def test_a_class_set_by_hand_is_kept_but_an_autotag_fallback_is_replaced():
+    store = Store()
+    hand, guessed = "urn:point:fbf/home/a/zone_temp", "urn:point:fbf/home/b/zone_temp"
+    store.add_entity(URIRef(hand), BRICK.Temperature_Sensor)
+    store.add_entity(URIRef(guessed), PROJ.Zone_Air_Temperature_Sensor_Variant)
+    store.add_entity(URIRef(guessed), TD.UnmappedPoint)
+    on_message = _listener(store)
+    tags = _envelope(json.dumps({"zone": True, "air": True, "temp": True, "sensor": True}))
+    on_message(None, None, _Msg("fbf/home/a/zone_temp/tags", tags))
+    on_message(None, None, _Msg("fbf/home/b/zone_temp/tags", tags))
+    assert _types(store, hand) == {str(BRICK.Temperature_Sensor)}
+    assert _types(store, guessed) == {str(BRICK.Zone_Air_Temperature_Sensor)}

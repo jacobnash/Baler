@@ -39,7 +39,9 @@ function chartRange(values, full = false) {
 }
 
 // Returns {clipped, outliers, fullMin, fullMax} so a caller can say
-// "N samples off the scale" and offer opts.fullRange.
+// "N samples off the scale" and offer opts.fullRange. opts.states names the
+// 0 and 1 of a two-state point (["off", "on"]): the axis is labelled with
+// them and the line is stepped, since a status holds until it changes.
 function drawLineChart(canvas, history, pad = 30, unit = "", opts = {}) {
   const ctx = canvas.getContext("2d");
   const w = canvas.width - pad * 2;
@@ -47,7 +49,9 @@ function drawLineChart(canvas, history, pad = 30, unit = "", opts = {}) {
 
   const values = history.map((r) => r.value);
   const times = history.map((r) => r.ts);
-  const range = chartRange(values, !!opts.fullRange);
+  const range = opts.states
+    ? { min: 0, max: 1, clipped: false, outliers: 0, fullMin: 0, fullMax: 1 }
+    : chartRange(values, !!opts.fullRange);
   const minV = range.min;
   const maxV = range.max;
   const spanV = maxV - minV || 1;
@@ -65,7 +69,7 @@ function drawLineChart(canvas, history, pad = 30, unit = "", opts = {}) {
 
   ctx.fillStyle = "currentColor";
   ctx.font = "11px sans-serif";
-  const fmtV = (v) => `${+v.toFixed(2)}${unit ? ` ${unit}` : ""}`;
+  const fmtV = (v) => (opts.states ? opts.states[v ? 1 : 0] : `${+v.toFixed(2)}${unit ? ` ${unit}` : ""}`);
   ctx.fillText(fmtV(maxV), 2, pad - 4);
   ctx.fillText(fmtV(minV), 2, pad + h + 12);
 
@@ -116,7 +120,10 @@ function drawLineChart(canvas, history, pad = 30, unit = "", opts = {}) {
     const x = xOf(row.ts);
     const y = yOf(row.value);
     if (breakBefore(i)) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
+    else {
+      if (opts.states) ctx.lineTo(x, yOf(history[i - 1].value));
+      ctx.lineTo(x, y);
+    }
   });
   ctx.stroke();
   // A sample joined to neither neighbour (the only sample, or one alone

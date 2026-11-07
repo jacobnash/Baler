@@ -18,6 +18,7 @@ from baler.store import BRICK, PROJ, TD
 tracer = tracing.get_tracer(__name__)
 
 DEFAULT_RULES_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "rules", "haystack_to_brick.yaml")
+EQUIP_RULES_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "rules", "haystack_equip_to_brick.yaml")
 
 # Below this, an LLM guess is discarded rather than asserted - see
 # classify_point_with_fallback. Not exposed as a config knob; there's
@@ -93,6 +94,38 @@ def classify_point(store, point_uri, rules: list[MappingRule] | None = None) -> 
         span.set_attribute("outcome", "miss")
         span.set_attribute("matched_rule", "")
         return "miss", None
+
+
+def classify_on_ingest(store, uri, rules: list[MappingRule]) -> str | None:
+    """Classification as tags arrive over MQTT (Baler#82): Windrow/edge
+    equips and points used to stay unclassified until someone ran
+    `python -m baler.autotag`, unlike the pullers, which classify as they
+    ingest. Deliberately narrower than classify_point:
+
+      * a direct rule match only - no PROJ fallback, no TD:UnmappedPoint, no
+        LLM. Those stay autotag's job, run by a human who reads its report.
+      * only while the entity has no Brick class: a class set by hand
+        (PATCH /ingest/records), by autotag or by an earlier message is
+        never replaced. A PROJ/UnmappedPoint type an earlier autotag left
+        is, once a direct match exists - the same swap reclassify makes.
+
+    Returns the Brick class asserted, or None. Cheap enough per tag message
+    (retained, so a burst on every listener or Windrow restart): one type
+    lookup, one tag read, at most one write."""
+    rows = store.query(f"SELECT ?type WHERE {{ <{uri}> a ?type }}")
+    types = [URIRef(str(r.type)) for r in rows]
+    if any(str(t).startswith(str(BRICK)) for t in types):
+        return None
+    tags = read_tags(store, uri)
+    direct_matches = [r for r in rules if set(r["tags"]) <= tags]
+    if not direct_matches:
+        return None
+    rule = max(direct_matches, key=lambda r: len(r["tags"]))
+    for t in types:
+        if str(t).startswith(str(PROJ)) or t == TD.UnmappedPoint:
+            store.remove_relationship(uri, RDF.type, t)
+    store.add_entity(uri, BRICK[rule["brick_class"]])
+    return rule["brick_class"]
 
 
 def classify_point_with_fallback(store, point_uri, rules: list[MappingRule] | None = None, llm_classify=None) -> tuple[str, str | None]:
