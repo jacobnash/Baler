@@ -86,20 +86,44 @@ def _no_leaked_site_prefixes(request):
 
 
 # --- CI sharding (#27) ---------------------------------------------------------
-# BALER_SHARD=i/n keeps only the test files whose position in the sorted file
-# list is i-1 modulo n, so n CI jobs (each with its own stack) split the
-# integration suite. Whole files, so module-scoped fixtures stay together.
+# BALER_SHARD=i/n keeps only shard i of n (whole files, so module-scoped
+# fixtures stay together), so n CI jobs - each with its own stack - split
+# the integration suite. Shards are balanced by estimated duration.
+
+
+# Files much slower than their test count suggests (seconds, from CI's
+# --durations): they're placed first so the shards come out even. Every
+# other file counts SECONDS_PER_TEST per test.
+SLOW_FILES = {
+    "tests/test_gateway_auth.py": 50.0,  # waits out the gateway's 30 s revocation poll
+    "tests/test_haystack_brick_e2e.py": 40.0,
+    "tests/test_broker_accounts.py": 8.0,
+}
+SECONDS_PER_TEST = 0.4
+
+
+def _shard_files(counts: dict[str, int], total: int) -> list[set[str]]:
+    """Greedy: heaviest file first, each into the currently lightest shard."""
+    weight = {f: SLOW_FILES.get(f, n * SECONDS_PER_TEST) for f, n in counts.items()}
+    shards: list[set[str]] = [set() for _ in range(total)]
+    load = [0.0] * total
+    for f in sorted(weight, key=lambda f: (-weight[f], f)):
+        i = load.index(min(load))
+        shards[i].add(f)
+        load[i] += weight[f]
+    return shards
 
 
 def pytest_collection_modifyitems(config, items):
     import os
+    from collections import Counter
 
     spec = os.environ.get("BALER_SHARD", "").strip()
     if not spec:
         return
     index, total = (int(x) for x in spec.split("/"))
-    files = sorted({item.nodeid.split("::")[0] for item in items})
-    mine = {f for n, f in enumerate(files) if n % total == index - 1}
+    counts = Counter(item.nodeid.split("::")[0] for item in items)
+    mine = _shard_files(dict(counts), total)[index - 1]
     keep = [item for item in items if item.nodeid.split("::")[0] in mine]
     dropped = [item for item in items if item.nodeid.split("::")[0] not in mine]
     if dropped:

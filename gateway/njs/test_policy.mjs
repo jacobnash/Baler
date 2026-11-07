@@ -142,6 +142,17 @@ check("user lifecycle routes: admin, except changing your own password", () => {
     assert.equal(policy.resolveRoute("POST", "/auth/me/password").minRole, "viewer");
 });
 
+check("unknown routes say where to look (#69)", () => {
+    const api = policy.unknownRouteMessage("GET", "/api/derivation");
+    assert.match(api, /^no such route: GET \/api\/derivation/);
+    assert.match(api, /Haystack API/);
+    assert.match(api, /did you mean \/derivation\/\.\.\.\? API reference: \/derivation\/docs/);
+    assert.match(policy.unknownRouteMessage("GET", "/derivations"), /did you mean \/derivation\//);
+    assert.match(policy.unknownRouteMessage("GET", "/derivation/derivations/abc"), /API reference: \/derivation\/docs/);
+    assert.match(policy.unknownRouteMessage("GET", "/nope"), /all docs: \/docs/);
+    assert.doesNotMatch(policy.unknownRouteMessage("GET", "/nope"), /did you mean/);
+});
+
 check("orphaned points: admin only", () => {
     assert.equal(policy.resolveRoute("GET", "/ops/orphans").minRole, "admin");
     assert.equal(policy.resolveRoute("POST", "/ops/orphans/remove").minRole, "admin");
@@ -233,6 +244,14 @@ check("commissioning (/cx/): reads viewer, changes operator, archive admin, site
     assert.equal(policy.resolveRoute("POST", "/cx/active-runs/a1/confirm").minRole, "admin");
     assert.equal(policy.resolveRoute("POST", "/cx/active-runs/a1/abort").minRole, "operator");
     assert.equal(policy.resolveRoute("DELETE", "/cx/active-runs/a1"), null);
+    // Cx 10 agent
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/agent/sessions").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/projects/p1/agent/sessions").minRole, "operator");
+    assert.equal(policy.resolveRoute("GET", "/cx/agent-sessions/s1").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/agent-sessions/s1/messages").minRole, "operator");
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/agent/proposals").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/agent-proposals/x1/accept").minRole, "operator");
+    assert.equal(policy.resolveRoute("POST", "/cx/agent-proposals/x1/reject").minRole, "operator");
     // per-project tenancy is checked by commissioning_api, so not WHOLE_ORG
     assert.equal(policy.scopeSatisfies("commissioning", { site_ids: ["s1"] }), true);
 });

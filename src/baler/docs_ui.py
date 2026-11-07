@@ -60,7 +60,23 @@ SWAGGER_UI_HTML = f"""<!DOCTYPE html>
 <div id="swagger-ui"></div>
 <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
 <script>
-window.onload = () => SwaggerUIBundle({{url: "/openapi.yaml", dom_id: "#swagger-ui"}});
+// Relative, not /openapi.yaml: behind the gateway this page is
+// /<api>/docs and its spec is /<api>/openapi.yaml - the absolute path hit
+// the site root and 404'd ("Failed to load API definition", #68). And the
+// specs' servers name localhost:8080, so "Try it out" also gets this page's
+// own base (e.g. https://host/derivation) as the first server.
+window.onload = () => {{
+  const base = location.origin + location.pathname.replace(new RegExp("/docs/?$"), "");
+  const ui = SwaggerUIBundle({{
+    url: "openapi.yaml",
+    dom_id: "#swagger-ui",
+    onComplete: () => {{
+      const spec = ui.specSelectors.specJson().toJS();
+      const rest = (spec.servers || []).filter((s) => s.url !== base);
+      ui.specActions.updateJsonSpec({{...spec, servers: [{{url: base, description: "this server"}}, ...rest]}});
+    }},
+  }});
+}};
 </script>
 </body>
 </html>

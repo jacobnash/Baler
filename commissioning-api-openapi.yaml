@@ -38,6 +38,7 @@ tags:
   - name: Spec
   - name: Faults
   - name: Active tests
+  - name: Agent
 paths:
   /projects:
     get:
@@ -1428,6 +1429,146 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ActiveRun" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/agent/sessions:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Agent]
+      operationId: listCxAgentSessions
+      summary: The project's agent conversations, newest first
+      responses:
+        "200":
+          description: Sessions (without transcripts)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Agent]
+      operationId: startCxAgentSession
+      summary: Start a conversation with the commissioning agent (operator)
+      description: >-
+        A Claude tool-use loop over the Cx capabilities (inventory, runs,
+        templates and gaps, issues, procedures and test runs, spec items
+        and alignment, active-test status). It reads and runs passive work
+        itself; everything else it proposes (GET .../agent/proposals) for a
+        person to accept. It works with the starter's org and sites only.
+        Asynchronous: 202, then poll GET /agent-sessions/{id} until status
+        isn't `working`. Needs the llm extra and ANTHROPIC_API_KEY (501
+        without the extra); the model is BALER_CX_MODEL.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties: { message: { type: string } }
+      responses:
+        "202":
+          description: The session, working on the message
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentSession" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { description: The llm extra isn't installed on the server }
+  /agent-sessions/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Agent]
+      operationId: getCxAgentSession
+      summary: A conversation - status, last reply, readable transcript
+      responses:
+        "200":
+          description: The session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentSession" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /agent-sessions/{id}/messages:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Agent]
+      operationId: messageCxAgentSession
+      summary: Send the next message (operator; the session's starter only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties: { message: { type: string } }
+      responses:
+        "202":
+          description: Working on it
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentSession" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: Not this session's starter }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Still working on the last message }
+  /projects/{id}/agent/proposals:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Agent]
+      operationId: listCxAgentProposals
+      summary: What the agent proposed, newest first
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [proposed, accepted, rejected, failed] } }
+      responses:
+        "200":
+          description: Proposals
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AgentProposal" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /agent-proposals/{id}/accept:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Agent]
+      operationId: acceptCxAgentProposal
+      summary: Carry out a proposal as yourself (operator; an active test needs an admin and stays planned)
+      responses:
+        "200":
+          description: The proposal, accepted, with what was done in `result`
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentProposal" }
+        "403": { description: Your role can't carry this one out }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /agent-proposals/{id}/reject:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Agent]
+      operationId: rejectCxAgentProposal
+      summary: Reject a proposal (operator)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { note: { type: string } }
+      responses:
+        "200":
+          description: The proposal, rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentProposal" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /templates:
     get:
       tags: [Templates]
@@ -1926,6 +2067,43 @@ components:
         results: { type: array, items: { type: object } }
         error: { type: [string, "null"] }
         abort_requested: { type: boolean }
+    AgentSession:
+      type: object
+      required: [id, project_id, status, transcript]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        created_by: { type: [string, "null"] }
+        status: { type: string, enum: [idle, working, failed] }
+        last_reply: { type: [string, "null"] }
+        error: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        transcript:
+          type: array
+          items:
+            type: object
+            properties:
+              role: { type: string, enum: [user, assistant, tool] }
+              text: { type: string }
+              tool: { type: string }
+              input: { type: [object, "null"] }
+              error: { type: string }
+    AgentProposal:
+      type: object
+      required: [id, project_id, kind, payload, reason, status]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        session_id: { type: [string, "null"] }
+        kind: { type: string, enum: [issue, procedure, phase, spec_item, mapping, active_test] }
+        payload: { type: object }
+        reason: { type: string }
+        status: { type: string, enum: [proposed, accepted, rejected, failed] }
+        result: { type: [object, "null"] }
+        decided_by: { type: [string, "null"] }
+        decided_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
     IssueSeverity:
       type: [string, "null"]
       enum: [critical, major, minor, info, null]

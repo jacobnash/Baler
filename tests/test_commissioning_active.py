@@ -257,6 +257,9 @@ def test_active_api_envelope(served, oas, monkeypatch):
     # the switch is off
     monkeypatch.delenv("BALER_CX_ALLOW_WRITES", raising=False)
     assert requests.post(f"{base}/active-runs/{rid}/confirm", json={"confirm": rid}, headers=admin).status_code == 403
+    # switch off answers first: a wrong confirm or an unknown run is still 403, not 400/404
+    assert requests.post(f"{base}/active-runs/{rid}/confirm", json={"confirm": "nope"}, headers=admin).status_code == 403
+    assert requests.post(f"{base}/active-runs/no-such-run/confirm", json={}, headers=admin).status_code == 403
     monkeypatch.setenv("BALER_CX_ALLOW_WRITES", "1")
     st = requests.get(f"{base}/active/status", headers=admin).json()
     assert st["writes_allowed"] is True and st["level"] == 8

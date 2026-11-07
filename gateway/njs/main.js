@@ -23,9 +23,11 @@ async function authorize(r) {
 
     const route = policy.resolveRoute(r.method, r.uri);
     if (!route) {
-        // Unmapped route under a proxied prefix - a policy gap to close,
-        // not traffic to silently let through. See policy.js's own note.
-        r.return(403, "no policy defined for this route\n");
+        // Unmapped route under a proxied prefix: never let through. Said as
+        // a 404 with where to look (policy.unknownRouteMessage, #69) - it's
+        // a typo or a route that doesn't exist far more often than a gap.
+        r.headersOut["Content-Type"] = "text/plain; charset=utf-8";
+        r.return(404, policy.unknownRouteMessage(r.method, r.uri));
         return;
     }
 
@@ -43,13 +45,13 @@ async function authorize(r) {
 
     const token = bearerToken(r);
     if (!token) {
-        r.return(401, "missing bearer token\n");
+        r.return(401, "missing bearer token - " + policy.SIGN_IN_HINT + "\n");
         return;
     }
 
     const claims = await jwt.verify(token, process.env.BALER_JWT_SECRET);
     if (!claims) {
-        r.return(401, "invalid or expired token\n");
+        r.return(401, "invalid or expired token - " + policy.SIGN_IN_HINT + "\n");
         return;
     }
 
@@ -79,7 +81,7 @@ async function authorize(r) {
     }
 
     if (!ratelimit.checkRateLimit(r, claims)) {
-        r.headersOut["Retry-After"] = "60";
+        r.headersOut["Retry-After"] = String(ratelimit.retryAfterSeconds(Date.now()));
         r.return(429, "rate limit exceeded\n");
         return;
     }

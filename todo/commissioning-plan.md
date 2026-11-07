@@ -1,6 +1,6 @@
 # Commissioning agent: research and plan (Baler#32)
 
-Status: **in progress.** Jacob answered the open questions on
+Status: **slices Cx 1-10 built** (2026-11-06). Jacob answered the open questions on
 2026-11-06 (see [Decisions](#0-decisions-jacob-2026-11-06)), and the
 work is split into the shippable slices in [§0.2](#02-slices). This is a
 living doc: keep it current as slices land. Where §5 and §11 below
@@ -80,7 +80,7 @@ Each slice is a GitHub issue, and each is independently mergeable.
 | Cx 7 ✅ | #43 | Spec ingestion: Claude PDF extraction as proposals, CSV/XLSX; spec↔device alignment; `record_edit` write-back. As built: `commissioning/spec.py` (tags, CSV/XLSX, alignment, points), `commissioning/spec_llm.py` (PDF via the Claude API, structured output, server-side refusal fallbacks, `BALER_CX_MODEL`), `cx_spec_documents`/`cx_spec_items`/`cx_mappings`; alignment is computed on request, only a person's confirm/reject is stored; write-back sets `cxSpecTag` (and the class when the equipment has none) via `record_edit` + `record_edits` | Cx 1, Cx 4 |
 | Cx 8 ✅ | #44 | Opt-in fault mirroring (real URIs); ingest of faults as Cx issues. As built: `commissioning/mirror.py`; `settings.fault_mirroring` (`equipment: confirmed` = confirmed against the spec in Cx 7, or `all`); rule ids `cx:<check_id>`; webhooks via fault_detector's delivery; accepted risks suppress; `POST .../faults/ingest` for `fault_detector` (closes issues when the fault resolves) or an outside FDD tool | Cx 2, Cx 4 |
 | Cx 9 ✅ | #45 | Active tests via `point_write` inside the safety envelope. As built: `commissioning/active.py`; `cx_active_runs`; plan (dry run) → admin confirms the run id inside its window → background executor writes at priority 8 as `cx:<run>`, relinquishes per step and per run in `finally`; sweeper on the scheduler tick; per-run abort and org-wide kill switch; before-state; `BALER_CX_ALLOW_WRITES=1`; rung 4 = `command_response` | Cx 6 |
-| Cx 10 | #46 | The commissioning agent (Claude tool use over `/cx/`) | Cx 1–Cx 9, can start after Cx 4 |
+| Cx 10 ✅ | #46 | The commissioning agent (Claude tool use over `/cx/`). As built: `commissioning/agent.py` (16 tools: reads, passive runs and test runs, and `propose`), `cx_agent_sessions` (API transcript replayed unchanged) and `cx_agent_proposals` (issue, procedure, phase, spec_item, mapping, active_test - accepted as the person; an active test becomes a *planned* Cx 9 run); every tool call is `agent.<tool>` in `cx_events`; Assistant panel on cx.html | Cx 1–Cx 9, can start after Cx 4 |
 
 **As built (Cx 2):** rungs are Brick-keyed (`commissioning/ladder.py`).
 A point's role comes from its Brick class family (Sensor, Setpoint,

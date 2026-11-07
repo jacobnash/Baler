@@ -22,6 +22,13 @@ IFS=$old_ifs
 chmod 600 "$passwd_file"
 chown mosquitto:mosquitto "$passwd_file"
 
+# The ACL is bind-mounted from the checkout (0644, the host user's), and
+# mosquitto 2.1 warns about world-readable security files (and says future
+# versions will refuse them). The broker reads a private copy (#59).
+cp /mosquitto/config/acl /mosquitto/data/acl
+chmod 600 /mosquitto/data/acl
+chown mosquitto:mosquitto /mosquitto/data/acl
+
 # Edge-node accounts live in the dynamic-security plugin's file (Baler#36).
 # Created empty on first start, then owned by the plugin: it persists every
 # account change there, so it's never regenerated. No admin client - the

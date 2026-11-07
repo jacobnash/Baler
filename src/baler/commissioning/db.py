@@ -100,7 +100,7 @@ CREATE TABLE IF NOT EXISTS cx_results (
     symptom     TEXT,
     candidates  JSONB NOT NULL DEFAULT '[]',
     evidence    JSONB NOT NULL,
-    PRIMARY KEY (run_id, check_id, subject)
+    PRIMARY KEY (run_id, equip_uri, check_id, subject)
 );
 CREATE INDEX IF NOT EXISTS cx_results_equip ON cx_results (run_id, equip_uri);
 
@@ -281,6 +281,37 @@ CREATE TABLE IF NOT EXISTS cx_active_runs (
     abort_requested BOOLEAN NOT NULL DEFAULT false
 );
 CREATE INDEX IF NOT EXISTS cx_active_runs_project ON cx_active_runs (project_id, created_at DESC);
+
+-- Cx 10 (#46): the commissioning agent's sessions (the API transcript,
+-- replayed unchanged) and its proposals, which a person accepts.
+CREATE TABLE IF NOT EXISTS cx_agent_sessions (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES cx_projects(id),
+    created_by  TEXT,
+    claims      JSONB NOT NULL,             -- org, sites, role of the starter: the agent's scope
+    status      TEXT NOT NULL,              -- idle | working | failed
+    messages    JSONB NOT NULL DEFAULT '[]',
+    last_reply  TEXT,
+    error       TEXT,
+    created_at  TIMESTAMPTZ NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cx_agent_sessions_project ON cx_agent_sessions (project_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS cx_agent_proposals (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES cx_projects(id),
+    session_id  TEXT,
+    kind        TEXT NOT NULL,              -- issue | procedure | phase | spec_item | mapping | active_test
+    payload     JSONB NOT NULL,
+    reason      TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL,              -- proposed | accepted | rejected | failed
+    result      JSONB,
+    decided_by  TEXT,
+    decided_at  TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cx_agent_proposals_project ON cx_agent_proposals (project_id, status);
 """
 
 ROW_TABLES: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
@@ -293,6 +324,10 @@ ROW_TABLES: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
                         "created_by", "created_at", "confirmed_by", "confirmed_at", "started_at", "finished_at", "before",
                         "writes", "results", "error", "abort_requested"),
                        frozenset({"steps", "plan", "before", "writes", "results"})),
+    "cx_agent_sessions": (("id", "project_id", "created_by", "claims", "status", "messages", "last_reply", "error",
+                           "created_at", "updated_at"), frozenset({"claims", "messages"})),
+    "cx_agent_proposals": (("id", "project_id", "session_id", "kind", "payload", "reason", "status", "result",
+                            "decided_by", "decided_at", "created_at"), frozenset({"payload", "result"})),
     "cx_mappings": (("id", "project_id", "spec_item_id", "equip_uri", "confidence", "basis", "alternatives", "status",
                      "decided_by", "decided_at", "written_back", "created_at"),
                     frozenset({"basis", "alternatives", "written_back"})),
@@ -332,9 +367,24 @@ class RunActive(Exception):
         self.run_id = run_id
 
 
+# #72: a point attached to two pieces of equipment (computed outputs are) is
+# checked under each, so (check_id, subject) alone isn't unique within a
+# run - the duplicate aborted the whole run. Widen an existing table's key.
+RESULTS_KEY_MIGRATION = """
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint
+               WHERE conname = 'cx_results_pkey'
+                 AND pg_get_constraintdef(oid) = 'PRIMARY KEY (run_id, check_id, subject)') THEN
+        ALTER TABLE cx_results DROP CONSTRAINT cx_results_pkey;
+        ALTER TABLE cx_results ADD PRIMARY KEY (run_id, equip_uri, check_id, subject);
+    END IF;
+END $$;
+"""
+
+
 def ensure_schema(conn) -> None:
     auth.ensure_schema(conn)  # orgs/sites (+ sites.topic_prefixes) first: cx_projects references them
-    ddl.run(conn, SCHEMA)
+    ddl.run(conn, SCHEMA, RESULTS_KEY_MIGRATION)
     from baler import faults, record_edit
 
     record_edit.ensure_schema(conn)  # Cx 7 write-back logs to record_edits
@@ -855,7 +905,9 @@ class PgRepo:
         with conn.cursor() as cur:
             cur.executemany(
                 "INSERT INTO cx_results (run_id, equip_uri, check_id, subject, status, severity, symptom, candidates, evidence)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                # a repeated result must never cost the run all its others (#72)
+                " ON CONFLICT (run_id, equip_uri, check_id, subject) DO NOTHING",
                 [(run_id, r["equip_uri"], r["check_id"], r["subject"], r["status"], r.get("severity"),
                   r.get("symptom"), json.dumps(r.get("candidates") or []), json.dumps(r["evidence"], default=str))
                  for r in results],

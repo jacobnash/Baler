@@ -34,6 +34,14 @@ def _rows(store, sparql: str):
     return list(store.query(sparql))
 
 
+def _opt(row, name: str) -> str | None:
+    """An OPTIONAL variable: RemoteStore rows raise AttributeError when it's
+    unbound (rdflib's give None) - which took GET /ops/orphans down with a
+    502 for any orphan without a dis (#70)."""
+    value = getattr(row, name, None)
+    return str(value) if value else None
+
+
 def _scope_filter(scope, var: str) -> str:
     expr = scope.sparql(var) if scope is not None else None
     return f"FILTER({expr})" if expr else ""
@@ -56,8 +64,8 @@ def find(store, conn, scope=None, derivations_path: str | None = None) -> list[d
         derivation_id = uri[len(COMPUTED_PREFIX):].split("/", 1)[0]
         if derivation_id in derivation_ids:
             continue
-        found[uri] = {"id": uri, "kind": "derivation_gone", "dis": str(r.dis) if r.dis else None,
-                      "equip": str(r.equip) if r.equip else None,
+        found[uri] = {"id": uri, "kind": "derivation_gone", "dis": _opt(r, "dis"),
+                      "equip": _opt(r, "equip"),
                       "reason": f"its derivation {derivation_id} no longer exists"}
 
     for r in _rows(store, f"""{_PREFIXES}
@@ -69,7 +77,7 @@ def find(store, conn, scope=None, derivations_path: str | None = None) -> list[d
             {_scope_filter(scope, "p")}
         }} LIMIT {LIMIT}"""):
         uri = str(r.p)
-        found.setdefault(uri, {"id": uri, "kind": "no_equip", "dis": str(r.dis) if r.dis else None,
+        found.setdefault(uri, {"id": uri, "kind": "no_equip", "dis": _opt(r, "dis"),
                                "equip": None, "reason": "not linked to any equipment"})
 
     latest = timeseries.read_latest_many(conn, list(found)) if found else {}

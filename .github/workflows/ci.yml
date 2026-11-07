@@ -35,7 +35,8 @@ jobs:
       # Without openhay tests/test_haystack_api.py skips; without the
       # cx-gl36 extra (pandas) tests/test_commissioning_gl36.py does.
       - run: pip install -e ".[dev,validate,cx-gl36]"
-      - run: pytest -m "not integration"
+      # parallel across the runner's cores: ~3 min serial (#27)
+      - run: pytest -m "not integration" -n auto
       - run: openapi-spec-validator openapi.yaml fault-api-openapi.yaml derivation-api-openapi.yaml validate-api-openapi.yaml auth-api-openapi.yaml haystack-api-openapi.yaml commissioning-api-openapi.yaml
       # Both blocking (PLAN.md Guardrails): ruff went 63 -> 0 and mypy
       # 19 -> 0 against the rule sets in ruff.toml/pyproject.toml, see
@@ -51,7 +52,7 @@ jobs:
       # gateway/njs/ has no pytest equivalent - plain node runs the same
       # WebCrypto-based logic njs runs inside nginx (GitHub Actions
       # runners have Node preinstalled, no setup-node action needed).
-      - run: node gateway/njs/test_jwt.mjs && node gateway/njs/test_policy.mjs
+      - run: node gateway/njs/test_jwt.mjs && node gateway/njs/test_policy.mjs && node gateway/njs/test_ratelimit.mjs
 
   integration:
     runs-on: ubuntu-latest

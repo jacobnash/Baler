@@ -19,6 +19,7 @@
       <a href="devices.html">Devices</a>
       <a href="cx.html">Commissioning</a>
       <a href="ops.html">Ops</a>
+      <a href="/docs" target="_blank" rel="noopener">Docs</a>
     </nav>
   </header>
   <div id="login-gate" class="login-gate">
@@ -59,6 +60,23 @@
           <button type="button" id="edit-phases-btn" data-min-role="operator">Edit phases</button>
           <span class="hint">Click a phase to make it current.</span>
         </div>
+      </section>
+
+      <section id="agent-section">
+        <h2>Assistant</h2>
+        <p class="hint">The commissioning agent reads this project's data and runs passive checks. Anything that changes the project it only proposes - you accept or reject each proposal below.</p>
+        <div id="agent-transcript" class="agent-transcript"></div>
+        <div class="toolbar agent-input" data-min-role="operator">
+          <textarea id="agent-message" rows="2" placeholder="e.g. What should we do next in this phase?"></textarea>
+          <button type="button" id="agent-send">Ask</button>
+          <button type="button" id="agent-new" title="Start a fresh conversation">New conversation</button>
+        </div>
+        <p id="agent-status" class="hint"></p>
+        <h3 class="cx-sub">Proposals</h3>
+        <table>
+          <thead><tr><th>Kind</th><th>What</th><th>Why</th><th>Status</th><th></th></tr></thead>
+          <tbody id="agent-proposals"></tbody>
+        </table>
       </section>
 
       <section>
@@ -311,5 +329,6 @@
   <script src="cx_procedures.js"></script>
   <script src="cx_spec.js"></script>
   <script src="cx_active.js"></script>
+  <script src="cx_agent.js"></script>
 </body>
 </html>

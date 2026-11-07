@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -34,6 +35,7 @@ from urllib.parse import parse_qs, urlparse
 from baler import docs_ui, gateway_auth, tracing
 from baler.commissioning import (
     active,
+    agent,
     db,
     economizer,
     engine,
@@ -61,7 +63,7 @@ PORT = 8009
 RUN_STATEMENT_TIMEOUT = "10min"
 
 _PROJECT = re.compile(r"/projects/([^/]+)")
-_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs)")
+_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|agent/sessions|agent/proposals)")
 _PROJECT_ISSUES = re.compile(r"/projects/([^/]+)/issues/(import|export)")
 _RUN_ISSUES = re.compile(r"/runs/([^/]+)/issues")
 _ISSUE = re.compile(r"/issues/([^/]+)")
@@ -76,6 +78,9 @@ _SPEC_DOC = re.compile(r"/spec-documents/([^/]+)")
 _SPEC_ITEM = re.compile(r"/spec-items/([^/]+)")
 _MAPPING = re.compile(r"/mappings/([^/]+)")
 _ACTIVE_RUN = re.compile(r"/active-runs/([^/]+)")
+_AGENT_SESSION = re.compile(r"/agent-sessions/([^/]+)")
+_AGENT_SESSION_MSG = re.compile(r"/agent-sessions/([^/]+)/messages")
+_PROPOSAL_SUB = re.compile(r"/agent-proposals/([^/]+)/(accept|reject)")
 _ACTIVE_RUN_SUB = re.compile(r"/active-runs/([^/]+)/(confirm|abort)")
 _RUN = re.compile(r"/runs/([^/]+)")
 _RUN_REPORT = re.compile(r"/runs/([^/]+)/report")
@@ -108,7 +113,7 @@ def _check_settings(settings) -> dict:
 engine_kwargs = runner.engine_kwargs
 
 
-def make_handler(repo, clock=None, worker=None, executor=None):
+def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None):
     now_fn = clock or (lambda: datetime.now(timezone.utc))
     worker = worker or runner.RunWorker(repo, now_fn)
     # Active tests (Cx 9) need a point_write route; without an executor
@@ -190,6 +195,9 @@ def make_handler(repo, clock=None, worker=None, executor=None):
                     ("POST", "faults/ingest"): ("ingest_faults", self._ingest_faults),
                     ("GET", "active-runs"): ("list_active_runs", self._list_active_runs),
                     ("POST", "active-runs"): ("plan_active_run", self._plan_active_run),
+                    ("GET", "agent/sessions"): ("list_agent_sessions", self._list_agent_sessions),
+                    ("POST", "agent/sessions"): ("start_agent_session", self._start_agent_session),
+                    ("GET", "agent/proposals"): ("list_agent_proposals", self._list_agent_proposals),
                 }
                 hit = table.get((method, sub))
                 return None if hit is None else (hit[0], lambda span, claims: hit[1](span, claims, pid))
@@ -204,6 +212,8 @@ def make_handler(repo, clock=None, worker=None, executor=None):
                                    ("GET", "export"): ("export_issues", self._export_issues)}),
                 (_ISSUE_SUB, {("GET", "events"): ("issue_events", self._issue_events),
                               ("POST", "risk"): ("accept_risk", self._accept_risk)}),
+                (_PROPOSAL_SUB, {("POST", "accept"): ("accept_proposal", self._accept_proposal),
+                                 ("POST", "reject"): ("reject_proposal", self._reject_proposal)}),
                 (_ACTIVE_RUN_SUB, {("POST", "confirm"): ("confirm_active_run", self._confirm_active_run),
                                    ("POST", "abort"): ("abort_active_run", self._abort_active_run)}),
             ):
@@ -239,6 +249,8 @@ def make_handler(repo, clock=None, worker=None, executor=None):
                 (_SPEC_ITEM, {"PATCH": ("patch_spec_item", self._patch_spec_item)}),
                 (_MAPPING, {"DELETE": ("undo_mapping", self._undo_mapping)}),
                 (_ACTIVE_RUN, {"GET": ("get_active_run", self._get_active_run)}),
+                (_AGENT_SESSION_MSG, {"POST": ("agent_message", self._agent_message)}),
+                (_AGENT_SESSION, {"GET": ("get_agent_session", self._get_agent_session)}),
             ):
                 m = rx.fullmatch(path)
                 if m:
@@ -1383,6 +1395,11 @@ def make_handler(repo, clock=None, worker=None, executor=None):
             its window, and the body must repeat the run's id."""
             if not self._require_admin(claims):
                 return
+            # The deployment switch answers first: with writes off, nothing
+            # about the request matters (planning, a dry run, stays allowed).
+            if not active.writes_allowed():
+                respond_error(self, 403, "active tests are switched off for this deployment (BALER_CX_ALLOW_WRITES=1 enables them)")
+                return
             hit = self._visible_active(rid, claims)
             if hit is None:
                 return
@@ -1390,9 +1407,6 @@ def make_handler(repo, clock=None, worker=None, executor=None):
             body = self.read_json_body()
             if body.get("confirm") != rid:
                 raise ValueError("confirm by sending {\"confirm\": \"<this run's id>\"} after reading the plan")
-            if not active.writes_allowed():
-                respond_error(self, 403, "active tests are switched off for this deployment (BALER_CX_ALLOW_WRITES=1 enables them)")
-                return
             if executor is None:
                 respond_error(self, 503, "no point_write route is configured on this server")
                 return
@@ -1457,6 +1471,163 @@ def make_handler(repo, clock=None, worker=None, executor=None):
                         except Exception as exc:  # noqa: BLE001 - reported; the sweeper retries
                             relinquished.append(f"FAILED {point}: {exc}")
             respond_json(self, 200, {"aborted": stopped, "relinquished": relinquished})
+
+        # ------------------------------------------------------- agent (Cx 10)
+
+        def _agent_available(self) -> bool:
+            if agent_client is not None:
+                return True
+            try:
+                import anthropic  # noqa: F401
+            except ImportError:
+                respond_error(self, 501, "the commissioning agent needs the llm extra (anthropic) installed on the server")
+                return False
+            return True
+
+        @staticmethod
+        def _transcript(messages: list[dict]) -> list[dict]:
+            """What a person reads: text, the tools the agent used, and
+            their results' errors - not the raw API blocks."""
+            out = []
+            for m in messages:
+                for b in m.get("content") or []:
+                    t = b.get("type")
+                    if t == "text" and b.get("text"):
+                        out.append({"role": m["role"], "text": b["text"]})
+                    elif t == "tool_use":
+                        out.append({"role": "tool", "tool": b["name"], "input": b.get("input")})
+                    elif t == "tool_result" and b.get("is_error"):
+                        out.append({"role": "tool", "error": str(b.get("content"))[:500]})
+            return out
+
+        def _public_session(self, sess: dict) -> dict:
+            out = {k: v for k, v in db.public_row(sess).items() if k not in ("messages", "claims")}
+            out["transcript"] = self._transcript(sess.get("messages") or [])
+            return out
+
+        def _visible_session(self, sid: str, claims: dict) -> tuple[dict, dict] | None:
+            sess = repo.get_row("cx_agent_sessions", sid)
+            project = repo.get_project(sess["project_id"]) if sess else None
+            if sess is None or project is None or not self._visible(project, claims):
+                respond_error(self, 404, "no such agent session")
+                return None
+            return sess, project
+
+        def _run_agent_turn(self, sess: dict, project: dict, text: str) -> None:
+            sid = sess["id"]
+            claims = sess["claims"]
+
+            def turn():
+                try:
+                    ctx = agent.Ctx(repo, worker, project, claims, now_fn, sid)
+                    messages, reply = agent.run_turn(ctx, sess.get("messages") or [], text, agent_client)
+                    repo.update_row("cx_agent_sessions", sid, {"messages": messages, "last_reply": reply, "status": "idle",
+                                                               "error": None, "updated_at": now_fn()})
+                except Exception as exc:  # noqa: BLE001 - recorded on the session
+                    repo.update_row("cx_agent_sessions", sid, {"status": "failed", "error": f"{type(exc).__name__}: {exc}"[:2000],
+                                                               "updated_at": now_fn()})
+            repo.update_row("cx_agent_sessions", sid, {"status": "working", "error": None, "updated_at": now_fn()})
+            threading.Thread(target=turn, name=f"cx-agent-{sid[:8]}", daemon=True).start()
+
+        def _read_message(self) -> str:
+            text = self.read_json_body().get("message")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("message is required")
+            return text.strip()
+
+        def _start_agent_session(self, span, claims, pid) -> None:
+            """A new conversation; the agent works with the caller's own
+            org and sites (and the project's site), never more."""
+            p = self._project(pid, claims)
+            if p is None or not self._agent_available():
+                return
+            text = self._read_message()
+            now = now_fn()
+            sess = {"id": db.new_id(), "project_id": pid, "created_by": claims.get("sub"),
+                    "claims": {k: claims.get(k) for k in ("sub", "org_id", "site_ids", "role")}, "status": "idle",
+                    "messages": [], "last_reply": None, "error": None, "created_at": now, "updated_at": now}
+            repo.put_rows("cx_agent_sessions", [sess])
+            self._event(pid, "agent.session", claims, {"session_id": sess["id"]})
+            self._run_agent_turn(sess, p, text)
+            respond_json(self, 202, self._public_session(repo.get_row("cx_agent_sessions", sess["id"]) or sess))
+
+        def _agent_message(self, span, claims, sid) -> None:
+            hit = self._visible_session(sid, claims)
+            if hit is None or not self._agent_available():
+                return
+            sess, project = hit
+            if sess["status"] == "working":
+                respond_error(self, 409, "the agent is still working on the last message")
+                return
+            if sess["created_by"] != claims.get("sub"):
+                respond_error(self, 403, "a session runs with its starter's access; start your own")
+                return
+            self._run_agent_turn(sess, project, self._read_message())
+            respond_json(self, 202, self._public_session(repo.get_row("cx_agent_sessions", sid) or sess))
+
+        def _get_agent_session(self, span, claims, sid) -> None:
+            hit = self._visible_session(sid, claims)
+            if hit is not None:
+                respond_json(self, 200, self._public_session(hit[0]))
+
+        def _list_agent_sessions(self, span, claims, pid) -> None:
+            if self._project(pid, claims) is not None:
+                rows = repo.find_rows("cx_agent_sessions", project_id=pid)
+                respond_json(self, 200, [{k: v for k, v in db.public_row(r).items() if k not in ("messages", "claims")}
+                                         for r in reversed(rows)])
+
+        def _list_agent_proposals(self, span, claims, pid) -> None:
+            if self._project(pid, claims) is None:
+                return
+            q = parse_qs(urlparse(self.path).query)
+            eq: dict[str, str] = {"project_id": pid}
+            if "status" in q:
+                eq["status"] = q["status"][0]
+            respond_json(self, 200, [db.public_row(r) for r in reversed(repo.find_rows("cx_agent_proposals", **eq))])
+
+        def _decide_proposal(self, claims, pid_or_id: str) -> tuple[dict, dict] | None:
+            prop = repo.get_row("cx_agent_proposals", pid_or_id)
+            project = repo.get_project(prop["project_id"]) if prop else None
+            if prop is None or project is None or not self._visible(project, claims):
+                respond_error(self, 404, "no such proposal")
+                return None
+            if prop["status"] != "proposed":
+                respond_error(self, 409, f"already {prop['status']}")
+                return None
+            return prop, project
+
+        def _accept_proposal(self, span, claims, prop_id) -> None:
+            """Carry out the agent's proposal as you (your role and scope)."""
+            hit = self._decide_proposal(claims, prop_id)
+            if hit is None:
+                return
+            prop, project = hit
+            now = now_fn()
+            try:
+                result = agent.accept(repo, prop, project, claims, now)
+            except PermissionError as exc:
+                respond_error(self, 403, str(exc))
+                return
+            except (ValueError, TypeError, KeyError, db.IssueExists) as exc:
+                repo.update_row("cx_agent_proposals", prop_id, {"status": "failed", "result": {"error": str(exc)},
+                                                                "decided_by": claims.get("sub"), "decided_at": now})
+                respond_error(self, 409, f"couldn't carry it out: {exc}")
+                return
+            repo.update_row("cx_agent_proposals", prop_id, {"status": "accepted", "result": result,
+                                                            "decided_by": claims.get("sub"), "decided_at": now})
+            self._event(project["id"], "agent.proposal.accept", claims, {"proposal_id": prop_id, "kind": prop["kind"], **result})
+            respond_json(self, 200, db.public_row(repo.get_row("cx_agent_proposals", prop_id) or prop))
+
+        def _reject_proposal(self, span, claims, prop_id) -> None:
+            hit = self._decide_proposal(claims, prop_id)
+            if hit is None:
+                return
+            prop, project = hit
+            note = self.read_json_body().get("note")
+            repo.update_row("cx_agent_proposals", prop_id, {"status": "rejected", "decided_by": claims.get("sub"), "decided_at": now_fn(),
+                                                            "result": {"note": str(note)[:2000]} if note else None})
+            self._event(project["id"], "agent.proposal.reject", claims, {"proposal_id": prop_id, "kind": prop["kind"]})
+            respond_json(self, 200, db.public_row(repo.get_row("cx_agent_proposals", prop_id) or prop))
 
         def _templates(self, span, claims) -> None:
             respond_json(self, 200, [t.as_dict() for t in tpl.load()])
