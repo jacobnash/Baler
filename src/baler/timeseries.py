@@ -10,6 +10,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import psycopg
+from psycopg import sql
 from psycopg_pool import ConnectionPool
 
 from baler import ddl
@@ -43,10 +44,13 @@ ON point_history (point_uri, ts DESC) WHERE unit IS NOT NULL OR label IS NOT NUL
 # point_history in 5-minute buckets, and 1-hour buckets built on those. Each
 # keeps sum/count/min/max (avg = sum/count), which recombine exactly into any
 # coarser bucket, so read_rollup can fold a day of 5M raw samples from ~150k
-# pre-summed rows instead. materialized_only = false: anything newer than the
-# last refresh is folded from raw rows at query time, so results are never
-# stale. Refreshed every 5/30 minutes over the last ROLLUP_WINDOW_DAYS + 5
-# days; older spans keep using raw rows (never materialized there).
+# pre-summed rows instead. Refreshed every 5/30 minutes over the last
+# ROLLUP_WINDOW_DAYS + 5 days. read_rollup never trusts a bucket TimescaleDB
+# itself records as out of date (unrefreshed tail, backfill since the last
+# refresh, never materialized): it folds those from raw rows (_rollup_plan),
+# so results are the raw fold's, never stale. (materialized_only = false
+# alone wasn't enough: it covers only data newer than the watermark, and
+# backfill below it stayed invisible until the next refresh.)
 ROLLUP_VIEWS = (("point_history_1h", 3600), ("point_history_5m", 300))
 ROLLUP_WINDOW_DAYS = 30
 _V = "COALESCE(value, value_bool::int::float8)"
@@ -324,56 +328,200 @@ _PART_FOLD_SQL = {
     "sum": "SUM(vsum)",
     "count": "SUM(vcount)",
 }
-_views_present: bool | None = None
+# _PART_FOLD_SQL over exactly one part row.
+_ROW_FOLD_SQL = {
+    "avg": "vsum / NULLIF(vcount, 0)",
+    "min": "vmin",
+    "max": "vmax",
+    "sum": "vsum",
+    "count": "vcount",
+}
+
+# Each view's source, for hierarchical aggregates: a view is only as fresh
+# as the one it is built from.
+_VIEW_SOURCE = {"point_history_1h": "point_history_5m"}
+# Past this many separate pieces the plan isn't worth it (lots of scattered
+# backfill): fold everything from raw rows instead, which is always exact.
+_MAX_PLAN_PARTS = 24
+_US = 1_000_000
+
+# What each view has NOT got right yet, straight from TimescaleDB's own
+# bookkeeping, in its internal time (microseconds since the Unix epoch):
+# - the view's materialization log: ranges never materialized (before the
+#   policy window, after the last refresh) or invalidated since;
+# - its source hypertable's log: writes below the invalidation threshold
+#   (backfill, late data) that no refresh has picked up yet;
+# - everything from the view's watermark on.
+# Internal catalog tables (no public API exposes pending invalidations): if
+# a TimescaleDB upgrade renames them this query fails and read_rollup folds
+# raw rows, which is slower but still exact.
+_DIRTY_SQL = """
+WITH ca AS (
+    SELECT c.user_view_name::text AS v, c.mat_hypertable_id AS mat, c.raw_hypertable_id AS raw,
+           h.schema_name::text AS mat_schema, h.table_name::text AS mat_table
+    FROM _timescaledb_catalog.continuous_agg c
+    JOIN _timescaledb_catalog.hypertable h ON h.id = c.mat_hypertable_id
+    WHERE c.user_view_name = ANY(%s)
+)
+SELECT v, mat_schema, mat_table, _timescaledb_functions.cagg_watermark(mat), NULL::bigint FROM ca
+UNION ALL
+SELECT ca.v, NULL, NULL, l.lowest_modified_value, l.greatest_modified_value
+FROM ca JOIN _timescaledb_catalog.continuous_aggs_materialization_invalidation_log l ON l.materialization_id = ca.mat
+UNION ALL
+SELECT ca.v, NULL, NULL, l.lowest_modified_value, l.greatest_modified_value
+FROM ca JOIN _timescaledb_catalog.continuous_aggs_hypertable_invalidation_log l ON l.hypertable_id = ca.raw
+"""
 
 
-def _rollup_view_for(conn, start_ts: datetime, end_ts: datetime, interval_seconds: int | None) -> tuple[str, int] | None:
-    """The coarsest pre-folded view that gives exactly the raw answer: its
-    bucket divides the interval, the span starts on one of its boundaries
-    (so no bucket straddles two output buckets), and the span is inside the
-    window the refresh policy keeps materialized."""
-    global _views_present
+def _rollup_levels(start_ts: datetime, interval_seconds: int | None) -> list[tuple[str, int]]:
+    """The pre-folded views usable for this rollup, coarsest first: the
+    view's bucket divides the interval and the span starts on one of its
+    boundaries, so none of its buckets straddles two output buckets."""
     if not interval_seconds or start_ts.tzinfo is None:
-        return None
-    if start_ts < datetime.now(timezone.utc) - timedelta(days=ROLLUP_WINDOW_DAYS) or end_ts <= start_ts:
-        return None
-    if _views_present is not True:
-        row = conn.execute("SELECT to_regclass('point_history_1h') IS NOT NULL").fetchone()
-        _views_present = bool(row and row[0])
-        if not _views_present:
-            return None
+        return []
     start_epoch = start_ts.timestamp()
-    for view, size in ROLLUP_VIEWS:
-        if interval_seconds % size == 0 and start_epoch % size == 0:
-            return view, size
-    return None
+    return [(view, size) for view, size in ROLLUP_VIEWS
+            if interval_seconds % size == 0 and start_epoch % size == 0]
 
 
-def _read_rollup_from_view(conn, view: str, size: int, point_uris: list[str], start_ts: datetime,
-                           end_ts: datetime, fold: str, interval_seconds: int) -> list[tuple]:
-    """Whole buckets from the view up to the last full one before end_ts,
-    then the raw samples after it (the tail of a "today" span), folded
-    together into date_bin buckets aligned to start_ts."""
-    aligned_end = datetime.fromtimestamp(end_ts.timestamp() // size * size, tz=timezone.utc)
-    aligned_end = max(aligned_end, start_ts)
-    return conn.execute(
-        f"""
-        SELECT point_uri, date_bin(make_interval(secs => %s), b, %s) AS bucket, {_PART_FOLD_SQL[fold]} AS agg
-        FROM (
-            SELECT point_uri, bucket AS b, vsum, vcount::bigint AS vcount, vmin, vmax FROM {view}
-            WHERE point_uri = ANY(%s) AND bucket >= %s AND bucket < %s
-            UNION ALL
-            SELECT point_uri, ts, v, 1::bigint, v, v FROM (
-                SELECT point_uri, ts, {_V} AS v FROM point_history
-                WHERE point_uri = ANY(%s) AND ts >= %s AND ts < %s
-            ) raw WHERE v IS NOT NULL
-        ) parts
-        GROUP BY point_uri, 2
-        HAVING SUM(vcount) > 0
-        ORDER BY point_uri, 2
-        """,
-        (interval_seconds, start_ts, point_uris, start_ts, aligned_end, point_uris, aligned_end, end_ts),
-    ).fetchall()
+def _merge(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    for a, b in sorted(ranges):
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def _subtract(region: tuple[int, int], holes: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """region minus the (merged, sorted) holes, as half-open ranges."""
+    a, b = region
+    out = []
+    for ha, hb in holes:
+        if hb <= a or ha >= b:
+            continue
+        if ha > a:
+            out.append((a, ha))
+        a = max(a, hb)
+    if a < b:
+        out.append((a, b))
+    return out
+
+
+def _dirty_by_view(conn, views: list[str]) -> tuple[dict[str, list[tuple[int, int]]], dict[str, tuple[str, str]]] | None:
+    """Per view: merged half-open µs ranges, widened to whole view buckets,
+    where its materialized rows can't be trusted - including whatever its
+    source view can't (transitively). Plus each view's materialization
+    table. None when the views or the catalog aren't there."""
+    wanted = set(views)
+    for v in views:
+        while v in _VIEW_SOURCE:
+            v = _VIEW_SOURCE[v]
+            wanted.add(v)
+    try:
+        with conn.transaction():  # a savepoint: a failure here mustn't abort the caller's transaction
+            rows = conn.execute(_DIRTY_SQL, (sorted(wanted),)).fetchall()
+    except psycopg.Error:
+        return None
+    sizes = dict(ROLLUP_VIEWS)
+    raw: dict[str, list[tuple[int, int]]] = {v: [] for v in wanted}
+    tables: dict[str, tuple[str, str]] = {}
+    for v, schema, table, lo, hi in rows:
+        size = sizes[v] * _US
+        if schema is not None:  # the watermark row
+            tables[v] = (schema, table)
+            raw[v].append((lo // size * size, 2**63))
+        else:  # inclusive [lo, hi] -> every view bucket it touches
+            raw[v].append((lo // size * size, (hi // size + 1) * size))
+    if set(tables) != wanted:
+        return None
+    dirty = {}
+    for v in views:
+        ranges, src = list(raw[v]), v
+        while src in _VIEW_SOURCE:
+            src = _VIEW_SOURCE[src]
+            size = sizes[v] * _US  # a dirty source bucket spoils the whole bucket of v around it
+            ranges += [(a // size * size, -(-b // size) * size) for a, b in raw[src]]
+        dirty[v] = _merge(ranges)
+    return dirty, tables
+
+
+def _rollup_plan(conn, levels: list[tuple[str, int]], start_ts: datetime, end_ts: datetime) -> list[tuple] | None:
+    """Cover [start_ts, end_ts) with the coarsest clean pieces available:
+    ("view", schema, table, bucket_seconds, a, b) for whole materialized buckets that are
+    up to date, finer views for what coarser ones haven't got right, and
+    ("raw", a, b) for the rest - the unrefreshed tail, the partial last
+    bucket, backfill no refresh has seen yet. Every raw sample is counted
+    exactly once, from wherever its bucket is clean. None means fold
+    everything from raw rows."""
+    found = _dirty_by_view(conn, [v for v, _ in levels])
+    if found is None:
+        return None
+    dirty, tables = found
+    todo = [(int(start_ts.timestamp() * _US), int(end_ts.timestamp() * _US))]
+    parts: list[tuple] = []
+    for view, size_s in levels:
+        size = size_s * _US
+        left = []
+        for a, b in todo:
+            whole = (-(-a // size) * size, b // size * size)
+            clean = _subtract(whole, dirty[view]) if whole[0] < whole[1] else []
+            parts += [("view", *tables[view], size_s, x, y) for x, y in clean]
+            left += _subtract((a, b), clean)
+        todo = left
+    parts += [("raw", a, b) for a, b in todo]
+    if not any(p[0] == "view" for p in parts) or len(parts) > _MAX_PLAN_PARTS:
+        return None
+    return parts
+
+
+def _ts(us: int) -> datetime:
+    return datetime.fromtimestamp(0, tz=timezone.utc) + timedelta(microseconds=us)
+
+
+def _read_rollup_planned(conn, parts: list[tuple], point_uris: list[str], start_ts: datetime,
+                         fold: str, interval_seconds: int) -> list[tuple]:
+    """Fold the plan's pieces together into date_bin buckets aligned to
+    start_ts: pre-summed (vsum, vcount, vmin, vmax) rows from the views,
+    raw samples as one-sample parts. A view whose bucket IS the output
+    bucket needs no regrouping: each of its rows is a finished bucket (no
+    other piece shares it - dirty ranges are whole buckets), so those rows
+    skip the hash aggregate, with the same arithmetic on one row."""
+    direct: list[sql.Composable] = []
+    grouped: list[sql.Composable] = []
+    direct_params: list = []
+    grouped_params: list = []
+    for part in parts:
+        if part[0] == "view":
+            _, schema, table, size, a, b = part
+            branch = sql.SQL(
+                "SELECT point_uri, bucket AS b, vsum, vcount::bigint AS vcount, vmin, vmax FROM {} "
+                "WHERE point_uri = ANY(%s) AND bucket >= %s AND bucket < %s").format(sql.Identifier(schema, table))
+            target, target_params = (direct, direct_params) if size == interval_seconds else (grouped, grouped_params)
+        else:
+            _, a, b = part
+            branch = sql.SQL(
+                f"SELECT point_uri, ts AS b, v AS vsum, 1::bigint AS vcount, v AS vmin, v AS vmax FROM (SELECT point_uri, ts, {_V} AS v FROM point_history "
+                "WHERE point_uri = ANY(%s) AND ts >= %s AND ts < %s) raw WHERE v IS NOT NULL")
+            target, target_params = grouped, grouped_params
+        target.append(branch)
+        target_params += [point_uris, _ts(a), _ts(b)]
+    selects: list[sql.Composable] = []
+    params: list = []
+    if direct:
+        selects.append(sql.SQL(
+            "SELECT point_uri, b AS bucket, {fold} AS agg FROM ({parts}) parts WHERE vcount > 0"
+        ).format(fold=sql.SQL(_ROW_FOLD_SQL[fold]), parts=sql.SQL(" UNION ALL ").join(direct)))
+        params += direct_params
+    if grouped:
+        selects.append(sql.SQL(
+            "SELECT point_uri, date_bin(make_interval(secs => %s), b, %s) AS bucket, {fold} AS agg "
+            "FROM ({parts}) parts GROUP BY point_uri, 2 HAVING SUM(vcount) > 0"
+        ).format(fold=sql.SQL(_PART_FOLD_SQL[fold]), parts=sql.SQL(" UNION ALL ").join(grouped)))
+        params += [interval_seconds, start_ts, *grouped_params]
+    query = sql.SQL("SELECT * FROM ({}) r ORDER BY bucket").format(sql.SQL(" UNION ALL ").join(selects))
+    return conn.cursor(binary=True).execute(query, params).fetchall()
 
 
 def read_rollup(
@@ -393,18 +541,27 @@ def read_rollup(
     the caller's zone so a "day" or "month" boundary is the local one.
     Booleans fold as 0/1 (so avg of a run status = fraction of the
     interval it was on); text values are skipped - there's nothing
-    numeric to fold. Each bucket is stamped with its START."""
+    numeric to fold. Each bucket is stamped with its START.
+
+    Fixed intervals read the continuous aggregates where they are up to
+    date and raw rows elsewhere (_rollup_plan), inside one REPEATABLE READ
+    snapshot so the bookkeeping read and the data read agree - the answer
+    is the raw fold's as of that snapshot, never a stale one."""
     if not point_uris:
         return {}
     if fold not in _FOLD_SQL:
         raise ValueError(f"unknown fold {fold!r}")
-    view = _rollup_view_for(conn, start_ts, end_ts, interval_seconds) if interval_months is None else None
-    if view is not None:
-        out: dict[str, list] = {uri: [] for uri in point_uris}
-        for point_uri, bucket, agg in _read_rollup_from_view(conn, view[0], view[1], point_uris, start_ts, end_ts,
-                                                             fold, int(interval_seconds or 0)):
-            out[point_uri].append((bucket, float(agg) if agg is not None else None))
-        return out
+    out: dict[str, list] = {uri: [] for uri in point_uris}
+    levels = _rollup_levels(start_ts, interval_seconds) if interval_months is None and end_ts > start_ts else []
+    if levels:
+        with conn.transaction():
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            parts = _rollup_plan(conn, levels, start_ts, end_ts)
+            rows = _read_rollup_planned(conn, parts, point_uris, start_ts, fold, int(interval_seconds or 0)) if parts else None
+        if rows is not None:
+            for point_uri, bucket, agg in rows:
+                out[point_uri].append((bucket, float(agg) if agg is not None else None))
+            return out
     if interval_months is not None:
         unit = _CALENDAR_TRUNC.get(interval_months)
         if unit is None:
@@ -416,7 +573,11 @@ def read_rollup(
             raise ValueError("rollup interval must be positive")
         bucket_sql = "date_bin(make_interval(secs => %s), ts, %s)"
         bucket_params = (interval_seconds, start_ts)
-    cur = conn.execute(
+    # ORDER BY bucket alone: rows are filed per point below, so only each
+    # point's own order matters, and sorting on point_uri too (a collated
+    # text sort) was most of this query's time. Binary results: about half
+    # the client-side decode cost of text for ~100k rows.
+    cur = conn.cursor(binary=True).execute(
         f"""
         SELECT point_uri, bucket, {_FOLD_SQL[fold]} AS agg FROM (
             SELECT point_uri, {bucket_sql} AS bucket,
@@ -426,11 +587,10 @@ def read_rollup(
         ) t
         WHERE v IS NOT NULL
         GROUP BY point_uri, bucket
-        ORDER BY point_uri, bucket
+        ORDER BY bucket
         """,
         (*bucket_params, point_uris, start_ts, end_ts),
     )
-    out = {uri: [] for uri in point_uris}
     for point_uri, bucket, agg in cur.fetchall():
         out[point_uri].append((bucket, float(agg) if agg is not None else None))
     return out
