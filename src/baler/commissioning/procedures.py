@@ -294,7 +294,10 @@ def eval_check(c: dict, equip: dict, results: list[dict], classes: dict[str, str
     return {"criterion": c, "status": status, "counts": counts, "failing": failing}
 
 
-def eval_range(c: dict, equip: dict, series: dict[str, list], points: dict[str, dict]) -> dict:
+def eval_range(c: dict, equip: dict, series: dict[str, list], points: dict[str, dict],
+               truncated: set[str] | frozenset = frozenset()) -> dict:
+    """A point whose window was cut at the read limit can still fail (a bad
+    value was seen) but can't pass: the unread rest might not be in range."""
     r = c["range"]
     if c.get("point"):
         targets = [points[c["point"]]] if c["point"] in points else []
@@ -304,7 +307,7 @@ def eval_range(c: dict, equip: dict, series: dict[str, list], points: dict[str, 
     if not targets:
         return {"criterion": c, "status": "inconclusive" if c.get("required") or c.get("point") else "not_applicable",
                 "counts": {}, "failing": []}
-    out, bad, unknown = [], [], 0
+    out, bad, unknown, partial = [], [], 0, []
     for p in targets:
         vals = [v for _, v in numeric(series.get(p["id"], []))]
         if not vals:
@@ -319,14 +322,21 @@ def eval_range(c: dict, equip: dict, series: dict[str, list], points: dict[str, 
             lo, hi = [None if x is None else x * 9 / 5 + 32 for x in (lo, hi)]
         low, high = min(vals), max(vals)
         ok = (lo is None or low >= lo) and (hi is None or high <= hi)
-        out.append(p["id"])
         if not ok:
+            out.append(p["id"])
             bad.append({"subject": p["id"], "status": "fail", "check_id": "range",
                         "symptom": f"{p.get('dis') or p['id']} ranged {low:g}..{high:g} {p.get('unit') or ''}".strip()
                         + f", outside {lo if lo is not None else '-inf'}..{hi if hi is not None else 'inf'}"})
+        elif p["id"] in truncated:
+            unknown += 1
+            partial.append({"subject": p["id"], "status": "inconclusive", "check_id": "range",
+                            "symptom": f"window truncated at {len(series.get(p['id'], []))} samples: "
+                                       "only the start of the window was read, so the rest is unjudged"})
+        else:
+            out.append(p["id"])
     status = "fail" if bad else ("inconclusive" if unknown or not out else "pass")
     return {"criterion": c, "status": status, "counts": {"pass": len(out) - len(bad), "fail": len(bad), "inconclusive": unknown},
-            "failing": bad[:10]}
+            "failing": (bad + partial)[:10]}
 
 
 def worst(statuses) -> str:
@@ -336,9 +346,11 @@ def worst(statuses) -> str:
     return min(st, key=lambda s: ORDER[s])
 
 
-def evaluate(proc: dict, equips: list[dict], results: list[dict], series: dict[str, list]) -> list[dict]:
+def evaluate(proc: dict, equips: list[dict], results: list[dict], series: dict[str, list],
+             truncated: set[str] | frozenset = frozenset()) -> list[dict]:
     """[{equip_uri, dis, status, steps: [{id, title, status, criteria: [...]}]}]
-    for every equipment the procedure applies to."""
+    for every equipment the procedure applies to. `truncated`: points whose
+    window read stopped at the per-point limit (History.window)."""
     classes = {p["id"]: p.get("brickClass") for e in equips for p in e["points"]}
     points = {p["id"]: p for e in equips for p in e["points"]}
     out = []
@@ -347,7 +359,7 @@ def evaluate(proc: dict, equips: list[dict], results: list[dict], series: dict[s
             continue
         steps = []
         for st in proc["steps"]:
-            crit = [eval_range(c, e, series, points) if "range" in c else eval_check(c, e, results, classes)
+            crit = [eval_range(c, e, series, points, truncated) if "range" in c else eval_check(c, e, results, classes)
                     for c in st["criteria"]]
             steps.append({"id": st["id"], "title": st["title"], "status": worst(c["status"] for c in crit), "criteria": crit})
         out.append({"equip_uri": e["id"], "dis": e.get("dis"), "status": worst(s["status"] for s in steps), "steps": steps})
@@ -408,18 +420,21 @@ def diff_results(previous: list[dict], current: list[dict]) -> dict:
 
 
 class ClippedHistory:
-    """History as of `end`: `latest` is the last sample at or before end
-    (within `lookback`), so a past test window isn't judged on data that
-    arrived later."""
+    """History as of `end`: `latest` is the last sample at or before end,
+    so a past test window isn't judged on data that arrived later. It is
+    one backward probe per point - reading a 31-day window and taking the
+    last row judged "latest" on the 5000th-oldest sample once a point had
+    more than the window's per-point limit (Baler#88)."""
 
-    def __init__(self, history: History, end: datetime, lookback: timedelta = timedelta(days=31)):
+    def __init__(self, history: History, end: datetime):
         self.history = history
         self.end = end
-        self.lookback = lookback
 
-    def latest(self, point_uris: list[str]):
-        w = self.history.window(point_uris, self.end - self.lookback, self.end + timedelta(seconds=1))
-        return {u: s[-1] for u, s in w.items() if s}
+    def latest(self, point_uris: list[str], before: datetime | None = None):
+        return self.history.latest(point_uris, before=min(before or self.end, self.end))
 
-    def window(self, point_uris: list[str], start: datetime, end: datetime):
-        return self.history.window(point_uris, start, min(end, self.end + timedelta(seconds=1)))
+    def latest_raw(self, point_uris: list[str], before: datetime | None = None):
+        return self.history.latest_raw(point_uris, before=min(before or self.end, self.end))
+
+    def window(self, point_uris: list[str], start: datetime, end: datetime, truncated: set[str] | None = None):
+        return self.history.window(point_uris, start, min(end, self.end + timedelta(seconds=1)), truncated=truncated)

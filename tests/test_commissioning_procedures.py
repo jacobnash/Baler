@@ -35,8 +35,9 @@ def _evaluate(template, history=None, start=None, end=None):
     _, results = engine.run(hx.store(), hist, [Scope.everything()], end, (end - start).total_seconds() / 3600,
                             equips=equips, site_equips=site)
     ids = runner._range_points(proc, site)
-    series = hist.window(ids, start, end + timedelta(seconds=1))
-    return procedures.evaluate(proc, equips, results, series)
+    truncated: set[str] = set()
+    series = hist.window(ids, start, end + timedelta(seconds=1), truncated=truncated)
+    return procedures.evaluate(proc, equips, results, series, truncated)
 
 
 def _step(per, equip, step):
@@ -115,6 +116,53 @@ def test_a_past_window_is_judged_on_what_was_known_then():
     end = hx.NOW - timedelta(hours=6)
     per = _evaluate("boiler_power_on", h, start=end - timedelta(hours=2), end=end)
     assert _step(per, hx.BOILER, "points-appear")["status"] == "fail"
+
+
+def _limited(limit):
+    """The hospital history behind PostgresHistory's per-point read limit."""
+    h = hx.history()
+    return type(h)(h.series, per_point_limit=limit)
+
+
+def test_latest_is_the_newest_sample_even_past_the_read_limit():
+    """Baler#88: 24 h of 5-minute samples is 288 rows; with a 50-row read
+    limit, 'latest' read through a window was the 50th-oldest sample (20 h
+    stale) and every point failed 'every point appears'."""
+    per = _evaluate("boiler_power_on", _limited(50))
+    assert _step(per, hx.BOILER, "points-appear")["status"] == "pass"
+
+
+def test_a_truncated_window_cannot_pass_a_range_but_can_fail_it():
+    hw = _step(_evaluate("boiler_startup", _limited(50)), hx.BOILER, "hw-temp")
+    assert hw["status"] == "inconclusive"
+    assert "window truncated at 50 samples" in hw["criteria"][0]["failing"][0]["symptom"]
+
+    h = _limited(50)
+    h.add(hx.pt(hx.BOILER, "hw-sup-temp"), hx.NOW - timedelta(hours=23, minutes=59), -40.0)  # inside the read prefix
+    hw = _step(_evaluate("boiler_startup", h), hx.BOILER, "hw-temp")
+    assert hw["status"] == "fail" and "-40" in hw["criteria"][0]["failing"][0]["symptom"]
+
+
+def test_empty_readings_are_not_reporting():
+    """Baler#85: a bridge publishing null while the device is down must fail
+    'every point appears', not pass on the null rows."""
+    h = hx.history()
+    dead = hx.pt(hx.BOILER, "hw-ret-temp")
+    h.series[dead] = [(t, v) for t, v in h.series[dead] if t < hx.NOW - timedelta(hours=3)]
+    for m in range(0, 120, 5):
+        h.add(dead, hx.NOW - timedelta(minutes=m), None)
+    appear = _step(_evaluate("boiler_power_on", h), hx.BOILER, "points-appear")
+    assert appear["status"] == "fail"
+    [f] = appear["criteria"][0]["failing"]
+    assert f["subject"] == dead and "empty readings" in f["symptom"]
+
+
+def test_empty_readings_with_no_real_value_ever_say_so():
+    h = hx.history()
+    dead = hx.pt(hx.BOILER, "hw-ret-temp")
+    h.series[dead] = [(hx.NOW - timedelta(minutes=m), None) for m in range(0, 60, 5)]
+    [f] = _step(_evaluate("boiler_power_on", h), hx.BOILER, "points-appear")["criteria"][0]["failing"]
+    assert "no real value ever" in f["symptom"]
 
 
 def test_diff_states():

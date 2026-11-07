@@ -186,24 +186,46 @@ def read_latest(conn: psycopg.Connection, point_uri: str):
     return None if row is None else _row_to_value(row)
 
 
-def read_latest_many(conn: psycopg.Connection, point_uris: list[str]) -> dict[str, tuple[datetime, object]]:
+def read_latest_many(
+    conn: psycopg.Connection,
+    point_uris: list[str],
+    before: datetime | None = None,
+    since: datetime | None = None,
+    with_value: bool = False,
+) -> dict[str, tuple[datetime, object]]:
     """Latest (ts, value) per point, in one query: haystack_api's curVal
     and the commissioning existence check both need it for hundreds of
-    points at once. Points with no samples are absent from the result."""
+    points at once. Points with no samples are absent from the result.
+
+    `before` makes it "latest as of" (ts <= before) - a past Cx test window
+    is judged on what had arrived by its end. `with_value` skips rows with
+    no value at all (a bridge that publishes null when it can't reach the
+    device, Baler#85); pair it with `since` so a point with nothing but
+    empty rows doesn't walk its whole history."""
     if not point_uris:
         return {}
+    conds = ["point_uri = u.uri"]
+    params: list = [point_uris]
+    if before is not None:
+        conds.append("ts <= %s")
+        params.append(before)
+    if since is not None:
+        conds.append("ts >= %s")
+        params.append(since)
+    if with_value:
+        conds.append("(value IS NOT NULL OR value_text IS NOT NULL OR value_bool IS NOT NULL)")
     cur = conn.execute(
-        """
+        f"""
         SELECT u.uri, h.ts, h.value, h.value_text, h.value_bool
         FROM unnest(%s::text[]) AS u(uri)
         CROSS JOIN LATERAL (
             -- one backward primary-key probe per point; DISTINCT ON sorted
             -- every row of every point's history (>60s at 20M rows)
             SELECT ts, value, value_text, value_bool FROM point_history
-            WHERE point_uri = u.uri ORDER BY ts DESC LIMIT 1
+            WHERE {" AND ".join(conds)} ORDER BY ts DESC LIMIT 1
         ) h
         """,
-        (point_uris,),
+        params,
     )
     return {uri: (ts, _row_to_value((v, vt, vb))) for uri, ts, v, vt, vb in cur.fetchall()}
 
