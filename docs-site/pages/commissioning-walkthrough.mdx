@@ -47,7 +47,7 @@ Sources: [ASHRAE Guideline 0 overview](https://cxplanner.com/commissioning-101/a
 | Start-up and functional tests | Procedures (power-on, start-up, functional), including S1-S3 sequence criteria seeded from a spec's acceptance criteria |
 | Sequence checks | Optional ASHRAE Guideline 36 items (`gl36:*` results) |
 | Issues log | Cx issues opened from failing (or inconclusive) results. A passing run only *resolves* one (`ready_for_retest`, shown as "resolved, pending verification"); a later run over data from after the fix records the retest; only a person closes it, and the close cites that retest |
-| Waivers | An accepted risk on an issue (owner, reason, review-by date), so a known failure or an inconclusive result can be signed off |
+| Waivers | An accepted risk on an issue (reason, owner, retest trigger and review-by date, all required), so a known failure or an inconclusive result can be signed off. The accepter is named by the display name on their account (Ops -> Users), labelled CxA in the report when it matches `settings.cxa_name` |
 | Phase sign-off | Phase gates: moving into start-up, functional testing and acceptance (and later) checks the records first (`settings.phase_gates`: `warn`, `block` or `off`) |
 | Final report | The project Cx report, `GET /cx/projects/{id}/report?format=html`: phase history, spec vs installed, verdicts, procedure results, the issues log with who did what |
 | Ongoing commissioning | Fault rules and derivations running on live data, shown in Alarms and Derivations |
@@ -180,7 +180,10 @@ equipment verdicts from the latest run, procedure results, and the issues
 log with every resolve, retest and close, who did it and when. The same
 data comes back as JSON without `?format=html`. The report needs the
 `Authorization` header, so a plain browser link won't open it; use the
-script, or `curl -H "Authorization: Bearer $TOKEN"`.
+Commissioning page's **Project Cx report** button, the script, or
+`curl -H "Authorization: Bearer $TOKEN"`. Add `&origin=https://your-baler`
+so the trend links in a saved copy point at your Baler (the button and the
+script do).
 
 ## Walkthrough: the retrofit and the campus
 

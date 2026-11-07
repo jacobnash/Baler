@@ -86,10 +86,12 @@
           <label>Window (hours) <input type="number" id="run-window" min="1" max="744" step="1" placeholder="24" /></label>
           <span id="run-status" class="hint"></span>
         </div>
+        <div class="cx-grid-wrap">
         <table>
           <thead><tr><th>Started</th><th>Phase</th><th>Status</th><th>Fail</th><th>Inconclusive</th><th>Pass</th><th></th></tr></thead>
           <tbody id="runs-body"></tbody>
         </table>
+        </div>
       </section>
 
       <section id="results-section" hidden>
@@ -104,6 +106,7 @@
           <label>Equipment <input type="search" id="results-search" placeholder="filter, e.g. campus-07 or ahu" /></label>
           <span id="results-count" class="hint"></span>
           <button type="button" id="report-btn">Printable report</button>
+          <button type="button" id="project-report-btn" title="The whole project for the CxA: limitations, sequences, acceptance, issues and waivers, sign-off">Project Cx report</button>
           <button type="button" id="issues-from-run-btn" data-min-role="operator">Open issues for failures</button>
         </div>
         <div class="cx-grid-wrap"><table id="results-grid" class="cx-grid"></table></div>
@@ -311,8 +314,8 @@
         <label>Reason <input type="text" id="risk-reason" required placeholder="why it can't be closed now, e.g. read-only controller" /></label>
         <label>Owner / responsible <input type="text" id="risk-owner" required placeholder="a party or person, e.g. Controls contractor (Acme)" /></label>
         <label>Retest trigger <input type="text" id="risk-retest" required placeholder="an event, e.g. first heating changeover, or writes enabled" /></label>
-        <label>Accepted by (your name as signed) <input type="text" id="risk-name" required placeholder="e.g. Jacob Nash" /></label>
-        <label>Review by <input type="date" id="risk-review" /></label>
+        <label>Accepted by <input type="text" id="risk-name" required placeholder="e.g. Jacob Nash" aria-describedby="risk-name-hint" /> <span class="hint" id="risk-name-hint"></span></label>
+        <label>Review by <input type="date" id="risk-review" required /></label>
         <button type="button" id="risk-accept-btn">Accept risk</button>
       </fieldset>
       <details><summary>History</summary><ul id="issue-events" class="cx-events hint"></ul></details>

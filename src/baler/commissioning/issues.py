@@ -199,9 +199,10 @@ def _due(v) -> date:
 
 
 def check_risk(body: dict, today: date) -> tuple[str, date]:
-    """(reason, review_by). The optional structured fields - owner (who is
-    responsible for the open item) and retest_trigger (what retest lifts
-    it, e.g. "first seasonal changeover") - are read by risk_extras."""
+    """(reason, review_by). The other required fields - owner (who is
+    responsible for the open item), retest_trigger (what retest lifts it,
+    e.g. "first seasonal changeover") and who accepted it - are read by
+    risk_extras."""
     reason = _text(body.get("reason"))
     if not reason:
         raise ValueError("reason is required")
@@ -214,18 +215,32 @@ def check_risk(body: dict, today: date) -> tuple[str, date]:
     return reason, review_by
 
 
-def risk_extras(body: dict) -> dict:
+def risk_extras(body: dict, account_name: str | None = None) -> dict:
     """A waiver must say who carries the open item and what retest lifts it
     - a blank Owner / Retest trigger printed "-" in the report (Baler#100
-    review). accepted_name is how the person accepting it signs (e.g.
-    "Jacob Nash"); the account email stays as accepted_email."""
+    review, #121) - and who accepted it by name.
+
+    The accepter's name is the display name on their own user record
+    (account_name) when it has one, snapshotted onto the waiver so a later
+    rename doesn't rewrite a signed record; a body accepted_name is then
+    ignored, so nobody can sign as someone else. Without one, accepted_name
+    is required and kept as typed (accepted_name_source "typed"; the report
+    never labels a typed name as the CxA). The account email stays as
+    accepted_email."""
     owner = _text(body.get("owner"), 200)
     trigger = _text(body.get("retest_trigger"), 500)
     if not owner:
         raise ValueError("owner is required: who is responsible for the open item")
     if not trigger:
         raise ValueError("retest_trigger is required: what retest lifts the waiver (e.g. first seasonal changeover)")
-    return {"owner": owner, "retest_trigger": trigger, "accepted_name": _text(body.get("accepted_name"), 200)}
+    account = _text(account_name, 200)
+    if account:
+        return {"owner": owner, "retest_trigger": trigger, "accepted_name": account, "accepted_name_source": "account"}
+    typed = _text(body.get("accepted_name"), 200)
+    if not typed:
+        raise ValueError("accepted_name is required: your account has no display name (an admin sets it in "
+                         "Ops -> Users), so say who is accepting this risk")
+    return {"owner": owner, "retest_trigger": trigger, "accepted_name": typed, "accepted_name_source": "typed"}
 
 
 # ------------------------------------------------------------ import/export

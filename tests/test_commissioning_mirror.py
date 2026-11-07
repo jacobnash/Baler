@@ -105,7 +105,8 @@ def test_confirmed_only_and_risk_suppression(served, repo):
     assert {f["point_uri"] for f in repo.faults} == {RAT}  # AHU only, VAV not confirmed
     issue = requests.post(f"{base}/projects/{p['id']}/issues", headers=api.A,
                           json={"from_result": {"run_id": run["run"]["id"], "check_id": "exists", "subject": RAT}}).json()
-    assert requests.post(f"{base}/issues/{issue['id']}/risk", json={"owner": "Controls Co", "retest_trigger": "sensor replaced", "reason": "on order", "review_by": "2027-01-01"}, headers=api.A).status_code == 201
+    assert requests.post(f"{base}/issues/{issue['id']}/risk", json={"owner": "Controls Co", "retest_trigger": "sensor replaced", "reason": "on order", "review_by": "2027-01-01",
+                                                                         "accepted_name": "Pat Admin"}, headers=api.A).status_code == 201
     _run(base, p["id"])
     assert repo.faults[0]["status"] == "resolved"  # the accepted risk suppresses the mirror
 
