@@ -1,8 +1,14 @@
 """The data side of scripts/seed_cx_demo.py: pure functions, no server."""
 
+import importlib.util
 import random
+from pathlib import Path
 
-from scripts import seed_cx_demo as seed
+# scripts/ isn't a package, so load the script by path (CI's import roots differ
+# from a local checkout's).
+_spec = importlib.util.spec_from_file_location("seed_cx_demo", Path(__file__).resolve().parent.parent / "scripts" / "seed_cx_demo.py")
+seed = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(seed)
 
 
 def test_ahu_has_the_seven_template_points():

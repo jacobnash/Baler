@@ -57,13 +57,9 @@ Limits worth knowing (checked against the live site, November 2026):
   not just its own. Look for rows keyed `fbf/demo-cx/<project>/...` in the
   results table. Scoping a project to one building needs an admin-created
   site with a topic prefix; see Baler#75.
-- A run can fail if the same point appears twice in the model, as the
-  duplicated derived "Fan Duty Cycle" points do (Baler#72, Baler#62). Run it
-  again after the duplicates are cleaned up.
-- The gateway allows an operator 300 requests a minute per user, shared by
-  everyone signed in as that user. The seed script paces itself and stops at
-  the first 429 instead of retrying, because retrying keeps the limit locked
-  (Baler#71).
+- The gateway rate-limits each signed-in user. The seed script paces itself
+  and stops at the first 429 instead of retrying, so it is safe to rerun
+  after a short pause.
 
 ## Seed the demo
 
@@ -128,6 +124,5 @@ queued and workers process them in the background.
 - A functional-phase run shows failures for the planted defects, and an
   acceptance-phase run passes them.
 - Alarms lists faults from the `demo-cx-*` rules (for example a stuck or
-  out-of-range supply-air sensor), and `live` keeps values fresh. The count
-  in the status line can disagree with the number of rows (Baler#63).
+  out-of-range supply-air sensor), and `live` keeps values fresh.
 - `cleanup` removes the records, rules and projects, and `up` rebuilds them.
