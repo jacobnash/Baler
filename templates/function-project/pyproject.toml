@@ -1,0 +1,24 @@
+# A Baler function package is an ordinary pip-installable Python project.
+# What makes it one: the entry points below, and baler.toml next to this
+# file (the metadata the docs-site function index shows).
+[project]
+name = "baler-sample"
+version = "0.1.0"
+description = "Sample Baler functions: point table, history stats, hourly profile"
+requires-python = ">=3.10"
+# baler_fn itself is not listed: the Baler notebook image (and this
+# project's Dockerfile) provides it, the way a SkySpark pod relies on the
+# runtime it is installed into. See docs-site/pages/code/write-a-function.mdx.
+dependencies = ["pandas>=2.1"]
+
+[project.entry-points."baler.functions"]
+point_table = "baler_sample.functions:point_table"
+his_stats = "baler_sample.functions:his_stats"
+hourly_profile = "baler_sample.functions:hourly_profile"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

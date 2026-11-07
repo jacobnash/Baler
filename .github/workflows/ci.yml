@@ -44,7 +44,7 @@ jobs:
       # BASELINE.md. Fix or scoped-noqa-with-reason new findings; don't
       # loosen the gate.
       - run: ruff check src/ tests/
-      - run: mypy src/baler
+      - run: mypy src/baler && mypy src/baler_fn  # separately: one run over both trips a duplicate-module error in vendor_constrain
       # Clone-detection is reporting-only (PLAN.md Guardrails) - alerts on
       # new duplication without blocking; baseline is ~3.7% Python
       # (BASELINE.md). Node is preinstalled on GitHub Actions runners.
