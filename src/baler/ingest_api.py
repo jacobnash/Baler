@@ -242,8 +242,10 @@ def make_handler(store, ts_pool):
                 except ValueError:
                     _respond_error(self, 400, "maxSamples must be an integer")
                     return
+                compact = query.get("compact", ["0"])[0] in ("1", "true")
                 span.set_attribute("expr", expr)
                 span.set_attribute("tz", tz)
+                span.set_attribute("compact", compact)
 
                 try:
                     parsed = hisquery.parse_query(expr)
@@ -263,7 +265,11 @@ def make_handler(store, ts_pool):
                     return
                 span.set_attribute("matched", result["matchedCount"])
                 span.set_attribute("series", len(result["series"]))
-                respond_json_streamed(self, 200, result)
+                with tracer.start_as_current_span("ingest_api.his.serialize") as sp:
+                    if compact:
+                        hisquery.compact_series(result)
+                    sp.set_attribute("samples", sum(len(s["history"]["ts"] if compact else s["history"]) for s in result["series"]))
+                    respond_json_streamed(self, 200, result)
 
         def do_PATCH(self):
             if not self._require_gateway():
@@ -430,9 +436,12 @@ def main() -> None:
         # The Equipment page's history read, once before listening
         # (baler.warmup): 4.9 s cold against 1.6 s warm on nash-srv.
         hisquery.warm_caches()
+        # Both rollup views get a first touch: today's auto rollup reads the
+        # 5-minute one, yesterday by the hour the 1-hour one.
         with ts_pool.connection() as conn:
-            hisquery.run_query(store, conn, hisquery.parse_query("readAll(equip).hisRead(today)"),
-                               now=datetime.now(timezone.utc), tz=DEFAULT_TZ, max_samples=hisquery.DEFAULT_MAX_SAMPLES)
+            for expr in ("readAll(equip).hisRead(today)", "readAll(equip).hisRead(yesterday).hisRollup(avg, 1h)"):
+                hisquery.run_query(store, conn, hisquery.parse_query(expr), now=datetime.now(timezone.utc), tz=DEFAULT_TZ,
+                                   max_samples=hisquery.DEFAULT_MAX_SAMPLES)
 
     warmup.run("his read", warm)
 

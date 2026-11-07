@@ -331,6 +331,15 @@ paths:
             type: integer
             minimum: 1
             maximum: 200000
+        - name: compact
+          in: query
+          description: >-
+            `1`: each series' `history` is two parallel arrays, `{"ts": [...], "value": [...]}`,
+            instead of one `{ts, value}` object per sample - the same data in about half the bytes
+            (Baler#107). Whole-second timestamps are integers. Omit for the default form.
+          schema:
+            type: string
+            enum: ["0", "1", "true"]
       responses:
         "200":
           description: One series per resolved point, each with its metadata and history for the span.
@@ -600,9 +609,16 @@ components:
         equipDis:
           type: [string, "null"]
         history:
-          type: array
-          items:
-            $ref: "#/components/schemas/HistoryItem"
+          oneOf:
+            - type: array
+              items:
+                $ref: "#/components/schemas/HistoryItem"
+            - type: object
+              description: The `compact=1` form - `ts[i]` goes with `value[i]`.
+              required: [ts, value]
+              properties:
+                ts: { type: array, items: { type: number } }
+                value: { type: array, items: {} }
         truncated:
           type: boolean
           description: True if the point had more raw samples in the span than `limit` allowed.

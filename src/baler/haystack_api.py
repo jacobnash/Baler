@@ -1239,7 +1239,9 @@ def make_handler(backend: Backend, login: ScramLogin | None):
                     return
                 fmt = oh.negotiate(accept, flavor)
                 try:
-                    out = oh.encode_grid(grid, fmt).encode("utf-8")
+                    with tracer.start_as_current_span("haystack.encode") as enc:
+                        out = oh.encode_grid(grid, fmt).encode("utf-8")
+                        enc.set_attribute("bytes", len(out))
                 except ValueError as exc:
                     # One unencodable value must not drop the connection
                     # (a client sees a reset, not an error): say what failed.

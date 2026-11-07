@@ -1652,6 +1652,19 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
     }
 
 
+def compact_series(result: dict) -> dict:
+    """/his?compact=1: each series' history as two parallel arrays,
+    {"ts": [...], "value": [...]}, instead of one {"ts", "value"} object per
+    sample - the same data in about half the bytes (readAll(equip) for a day
+    is 3+ MB in the default form, Baler#107), and quicker to encode. Whole-
+    second timestamps go as integers. In place; returns `result`."""
+    for s in result["series"]:
+        hist = s["history"]
+        s["history"] = {"ts": [int(h["ts"]) if h["ts"] == int(h["ts"]) else h["ts"] for h in hist],
+                        "value": [h["value"] for h in hist]}
+    return result
+
+
 # --- rollup intervals ------------------------------------------------------
 
 
