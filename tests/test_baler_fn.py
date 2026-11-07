@@ -437,6 +437,13 @@ def test_his_write_raises_on_an_error_grid(fake_baler):
         client.his_write("urn:bad", [(dt.datetime.now(dt.timezone.utc), 1)])
 
 
+def test_his_write_encodes_nan_and_infinity_the_haystack_way(fake_baler):
+    ts = dt.datetime(2026, 11, 7, 10, tzinfo=dt.timezone.utc)
+    baler_fn.connect(url=fake_baler.url, api_key="key-123").his_write(
+        "urn:p1", [(ts, float("nan")), (ts, float("inf")), (ts, float("-inf"))])
+    assert [r["val"] for r in fake_baler.writes[0]["body"]["rows"]] == ["n:NaN", "n:INF", "n:-INF"]
+
+
 def test_his_write_refuses_naive_timestamps():
     client = HaystackClient("http://unused", token="t")
     with pytest.raises(ValueError, match="timezone"):

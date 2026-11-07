@@ -20,6 +20,7 @@ wire format that modern Haxall/SkySpark servers no longer speak.
 import base64
 import hashlib
 import hmac
+import math
 import secrets
 from collections.abc import Iterable
 from datetime import datetime, timezone
@@ -42,7 +43,12 @@ def _encode_haystack_scalar(value: Any) -> Any:
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
-        return f"n:{float(value)!r}"
+        f = float(value)
+        if math.isnan(f):
+            return "n:NaN"
+        if math.isinf(f):
+            return "n:INF" if f > 0 else "n:-INF"
+        return f"n:{f!r}"
     if isinstance(value, datetime):
         if value.tzinfo is None:
             raise ValueError(f"naive datetime {value!r}: hisWrite timestamps need a timezone")
