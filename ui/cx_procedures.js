@@ -146,7 +146,7 @@ async function showTestRun(runId) {
       const state = changed[`${e.equip_uri}|${st.id}`];
       td.append(el("span", { className: `chip chip-${st.status}`, textContent: st.status.replace("_", " ") }));
       if (state === "regressed" || state === "resolved") td.append(el("span", { className: "hint", textContent: ` ${state}` }));
-      td.addEventListener("click", () => openDrawer(`${e.dis || e.equip_uri} · ${st.title}`, stepResults(e, st)));
+      td.addEventListener("click", () => openDrawer(`${e.dis || e.equip_uri} · ${st.title}`, stepResults(tr, e, st)));
       row.append(td);
     }
     body.append(row);
@@ -157,11 +157,17 @@ async function showTestRun(runId) {
 }
 
 // A step's criteria as evidence cards, in the drawer cx.js already has.
-function stepResults(e, st) {
+function stepResults(tr, e, st) {
   return st.criteria.map((c, i) => {
-    const crit = c.criterion;
-    const what = crit.check ? `check ${crit.check}${crit.point_class ? ` on ${crit.point_class}` : ""}${crit.strict ? " (strict)" : ""}`
-      : `range ${crit.range.min ?? "-inf"}..${crit.range.max ?? "inf"} ${crit.range.unit || ""} on ${crit.point || crit.point_class}`;
+    // the rule as this run judged it: the snapshot on the run, else the verdict's own
+    const crit = (tr.procedure.steps.find((s) => s.id === st.id) || { criteria: [] }).criteria[i] || c.criterion || {};
+    const on = crit.point || crit.point_class || "";
+    const tag = crit.sequence ? `${crit.sequence}: ` : "";
+    const what = tag + (crit.check ? `check ${crit.check}${crit.point_class ? ` on ${crit.point_class}` : ""}${crit.strict ? " (strict)" : ""}`
+      : crit.range ? `range ${crit.range.min ?? "-inf"}..${crit.range.max ?? "inf"} ${crit.range.unit || ""} on ${on}${crit.range.hours ? " (occupied hours)" : ""}`
+      : crit.availability ? `available at least ${crit.availability.min_pct}% (a sample every ${crit.availability.max_gap_minutes} min) on ${on}`
+      : crit.response ? `when ${crit.response.when.point || crit.response.when.point_class} = ${crit.response.when.equals}, ${crit.response.then.point || crit.response.then.point_class} moves ${crit.response.then.changes_by} within ${crit.response.then.within_minutes} min`
+      : "rule not recorded");
     return {
       equip_uri: e.equip_uri, check_id: `criterion ${i + 1}`, subject: what, status: c.status, severity: null,
       symptom: c.failing.map((f) => f.symptom || `${f.check_id} ${f.status} on ${f.subject}`).join("; ") || null,

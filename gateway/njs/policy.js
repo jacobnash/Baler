@@ -295,6 +295,19 @@ function sessionCutOff(claims, cutoff) {
     return iat < Number(cutoff);
 }
 
+/*
+ * Whether a token's jti is on the denylist (cached value for that jti, or
+ * undefined/null). Every kind is checked: API keys revoked in Ops, and
+ * session tokens ended early by Haystack `close`. The "user:<id>" cutoff
+ * keys can't collide: a jti never contains ":".
+ */
+function jtiRevoked(claims, cached) {
+    if (!claims.jti) {
+        return false;
+    }
+    return cached !== undefined && cached !== null && cached !== "";
+}
+
 // Resources a site-restricted token can't reach at all: they span the
 // whole org and have no per-site filter to apply.
 const WHOLE_ORG = { devices: true };
@@ -364,4 +377,4 @@ function unknownRouteMessage(method, uri) {
 
 const SIGN_IN_HINT = "sign in with POST /auth/login (see /auth/docs), then send Authorization: Bearer <token>";
 
-export default { ROLE_RANK, ROUTES, resolveRoute, roleSatisfies, scopeSatisfies, parseUserCutoff, sessionCutOff, bearerFromHeader, isHaystackHandshake, unknownRouteMessage, SIGN_IN_HINT };
+export default { ROLE_RANK, ROUTES, resolveRoute, roleSatisfies, scopeSatisfies, parseUserCutoff, sessionCutOff, jtiRevoked, bearerFromHeader, isHaystackHandshake, unknownRouteMessage, SIGN_IN_HINT };

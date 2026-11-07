@@ -65,10 +65,10 @@ async function authorize(r) {
         return;
     }
 
-    // Only long-lived (api_key-class) tokens are checked against the
-    // revocation cache - short-TTL session tokens skip it entirely, per
-    // the original design rationale (their own expiry is the guard).
-    if (claims.kind === "api_key" && ngx.shared.revoked.get(claims.jti)) {
+    // Any token whose jti is on the denylist: a revoked API key, or a
+    // session ended by Haystack's `close` op (auth.revoke_session) - which
+    // must then stop working on every API, not just /api/ (Baler#134).
+    if (policy.jtiRevoked(claims, ngx.shared.revoked.get(claims.jti))) {
         r.return(401, "token has been revoked\n");
         return;
     }

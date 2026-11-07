@@ -69,7 +69,9 @@ Records come from the same entity graph everything else reads:
 
 Filters work exactly like the [Query page](/his-query): a name matches as a Haystack marker,
 a Brick class (`Air_Handling_Unit`) or a Brick tag word. So `read ahu` also finds AHUs that
-never had a Haystack `ahu` tag.
+never had a Haystack `ahu` tag. Tag paths (`point and equipRef->ahu`,
+`equipRef->siteRef->dis == "HQ"`), units (`area > 1000ft²` matches only `ft²`, with no
+conversion), date, time and Uri literals, and `^symbol` terms all work.
 
 ## Who sees what
 
@@ -110,15 +112,21 @@ controller's own logic until it's released.
 - **Roles:** writing needs the `operator` role. Haystack clients POST pointWrite for reads too, so
   reading the array also needs `operator`.
 
-## Not yet
+## Deliberately unsupported
 
-- `invokeAction` returns an error grid.
+- **`invokeAction`** answers with a Haystack error grid (HTTP 200, `err` meta) that says it isn't
+  supported, and `ops` doesn't list it. In SkySpark and Haxall an action is an Axon expression in a
+  record's `actions` grid. Baler records define no actions and Baler has no Axon to run one. To
+  command a point, use `pointWrite`.
+- **A Symbol as a comparison value** (`kind == ^elec`) is a filter parse error. Haystack's filter
+  grammar doesn't include it. A bare `^hot-water` term works and means `hot and water`.
 
 ## Ops, checked against Haxall
 
 `hisRead` takes every range the spec defines (`today`, `yesterday`, a date, a date range, two
 dateTimes, or one dateTime meaning "until now"), and the **batch** form (meta `range`, one `id` row
-per point, returning `ts, v0..vN`). `hisWrite` takes the batch form too. `close` ends the session:
-the token is refused by `/api` at once and by the gateway within 30 seconds. `ops` returns the
+per point, returning `ts, v0..vN`). `hisWrite` takes the batch form too (a `ts` column plus one
+column per point, each naming its point with an `id` in the column meta). `close` ends the session:
+the token is refused by `/api` at once and by the gateway, on every API, within 30 seconds. `ops` returns the
 Haystack 4 op defs. Each of these is a column in the CI conformance matrix, run against Haxall
 as the reference ([Haystack conformance](/haystack-conformance)).

@@ -612,12 +612,14 @@ function sparkline(pointUri) {
 
 // ---------------------------------------------------------------- report
 
-async function openReport(runId) {
+async function openReport(path) {
   // The report needs the Authorization header, so a plain link can't
-  // fetch it: fetch here, then show it from a blob URL.
+  // fetch it: fetch here, then show it from a blob URL. A root-relative
+  // link means nothing inside a blob: page (or a saved copy), so the
+  // report's trend links are made absolute to this origin (Baler#125).
   const win = window.open("", "_blank");
   try {
-    const res = await cxApi("GET", `/runs/${runId}/report?format=html`, undefined, true);
+    const res = await cxApi("GET", `${path}?format=html&origin=${encodeURIComponent(location.origin)}`, undefined, true);
     const url = URL.createObjectURL(new Blob([await res.text()], { type: "text/html" }));
     if (win) win.location = url;
     else location.href = url;
@@ -688,7 +690,8 @@ function wire() {
   $("results-search").addEventListener("input", () => { cx.resultsPage = 0; renderResults(); });
   $("results-prev").addEventListener("click", () => { cx.resultsPage -= 1; renderResults(); });
   $("results-next").addEventListener("click", () => { cx.resultsPage += 1; renderResults(); });
-  $("report-btn").addEventListener("click", () => cx.run && openReport(cx.run.id));
+  $("report-btn").addEventListener("click", () => cx.run && openReport(`/runs/${cx.run.id}/report`));
+  $("project-report-btn").addEventListener("click", () => cx.project && openReport(`/projects/${cx.project.id}/report`));
   $("gaps-btn").addEventListener("click", loadGaps);
   $("drawer-close").addEventListener("click", closeDrawer);
   document.addEventListener("keydown", (ev) => ev.key === "Escape" && closeDrawer());

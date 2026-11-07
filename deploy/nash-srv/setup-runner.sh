@@ -111,13 +111,42 @@ if [ -n "\$PREV" ] && runuser -u "${RUNNER_USER}" -- git cat-file -e "\$PREV^{co
     FAST=1
   fi
 fi
+# The HTTP APIs behind the gateway are replaced one at a time, each waited
+# on until its healthcheck passes, auth_api last (Baler#108): every other
+# route keeps working meanwhile (the gateway checks JWTs itself, with no
+# call to auth_api), and logins are down only for auth_api's own few
+# seconds. The gateway is never restarted for a backend: its upstreams
+# re-resolve (gateway/nginx.conf), and it is only reloaded, below.
+ROLLING="ingest_api fault_api derivation_api validate_api haystack_api ops_api commissioning_api auth_api"
 if [ "\$FAST" = 1 ]; then
   echo "only bind-mounted code/content changed since \$PREV - restarting app services, no rebuild"
-  APPS=\$("\${DC[@]}" ps --services --status running | grep -vxE 'postgres|oxigraph|mosquitto|jaeger|grafana|gateway|windrow.*' || true)
-  [ -n "\$APPS" ] && "\${DC[@]}" restart \$APPS
+  RUNNING=\$("\${DC[@]}" ps --services --status running)
+  # Daemons that serve no HTTP (mqtt_listener, fault_detector, ...) all at once.
+  OTHERS=\$(printf '%s\\n' "\$RUNNING" | grep -vxE "postgres|oxigraph|mosquitto|jaeger|grafana|gateway|windrow.*|\${ROLLING// /|}" || true)
+  [ -n "\$OTHERS" ] && "\${DC[@]}" restart \$OTHERS
+  for svc in \$ROLLING; do
+    printf '%s\\n' "\$RUNNING" | grep -qx "\$svc" || continue
+    "\${DC[@]}" restart "\$svc"
+    # Already running and unchanged, so this only waits for it to be healthy.
+    "\${DC[@]}" up -d --no-deps --wait --wait-timeout 120 "\$svc"
+  done
 else
   "\${DC[@]}" pull --ignore-pull-failures
-  "\${DC[@]}" up -d --build
+  # Build first: the old containers keep serving while images build.
+  "\${DC[@]}" build
+  ALL=\$("\${DC[@]}" config --services)
+  # Everything but the HTTP APIs and the gateway (infra, migrate, daemons,
+  # Windrow): recreated if changed, as before.
+  REST=\$(printf '%s\\n' "\$ALL" | grep -vxE "gateway|\${ROLLING// /|}" || true)
+  "\${DC[@]}" up -d \$REST
+  for svc in \$ROLLING; do
+    printf '%s\\n' "\$ALL" | grep -qx "\$svc" || continue
+    # Recreated only if its image or definition changed; its dependencies
+    # (postgres healthy, migrate done) are already up and aren't touched.
+    "\${DC[@]}" up -d --wait --wait-timeout 120 "\$svc"
+  done
+  # Recreated only if its own compose definition changed.
+  "\${DC[@]}" up -d --no-deps --wait --wait-timeout 60 gateway
 fi
 # Infrastructure services read config bind-mounted from the checkout, and
 # 'up -d' only recreates a container when its compose definition changes -
@@ -137,20 +166,22 @@ done
 # fix is that they don't write there at all (PYTHONPYCACHEPREFIX in
 # docker-compose.yml's shared daemon env, #29).
 chown -R "${RUNNER_USER}:${RUNNER_USER}" "${WORKDIR}"
-# Gateway caches upstream addresses at its own startup - if a backend got
-# recreated above without gateway also restarting, its routes 404/502 even
-# though the backend is healthy (see CLAUDE.md's gateway restart gotcha).
-"\${DC[@]}" restart gateway
-# Block here instead of handing control back to the caller (the deploy
-# workflow) while gateway is mid-restart - otherwise its very next step
-# can race a connection reset. Any HTTP response (even a 4xx from a
-# bogus login body) means it's accepting connections again; \`|| echo 000\`
-# keeps a transient curl failure from tripping this script's own set -e.
-for i in \$(seq 1 30); do
+# nginx.conf and njs are bind-mounted, so a change to them needs nginx to
+# re-read them. A graceful reload, not a restart: in-flight requests finish
+# and the listening socket never closes. nginx -t first, so a bad config
+# fails the deploy here (set -e) while the running config keeps serving.
+if [ -z "\$PREV" ] || printf '%s\\n' "\$CHANGED" | grep -q '^gateway/'; then
+  echo "gateway/ changed - reloading nginx"
+  "\${DC[@]}" exec -T gateway nginx -t
+  "\${DC[@]}" exec -T gateway nginx -s reload
+fi
+# Hand back to the workflow (whose next step logs in) only once a login
+# reaches auth_api: any status but a gateway-side 5xx or no answer at all.
+# \`|| echo 000\` keeps a transient curl failure from tripping set -e.
+for i in \$(seq 1 60); do
   code=\$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8080/auth/login \\
     -H 'Content-Type: application/json' -d '{}' || echo "000")
-  [ "\$code" != "000" ] && break
-  sleep 1
+  case "\$code" in 000|502|503|504) sleep 1 ;; *) break ;; esac
 done
 echo "\$HEAD_SHA" > "\$MARKER"
 EOF

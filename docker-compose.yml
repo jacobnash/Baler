@@ -92,13 +92,21 @@ services:
       - "1883:1883"
       - "8883:8883"
     healthcheck:
-      # No secret needed: a refused login (exit 5, "not authorised") proves
-      # the broker is up and checking credentials; down is exit 1.
-      test: ["CMD-SHELL", "mosquitto_pub -h 127.0.0.1 -p 1883 -t health -m x -u healthcheck -P none -q 0 >/dev/null 2>&1; [ $$? -eq 5 ]"]
-      interval: 10s
+      # Logs in as the healthcheck account and reads one retained $SYS
+      # message: passes only if the broker is up and accepts a correct
+      # password (Baler#109). The password is generated per start by
+      # entrypoint.sh into a root-only file, so it isn't in `docker inspect`;
+      # the old refused-login check logged "not authorised" every 10 s.
+      # A successful login still logs three connect/disconnect lines (only
+      # connection_messages false hides them, and that also hides real
+      # "not authorised" lines), so steady state checks once a minute;
+      # start_interval keeps startup (depends_on, up --wait) fast.
+      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -p 1883 -u healthcheck -P \"$$(cat /run/mosquitto-health/password)\" -t '$$SYS/broker/uptime' -C 1 -W 4 >/dev/null"]
+      interval: 60s
       timeout: 5s
-      retries: 6
-      start_period: 5s
+      retries: 3
+      start_period: 20s
+      start_interval: 2s
 
   oxigraph:
     # pinned (#23): holds the graph - tag and digest of what nash-srv runs
@@ -483,23 +491,36 @@ services:
       - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./gateway/njs:/etc/nginx/njs:ro
       - ./ui:/usr/share/nginx/ui:ro
+    # Serves /ui/ and its own config, nothing behind it - so it stays healthy
+    # (and keeps answering) while backends restart. The deploy waits on it.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/ui/"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+      start_interval: 1s
+    # Started after the backends, not gated on their health: its upstreams
+    # re-resolve at runtime (gateway/nginx.conf), so a backend that is down
+    # or restarting costs only that backend's routes, never the whole
+    # gateway and UI (Baler#108).
     depends_on:
       ingest_api:
-        condition: service_healthy
+        condition: service_started
       fault_api:
-        condition: service_healthy
+        condition: service_started
       derivation_api:
-        condition: service_healthy
+        condition: service_started
       validate_api:
-        condition: service_healthy
+        condition: service_started
       auth_api:
-        condition: service_healthy
+        condition: service_started
       ops_api:
-        condition: service_healthy
+        condition: service_started
       haystack_api:
-        condition: service_healthy
+        condition: service_started
       commissioning_api:
-        condition: service_healthy
+        condition: service_started
 
   # A local, free model for Cx 7/10 (BALER_LLM_PROVIDER=openai,
   # BALER_LLM_BASE_URL=http://ollama:11434/v1). Commented out, and under the

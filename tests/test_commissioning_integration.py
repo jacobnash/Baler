@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from baler import auth
-from baler.commissioning import db, engine, phases
+from baler.commissioning import db, engine, phases, report
 from baler.scope import Scope
 from baler.store import Store
 from baler.timeseries import connect_pool, write_point_value
@@ -188,6 +188,10 @@ def test_issues_and_risks_round_trip(repo):
     repo.update_issue(issue["id"], {"status": "risk_accepted"})
     assert repo.get_risk(rid)["review_by"] == date(2000, 1, 1)
     assert [r["id"] for r in repo.list_risks(pid)] == [rid]
+    # a waiver from before #121 (no name, no source) still reads, as typed/none
+    old = repo.get_risk(rid)
+    assert old["accepted_name"] is None and old["accepted_name_source"] is None
+    assert report.accepted_by(old, "Jacob Nash") == {"name": None, "email": "it", "source": None, "cxa": False}
     # review_by long past: the risk lapses, then the passing result resolves the issue (#86: never closes it)
     changes = runner.reconcile_issues(repo, pid, "r2", [{"check_id": "exists", "subject": "urn:point:cx-it/x", "status": "pass"}], now)
     assert [c[2] for c in changes] == ["risk.expired", "resolve.evidence"]

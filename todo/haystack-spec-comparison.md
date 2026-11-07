@@ -170,14 +170,20 @@ All are AFL-3.0.
   `vectors/haxall/`, with the AFL notice and the source path and commit of each.
 - Reimplement behavior from the spec and from what the reference shows it does.
 
-## Gaps already known from the code (confirm them live)
+## Gaps once known from the code (checked in Baler#134)
 
-- `ops` returns name/summary rows, not op defs.
-- `close` doesn't invalidate the token (it's a no-op).
-- `hisRead` with `{dateTime},{dateTime}` or a single `{dateTime}` is an error.
-- No batch `hisRead` or `hisWrite`.
-- `pointWrite` doesn't check or apply level 8 `duration`. The level count of 16 vs 17 is unconfirmed.
-- Filters ignore units, and there are no time, uri or symbol literals in Baler's filter grammar.
-- `invokeAction` is unsupported.
+Each is now covered by a test in `tests/test_haystack_api.py`:
+
+- `ops` returns the Haystack 4 op defs for the ops served. Fixed.
+- `close` revokes the session token: `/api` refuses it at once, and the gateway refuses it on
+  every API once its denylist refreshes. Fixed.
+- `hisRead` takes `{dateTime},{dateTime}` and a single `{dateTime}`. Fixed.
+- Batch `hisRead` and `hisWrite` work. Fixed.
+- `pointWrite` applies a level-8 `duration` as a timed override. Levels run 1-17, with 17 as
+  relinquish-default. Fixed.
+- Filters compare units, and support `->` paths, date/time/uri literals and `^symbol` terms.
+  Fixed. A Symbol as a comparison value isn't Haystack grammar and stays a parse error.
+- `invokeAction` is deliberately unsupported: it returns an error grid, isn't listed by `ops`, and
+  is documented in docs-site `haystack-api.mdx`.
 - No Turtle or JSON-LD export.
 - No Xeto (Haystack 5).

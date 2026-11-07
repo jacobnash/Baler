@@ -28,6 +28,15 @@ for pair in $MOSQUITTO_USERS; do
   mosquitto_passwd -b "$work/passwd" "$user" "$pass"
 done
 IFS=$old_ifs
+# The compose healthcheck's own account (Baler#109). Its password is random
+# per start and lives only in a root-only file inside this container, so it
+# never shows in `docker inspect` (env or healthcheck command). mosquitto/acl
+# lets it read $SYS/broker/uptime and nothing else. Logging in with it, not
+# being refused, is what proves the broker is up and checking passwords.
+health_pw_file=/run/mosquitto-health/password
+mkdir -p "${health_pw_file%/*}"
+head -c 18 /dev/urandom | base64 | tr -d '/+=' > "$health_pw_file"
+mosquitto_passwd -b "$work/passwd" healthcheck "$(cat "$health_pw_file")"
 install -m 600 -o mosquitto -g mosquitto "$work/passwd" "$passwd_file"
 rm -rf "$work"
 

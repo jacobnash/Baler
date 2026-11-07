@@ -110,10 +110,10 @@
             <label>Port <input id="c-port" type="number" min="1" max="65535" value="502" /></label>
             <label>Unit id <input id="c-unit" type="number" min="0" max="255" value="1" /></label>
           </div>
-          <p class="field-help">Holding registers, one register per point. Register numbers are the device's own (from its manual).</p>
+          <p class="field-help">Register numbers are 0-based protocol addresses: holding register 40001 is 0, input register 30010 is 9. 32-bit types use the register and the next one. Published value = raw × scale + offset. Writable points (holding registers and coils) can be commanded from Baler.</p>
           <div class="table-wrap points-wrap">
             <table id="modbus-points">
-              <thead><tr><th>Name in Baler</th><th>Register</th><th></th></tr></thead>
+              <thead><tr><th>Name in Baler</th><th>Function</th><th>Register</th><th>Type</th><th>Word order</th><th>Scale</th><th>Offset</th><th>Unit</th><th>Write</th><th></th></tr></thead>
               <tbody></tbody>
             </table>
           </div>

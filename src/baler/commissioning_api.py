@@ -536,15 +536,17 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             if hit is None:
                 return
             run, project = hit
-            fmt = parse_qs(urlparse(self.path).query).get("format", ["json"])[0]
+            q = parse_qs(urlparse(self.path).query)
+            fmt = q.get("format", ["json"])[0]
             if fmt not in ("json", "html"):
                 raise ValueError("format must be json or html")
+            origin = report.check_origin(q.get("origin", [""])[0])
             scope = repo.scope_for(claims)
             results = [r for r in repo.get_results(rid) if scope.allows(r["equip_uri"])]
             issues = [i for i in self._report_issues(project["id"]) if not i.get("equip_uri") or scope.allows(i["equip_uri"])]
             active_runs = [db.public_row(a) for a in repo.find_rows("cx_active_runs", project_id=project["id"])
                            if a["status"] not in ("planned", "cancelled") and scope.allows(a["equip_uri"])]
-            rep = report.build(db.public_project(project), run, results, issues, active_runs)
+            rep = report.build(db.public_project(project), run, results, issues, active_runs, origin)
             if fmt == "json":
                 respond_json(self, 200, rep)
                 return
@@ -570,30 +572,31 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             self.end_headers()
             self.wfile.write(body)
 
-        def _report_inventory(self, p: dict, claims: dict) -> list[dict] | None:
-            """The project's inventory, once per report: the equipment names
-            and the spec section both read it (it was built twice, Baler#150)."""
+        def _report_equipment(self, p: dict) -> dict[str, dict] | None:
+            """uri -> {dis, brickClass, points}: names and types for the
+            report instead of raw URIs (#99), read in the project's own
+            scope (its org, narrowed to its site and settings.prefixes), not
+            the caller's, so the same report names the same equipment
+            whoever generates it (#123). Only names are read this way: a
+            caller who can see the project can see its site, and every
+            result is still filtered by the caller's own scope."""
             try:
-                scopes, _ = self._scopes(p, claims)
-                return inventory.build(repo.store, scopes)
+                scopes, _ = runner.project_scopes(repo, p, {"org_id": p["org_id"]})
+                return {e["id"]: {"dis": e.get("dis"), "brickClass": e.get("brickClass"),
+                                  "points": [{**pt, "equip_uri": e["id"]} for pt in e.get("points") or []]}
+                        for e in inventory.build(repo.store, scopes)}
             except Exception:  # the report stands without names, and says so (equipment_names_unavailable)
                 log.warning("cx report %s: inventory failed", p["id"], exc_info=True)
                 return None
 
-        @staticmethod
-        def _report_equipment(equips: list[dict] | None) -> dict[str, dict] | None:
-            """uri -> {dis, brickClass, points}: names and types for the
-            report instead of raw URIs (#99)."""
-            if equips is None:
-                return None
-            return {e["id"]: {"dis": e.get("dis"), "brickClass": e.get("brickClass"), "points": e.get("points") or []}
-                    for e in equips}
-
-        def _report_acceptance(self, p: dict, run: dict | None, equipment: dict[str, dict] | None) -> dict | None:
+        def _report_acceptance(self, p: dict, run: dict | None, equipment: dict[str, dict] | None,
+                               scope) -> dict | None:
             """Per-point availability over the latest verification run's
-            window, after settings.acceptance.settle_minutes (#100 review)."""
+            window, after settings.acceptance.settle_minutes (#100 review),
+            for the equipment the caller may read."""
             if run is None or not equipment:
                 return None
+            equipment = {k: v for k, v in equipment.items() if scope.allows(k)}
             cfg = {"min_pct": 95.0, "max_gap_minutes": 5.0, "settle_minutes": 0.0,
                    **((p.get("settings") or {}).get("acceptance") or {})}
             start = run["window_start"] if isinstance(run["window_start"], datetime) else datetime.fromisoformat(run["window_start"])
@@ -612,18 +615,21 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             p = self._project(pid, claims)
             if p is None:
                 return
-            fmt = parse_qs(urlparse(self.path).query).get("format", ["json"])[0]
+            q = parse_qs(urlparse(self.path).query)
+            fmt = q.get("format", ["json"])[0]
             if fmt not in ("json", "html"):
                 raise ValueError("format must be json or html")
+            origin = report.check_origin(q.get("origin", [""])[0])
             scope = repo.scope_for(claims)
             runner.reconcile_issues(repo, pid, None, [], now_fn())
             run = next((r for r in repo.list_runs(pid, 20) if r.get("status") == "completed"), None)
-            equips = self._report_inventory(p, claims)
-            equipment = self._report_equipment(equips)
+            equipment = self._report_equipment(p)
+            if equipment is not None:  # never name what the caller can't read
+                equipment = {k: v for k, v in equipment.items() if scope.allows(k)}
             # Availability folds every sample of the run's window (the slow
             # part, Baler#150): in the background while the rest is read.
             side = ThreadPoolExecutor(max_workers=1)
-            acceptance_f = side.submit(self._report_acceptance, p, run, equipment)
+            acceptance_f = side.submit(self._report_acceptance, p, run, equipment, scope)
             results = [r for r in repo.get_results(run["id"]) if scope.allows(r["equip_uri"])] if run else []
             procs = [x for x in repo.list_procedures(pid) if x["status"] != "archived"]
             latest = {pr["id"]: next((t for t in repo.list_test_runs(pr["id"], 20) if t["status"] == "completed"), None)
@@ -632,9 +638,7 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             active_runs = [db.public_row(a) for a in repo.find_rows("cx_active_runs", project_id=pid)
                            if a["status"] not in ("planned", "cancelled") and scope.allows(a["equip_uri"])]
             try:
-                if equips is None:
-                    raise RuntimeError("no inventory")
-                alignment, _, _ = self._alignment_for(p, claims, equips)
+                alignment, _, _ = self._alignment_for(p, claims)
             except Exception:  # the report stands without the spec section
                 log.warning("cx report %s: spec alignment failed", pid, exc_info=True)
                 alignment = None
@@ -649,7 +653,7 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                                        iss, repo.list_events(pid, 500), alignment, docs, active_runs, active.writes_allowed(),
                                        site=repo.get_site(p["site_id"]) if p.get("site_id") else None,
                                        equipment=equipment,
-                                       acceptance=acceptance)
+                                       acceptance=acceptance, origin=origin)
             if fmt == "json":
                 respond_json(self, 200, rep)
                 return
@@ -905,12 +909,12 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             sub = claims.get("sub")
             risk = {"id": db.new_id(), "issue_id": iid, "accepted_by": sub, "accepted_email": repo.user_email(sub),
                     "reason": reason, "review_by": review_by, "created_at": now, "revoked_at": None, "revoked_by": None,
-                    **issues.risk_extras(body)}
+                    **issues.risk_extras(body, repo.user_name(sub))}
             repo.create_risk(risk)
             repo.update_issue(iid, {"status": "risk_accepted", "updated_at": now})
             self._issue_event(iid, "risk.accept", claims, {"risk_id": risk["id"], "reason": reason, "review_by": review_by.isoformat(),
                                                           "owner": risk["owner"], "retest_trigger": risk["retest_trigger"],
-                                                          "from": issue["status"]})
+                                                          "accepted_name": risk["accepted_name"], "from": issue["status"]})
             self._event(project["id"], "risk.accept", claims, {"issue_id": iid, "risk_id": risk["id"]})
             respond_json(self, 201, db.public_row(risk))
 
@@ -1358,10 +1362,9 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             self._event(pid, "spec.review", claims, {"status": status, "count": done})
             respond_json(self, 200, {"updated": done})
 
-        def _alignment_for(self, p: dict, claims: dict, equips: list[dict] | None = None) -> tuple[dict, list[dict], list[dict]]:
-            if equips is None:
-                scopes, _ = self._scopes(p, claims)
-                equips = inventory.build(repo.store, scopes)
+        def _alignment_for(self, p: dict, claims: dict) -> tuple[dict, list[dict], list[dict]]:
+            scopes, _ = self._scopes(p, claims)
+            equips = inventory.build(repo.store, scopes)
             items = repo.find_rows("cx_spec_items", project_id=p["id"])
             decisions = [d for d in repo.find_rows("cx_mappings", project_id=p["id"]) if d["status"] in ("confirmed", "rejected")]
             latest = {d["spec_item_id"]: d for d in decisions}  # oldest first, so the newest wins
