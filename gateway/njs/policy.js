@@ -311,4 +311,48 @@ function roleSatisfies(role, minRole) {
     return typeof have === "number" && typeof need === "number" && have >= need;
 }
 
-export default { ROLE_RANK, ROUTES, resolveRoute, roleSatisfies, scopeSatisfies, parseUserCutoff, sessionCutOff, bearerFromHeader, isHaystackHandshake };
+/*
+ * What to say for a path no policy row matches (#69): 404, the path, and
+ * where to look - the API's own reference, a guess when the path looks like
+ * one API under another's prefix (/api/derivation), and the site docs.
+ * "no policy defined for this route" told a user nothing.
+ */
+const API_PREFIXES = ["ingest", "fault", "windrow", "derivation", "validate", "ops", "cx", "auth"];
+
+function apiNamed(word) {
+    const w = String(word || "").toLowerCase();
+    for (let i = 0; i < API_PREFIXES.length; i++) {
+        const p = API_PREFIXES[i];
+        if (w === p || w === p + "s" || (p === "fault" && w === "faults")) {
+            return p;
+        }
+    }
+    return null;
+}
+
+function unknownRouteMessage(method, uri) {
+    const parts = String(uri).split("/");
+    const first = parts.length > 1 ? parts[1] : "";
+    const lines = ["no such route: " + method + " " + uri];
+    const own = apiNamed(first) === first ? first : null;
+    if (own) {
+        lines.push("API reference: /" + own + "/docs");
+    } else if (first === "api") {
+        lines.push("/api/ is the Haystack API: /api/{op} or /api/{project}/{op}, e.g. /api/about, /api/read, /api/hisRead");
+        const guess = apiNamed(parts.length > 2 ? parts[2] : "");
+        if (guess) {
+            lines.push("did you mean /" + guess + "/...? API reference: /" + guess + "/docs");
+        }
+    } else {
+        const guess = apiNamed(first);
+        if (guess) {
+            lines.push("did you mean /" + guess + "/...? API reference: /" + guess + "/docs");
+        }
+    }
+    lines.push("all docs: /docs");
+    return lines.join("\n") + "\n";
+}
+
+const SIGN_IN_HINT = "sign in with POST /auth/login (see /auth/docs), then send Authorization: Bearer <token>";
+
+export default { ROLE_RANK, ROUTES, resolveRoute, roleSatisfies, scopeSatisfies, parseUserCutoff, sessionCutOff, bearerFromHeader, isHaystackHandshake, unknownRouteMessage, SIGN_IN_HINT };

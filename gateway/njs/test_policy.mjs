@@ -142,6 +142,17 @@ check("user lifecycle routes: admin, except changing your own password", () => {
     assert.equal(policy.resolveRoute("POST", "/auth/me/password").minRole, "viewer");
 });
 
+check("unknown routes say where to look (#69)", () => {
+    const api = policy.unknownRouteMessage("GET", "/api/derivation");
+    assert.match(api, /^no such route: GET \/api\/derivation/);
+    assert.match(api, /Haystack API/);
+    assert.match(api, /did you mean \/derivation\/\.\.\.\? API reference: \/derivation\/docs/);
+    assert.match(policy.unknownRouteMessage("GET", "/derivations"), /did you mean \/derivation\//);
+    assert.match(policy.unknownRouteMessage("GET", "/derivation/derivations/abc"), /API reference: \/derivation\/docs/);
+    assert.match(policy.unknownRouteMessage("GET", "/nope"), /all docs: \/docs/);
+    assert.doesNotMatch(policy.unknownRouteMessage("GET", "/nope"), /did you mean/);
+});
+
 check("orphaned points: admin only", () => {
     assert.equal(policy.resolveRoute("GET", "/ops/orphans").minRole, "admin");
     assert.equal(policy.resolveRoute("POST", "/ops/orphans/remove").minRole, "admin");
