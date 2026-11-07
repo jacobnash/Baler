@@ -19,6 +19,23 @@ each criterion is a Cx check the engine already runs:
   {"range": {...}, "point": "urn:point:..."}
                                             one named point - e.g. a
                                             derivation output
+  {"range": {"min": 65, "max": 80, "unit": "F",
+             "hours": {"from": 7, "to": 18, "days": [0,1,2,3,4], "tz": "America/Chicago"}},
+   "point_class": "Zone_Air_Temperature_Sensor"}
+                                            a band during occupied hours only (S2)
+  {"availability": {"min_pct": 99, "max_gap_minutes": 5}, "point_class": "..."}
+                                            the point reported at least every
+                                            5 min for 99% of the window (S3)
+  {"response": {"when": {"point_class": "Fan_Status", "equals": 1},
+                "then": {"point_class": "Zone_Air_Temperature_Sensor",
+                         "changes_by": 0.5, "within_minutes": 60}}}
+                                            each time the condition starts, the
+                                            other point moves by at least that
+                                            much within that time (S1)
+
+Every criterion reports what it observed per point (min/max/last, sample
+count, availability, the edges it judged), not only what failed: evidence
+is computed, not typed (Baler#86).
 
 Execution is passive: the operator says "powered on / started at T", and
 the procedure is judged on history from T over the procedure's window.
@@ -39,6 +56,7 @@ from __future__ import annotations
 import copy
 import re
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from baler import brick_vocab
 from baler.commissioning.gl36 import is_fahrenheit
@@ -131,15 +149,49 @@ def _num(v, what) -> float:
     return float(v)
 
 
+KINDS_OF_CRITERION = ("check", "range", "availability", "response")
+
+
+def criterion_kind(c: dict) -> str:
+    return next(k for k in KINDS_OF_CRITERION if k in c)
+
+
+def _target_ref(t, where: str) -> None:
+    if not isinstance(t, dict) or bool(t.get("point")) == bool(t.get("point_class")):
+        raise ValueError(f"{where}: names exactly one of point or point_class")
+    if t.get("point") is not None and (not isinstance(t["point"], str) or not t["point"].startswith("urn:point:")):
+        raise ValueError(f"{where}: point must be a urn:point: URI")
+    if t.get("point_class") is not None and not isinstance(t["point_class"], str):
+        raise ValueError(f"{where}: point_class is a Brick class name")
+
+
+def _hours(h, where: str) -> None:
+    if not isinstance(h, dict) or set(h) - {"from", "to", "days", "tz"}:
+        raise ValueError(f"{where}: range.hours is {{from, to, days, tz}}")
+    lo, hi = h.get("from", 0), h.get("to", 24)
+    if any(isinstance(x, bool) or not isinstance(x, int) for x in (lo, hi)) or not 0 <= lo < hi <= 24:
+        raise ValueError(f"{where}: range.hours from/to are whole hours, 0 <= from < to <= 24")
+    days = h.get("days")
+    if days is not None and (not isinstance(days, list) or not days or
+                             any(isinstance(d, bool) or not isinstance(d, int) or not 0 <= d <= 6 for d in days)):
+        raise ValueError(f"{where}: range.hours.days is a list of weekdays, 0 = Monday")
+    if h.get("tz") is not None:
+        try:
+            ZoneInfo(str(h["tz"]))
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"{where}: range.hours.tz {h['tz']!r} isn't a time zone") from exc
+
+
 def _criterion(c, where: str) -> dict:
     if not isinstance(c, dict):
         raise TypeError(f"{where}: a criterion is an object")
-    allowed = {"check", "strict", "severity", "required", "pair_kind", "point_class", "range", "point"}
+    allowed = {"check", "strict", "severity", "required", "pair_kind", "point_class", "range", "point",
+               "availability", "response"}
     extra = set(c) - allowed
     if extra:
         raise ValueError(f"{where}: unknown criterion keys {sorted(extra)}")
-    if ("check" in c) == ("range" in c):
-        raise ValueError(f"{where}: a criterion has either check or range")
+    if sum(k in c for k in KINDS_OF_CRITERION) != 1:
+        raise ValueError(f"{where}: a criterion has exactly one of check, range, availability or response")
     if "check" in c:
         if not isinstance(c["check"], str) or not c["check"]:
             raise ValueError(f"{where}: check must be a check id or prefix")
@@ -147,7 +199,7 @@ def _criterion(c, where: str) -> dict:
             raise ValueError(f"{where}: pair_kind is cmd_status or track")
         if c.get("severity") not in (None, "required", "expected", "optional"):
             raise ValueError(f"{where}: severity is required, expected or optional")
-    else:
+    elif "range" in c:
         r = c["range"]
         if not isinstance(r, dict):
             raise TypeError(f"{where}: range is {{min, max, unit}}")
@@ -159,10 +211,38 @@ def _criterion(c, where: str) -> dict:
             raise ValueError(f"{where}: range.min is above range.max")
         if r.get("unit") not in (None, "C", "F"):
             raise ValueError(f"{where}: range.unit is C or F")
-        if not c.get("point") and not c.get("point_class"):
-            raise ValueError(f"{where}: a range names a point or a point_class")
-        if c.get("point") is not None and (not isinstance(c["point"], str) or not c["point"].startswith("urn:point:")):
-            raise ValueError(f"{where}: point must be a urn:point: URI")
+        if "hours" in r:
+            _hours(r["hours"], where)
+        if set(r) - {"min", "max", "unit", "hours"}:
+            raise ValueError(f"{where}: range is {{min, max, unit, hours}}")
+        _target_ref({"point": c.get("point"), "point_class": c.get("point_class")}, where)
+    elif "availability" in c:
+        a = c["availability"]
+        if not isinstance(a, dict) or set(a) - {"min_pct", "max_gap_minutes"}:
+            raise ValueError(f"{where}: availability is {{min_pct, max_gap_minutes}}")
+        pct = _num(a.get("min_pct"), f"{where}: availability.min_pct")
+        gap = _num(a.get("max_gap_minutes"), f"{where}: availability.max_gap_minutes")
+        if not 0 < pct <= 100 or gap <= 0:
+            raise ValueError(f"{where}: availability.min_pct is in (0, 100] and max_gap_minutes is positive")
+        _target_ref({"point": c.get("point"), "point_class": c.get("point_class")}, where)
+    else:
+        r = c["response"]
+        if not isinstance(r, dict) or set(r) != {"when", "then"}:
+            raise ValueError(f"{where}: response is {{when, then}}")
+        _target_ref({k: v for k, v in r["when"].items() if k != "equals"} if isinstance(r["when"], dict) else None,
+                    f"{where}: response.when")
+        if "equals" not in r["when"] or not isinstance(r["when"]["equals"], (int, float, str, bool)):
+            raise ValueError(f"{where}: response.when.equals is the value that starts it (e.g. 1, true, \"active\")")
+        then = r["then"]
+        if not isinstance(then, dict):
+            raise TypeError(f"{where}: response.then is an object")
+        _target_ref({k: v for k, v in then.items() if k not in ("changes_by", "within_minutes")}, f"{where}: response.then")
+        if _num(then.get("changes_by"), f"{where}: response.then.changes_by") <= 0 or \
+                _num(then.get("within_minutes"), f"{where}: response.then.within_minutes") <= 0:
+            raise ValueError(f"{where}: response.then.changes_by and within_minutes are positive")
+        if set(r["when"]) - {"point", "point_class", "equals"} or set(then) - {"point", "point_class", "changes_by", "within_minutes"}:
+            raise ValueError(f"{where}: response.when is {{point|point_class, equals}}, then is "
+                             "{point|point_class, changes_by, within_minutes}")
     for flag in ("strict", "required"):
         if flag in c and not isinstance(c[flag], bool):
             raise ValueError(f"{where}: {flag} is true or false")
@@ -294,24 +374,69 @@ def eval_check(c: dict, equip: dict, results: list[dict], classes: dict[str, str
     return {"criterion": c, "status": status, "counts": counts, "failing": failing}
 
 
+def _targets(ref: dict, equip: dict, points: dict[str, dict]) -> list[dict]:
+    if ref.get("point"):
+        return [points[ref["point"]]] if ref["point"] in points else []
+    fam = _family(ref["point_class"])
+    return [p for p in equip["points"] if p.get("brickClass") in fam]
+
+
+def series_points(c: dict, equips: list[dict]) -> set[str]:
+    """Point ids a criterion needs history for (runner reads them)."""
+    kind = criterion_kind(c)
+    if kind == "check":
+        return set()
+    refs = [c["response"]["when"], c["response"]["then"]] if kind == "response" else [c]
+    out: set[str] = set()
+    for ref in refs:
+        if ref.get("point"):
+            out.add(ref["point"])
+        else:
+            fam = _family(ref["point_class"])
+            out |= {p["id"] for e in equips for p in e["points"] if p.get("brickClass") in fam}
+    return out
+
+
+def _in_hours(ts: datetime, hours: dict | None) -> bool:
+    if not hours:
+        return True
+    local = ts.astimezone(ZoneInfo(hours["tz"])) if hours.get("tz") else ts
+    if hours.get("days") is not None and local.weekday() not in hours["days"]:
+        return False
+    return hours.get("from", 0) <= local.hour < hours.get("to", 24)
+
+
+def _iso(ts) -> str | None:
+    return ts.isoformat() if isinstance(ts, datetime) else ts
+
+
+def _observed(p: dict, rows: list, **extra) -> dict:
+    vals = [v for _, v in rows]
+    out = {"subject": p["id"], "dis": p.get("dis"), "unit": p.get("unit"), "samples": len(rows)}
+    if vals:
+        out.update(min=min(vals), max=max(vals), last=vals[-1], first_ts=_iso(rows[0][0]), last_ts=_iso(rows[-1][0]))
+    return {**out, **extra}
+
+
 def eval_range(c: dict, equip: dict, series: dict[str, list], points: dict[str, dict],
                truncated: set[str] | frozenset = frozenset()) -> dict:
     """A point whose window was cut at the read limit can still fail (a bad
-    value was seen) but can't pass: the unread rest might not be in range."""
+    value was seen) but can't pass: the unread rest might not be in range.
+    `range.hours` judges only samples inside those local hours (S2)."""
     r = c["range"]
-    if c.get("point"):
-        targets = [points[c["point"]]] if c["point"] in points else []
-    else:
-        fam = _family(c["point_class"])
-        targets = [p for p in equip["points"] if p.get("brickClass") in fam]
+    targets = _targets(c, equip, points)
     if not targets:
         return {"criterion": c, "status": "inconclusive" if c.get("required") or c.get("point") else "not_applicable",
-                "counts": {}, "failing": []}
-    out, bad, unknown, partial = [], [], 0, []
+                "counts": {}, "failing": [], "observed": []}
+    out, bad, unknown, partial, observed = [], [], 0, [], []
     for p in targets:
-        vals = [v for _, v in numeric(series.get(p["id"], []))]
+        rows = [(t, v) for t, v in numeric(series.get(p["id"], [])) if _in_hours(t, r.get("hours"))]
+        observed.append(_observed(p, rows))
+        vals = [v for _, v in rows]
         if not vals:
             unknown += 1
+            partial.append({"subject": p["id"], "status": "inconclusive", "check_id": "range",
+                            "symptom": "no numeric samples" + (" inside the judged hours" if r.get("hours") else " in the window")})
             continue
         lo, hi = r.get("min"), r.get("max")
         unit = r.get("unit")
@@ -336,7 +461,102 @@ def eval_range(c: dict, equip: dict, series: dict[str, list], points: dict[str, 
             out.append(p["id"])
     status = "fail" if bad else ("inconclusive" if unknown or not out else "pass")
     return {"criterion": c, "status": status, "counts": {"pass": len(out) - len(bad), "fail": len(bad), "inconclusive": unknown},
-            "failing": (bad + partial)[:10]}
+            "failing": (bad + partial)[:10], "observed": observed}
+
+
+def availability_pct(times: list[datetime], start: datetime, end: datetime, max_gap: timedelta) -> float:
+    """Share of [start, end) covered when each sample vouches for the point
+    up to `max_gap` after it (and the window start counts as a gap)."""
+    total = (end - start).total_seconds()
+    if total <= 0:
+        return 0.0
+    covered = 0.0
+    ts = sorted(t for t in times if start <= t < end)
+    for i, t in enumerate(ts):
+        nxt = ts[i + 1] if i + 1 < len(ts) else end
+        covered += min((nxt - t).total_seconds(), max_gap.total_seconds())
+    if ts:
+        covered += min((ts[0] - start).total_seconds(), max_gap.total_seconds()) if ts[0] > start else 0
+    return round(100.0 * min(covered, total) / total, 2)
+
+
+def eval_availability(c: dict, equip: dict, series: dict[str, list], points: dict[str, dict],
+                      window: tuple[datetime, datetime] | None, truncated=frozenset()) -> dict:
+    a = c["availability"]
+    targets = _targets(c, equip, points)
+    if not targets:
+        return {"criterion": c, "status": "inconclusive" if c.get("required") or c.get("point") else "not_applicable",
+                "counts": {}, "failing": [], "observed": []}
+    if window is None:
+        return {"criterion": c, "status": "inconclusive", "counts": {"inconclusive": len(targets)}, "observed": [],
+                "failing": [{"subject": equip["id"], "status": "inconclusive", "check_id": "availability",
+                             "symptom": "no judged window"}]}
+    gap = timedelta(minutes=a["max_gap_minutes"])
+    failing, observed, passed, unknown = [], [], 0, 0
+    for p in targets:
+        rows = [(t, v) for t, v in series.get(p["id"], []) if v is not None]
+        pct = availability_pct([t for t, _ in rows], window[0], window[1], gap)
+        observed.append(_observed(p, numeric(rows), availability_pct=pct, max_gap_minutes=a["max_gap_minutes"]))
+        if p["id"] in truncated:
+            unknown += 1
+            failing.append({"subject": p["id"], "status": "inconclusive", "check_id": "availability",
+                            "symptom": f"window truncated at {len(series.get(p['id'], []))} samples"})
+        elif pct + 1e-9 < a["min_pct"]:
+            failing.append({"subject": p["id"], "status": "fail", "check_id": "availability",
+                            "symptom": f"{p.get('dis') or p['id']} available {pct:g}% (a sample at least every "
+                                       f"{a['max_gap_minutes']:g} min), below {a['min_pct']:g}%"})
+        else:
+            passed += 1
+    nfail = sum(1 for f in failing if f["status"] == "fail")
+    status = "fail" if nfail else ("inconclusive" if unknown else "pass")
+    return {"criterion": c, "status": status, "counts": {"pass": passed, "fail": nfail, "inconclusive": unknown},
+            "failing": failing[:10], "observed": observed}
+
+
+def _value(v) -> float | None:
+    got = numeric([(None, v)])
+    return got[0][1] if got else None
+
+
+def eval_response(c: dict, equip: dict, series: dict[str, list], points: dict[str, dict]) -> dict:
+    """S1: each time `when` starts (its value becomes `equals`), every `then`
+    point must move by at least changes_by within within_minutes. No start
+    in the window is inconclusive - the condition was never exercised."""
+    when, then = c["response"]["when"], c["response"]["then"]
+    w_targets, t_targets = _targets(when, equip, points), _targets(then, equip, points)
+    if not w_targets or not t_targets:
+        return {"criterion": c, "status": "inconclusive" if c.get("required") else "not_applicable",
+                "counts": {}, "failing": [], "observed": []}
+    want = _value(when["equals"])
+    within = timedelta(minutes=then["within_minutes"])
+    edges = []
+    for wp in w_targets:
+        prev = None
+        for t, v in numeric(series.get(wp["id"], [])):
+            if v == want and prev is not None and prev != want:
+                edges.append((t, wp))
+            prev = v
+    observed, failing, passed = [], [], 0
+    for t, wp in edges:
+        for tp in t_targets:
+            vals = [v for ts, v in numeric(series.get(tp["id"], [])) if t <= ts <= t + within]
+            moved = (max(vals) - min(vals)) if len(vals) >= 2 else None
+            observed.append({"subject": tp["id"], "trigger": wp["id"], "at": _iso(t), "moved": moved, "samples": len(vals)})
+            if moved is None or moved + 1e-9 < then["changes_by"]:
+                failing.append({"subject": tp["id"], "status": "fail", "check_id": "response",
+                                "symptom": f"at {t.strftime('%Y-%m-%d %H:%M')} {wp.get('dis') or wp['id']} became "
+                                           f"{when['equals']}; {tp.get('dis') or tp['id']} moved "
+                                           f"{'nothing measurable' if moved is None else f'{moved:g}'} within "
+                                           f"{then['within_minutes']:g} min (needed {then['changes_by']:g})"})
+            else:
+                passed += 1
+    if not edges:
+        return {"criterion": c, "status": "inconclusive", "counts": {"inconclusive": 1}, "observed": [],
+                "failing": [{"subject": w_targets[0]["id"], "status": "inconclusive", "check_id": "response",
+                             "symptom": f"the condition ({when.get('point') or when.get('point_class')} = {when['equals']}) "
+                                        "never started in the window, so the response wasn't exercised"}]}
+    return {"criterion": c, "status": "fail" if failing else "pass", "counts": {"pass": passed, "fail": len(failing)},
+            "failing": failing[:10], "observed": observed[:50]}
 
 
 def worst(statuses) -> str:
@@ -347,7 +567,7 @@ def worst(statuses) -> str:
 
 
 def evaluate(proc: dict, equips: list[dict], results: list[dict], series: dict[str, list],
-             truncated: set[str] | frozenset = frozenset()) -> list[dict]:
+             truncated: set[str] | frozenset = frozenset(), window: tuple[datetime, datetime] | None = None) -> list[dict]:
     """[{equip_uri, dis, status, steps: [{id, title, status, criteria: [...]}]}]
     for every equipment the procedure applies to. `truncated`: points whose
     window read stopped at the per-point limit (History.window)."""
@@ -359,11 +579,21 @@ def evaluate(proc: dict, equips: list[dict], results: list[dict], series: dict[s
             continue
         steps = []
         for st in proc["steps"]:
-            crit = [eval_range(c, e, series, points, truncated) if "range" in c else eval_check(c, e, results, classes)
-                    for c in st["criteria"]]
+            crit = [_eval(c, e, results, classes, series, points, truncated, window) for c in st["criteria"]]
             steps.append({"id": st["id"], "title": st["title"], "status": worst(c["status"] for c in crit), "criteria": crit})
         out.append({"equip_uri": e["id"], "dis": e.get("dis"), "status": worst(s["status"] for s in steps), "steps": steps})
     return out
+
+
+def _eval(c, e, results, classes, series, points, truncated, window) -> dict:
+    kind = criterion_kind(c)
+    if kind == "range":
+        return eval_range(c, e, series, points, truncated)
+    if kind == "availability":
+        return eval_availability(c, e, series, points, window, truncated)
+    if kind == "response":
+        return eval_response(c, e, series, points)
+    return eval_check(c, e, results, classes)
 
 
 def summarize(per_equip: list[dict]) -> dict:

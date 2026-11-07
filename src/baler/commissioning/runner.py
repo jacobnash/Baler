@@ -227,13 +227,7 @@ def _range_points(proc: dict, equips: list[dict]) -> list[str]:
     out: set[str] = set()
     for st in proc["steps"]:
         for c in st["criteria"]:
-            if "range" not in c:
-                continue
-            if c.get("point"):
-                out.add(c["point"])
-            else:
-                fam = procedures._family(c["point_class"])
-                out |= {p["id"] for e in equips for p in e["points"] if p.get("brickClass") in fam}
+            out |= procedures.series_points(c, equips)
     return sorted(out)
 
 
@@ -251,7 +245,7 @@ def execute_test(repo, job: TestJob, clock: Callable[[], datetime], run_fn=engin
             ids = _range_points(job.procedure, site)
             truncated: set[str] = set()
             series = hist.window(ids, job.start, job.end + timedelta(seconds=1), truncated=truncated) if ids else {}
-        per = procedures.evaluate(job.procedure, equips, results, series, truncated)
+        per = procedures.evaluate(job.procedure, equips, results, series, truncated, (job.start, job.end))
         prev = next((r for r in repo.list_test_runs(job.procedure["id"], 20)
                      if r["id"] != job.run_id and r["status"] == "completed"), None)
         summary = procedures.summarize(per)

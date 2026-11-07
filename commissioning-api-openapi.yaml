@@ -1968,13 +1968,20 @@ components:
     Criterion:
       type: object
       description: >-
-        Either `check` (a Cx check id or prefix - `exists`, `live`,
+        Exactly one of: `check` (a Cx check id or prefix - `exists`, `live`,
         `pair:`, `template:`, `gl36:hw_reset`, `cx:econ_*` - optionally
         filtered by severity, pair_kind or point_class; `strict` counts
-        inconclusive as failing) or `range` ({min, max, unit}) over a
-        point_class's points or one named `point`, e.g. a derivation
-        output. A criterion matching nothing is not_applicable unless
-        `required`.
+        inconclusive as failing); `range` ({min, max, unit, hours}) over a
+        point_class's points or one named `point`, with `hours` limiting it
+        to local occupied hours (S2); `availability` ({min_pct,
+        max_gap_minutes}): the point reported at least every max_gap
+        minutes for min_pct of the window (S3); or `response` ({when:
+        {point|point_class, equals}, then: {point|point_class, changes_by,
+        within_minutes}}): each time `when` starts, `then` moves at least
+        changes_by within that time; never started is inconclusive (S1). A
+        criterion matching nothing is not_applicable unless `required`.
+        Evaluated criteria carry `observed` per point (min/max/last, sample
+        count, availability, the edges judged) - passing ones too.
       properties:
         check: { type: string }
         strict: { type: boolean }
@@ -1989,6 +1996,36 @@ components:
             min: { type: number }
             max: { type: number }
             unit: { type: string, enum: [C, F] }
+            hours:
+              type: object
+              properties:
+                from: { type: integer, minimum: 0, maximum: 23 }
+                to: { type: integer, minimum: 1, maximum: 24 }
+                days: { type: array, items: { type: integer, minimum: 0, maximum: 6 }, description: "0 = Monday" }
+                tz: { type: string, description: IANA time zone; UTC when omitted }
+        availability:
+          type: object
+          required: [min_pct, max_gap_minutes]
+          properties:
+            min_pct: { type: number, exclusiveMinimum: 0, maximum: 100 }
+            max_gap_minutes: { type: number, exclusiveMinimum: 0 }
+        response:
+          type: object
+          required: [when, then]
+          properties:
+            when:
+              type: object
+              properties:
+                point: { type: string }
+                point_class: { type: string }
+                equals: { description: The value that starts it, e.g. 1, true, "active" }
+            then:
+              type: object
+              properties:
+                point: { type: string }
+                point_class: { type: string }
+                changes_by: { type: number, exclusiveMinimum: 0 }
+                within_minutes: { type: number, exclusiveMinimum: 0 }
     ProcedureSpec:
       type: object
       required: [name, kind, equip_class, steps]

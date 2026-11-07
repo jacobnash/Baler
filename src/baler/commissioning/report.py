@@ -339,6 +339,20 @@ def project_build(project: dict, generated_at: datetime, generated_by: str | Non
     }
 
 
+def _obs_text(o: dict) -> str:
+    """One observed-evidence entry, compact: what the rule actually saw."""
+    name = o.get("dis") or short_point(o.get("subject"))
+    if "moved" in o:
+        moved = "nothing measurable" if o["moved"] is None else f'{o["moved"]:g}'
+        return f'{name} moved {moved} after {short_point(o.get("trigger"))} started {_when(o.get("at"))}'
+    unit = f' {o["unit"]}' if o.get("unit") else ""
+    bits = [f'{o["min"]:g}..{o["max"]:g}{unit}' if "min" in o and isinstance(o["min"], (int, float)) else None,
+            f'last {o["last"]:g}' if isinstance(o.get("last"), (int, float)) else None,
+            f'{o["availability_pct"]:g}% available' if "availability_pct" in o else None,
+            f'{o.get("samples", 0)} samples']
+    return f'{name}: ' + ", ".join(b for b in bits if b)
+
+
 def _fpt_html(fpts: list[dict]) -> str:
     if not fpts:
         return "<p class=muted>No test procedures on this project.</p>"
@@ -354,14 +368,15 @@ def _fpt_html(fpts: list[dict]) -> str:
             for st in e.get("steps") or []:
                 failing = "; ".join(f'{escape(short_point(x.get("subject")))}: {escape(x.get("symptom") or x.get("status") or "")}'
                                     for c in st.get("criteria") or [] for x in c.get("failing") or [])
+                seen = "<br>".join(escape(_obs_text(o)) for c in st.get("criteria") or [] for o in (c.get("observed") or [])[:8])
                 rows.append(f'<tr><td>{escape(short_point(e["equip_uri"]))}</td><td>{escape(st.get("title") or st["id"])}</td>'
-                            f'<td>{_verdict(st["status"])}</td><td>{failing}</td></tr>')
+                            f'<td>{_verdict(st["status"])}</td><td>{failing}</td><td class=muted>{seen}</td></tr>')
         by = (tr.get("summary") or {}).get("by_status") or {}
         blocks.append(f'<h3>{escape(f["name"] or "")} <span class=muted>({escape(f["kind"] or "")}) · test run '
                       f'{escape(str(tr["id"])[:8])} · {_when(tr.get("started_at"))} to '
                       f'{_when(tr.get("window_end"))}</span></h3>'
                       f'<p class=muted>{by.get("fail", 0)} fail · {by.get("inconclusive", 0)} incomplete · {by.get("pass", 0)} pass</p>'
-                      '<table><tr><th>Equipment</th><th>Step</th><th>Result</th><th>Expected vs actual (what failed)</th></tr>'
+                      '<table><tr><th>Equipment</th><th>Step</th><th>Result</th><th>What failed</th><th>Observed</th></tr>'
                       f'{"".join(rows)}</table>')
     return "".join(blocks)
 
