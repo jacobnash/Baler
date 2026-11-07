@@ -81,3 +81,24 @@ def test_remove_only_touches_current_orphans_and_logs_it(tmp_path):
     assert edits[0]["who"] == "admin@test" and edits[0]["detail"]["orphan"] == "derivation_gone"
     with pytest.raises(TypeError):
         orphans.remove(store, conn, "not-a-list", False, ("u1", None), Scope.everything(), derivations)
+
+
+def test_unbound_optional_vars_on_remote_store_rows_dont_crash(tmp_path, monkeypatch):
+    """#70: RemoteStore's SparqlRow raises AttributeError for an unbound
+    OPTIONAL var (rdflib's rows give None), so an orphan with no dis made
+    GET /ops/orphans a 502."""
+    from baler.remote_store import SparqlRow
+
+    class RemoteLikeStore:
+        def query(self, sparql):
+            if "computed/" in sparql and "NOT EXISTS" not in sparql:
+                return [SparqlRow({"p": {"type": "uri", "value": "urn:point:computed/gone/ahu-1"}})]
+            return [SparqlRow({"p": {"type": "uri", "value": "urn:point:test-orph/bare"}})]
+
+    derivations = tmp_path / "derivations.json"
+    derivations.write_text("[]")
+    monkeypatch.setattr(orphans.timeseries, "read_latest_many", lambda conn, uris: {})
+    found = {o["id"]: o for o in orphans.find(RemoteLikeStore(), None, Scope.everything(), str(derivations))}
+    assert found["urn:point:computed/gone/ahu-1"]["dis"] is None
+    assert found["urn:point:computed/gone/ahu-1"]["equip"] is None
+    assert found["urn:point:test-orph/bare"]["kind"] == "no_equip"
