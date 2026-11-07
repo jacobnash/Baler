@@ -209,7 +209,13 @@ function openProvisionDialog(device) {
       const points = await windrow("POST", "/learn", { device_address: device.address, device_instance: device.device_instance });
       learnList.innerHTML = "";
       for (const point of points) {
-        const checkbox = el("input", { type: "checkbox", value: JSON.stringify({ object_identifier: point.object_identifier, label: point.label }) });
+        // units and description too: Windrow tags the point from them - its
+        // Haystack unit, and the tag words a description adds (Baler#82).
+        // Dropping them is why a learned zone_temp read "no unit recorded".
+        const picked = { object_identifier: point.object_identifier, label: point.label };
+        if (point.units) picked.units = point.units;
+        if (point.description) picked.description = point.description;
+        const checkbox = el("input", { type: "checkbox", value: JSON.stringify(picked) });
         checkbox.checked = true;
         learnList.appendChild(el("li", {}, [el("label", {}, [checkbox, `${point.label} (${point.object_identifier})`])]));
       }

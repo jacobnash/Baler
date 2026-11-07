@@ -83,7 +83,7 @@
     "id": "cbee35a7424945b4b5f831b54ae097c5",
     "name": "fan-duty-cycle",
     "kind": "formula",
-    "fn_source": "def run(inputs, row):\n    series = inputs.get('fanStatus') or []\n    if not series:\n        return None\n    active = sum(1 for _, v in series if v == 'active')\n    return active / len(series)",
+    "fn_source": "def run(inputs, row):\n    series = inputs.get('fanStatus') or []\n    if not series:\n        return None\n    active = sum(1 for _, v in series if v is True or v == 'active')\n    return active / len(series)",
     "test_cases": [
       {
         "inputs": {

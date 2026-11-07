@@ -9,18 +9,27 @@ set -e
 umask 077
 
 passwd_file=/mosquitto/data/passwd
-: > "$passwd_file"
+# Built from scratch in a root-owned scratch dir, then installed for the
+# broker (#79). mosquitto 2.1 warns when a file it opens isn't owned by the
+# user opening it ("future versions will refuse"): mosquitto_passwd runs
+# here as root, and regenerating the persisted, mosquitto-owned passwd in
+# place made it warn on every restart after the first. The broker itself
+# loads its password file after dropping to the mosquitto user (plugins load
+# after drop_privileges in 2.1), so the installed copy must stay
+# mosquitto-owned - a root-owned 0600 passwd would be unreadable to it.
+work=$(mktemp -d)
+: > "$work/passwd"
 
 old_ifs=$IFS
 IFS=,
 for pair in $MOSQUITTO_USERS; do
   user=${pair%%:*}
   pass=${pair#*:}
-  mosquitto_passwd -b "$passwd_file" "$user" "$pass"
+  mosquitto_passwd -b "$work/passwd" "$user" "$pass"
 done
 IFS=$old_ifs
-chmod 600 "$passwd_file"
-chown mosquitto:mosquitto "$passwd_file"
+install -m 600 -o mosquitto -g mosquitto "$work/passwd" "$passwd_file"
+rm -rf "$work"
 
 # The ACL is bind-mounted from the checkout (0644, the host user's), and
 # mosquitto 2.1 warns about world-readable security files (and says future
