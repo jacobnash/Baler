@@ -83,7 +83,7 @@ def test_get_status_matches_documented_schema(live_server, spec):
             {
                 "id": "connect_source",
                 "label": "Connect a source",
-                "href": "devices.html",
+                "href": "connectors.html",
                 "description": "x",
                 "enabled": True,
             }

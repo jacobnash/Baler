@@ -42,6 +42,9 @@ WORKDIR="${RUNNER_DIR}/_work/Baler/Baler"
 COMPOSE_BASE="${WORKDIR}/docker-compose.yml"
 COMPOSE_OVERRIDE="${WORKDIR}/deploy/nash-srv/docker-compose.override.yml"
 COMPOSE_WINDROW="${WORKDIR}/deploy/nash-srv/docker-compose.windrow.yml"
+# Opt-in (Baler#78): a host-network Windrow for LAN broadcast discovery,
+# added only when the env file has the line BALER_WINDROW_LAN=1.
+COMPOSE_LAN="${WORKDIR}/deploy/nash-srv/docker-compose.lan.yml"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "must run as root (sudo)" >&2
@@ -81,7 +84,13 @@ cat > "$WRAPPER" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd "${WORKDIR}"
-DC=(docker compose -f "${COMPOSE_BASE}" -f "${COMPOSE_OVERRIDE}" -f "${COMPOSE_WINDROW}" --env-file "${ENV_FILE}")
+DC=(docker compose -f "${COMPOSE_BASE}" -f "${COMPOSE_OVERRIDE}" -f "${COMPOSE_WINDROW}")
+# Host-network Windrow for LAN discovery (Baler#78, docs-site edge-nodes):
+# only when the env file opts in, so the default deploy is unchanged.
+if grep -qx 'BALER_WINDROW_LAN=1' "${ENV_FILE}"; then
+  DC+=(-f "${COMPOSE_LAN}")
+fi
+DC+=(--env-file "${ENV_FILE}")
 # git runs as the checkout's owner, never as root: .git/config is writable
 # by anything running as ${RUNNER_USER} (e.g. an npm postinstall in the docs
 # build), and git honours hooks/fsmonitor/etc. from it (#28).
@@ -131,7 +140,7 @@ chown -R "${RUNNER_USER}:${RUNNER_USER}" "${WORKDIR}"
 # Gateway caches upstream addresses at its own startup - if a backend got
 # recreated above without gateway also restarting, its routes 404/502 even
 # though the backend is healthy (see CLAUDE.md's gateway restart gotcha).
-docker compose -f "${COMPOSE_BASE}" -f "${COMPOSE_OVERRIDE}" -f "${COMPOSE_WINDROW}" --env-file "${ENV_FILE}" restart gateway
+"\${DC[@]}" restart gateway
 # Block here instead of handing control back to the caller (the deploy
 # workflow) while gateway is mid-restart - otherwise its very next step
 # can race a connection reset. Any HTTP response (even a 4xx from a

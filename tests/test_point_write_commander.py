@@ -66,3 +66,48 @@ def test_silence_times_out_and_says_the_command_expires():
     c = pw.Commander(client_factory=FakeBroker(reply=None).factory, timeout=0.1, ttl=30)
     with pytest.raises(pw.CommandError, match="expires after 30s"):
         c.point_write("site-a", "i1", "fbf/a/sp", 1.0, 8)
+
+
+def test_targeted_command_keeps_its_target_id_and_correlates_on_request_id():
+    """update_connection's `id` is the connection; the reply is matched by
+    request_id (a new Windrow echoes both)."""
+    class Echo(FakeBroker):
+        def publish(self, topic, payload, qos=0):
+            cmd = json.loads(payload)
+            self.published.append((topic, cmd))
+
+            class Msg:
+                pass
+
+            def answer():
+                m = Msg()
+                m.topic = topic.rsplit("/", 1)[0] + "/result"
+                m.payload = json.dumps({"ok": True, "result": {"id": cmd["id"]}, "id": cmd["id"],
+                                        "request_id": cmd["request_id"]}).encode()
+                self.on_message(None, None, m)
+
+            threading.Thread(target=answer, daemon=True).start()
+
+    broker = Echo(reply={})
+    c = pw.Commander(client_factory=broker.factory, timeout=2)
+    assert c.command("home", "pi-1", "update_connection", {"id": "conn-7", "poll_interval": 10}) == {"id": "conn-7"}
+    topic, cmd = broker.published[0]
+    assert topic == "cmd/home/pi-1/update-connection" and cmd["id"] == "conn-7" and cmd["request_id"] != "conn-7"
+
+
+def test_status_heartbeats_are_tracked_and_cleared():
+    broker = FakeBroker(reply=None)
+    c = pw.Commander(client_factory=broker.factory)
+    assert c.statuses(settle=0) == {}
+
+    class Msg:
+        pass
+
+    m = Msg()
+    m.topic, m.payload = "cmd/home/pi-1/status", json.dumps({"online": True, "devices": 2}).encode()
+    broker.on_message(None, None, m)
+    got = c.statuses(settle=0)[("home", "pi-1")]
+    assert got["online"] is True and got["devices"] == 2 and got["received_at"] > 0
+    m.payload = b""
+    broker.on_message(None, None, m)
+    assert c.statuses(settle=0) == {}

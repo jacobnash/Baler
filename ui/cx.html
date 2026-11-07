@@ -16,8 +16,8 @@
       <a href="his.html">Query</a>
       <a href="alarms.html">Alarms</a>
       <a href="derivations.html">Derivations</a>
-      <a href="devices.html">Devices</a>
       <a href="cx.html">Commissioning</a>
+      <a href="connectors.html">Connectors</a>
       <a href="ops.html">Ops</a>
       <a href="/docs" target="_blank" rel="noopener">Docs</a>
     </nav>
@@ -215,10 +215,13 @@
       <section id="risks-section">
         <h2>Accepted risks</h2>
         <p class="hint">Kept apart from faults and closed issues on purpose. A risk lapses on its review date and its issue reopens.</p>
+        <div class="table-scroll" style="overflow-x:auto">
         <table>
-          <thead><tr><th>Issue</th><th>Reason</th><th>Accepted by</th><th>Review by</th><th></th></tr></thead>
+          <caption class="sr-only">Accepted risks (waivers)</caption>
+          <thead><tr><th scope="col">Issue</th><th scope="col">Reason</th><th scope="col">Accepted by</th><th scope="col">Owner</th><th scope="col">Retest trigger</th><th scope="col">Review by</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
           <tbody id="risks-body"></tbody>
         </table>
+        </div>
       </section>
 
       <section>
@@ -304,7 +307,11 @@
       </div>
       <fieldset id="issue-risk" data-min-role="admin">
         <legend>Accept as a risk</legend>
-        <label>Reason <input type="text" id="risk-reason" /></label>
+        <p class="hint">A waiver keeps the item open on the record: it names who carries it and what retest lifts it. All fields are required.</p>
+        <label>Reason <input type="text" id="risk-reason" required placeholder="why it can't be closed now, e.g. read-only controller" /></label>
+        <label>Owner / responsible <input type="text" id="risk-owner" required placeholder="a party or person, e.g. Controls contractor (Acme)" /></label>
+        <label>Retest trigger <input type="text" id="risk-retest" required placeholder="an event, e.g. first heating changeover, or writes enabled" /></label>
+        <label>Accepted by (your name as signed) <input type="text" id="risk-name" required placeholder="e.g. Jacob Nash" /></label>
         <label>Review by <input type="date" id="risk-review" /></label>
         <button type="button" id="risk-accept-btn">Accept risk</button>
       </fieldset>

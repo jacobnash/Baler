@@ -71,6 +71,11 @@ _SUBCLASS = re.compile(r"rdfs:subClassOf ((?:brick:\w+[,\s]*)+)")
 # class mean" both are the same kind of link: same tags, same subtree.
 _EQUIV = re.compile(r"(?:owl:equivalentClass|brick:isReplacedBy) ((?:brick:\w+[,\s]*)+)")
 _ASSOC_TAGS = re.compile(r"brick:hasAssociatedTag ((?:tag:\w+[,\s]*)+)")
+# Which side of an equivalence is the short name: `brick:AHU ... brick:aliasOf
+# brick:Air_Handling_Unit`. The terminator check drops targets that aren't a
+# plain class name (PAU's `brick:Pre-Cooling_Air_Unit`, which no class block
+# defines).
+_ALIAS_OF = re.compile(r"brick:aliasOf brick:(\w+)\s*[.;]")
 
 
 @dataclass
@@ -79,6 +84,7 @@ class BrickClass:
     parents: set[str] = field(default_factory=set)
     equivalents: set[str] = field(default_factory=set)
     own_tags: set[str] = field(default_factory=set)
+    alias_of: str | None = None
 
 
 @dataclass
@@ -149,6 +155,17 @@ class Vocab:
             stack.extend(self._children.get(n, ()))
         return frozenset(out)
 
+    def preferred_name(self, name: str) -> str:
+        """The class Brick says `name` is an alias of (`AHU` ->
+        `Air_Handling_Unit`), else `name` itself - so one class has one
+        spelling wherever things are grouped by class (Baler#76)."""
+        c = self.classes.get(name)
+        return c.alias_of if c is not None and c.alias_of in self.classes else name
+
+    def aliases(self) -> dict[str, str]:
+        """Every alias -> the class it names, from brick:aliasOf."""
+        return {n: c.alias_of for n, c in self.classes.items() if c.alias_of and c.alias_of in self.classes}
+
     def classes_with_tag(self, tag: str) -> frozenset[str]:
         return self._classes_by_tag.get(tag, frozenset())
 
@@ -173,6 +190,9 @@ def parse(path: str = DEFAULT_ONTOLOGY_PATH) -> Vocab:
         for rx, target in ((_SUBCLASS, c.parents), (_EQUIV, c.equivalents)):
             for hit in rx.finditer(body):
                 target.update(re.findall(r"brick:(\w+)", hit.group(1)))
+        alias_hit = _ALIAS_OF.search(body)
+        if alias_hit:
+            c.alias_of = alias_hit.group(1)
         tags_hit = _ASSOC_TAGS.search(body)
         if tags_hit:
             c.own_tags.update(re.findall(r"tag:(\w+)", tags_hit.group(1)))

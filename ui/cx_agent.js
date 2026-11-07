@@ -51,7 +51,10 @@ async function loadProposals() {
             await cxApi("POST", `/agent-proposals/${p.id}/${verb}`, {});
             await selectProject(cx.project.id); // what was accepted shows up everywhere
           } catch (err) {
-            alert(err.message);
+            // a phase gate in "block" mode refuses it and lists what's unmet;
+            // the proposal stays open to accept once the gate is met (#86)
+            const unmet = err.data && err.data.gate ? err.data.gate.unmet.map((u) => `- ${u.message}`).join("\n") : "";
+            alert(unmet ? `${err.message}\n\n${unmet}` : err.message);
           }
         });
         actions.append(b);

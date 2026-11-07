@@ -198,3 +198,45 @@ def http_handler_base_tracer_stub():
             return _Span()
 
     return _Tracer()
+
+
+def _his_like(samples: int) -> dict:
+    return {
+        "expr": "readAll(equip).hisRead(today)", "rollup": None, "matched": ["urn:equip:a"], "hints": [],
+        "span": {"start": 1.0, "end": 2.5, "label": "today", "tz": "UTC"},
+        "series": [
+            {"id": f"urn:point:p{p}", "dis": "Zone temp °F ☃", "unit": None, "tags": ["temp", "zone"],
+             "history": [{"ts": 1794009600.0 + 5 * i, "value": [20.5 + i / 7, True, "active", None][p % 4]}
+                         for i in range(samples)],
+             "truncated": False}
+            for p in range(5)
+        ],
+    }
+
+
+@pytest.mark.parametrize("payload", [
+    _his_like(0), _his_like(3), _his_like(2000), _his_like(2001), _his_like(9999),
+    [], {}, [[]], [{}], [1, [2, {"a": [3] * 5000}]], {"x": [{"a": {"b": [1, 2]}}] * 3000},
+    {"nan": float("nan"), "inf": float("inf"), "big": 10**30, "esc": "a\"b\\c\n\x00"},
+    [{"k": i} for i in range(4100)], list(range(4100)),
+])
+def test_json_pieces_is_json_dumps_byte_for_byte(payload):
+    assert "".join(http_handler_base.json_pieces(payload)) == json.dumps(payload)
+
+
+def test_json_pieces_cuts_big_payloads_small():
+    """No single piece is a big encode: what keeps one large /his response
+    from holding the GIL long enough to starve the health probe (#51)."""
+    payload = _his_like(20_000)
+    pieces = list(http_handler_base.json_pieces(payload))
+    assert len(json.dumps(payload)) > 4_000_000
+    assert max(len(p) for p in pieces) < 150_000
+
+
+def test_respond_json_streamed_writes_the_same_body_as_respond_json():
+    payload = _his_like(5000)
+    a, b = _make_handler(), _make_handler()
+    respond_json(a, 200, payload)
+    http_handler_base.respond_json_streamed(b, 200, payload)
+    assert a.wfile.getvalue() == b.wfile.getvalue()
+    b.send_header.assert_any_call("Content-Length", str(len(b.wfile.getvalue())))

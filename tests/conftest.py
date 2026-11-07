@@ -91,13 +91,27 @@ def _no_leaked_site_prefixes(request):
 # the integration suite. Shards are balanced by estimated duration.
 
 
-# Files much slower than their test count suggests (seconds, from CI's
-# --durations): they're placed first so the shards come out even. Every
-# other file counts SECONDS_PER_TEST per test.
+# Seconds per file, measured from CI's log timestamps (run 42376887272, the
+# gap between consecutive per-file progress lines). Every file not listed
+# counts SECONDS_PER_TEST per test. Re-measure when a shard gets slow: the
+# job log prints each file's line as it finishes.
 SLOW_FILES = {
     "tests/test_gateway_auth.py": 50.0,  # waits out the gateway's 30 s revocation poll
-    "tests/test_haystack_brick_e2e.py": 40.0,
-    "tests/test_broker_accounts.py": 8.0,
+    "tests/test_haystack_conformance.py": 17.0,
+    "tests/test_his_route.py": 10.5,
+    "tests/test_site_scoping_integration.py": 9.0,
+    "tests/test_broker_accounts.py": 7.5,
+    "tests/test_rollup_views.py": 7.5,
+    "tests/test_tags_route.py": 5.5,
+    "tests/test_validate_openapi.py": 5.0,
+    "tests/test_e2e_journey.py": 4.5,
+    "tests/test_auth_openapi.py": 4.5,
+    "tests/test_history_routes.py": 4.0,
+    "tests/test_derivation_openapi.py": 4.0,
+    "tests/test_openapi.py": 4.0,
+    "tests/test_haystack_brick_e2e.py": 3.5,
+    "tests/test_auth.py": 3.0,
+    "tests/test_webhooks.py": 2.5,
 }
 SECONDS_PER_TEST = 0.4
 
@@ -114,6 +128,9 @@ def _shard_files(counts: dict[str, int], total: int) -> list[set[str]]:
     return shards
 
 
+# trylast: after pytest's own -m/-k deselection, so the shards are balanced
+# over the tests that will actually run (not every test in each file).
+@pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
     import os
     from collections import Counter

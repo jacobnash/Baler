@@ -33,6 +33,14 @@ _EARLY_PROCEDURES = {"power_on", "startup"}
 MAX_ITEMS = 50
 
 
+class GateNotMet(Exception):
+    """A move a "block" gate refuses. Carries the evaluated gate."""
+
+    def __init__(self, gate: dict):
+        super().__init__(f"the {gate['target']} gate isn't met - fix what it lists, or move the phase yourself with an override note")
+        self.gate = gate
+
+
 def mode(settings: dict | None) -> str:
     m = (settings or {}).get("phase_gates", DEFAULT_MODE)
     return m if m in MODES else DEFAULT_MODE
