@@ -28,6 +28,7 @@ jobs:
           path-to-document: "https://github.com/jacobnash/baler/blob/main/CLA.md"
           branch: "main"
           # Sole maintainer, plus commits Claude Code authors for him
-          # (committer name "Claude", no linked GitHub account) and bots.
-          # Outside contributors still have to sign.
-          allowlist: jacobnash,Claude,*[bot]
+          # and bots. Claude's commits (noreply@anthropic.com) resolve to the
+          # GitHub login "claude", and the match is case-sensitive, so both
+          # spellings are listed. Outside contributors still have to sign.
+          allowlist: jacobnash,claude,Claude,*[bot]
