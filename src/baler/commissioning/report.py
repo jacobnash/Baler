@@ -744,14 +744,14 @@ def _criteria_html(fpts: list[dict]) -> str:
             + "".join(rows) + "</table>")
 
 
-def acceptance_availability(series: dict[str, list], points: dict[str, dict], start: datetime, end: datetime,
-                            settle_minutes: float, min_pct: float, max_gap_minutes: float) -> dict:
+def acceptance_availability(measured: dict[str, tuple[int, float]], points: dict[str, dict], start: datetime,
+                            end: datetime, settle_minutes: float, min_pct: float, max_gap_minutes: float) -> dict:
     """Per-point availability over the acceptance verification run's window,
     after a settle time - as data, not a phase note (Baler#100 review).
-    expected = the samples a point reporting every max_gap would send."""
+    `measured`: (samples, availability %) per point from judged_from to
+    end (repo.availability). expected = the samples a point reporting every
+    max_gap would send."""
     from datetime import timedelta
-
-    from baler.commissioning.procedures import availability_pct
 
     judged_from = start + timedelta(minutes=settle_minutes)
     span = max((end - judged_from).total_seconds(), 0.0)
@@ -760,9 +760,9 @@ def acceptance_availability(series: dict[str, list], points: dict[str, dict], st
     expected = math.ceil(span / (max_gap_minutes * 60)) if max_gap_minutes > 0 else 0
     rows = []
     for uri, pt in sorted(points.items()):
-        times = [t for t, v in series.get(uri, []) if v is not None and judged_from <= t < end]
-        pct = availability_pct(times, judged_from, end, timedelta(minutes=max_gap_minutes)) if span else 0.0
-        rows.append({"subject": uri, "dis": pt.get("dis"), "equip_uri": pt.get("equip_uri"), "samples": len(times),
+        samples, pct = measured.get(uri, (0, 0.0))
+        pct = pct if span else 0.0
+        rows.append({"subject": uri, "dis": pt.get("dis"), "equip_uri": pt.get("equip_uri"), "samples": samples,
                      "expected": expected,
                      "availability_pct": pct, "pass": pct + 1e-9 >= min_pct})
     return {"window_start": start.isoformat(), "window_end": end.isoformat(), "settle_minutes": settle_minutes,

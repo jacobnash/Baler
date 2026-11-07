@@ -67,7 +67,7 @@ function faultDetail(fault) {
   return JSON.stringify(d);
 }
 
-function renderFaults(faults) {
+function renderFaults(faults, total) {
   tbodyEl.innerHTML = "";
   for (const fault of faults) {
     const ackBtn = el("button", {
@@ -113,23 +113,51 @@ function renderFaults(faults) {
   const n = tbodyEl.querySelectorAll("tr.fault-row").length;
   const open = faults.filter((f) => f.status === "open").length;
   const which = statusFilterEl.value;
-  const text = which ? `${n} ${which} fault${n === 1 ? "" : "s"}` : `${n} fault${n === 1 ? "" : "s"} (${open} open)`;
-  faultsCountEl.textContent = which ? `(${n} ${which})` : `(${n}, ${open} open)`;
+  // GET /faults pages (newest first); X-Total-Count says how many match.
+  const more = total > n;
+  const shown = more ? `newest ${n} of ${total}` : `${n}`;
+  const text = which ? `${shown} ${which} fault${total === 1 ? "" : "s"}` : `${shown} fault${total === 1 ? "" : "s"} (${open} open${more ? " among them" : ""})`;
+  faultsCountEl.textContent = which ? `(${shown} ${which})` : `(${shown}, ${open} open${more ? " among them" : ""})`;
   statusEl.textContent = text;
+  loadMoreEl.hidden = !more || pageSize >= MAX_PAGE;
 }
+
+// The rows asked for per load: one page to start, a page more per "Show
+// more" click (the 5 s refresh keeps asking for that many).
+const PAGE = 500;
+const MAX_PAGE = 5000; // fault_api's cap per request
+let pageSize = PAGE;
+const loadMoreEl = document.getElementById("faults-more");
 
 async function loadFaults() {
   if (dialogOpen) return;
   try {
     const status = statusFilterEl.value;
-    const faults = await faultApi("GET", status ? `/faults?status=${status}` : "/faults");
-    renderFaults(faults);
+    const query = new URLSearchParams({ limit: String(pageSize) });
+    if (status) query.set("status", status);
+    const res = await fetch(`${FAULT_API_URL}/faults?${query}`, { headers: authHeaders() });
+    if (res.status === 401) {
+      handleUnauthorized();
+      throw new Error("session expired");
+    }
+    const data = await res.json();
+    if (!res.ok) throw new Error(data && data.error ? data.error : `GET /faults failed: ${res.status}`);
+    const total = Number(res.headers.get("X-Total-Count") || data.length);
+    renderFaults(data, total);
   } catch (err) {
     statusEl.textContent = `failed to reach fault API: ${err.message}`;
   }
 }
 
-statusFilterEl.addEventListener("change", loadFaults);
+loadMoreEl.addEventListener("click", () => {
+  pageSize = Math.min(pageSize + PAGE, MAX_PAGE);
+  loadFaults();
+});
+
+statusFilterEl.addEventListener("change", () => {
+  pageSize = PAGE;
+  loadFaults();
+});
 
 // --- rule creation - same Form/Raw JSON editor pattern as derivations.js's
 // config pane, adapted to this one textarea (no fn_source/test_cases here). ---

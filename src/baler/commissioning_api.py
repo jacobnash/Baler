@@ -29,6 +29,7 @@ import logging
 import os
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -601,9 +602,10 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             start = run["window_start"] if isinstance(run["window_start"], datetime) else datetime.fromisoformat(run["window_start"])
             end = run["window_end"] if isinstance(run["window_end"], datetime) else datetime.fromisoformat(run["window_end"])
             points = {pt["id"]: pt for e in equipment.values() for pt in e.get("points") or []}
-            with repo.history() as h:
-                series = h.window(sorted(points), start, end + timedelta(seconds=1)) if points else {}
-            return report.acceptance_availability(series, points, start, end, float(cfg["settle_minutes"]),
+            judged_from = start + timedelta(minutes=float(cfg["settle_minutes"]))
+            measured = repo.availability(sorted(points), judged_from, end,
+                                         timedelta(minutes=float(cfg["max_gap_minutes"]))) if points and end > judged_from else {}
+            return report.acceptance_availability(measured, points, start, end, float(cfg["settle_minutes"]),
                                                   float(cfg["min_pct"]), float(cfg["max_gap_minutes"]))
 
         def _project_report(self, span, claims, pid) -> None:
@@ -621,6 +623,13 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             scope = repo.scope_for(claims)
             runner.reconcile_issues(repo, pid, None, [], now_fn())
             run = next((r for r in repo.list_runs(pid, 20) if r.get("status") == "completed"), None)
+            equipment = self._report_equipment(p)
+            if equipment is not None:  # never name what the caller can't read
+                equipment = {k: v for k, v in equipment.items() if scope.allows(k)}
+            # Availability folds every sample of the run's window (the slow
+            # part, Baler#150): in the background while the rest is read.
+            side = ThreadPoolExecutor(max_workers=1)
+            acceptance_f = side.submit(self._report_acceptance, p, run, equipment, scope)
             results = [r for r in repo.get_results(run["id"]) if scope.allows(r["equip_uri"])] if run else []
             procs = [x for x in repo.list_procedures(pid) if x["status"] != "archived"]
             latest = {pr["id"]: next((t for t in repo.list_test_runs(pr["id"], 20) if t["status"] == "completed"), None)
@@ -634,16 +643,17 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 log.warning("cx report %s: spec alignment failed", pid, exc_info=True)
                 alignment = None
             docs = [db.public_row(d) for d in repo.find_rows("cx_spec_documents", project_id=pid)]
-            equipment = self._report_equipment(p)
-            if equipment is not None:  # never name what the caller can't read
-                equipment = {k: v for k, v in equipment.items() if scope.allows(k)}
+            try:
+                acceptance = acceptance_f.result()
+            finally:
+                side.shutdown(wait=False)
             rep = report.project_build(db.public_project(p), now_fn(), repo.user_email(claims.get("sub")) or claims.get("sub"),
                                        db.public_row(run) if run else None, results, procs,
                                        {k: (db.public_row(v) if v else None) for k, v in latest.items()},
                                        iss, repo.list_events(pid, 500), alignment, docs, active_runs, active.writes_allowed(),
                                        site=repo.get_site(p["site_id"]) if p.get("site_id") else None,
                                        equipment=equipment,
-                                       acceptance=self._report_acceptance(p, run, equipment, scope), origin=origin)
+                                       acceptance=acceptance, origin=origin)
             if fmt == "json":
                 respond_json(self, 200, rep)
                 return

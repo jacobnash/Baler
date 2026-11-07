@@ -14,6 +14,7 @@ from baler.faults import (
     ensure_schema,
     is_webhook_disabled,
     list_faults,
+    list_faults_page,
     list_webhook_health,
     open_fault,
     record_webhook_failure,
@@ -189,3 +190,54 @@ def test_list_webhook_health_returns_every_webhook_keyed_by_id(conn):
     # a webhook that's never recorded an attempt has no row - the caller
     # (fault_api.py's GET /webhooks) is responsible for the not-in-dict default
     assert "test-faults:never-attempted" not in health
+
+
+@pytest.mark.integration
+def test_list_faults_page_walks_list_faults_in_order(conn):
+    """Pages, joined, are list_faults' answer (Baler#107): same rows, same
+    newest-first order, every row exactly once."""
+    t0 = datetime(2099, 1, 1, tzinfo=timezone.utc)  # `since` keeps other rows out
+    for i in range(7):
+        fid = open_fault(conn, f"test-faults:page-{i}", f"urn:point:test-faults:page/{'mine' if i % 2 else 'theirs'}",
+                         t0 + timedelta(minutes=i % 4))  # repeated started_at: ties go by id
+        close_fault(conn, f"test-faults:page-{i}", f"urn:point:test-faults:page/{'mine' if i % 2 else 'theirs'}", t0 + timedelta(hours=1))
+        assert fid
+    whole = [f for f in list_faults(conn, status="resolved") if f["rule_id"].startswith("test-faults:page-")]
+    since = t0
+    seen, before = [], None
+    while True:
+        page, total, before = list_faults_page(conn, status="resolved", limit=3, before=before, since=since)
+        seen += page
+        if before is None:
+            break
+    assert len(seen) == 7 and total == 7
+    assert seen == sorted(whole, key=lambda f: (datetime.fromisoformat(f["started_at"]), f["id"]), reverse=True)
+
+
+@pytest.mark.integration
+def test_list_faults_page_applies_scope_before_paging(conn):
+    t0 = datetime(2099, 1, 2, tzinfo=timezone.utc)
+    for i in range(6):
+        open_fault(conn, f"test-faults:scope-{i}", f"urn:point:test-faults:scope/{'mine' if i % 2 else 'theirs'}/{i}",
+                   t0 + timedelta(minutes=i))
+
+    def allows(uri):
+        return "/mine/" in uri
+
+    page, total, nxt = list_faults_page(conn, limit=2, since=t0, allows=allows)
+    assert total == 3
+    assert [f["rule_id"] for f in page] == ["test-faults:scope-5", "test-faults:scope-3"]
+    assert nxt == page[-1]["id"]
+    rest, total2, _ = list_faults_page(conn, limit=2, since=t0, allows=allows, before=nxt)
+    assert total2 == total and [f["rule_id"] for f in rest] == ["test-faults:scope-1"]
+    assert list_faults_page(conn, limit=2, since=t0, allows=allows, before=rest[0]["id"])[0] == []
+
+
+@pytest.mark.integration
+def test_list_faults_page_rejects_bad_limits_and_cursors(conn):
+    with pytest.raises(ValueError):
+        list_faults_page(conn, limit=0)
+    with pytest.raises(ValueError):
+        list_faults_page(conn, limit=5001)
+    with pytest.raises(ValueError):
+        list_faults_page(conn, status="open", before=-1)

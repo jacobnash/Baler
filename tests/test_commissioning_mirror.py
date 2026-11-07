@@ -62,13 +62,25 @@ def served(monkeypatch, repo):
     sent = []
     worker.notify = lambda *a: sent.append(a)
     server = api._serve(monkeypatch, repo, worker)
+    _workers.append(worker)
     yield f"http://127.0.0.1:{server.server_address[1]}", sent
+    _workers.remove(worker)
     server.shutdown()
+
+
+_workers: list = []  # the served fixture's RunWorker, for _run to join
 
 
 def _run(base, pid, headers=api.A):
     run = requests.post(f"{base}/projects/{pid}/runs", json={}, headers=headers).json()
-    return api._wait(base, run["id"], headers).json()
+    done = api._wait(base, run["id"], headers).json()
+    # The run reads "completed" before the runner mirrors its faults
+    # (runner.execute: complete_run, then mirror.apply), so a test that
+    # checks repo.faults right after the status flips races the mirror.
+    # Joining the worker waits for the whole job, mirroring included.
+    for worker in _workers:
+        worker.join()
+    return done
 
 
 def test_mirroring_opens_real_uri_faults_and_resolves_them(served, repo, oas):

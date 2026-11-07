@@ -401,7 +401,10 @@ def test_119_acceptance_availability_is_data_with_window_settle_and_counts():
               "urn:point:zone": [(t, 1.0) for i, t in enumerate(every) if i != 20]}
     points = {"urn:point:full": {"dis": "full", "equip_uri": "urn:equip:e"},
               "urn:point:zone": {"dis": "bacnet/zone_temp", "equip_uri": "urn:equip:e"}}
-    acc = report.acceptance_availability(series, points, start, end, 3, 95, 1)
+    from baler.commissioning.history import InMemoryHistory
+
+    measured = InMemoryHistory(series).availability(list(points), judged_from, end, timedelta(minutes=1))
+    acc = report.acceptance_availability(measured, points, start, end, 3, 95, 1)
     by = {r["dis"]: r for r in acc["points"]}
     assert (by["full"]["samples"], by["full"]["expected"], by["full"]["availability_pct"]) == (37, 37, 100.0)
     assert (by["bacnet/zone_temp"]["samples"], by["bacnet/zone_temp"]["expected"]) == (36, 37)
