@@ -491,9 +491,6 @@ async function selectPoint(point, btn) {
     }));
   }
   detailEl.appendChild(h2);
-  // Stacked layout (style.css, phone width): the detail sits below the
-  // tree, so bring it into view or the tap looks like it did nothing.
-  if (window.matchMedia("(max-width: 700px)").matches) detailEl.scrollIntoView({ block: "start" });
 
   if (point.brickClass) {
     const p = document.createElement("p");
@@ -543,6 +540,11 @@ async function selectPoint(point, btn) {
     redraw();
   };
   redraw();
+  // Stacked layout (style.css, phone width): the detail sits below the
+  // tree, so bring it into view or the tap looks like it did nothing.
+  // After the tags and chart are in, so the page is tall enough to put
+  // the detail's top at the top of the screen.
+  if (window.matchMedia("(max-width: 700px)").matches) detailEl.scrollIntoView({ block: "start" });
 
   if (historyKey) refreshTimer = setInterval(reload, REFRESH_INTERVAL_MS);
 }
