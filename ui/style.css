@@ -81,10 +81,17 @@ main {
   border-radius: 3px;
 }
 #tree button:hover { background: rgba(43, 108, 176, 0.12); }
-/* app.js's hisLink() - the per-equipment "chart everything" jump into
-   his.html, sitting inside each equipment <summary>. */
-#tree summary .his-link { text-decoration: none; font-size: 0.8rem; opacity: 0.55; }
-#tree summary .his-link:hover { opacity: 1; }
+/* app.js's buildEquipNode(): the equipment's actions (Cx dot, the
+   hisLink() "chart everything" jump into his.html, edit buttons) are a
+   sibling of its <summary>, laid over the summary's line on the right -
+   the summary's padding keeps its label clear of them. */
+#tree .equip-node { position: relative; }
+#tree .equip-node > details > summary { padding-right: 2.75rem; }
+#tree .equip-node:has(.edit-btn) > details > summary { padding-right: 9rem; }
+#tree .equip-actions { position: absolute; top: 0.15rem; right: 0; display: flex; align-items: center; gap: 0.15rem; }
+#tree .equip-actions button { width: auto; }
+#tree .equip-actions .his-link { text-decoration: none; font-size: 0.8rem; opacity: 0.55; }
+#tree .equip-actions .his-link:hover, #tree .equip-actions .his-link:focus-visible { opacity: 1; }
 #detail .his-link { color: var(--accent-text); }
 #tree button.selected { background: var(--accent); color: #fff; }
 
@@ -235,6 +242,19 @@ button.danger { margin-left: auto; color: var(--color-critical, #c53030); }
   header { flex-wrap: wrap; row-gap: 0.25rem; }
   header #status { flex-basis: 100%; order: 3; font-size: 0.8rem; }
   .top-nav { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; margin-left: 0; }
+}
+
+/* Equipment page on a phone (Baler#160): side by side, the tree took up
+   to 320px and left the detail pane ~70px. Stack them instead - tree
+   first (capped so the detail stays reachable), detail at full width
+   below, and the page scrolls as a whole. app.js scrolls the detail into
+   view when a point is picked. */
+@media (max-width: 700px) {
+  main:has(> #tree) { display: block; height: auto; }
+  #tree { max-height: 45vh; border-right: none; border-bottom: 1px solid var(--border); }
+  #detail { overflow-y: visible; }
+  /* the 640px-wide history canvas scales down without squashing */
+  #detail canvas { height: auto; }
 }
 
 /* Visually hidden, still read by screen readers (table captions, icon-only headers). */
