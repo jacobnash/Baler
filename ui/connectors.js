@@ -317,39 +317,98 @@ function connectorRows() {
   ];
 }
 
+// Many connectors on one node (Baler#161): a filter over prefix and device,
+// one group per controller (header with counts, collapsible), sorted by
+// prefix with numbers in order (vav-2 before vav-10), and at most
+// GROUP_PAGE rows per group until "Show more".
+const GROUP_PAGE = 25;
+const listView = { filter: "", failingOnly: false, collapsed: new Set(), shown: new Map() };
+const byPrefix = (a, b) => a.c.topic_prefix.localeCompare(b.c.topic_prefix, undefined, { numeric: true });
+const notOk = (r) => r.c.poll_status && r.c.poll_status.state !== "ok" && r.c.poll_status.state !== "waiting";
+
+function connectorRow(r) {
+  const actions = el("td", { className: "actions" });
+  const prefix = r.c.topic_prefix;
+  if (isAdmin()) {
+    actions.append(
+      button("Edit", { label: `Edit connector ${prefix}`, fk: `edit:${r.kind}:${r.c.id}`, disabled: !canChange(),
+                       onClick: () => openConnector({ kind: r.kind, record: r.c }) }),
+      button("Delete", { label: `Delete connector ${prefix}`, fk: `del:${r.kind}:${r.c.id}`, className: "danger", disabled: !canChange(),
+                         onClick: () => deleteConnector(r.kind, r.c) }),
+    );
+  }
+  return el("tr", {}, [
+    el("td", { textContent: r.kind === "bacnet" ? "BACnet" : "Modbus" }),
+    el("td", { textContent: r.device }),
+    el("td", {}, [equipLink(prefix)]),
+    el("td", { textContent: `${r.points.length}`, title: r.points.join(", ") }),
+    el("td", { textContent: `${r.c.poll_interval ?? "—"} s` }),
+    pollCell(r.c, r.points.length),
+    loginCell(r.c, r.kind === "bacnet" ? "connection" : "modbus_connection", prefix),
+    actions,
+  ]);
+}
+
 function renderConnections() {
-  const tbody = $("connections-table").querySelector("tbody");
-  tbody.innerHTML = "";
-  const rows = connectorRows();
+  const table = $("connections-table");
+  for (const tb of table.querySelectorAll("tbody")) tb.remove();
+  const all = connectorRows();
+  const q = listView.filter.trim().toLowerCase();
+  const rows = all.filter((r) => (!q || `${r.c.topic_prefix} ${r.device} ${r.kind}`.toLowerCase().includes(q))
+    && (!listView.failingOnly || notOk(r))).sort(byPrefix);
+  $("conn-tools").hidden = all.length < 2;
+  $("conn-count").textContent = q || listView.failingOnly
+    ? `${rows.length} of ${plural(all.length, "connector")}`
+    : plural(all.length, "connector");
+
+  const groups = new Map();
   for (const r of rows) {
-    const actions = el("td", { className: "actions" });
-    const prefix = r.c.topic_prefix;
-    if (isAdmin()) {
-      actions.append(
-        button("Edit", { label: `Edit connector ${prefix}`, fk: `edit:${r.kind}:${r.c.id}`, disabled: !canChange(),
-                         onClick: () => openConnector({ kind: r.kind, record: r.c }) }),
-        button("Delete", { label: `Delete connector ${prefix}`, fk: `del:${r.kind}:${r.c.id}`, className: "danger", disabled: !canChange(),
-                           onClick: () => deleteConnector(r.kind, r.c) }),
-      );
+    const key = `${r.kind}|${r.device}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  // A header per controller only when there's something to group.
+  const grouped = groups.size > 1 || rows.length > GROUP_PAGE;
+  for (const [key, list] of groups) {
+    const tbody = el("tbody");
+    const open = !listView.collapsed.has(key) || !!q;
+    if (grouped) {
+      const failing = list.filter(notOk).length;
+      const toggle = button(`${open ? "▾" : "▸"} ${list[0].kind === "bacnet" ? "BACnet" : "Modbus"} ${list[0].device}`, { className: "group-toggle", fk: `group:${key}` });
+      toggle.setAttribute("aria-expanded", String(open));
+      toggle.addEventListener("click", () => {
+        if (listView.collapsed.has(key)) listView.collapsed.delete(key); else listView.collapsed.add(key);
+        keepFocus(renderConnections);
+      });
+      const th = el("th", { colSpan: 8, scope: "rowgroup" }, [toggle, " ",
+        el("span", { className: "hint", textContent: `${plural(list.length, "connector")}${failing ? ` · ${failing} not OK` : ""}` })]);
+      tbody.append(el("tr", { className: "group-head" }, [th]));
     }
-    tbody.append(el("tr", {}, [
-      el("td", { textContent: r.kind === "bacnet" ? "BACnet" : "Modbus" }),
-      el("td", { textContent: r.device }),
-      el("td", {}, [equipLink(prefix)]),
-      el("td", { textContent: `${r.points.length}`, title: r.points.join(", ") }),
-      el("td", { textContent: `${r.c.poll_interval ?? "—"} s` }),
-      pollCell(r.c, r.points.length),
-      loginCell(r.c, r.kind === "bacnet" ? "connection" : "modbus_connection", prefix),
-      actions,
-    ]));
+    if (open) {
+      const limit = q ? list.length : (listView.shown.get(key) || GROUP_PAGE);
+      for (const r of list.slice(0, limit)) tbody.append(connectorRow(r));
+      if (list.length > limit) {
+        const more = button(`Show ${Math.min(GROUP_PAGE, list.length - limit)} more (${list.length - limit} hidden)`, { fk: `more:${key}` });
+        more.addEventListener("click", () => { listView.shown.set(key, limit + GROUP_PAGE); keepFocus(renderConnections); });
+        tbody.append(el("tr", { className: "group-more" }, [el("td", { colSpan: 8 }, [more])]));
+      }
+    }
+    table.append(tbody);
   }
   if (!rows.length) {
-    let text = "No connectors yet.";
-    if (state.node && !state.node.online && !state.loadedAt) text = "Can't list connectors while this node is offline.";
-    else if (isAdmin()) text = "No connectors yet. Add one by address, or scan and add one for a device found below.";
-    const td = el("td", { colSpan: 8, className: "hint" }, [text, " "]);
-    td.append(el("a", { href: "/docs/connectors", target: "_blank", rel: "noopener", textContent: "How to add a connector" }));
+    const tbody = el("tbody");
+    let td;
+    if (all.length) {
+      td = el("td", { colSpan: 8, className: "hint", textContent: "No connector matches the filter." });
+    } else {
+      let text = "No connectors yet.";
+      if (state.node && !state.node.online && !state.loadedAt) text = "Can't list connectors while this node is offline.";
+      else if (isAdmin()) text = "No connectors yet. Add one by address, or scan and add one for a device found below.";
+      td = el("td", { colSpan: 8, className: "hint" }, [text, " "]);
+      td.append(el("a", { href: "/docs/connectors", target: "_blank", rel: "noopener", textContent: "How to add a connector" }));
+    }
     tbody.append(el("tr", {}, [td]));
+    table.append(tbody);
   }
 }
 
@@ -1045,6 +1104,8 @@ $("scan-form").addEventListener("submit", submitScan);
 $("scan-cidr").addEventListener("input", () => { scanConfirmFor = null; $("scan-go").textContent = "Sweep"; $("scan-error").hidden = true; });
 $("scan-dialog-cancel").addEventListener("click", () => $("scan-dialog").close());
 $("refresh").addEventListener("click", refresh);
+$("conn-filter").addEventListener("input", (e) => { listView.filter = e.target.value; renderConnections(); });
+$("conn-failing").addEventListener("change", (e) => { listView.failingOnly = e.target.checked; renderConnections(); });
 for (const r of document.querySelectorAll('input[name="protocol"]')) r.addEventListener("change", () => {
   setProtocol(protocol());
   if (protocol() === "modbus" && !$("modbus-points").querySelector("tbody tr")) addRegisterRow();

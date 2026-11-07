@@ -53,8 +53,10 @@ refuses anything else, naming the prefix it expects:
 | Remote node | its site's prefix, e.g. `fbf/home/` | The broker drops anything a site's account publishes outside its site's prefixes |
 
 A remote node's site is the site its broker account belongs to
-(**Ops → Edge nodes**). If the page can't look that up, it says so, and you
-have to make sure of the prefix yourself.
+(**Ops → Edge nodes**). Baler checks the prefix again when the connector is
+saved, for every role and every client (the API too), and refuses one
+outside the node's allowed prefix. If it can't look the site up, the dialog
+says so under the field, and you have to make sure of the prefix yourself.
 
 Two more rules, also checked in the dialog:
 
@@ -133,6 +135,17 @@ you edit the connector. A node running an older Windrow shows `—`.
 The prefix in each row links to the equipment in **Equipment**
 (`index.html?equip=urn:equip:<prefix>`), which opens the tree at it. Its
 points appear there as they report.
+
+## Find a connector
+
+With more than one connector, a **Filter** box above the table matches the
+topic prefix and the device: type `vav-42` and only `fbf/vav-42` is left.
+**Only ones not OK** narrows to connectors whose status isn't OK.
+
+Connectors are grouped by controller, one header per device with its count
+and how many aren't OK; click the header to collapse it. Within a group they
+are sorted by prefix, numbers in order (`vav-2` before `vav-10`), and a big
+group shows 25 at a time with **Show more**. A filter shows every match.
 
 ## Edit or delete a connector
 

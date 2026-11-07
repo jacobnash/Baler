@@ -67,10 +67,14 @@
 
       <section aria-labelledby="conns-h">
         <h2 id="conns-h">Connectors on this node</h2>
+        <div id="conn-tools" class="list-tools" hidden>
+          <label class="grow">Filter <input type="search" id="conn-filter" placeholder="topic prefix or device, e.g. vav-42" autocomplete="off" aria-describedby="conn-count" /></label>
+          <label class="check"><input type="checkbox" id="conn-failing" /> Only ones not OK</label>
+          <span id="conn-count" class="hint" aria-live="polite"></span>
+        </div>
         <div class="table-wrap">
           <table id="connections-table">
             <thead><tr><th>Protocol</th><th>Device</th><th>Equipment (topic prefix)</th><th>Points</th><th>Poll</th><th>Status</th><th>Login</th><th><span class="sr-only">Actions</span></th></tr></thead>
-            <tbody></tbody>
           </table>
         </div>
       </section>

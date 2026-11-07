@@ -32,6 +32,13 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
 
+.list-tools { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.5rem 1rem; margin: 0 0 0.5rem; }
+.list-tools label { margin: 0; font-size: 0.85rem; }
+.list-tools label.grow { flex: 0 1 22rem; }
+.list-tools label.grow input { display: block; width: 100%; margin-top: 0.2rem; font: inherit; padding: 0.3rem; }
+.list-tools label.check { display: inline-flex; align-items: center; gap: 0.3rem; }
+tr.group-head th { text-align: left; padding-top: 0.6rem; border-bottom: 1px solid var(--border); font-weight: normal; }
+button.group-toggle { font: inherit; font-weight: 600; background: none; border: 0; padding: 0.1rem 0; color: inherit; cursor: pointer; }
 .table-wrap { overflow-x: auto; position: relative; } /* contains .sr-only headers, which are absolute */
 .hint.small, .small { font-size: 0.78rem; }
 .poll-cell { min-width: 11rem; }
