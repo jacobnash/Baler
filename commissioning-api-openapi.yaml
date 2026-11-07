@@ -1635,7 +1635,20 @@ paths:
               schema: { $ref: "#/components/schemas/AgentProposal" }
         "403": { description: Your role can't carry this one out }
         "404": { $ref: "#/components/responses/NotFound" }
-        "409": { $ref: "#/components/responses/Conflict" }
+        "409":
+          description: >-
+            Already decided, or it couldn't be carried out (the proposal is then `failed`). A phase
+            change the project's `block` gate refuses also answers 409, with the `gate`; that proposal
+            stays `proposed`, so it can be accepted once the gate is met (or a person moves the phase
+            with an override note via POST .../phase).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error: { type: string }
+                  gate: { $ref: "#/components/schemas/PhaseGate" }
   /agent-proposals/{id}/reject:
     parameters:
       - { $ref: "#/components/parameters/ProjectId" }
