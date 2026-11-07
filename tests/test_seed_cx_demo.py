@@ -37,3 +37,9 @@ def test_planted_defects_show_up_in_the_data():
 def test_same_seed_same_data():
     a = seed.readings("newbuild", 1, 0, 3600, {}, random.Random(3))
     assert a == seed.readings("newbuild", 1, 0, 3600, {}, random.Random(3))
+
+
+def test_project_prefix_covers_exactly_its_own_equipment():
+    for slug in ("newbuild", "campus-07"):
+        assert all(key.startswith(seed.prefix(slug) + "/") for key, *_ in seed.equips(slug, 2))
+    assert not any(k.startswith(seed.prefix("campus-1") + "/") for k, *_ in seed.equips("campus-10", 1))

@@ -12,6 +12,7 @@ purpose and the equipment is labelled DEMO.
   python -m scripts.seed_cx_demo up                 # build everything at its end-state
   python -m scripts.seed_cx_demo advance newbuild   # move one project one phase, live
   python -m scripts.seed_cx_demo live               # keep readings flowing (Ctrl-C)
+  python -m scripts.seed_cx_demo scope              # scope existing projects to their own prefix
   python -m scripts.seed_cx_demo cleanup            # admin login needed
 
 Login: BALER_URL, BALER_EMAIL, BALER_PASSWORD. An operator can do everything
@@ -49,6 +50,11 @@ ZONE_POINTS = [("zone-temp", "Zone_Air_Temperature_Sensor", 72.0, 0.5),
 PROJECTS = {"newbuild": ("Riverside Clinic (new build)", "newbuild", 2, "operations"),
             "retrofit": ("Harbor Office (retrofit)", "retrofit", 2, "operations")}
 CAMPUS = 24
+
+
+def prefix(slug):
+    """The topic prefix a project's equipment lives under."""
+    return f"{ROOT}/{slug}"
 
 
 def equips(slug, n_ahu):
@@ -124,12 +130,18 @@ class Baler:
         for i in range(0, len(items), 500):
             self.call("POST", "/ingest/ingest", json=items[i:i + 500])
 
-    def project(self, title, phase):
+    def project(self, title, phase, slug):
+        """The project for `title`, scoped to its own equipment by topic prefix
+        (settings.prefixes, Baler#75): created if missing, re-scoped if it exists
+        without it. Without a prefix an operator's project covers the whole org."""
+        want = [prefix(slug)]
         for p in self.call("GET", "/cx/projects"):
             if p["name"] == title:
+                if (p.get("settings") or {}).get("prefixes") != want:
+                    p = self.call("PATCH", f"/cx/projects/{p['id']}", json={"settings": {**(p.get("settings") or {}), "prefixes": want}})
                 return p
         return self.call("POST", "/cx/projects", json={
-            "name": title, "phase": phase,
+            "name": title, "phase": phase, "settings": {"prefixes": want},
             "phases": [{"key": k, "name": n} for k, n in PHASES]})
 
     def go_phase(self, pid, key):
@@ -180,7 +192,7 @@ def install_ops(b):
 def cmd_up(b, rng):
     install_ops(b)
     for slug, (title, _kind, n_ahu, end) in PROJECTS.items():
-        pid = b.project(title, "design")["id"]
+        pid = b.project(title, "design", slug)["id"]
         for key, _ in PHASES[1:PHASES.index(next(p for p in PHASES if p[0] == end)) + 1]:
             apply_phase(b, slug, n_ahu, key, rng)
             b.go_phase(pid, key)
@@ -191,7 +203,7 @@ def cmd_up(b, rng):
     for i in range(1, CAMPUS + 1):  # the campus: many small projects at mixed phases
         slug, phase = f"campus-{i:02d}", rng.choice(PHASES[1:7])[0]
         title = f"demo-cx campus building {i:02d}"
-        pid = b.project(title, "design")["id"]
+        pid = b.project(title, "design", slug)["id"]
         b.create_records(slug, 1)
         defects = rng.choice([{}, {}, {"ahu-1/sat": "stuck"}, {"ahu-1/mat": "stale"}])
         now = time.time()
@@ -200,9 +212,18 @@ def cmd_up(b, rng):
     print(f"campus: {CAMPUS} projects")
 
 
+def cmd_scope(b):
+    """Scope every existing demo project to its own prefix; no data is written."""
+    for slug, (title, *_rest) in PROJECTS.items():
+        b.project(title, "design", slug)
+    for i in range(1, CAMPUS + 1):
+        b.project(f"demo-cx campus building {i:02d}", "design", f"campus-{i:02d}")
+    print("projects scoped to their own prefixes")
+
+
 def cmd_advance(b, slug, rng):
     title, _k, n_ahu, _e = PROJECTS[slug]
-    p = b.project(title, "design")
+    p = b.project(title, "design", slug)
     keys = [k for k, _ in PHASES]
     cur = next(x["key"] for x in p["phases"] if x["status"] == "active")
     nxt = keys[min(keys.index(cur) + 1, len(keys) - 1)]
@@ -241,14 +262,14 @@ def cmd_cleanup(b):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["up", "advance", "live", "cleanup"])
+    ap.add_argument("cmd", choices=["up", "advance", "live", "scope", "cleanup"])
     ap.add_argument("project", nargs="?", choices=list(PROJECTS))
     ap.add_argument("--seed", type=int, default=7, help="same seed, same demo data")
     a = ap.parse_args()
     b = Baler(os.environ["BALER_URL"], os.environ["BALER_EMAIL"], os.environ["BALER_PASSWORD"])
     rng = random.Random(a.seed)
     {"up": lambda: cmd_up(b, rng), "advance": lambda: cmd_advance(b, a.project or sys.exit("advance needs a project"), rng),
-     "live": lambda: cmd_live(b, rng), "cleanup": lambda: cmd_cleanup(b)}[a.cmd]()
+     "live": lambda: cmd_live(b, rng), "scope": lambda: cmd_scope(b), "cleanup": lambda: cmd_cleanup(b)}[a.cmd]()
 
 
 if __name__ == "__main__":

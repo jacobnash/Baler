@@ -52,11 +52,11 @@ Limits worth knowing (checked against the live site, November 2026):
 
 - The phase you are in is recorded with each run but does not yet change
   what a run checks, and one run per project can be active at a time.
-- An operator can only create **whole-organization** projects, so every demo
-  project reports on all equipment in the organization (about 150 pieces),
-  not just its own. Look for rows keyed `fbf/demo-cx/<project>/...` in the
-  results table. Scoping a project to one building needs an admin-created
-  site with a topic prefix; see Baler#75.
+- Each demo project is scoped to its own equipment by topic prefix
+  (`settings.prefixes`, Baler#75), for example `fbf/demo-cx/newbuild`. A
+  project without a prefix covers the whole organization. On a server that
+  predates Baler#75 the prefix is saved but ignored, and every project
+  reports on all equipment.
 - The gateway rate-limits each signed-in user. The seed script paces itself
   and stops at the first 429 instead of retrying, so it is safe to rerun
   after a short pause.
@@ -69,6 +69,7 @@ Everything is created through the public gateway, so it needs only a login:
 export BALER_URL=https://your-host BALER_EMAIL=you@example.com BALER_PASSWORD=...
 python -m scripts.seed_cx_demo up        # new build + retrofit + 24 campus projects
 python -m scripts.seed_cx_demo live      # keep fresh readings flowing (Ctrl-C to stop)
+python -m scripts.seed_cx_demo scope     # scope existing projects to their own prefix
 python -m scripts.seed_cx_demo cleanup   # remove it all (admin login)
 ```
 
