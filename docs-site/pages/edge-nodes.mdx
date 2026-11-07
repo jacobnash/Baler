@@ -1,0 +1,190 @@
+---
+title: Edge nodes (Raspberry Pi)
+---
+
+An edge node is a small computer at a site, like a Niagara JACE: it sits on
+the building network next to the field devices and gets their data to
+Baler. Here that's a Raspberry Pi running [Windrow](/windrow). This page is
+the runbook. The broker side (per-site accounts, TLS) is in
+[Multi-site: edge nodes](/multi-site#edge-nodes-per-site-broker-accounts),
+and the Pi installer itself is Windrow's
+[docs/edge-nodes.md](https://github.com/jacobnash/Windrow/blob/main/docs/edge-nodes.md).
+
+## Three ways a device reaches Baler
+
+| | Who polls the device | Discovers unknown devices? | Needs |
+|---|---|---|---|
+| **A. By IP from nash-srv** | `windrow_api`, the Windrow beside Baler | No: you add each device by address | Nothing new. Unicast BACnet and Modbus TCP leave its Docker bridge through NAT |
+| **B. Pi as site gateway** | Windrow on the Pi (`install-edge.sh gateway`) | Yes, on the Pi's LAN | An edge account, and the broker reachable from the site on TLS 8883 |
+| **C. Host-network Windrow on nash-srv** | `windrow_lan` (`deploy/nash-srv/docker-compose.lan.yml`) | Yes, on nash-srv's own LAN | An edge account and `BALER_WINDROW_LAN=1` |
+
+**The Home Edge Pilot uses A.** Two Pis on nash-srv's LAN run Windrow's
+simulators: a BACnet/IP device on `192.168.128.228` (`install-edge.sh bacnet`)
+and a Modbus TCP server on `192.168.128.230` (`install-edge.sh modbus`).
+`windrow_api` polls both by IP.
+
+**B is the JACE pattern** and the one to use for a real remote site: the Pi
+publishes out over TLS, and nothing at the site has to accept an inbound
+connection. **C** only matters when the devices are on the same LAN as
+nash-srv and you want them found without typing addresses.
+
+### Do we need a host-network Windrow on nash-srv? (#78)
+
+Not for the pilot. A device whose address you know works from
+`windrow_api` today: `windrow_api` sends a directed Who-Is and ReadProperty
+by unicast, Modbus TCP is unicast, and the replies come back through the
+bridge's connection tracking.
+
+There are two things the bridge can't do:
+
+- **Broadcast discovery.** A Who-Is broadcast from a Docker bridge never
+  reaches the LAN, so `windrow_api` can't find devices you haven't told it about.
+- **Broadcast replies.** A device that answers a unicast Who-Is with a
+  *broadcast* I-Am isn't seen through NAT. Windrow's simulator answers by
+  unicast. Some real controllers broadcast instead, so they need B or C.
+
+So use B wherever there's a Pi to spare at the site. Use C (below) when a
+device on nash-srv's own LAN needs broadcast discovery, or answers with a
+broadcast I-Am, and no Pi there runs the `gateway` role. The Home Edge
+Pilot's Pis are both simulators, and `bacnet` and `gateway` can't share a
+Pi, because both bind UDP 47808.
+
+The existing `windrow_api` doesn't switch to host networking: its mock
+hospital (`172.30.0.10`) relies on the `bacnet-mock` bridge, and the live
+demo uses it.
+
+## Runbook
+
+### 1. Broker account (B and C)
+
+In Baler, **Ops → Edge nodes → Add edge node** (admin). Pick a site that
+has a topic prefix (for the pilot, e.g. `fbf/home`). Use the Windrow's site
+id as the username: its command channel is `cmd/<username>/#`. Copy the
+password; it's shown once.
+
+The broker drops anything the account publishes outside its site's
+prefixes. Every connection's topic prefix has to sit under the site's, or
+it looks connected but no data arrives.
+
+### 2. Install the Pi
+
+On a fresh Raspberry Pi OS Lite (64-bit), as in Windrow's guide:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/jacobnash/Windrow/main/deploy/pi/install-edge.sh
+sudo bash install-edge.sh bacnet     # or modbus (A), or gateway (B)
+```
+
+For `gateway`, put the account in `/etc/windrow/edge.env` (`MQTT_HOST`,
+`MQTT_PORT=8883`, `MQTT_USERNAME`, `MQTT_PASSWORD`, `WINDROW_SITE_ID`), then
+run `sudo systemctl restart windrow-gateway`. The gateway's HTTP API stays on
+the Pi's loopback. Baler manages it over MQTT.
+
+Give each Pi a DHCP reservation on the router. nash-srv can't resolve
+`.local` names (no avahi), and BACnet needs a literal address.
+
+### 3. Connect the devices
+
+- **A:** in Baler's Devices page (Connectors, once
+  [#98](https://github.com/jacobnash/Baler/pull/98) lands), add the device by
+  address, `192.168.128.228:47808` for BACnet or `192.168.128.230` port 502
+  for Modbus. Then connect it with a topic prefix under the site's.
+- **B and C:** the node discovers the devices itself (BACnet every 5
+  minutes, a Modbus sweep of its `--modbus-scan-cidr` every 10). With
+  [#98](https://github.com/jacobnash/Baler/pull/98) and Windrow's status
+  heartbeat ([Windrow#2](https://github.com/jacobnash/Windrow/pull/2)), it
+  shows in Connectors' node picker as online, and you connect its devices
+  there. Before those land, use the
+  [command channel](https://github.com/jacobnash/Windrow/blob/main/docs/command-channel.md)
+  (`learn`, `modbus_discover`).
+
+### 4. Verify end to end
+
+On nash-srv, as a user in the `docker` group:
+
+```bash
+bash deploy/nash-srv/check-edge.sh --bacnet 192.168.128.228 \
+  --modbus 192.168.128.230 --prefix fbf/home
+```
+
+It is read-only. It checks four things, from inside the Windrow container
+that polls the devices (`--windrow windrow_lan` for C):
+
+- each device answers: a unicast Who-Is gets an I-Am, and TCP 502 accepts;
+- that Windrow has recorded each device and has a connection polling it;
+- a reading arrives on the broker under the prefix.
+
+Then check the points in the equipment tree. Run `baler.autotag` if they're
+unclassified, as `seed-demo-data.sh` does.
+
+For B, the Pi's own view: `journalctl -u windrow-gateway -f` and
+`curl -s localhost:8001/devices` on the Pi.
+
+## C: the host-network instance on nash-srv
+
+`deploy/nash-srv/docker-compose.lan.yml` adds `windrow_lan`, a second
+Windrow with `network_mode: host`. It's off unless
+`~/.config/baler/nash-srv.env` (the runner's env file) has
+`BALER_WINDROW_LAN=1`. The deploy wrapper then adds the file to every
+deploy. The wrapper only picks this up after `setup-runner.sh` is re-run
+once (`sudo bash deploy/nash-srv/setup-runner.sh`, no token needed).
+
+| Setting (`nash-srv.env`) | Example | |
+|---|---|---|
+| `WINDROW_LAN_ADDRESS` | `192.168.128.145/24:47808` | nash-srv's LAN address (`enp2s0`). Must be port 47808: bacpypes3 sends Who-Is to its own port |
+| `WINDROW_LAN_SITE_ID` | `home` | the edge account's username, used as `--site-id` |
+| `WINDROW_LAN_MQTT_PASSWORD` | | that account's password |
+| `WINDROW_LAN_MODBUS_CIDR` | `192.168.128.0/24` | the LAN to sweep for Modbus TCP |
+| `WINDROW_LAN_INSTANCE_ID` | `nash-srv-lan` (default) | its instance id in `cmd/<site>/<instance>/#` |
+| `WINDROW_LAN_API_PORT` | `8011` (default) | its HTTP API, bound to `127.0.0.1` only |
+
+Ports, against what's already there:
+
+- **UDP 47808 on `192.168.128.145`** is the only thing new on the LAN.
+  Nothing else on nash-srv binds it. The mock device's 47808 is on
+  `172.30.0.10`, inside the bridge, and the Pis' 47808 are on their own
+  addresses.
+- **TCP `127.0.0.1:8011`** is Windrow's API. It's loopback only and still
+  wants `X-Gateway-Secret`. `windrow_api` publishes no host ports: its 8001
+  and `172.30.0.11:47820` are inside its own network namespace.
+- **MQTT** goes out to `127.0.0.1:1883`, where the override file publishes
+  mosquitto on loopback. It connects as the edge account, so the broker
+  holds it to its site like any Pi gateway.
+
+The gateway has no route to `windrow_lan`. A container can't reach a
+loopback-only port on the host, and exposing the API on a Docker bridge
+address would expose it to every container on this shared box. Like a Pi
+gateway, it's managed over the MQTT command channel, so Connectors lists
+it as one more node.
+
+To turn it off, remove `BALER_WINDROW_LAN=1` and run
+`docker compose ... -f deploy/nash-srv/docker-compose.lan.yml rm -sf windrow_lan`.
+A deploy without the file doesn't remove the container.
+
+## How nodes show up in Baler
+
+One Windrow per site gateway, and each Windrow is a node. A node is
+identified by `site id + instance id`, the topic `cmd/<site>/<instance>/…`.
+A site can have several, each with its own instance id. The Devices page
+becomes a per-node view: Connectors' node picker in
+[#98](https://github.com/jacobnash/Baler/pull/98) lists the local
+`windrow_api` and every node that publishes a status heartbeat, with
+online/offline and last seen. Readings land in the same equipment tree
+whichever node polled them; the topic prefix says which site they belong to.
+
+## What's left that needs hands on hardware
+
+These can't be done from the repository:
+
+- **Opening the broker to the sites (B).** Run `setup-runner.sh` step 7 on
+  nash-srv, which publishes `0.0.0.0:8883` with the Let's Encrypt cert. If a
+  Pi isn't on nash-srv's LAN, forward 8883 on the router. Until then, the
+  `gateway` and `weather` roles can't reach the broker. The simulators and A
+  don't need it.
+- **A real `gateway` Pi.** Neither pilot Pi runs one; both are simulators. B
+  needs a third Pi, or one of them re-imaged as `gateway`, over SSH.
+- **Turning on C.** On nash-srv: create the edge account, fill in
+  `nash-srv.env`, and re-run `setup-runner.sh`. Then
+  `check-edge.sh --windrow windrow_lan` against the Pis. Its acceptance (it
+  discovers the BACnet Pi by broadcast and sweeps the Modbus Pi) can only be
+  confirmed on that LAN.

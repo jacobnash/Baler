@@ -17,6 +17,13 @@ The guardrails don't change with the provider:
   (issues, procedures, phase changes, spec items, mappings, active tests)
   is a proposal a person accepts. Every tool call it makes is a
   `cx_events` row (`agent.<tool>`).
+- Accepting the agent's phase change goes through the same
+  [phase gate](https://github.com/jacobnash/Baler/blob/main/src/baler/commissioning/gates.py)
+  as moving the phase yourself. In `block` mode an unmet gate refuses it
+  (409, listing what's unmet) and the proposal stays open to accept once
+  the gate is met. Only a person overrides a gate, with a note, through
+  `POST /cx/projects/{id}/phase`. The agent can preview a gate
+  (`phase_gate`) and read the project's open faults (`open_faults`).
 
 ## Choosing a provider
 

@@ -27,6 +27,7 @@ from datetime import datetime, timedelta
 from baler.commissioning import (
     db,
     engine,
+    gates,
     inventory,
     issues,
     mirror,
@@ -134,6 +135,29 @@ def reconcile_issues(repo, project_id: str, run_id: str | None, results: list[di
                        {("test_run_id" if kind == "test_run" else "run_id"): run_id, "resolved": resolved,
                         "retested": retested, "reopened": reopened}, now)
     return changes
+
+
+def phase_gate(repo, project: dict, key: str, now: datetime) -> dict | None:
+    """The gate for moving `project` into phase `key` (#86), or None when
+    the move isn't gated (backwards, sideways into an ungated phase, or
+    phase_gates "off"). Shared by POST .../phase and the agent's accepted
+    phase proposals, so neither path can skip it."""
+    if gates.mode(project.get("settings")) == "off":
+        return None
+    by_key = {ph["key"]: ph for ph in project["phases"]}
+    cur = by_key.get(phases.current(project["phases"]) or "")
+    if key not in by_key or not gates.rules_for(key) or (cur and by_key[key]["position"] <= cur["position"]):
+        return None
+    pid = project["id"]
+    run = next((r for r in repo.list_runs(pid, 20) if r.get("status") == "completed"), None)
+    results = repo.get_results(run["id"]) if run else []
+    procs = repo.list_procedures(pid)
+    latest = {pr["id"]: next((t for t in repo.list_test_runs(pr["id"], 20) if t["status"] == "completed"), None)
+              for pr in procs}
+    reconcile_issues(repo, pid, None, [], now)  # an overdue waiver lapses first
+    active = repo.list_issues(pid, issues.ACTIVE)
+    risks = {r["issue_id"]: r for r in repo.list_risks(pid)}
+    return gates.evaluate(key, run, results, procs, latest, active, risks)
 
 
 def project_scopes(repo, project: dict, claims: dict) -> tuple[list[Scope], list[str]]:
