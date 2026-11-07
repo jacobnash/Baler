@@ -125,6 +125,12 @@ def _check_settings(settings) -> dict:
         mirror.validate_settings(settings["fault_mirroring"])
     if "phase_gates" in settings:
         gates.validate_mode(settings["phase_gates"])
+    if "acceptance" in settings:
+        acc = settings["acceptance"]
+        if not isinstance(acc, dict) or set(acc) - {"min_pct", "max_gap_minutes", "settle_minutes"} or any(
+                isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0 for v in acc.values()) \
+                or not 0 < acc.get("min_pct", 95) <= 100 or acc.get("max_gap_minutes", 5) <= 0:
+            raise ValueError("acceptance is {min_pct (0-100], max_gap_minutes > 0, settle_minutes >= 0}")
     if settings.get("schedule") is not None:
         sched = settings["schedule"]
         every = sched.get("every_hours") if isinstance(sched, dict) else None
@@ -580,6 +586,32 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             self.end_headers()
             self.wfile.write(body)
 
+        def _report_equipment(self, p: dict, claims: dict) -> dict[str, dict] | None:
+            """uri -> {dis, brickClass, points}: names and types for the
+            report instead of raw URIs (#99)."""
+            try:
+                scopes, _ = self._scopes(p, claims)
+                return {e["id"]: {"dis": e.get("dis"), "brickClass": e.get("brickClass"), "points": e.get("points") or []}
+                        for e in inventory.build(repo.store, scopes)}
+            except Exception:  # the report stands without names, and says so (equipment_names_unavailable)
+                log.warning("cx report %s: inventory failed", p["id"], exc_info=True)
+                return None
+
+        def _report_acceptance(self, p: dict, run: dict | None, equipment: dict[str, dict] | None) -> dict | None:
+            """Per-point availability over the latest verification run's
+            window, after settings.acceptance.settle_minutes (#100 review)."""
+            if run is None or not equipment:
+                return None
+            cfg = {"min_pct": 95.0, "max_gap_minutes": 5.0, "settle_minutes": 0.0,
+                   **((p.get("settings") or {}).get("acceptance") or {})}
+            start = run["window_start"] if isinstance(run["window_start"], datetime) else datetime.fromisoformat(run["window_start"])
+            end = run["window_end"] if isinstance(run["window_end"], datetime) else datetime.fromisoformat(run["window_end"])
+            points = {pt["id"]: pt for e in equipment.values() for pt in e.get("points") or []}
+            with repo.history() as h:
+                series = h.window(sorted(points), start, end + timedelta(seconds=1)) if points else {}
+            return report.acceptance_availability(series, points, start, end, float(cfg["settle_minutes"]),
+                                                  float(cfg["min_pct"]), float(cfg["max_gap_minutes"]))
+
         def _project_report(self, span, claims, pid) -> None:
             """The Cx report for the whole project (#87), as JSON or a
             printable page: scope and limitations, phase history, spec vs
@@ -606,10 +638,14 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 log.warning("cx report %s: spec alignment failed", pid, exc_info=True)
                 alignment = None
             docs = [db.public_row(d) for d in repo.find_rows("cx_spec_documents", project_id=pid)]
+            equipment = self._report_equipment(p, claims)
             rep = report.project_build(db.public_project(p), now_fn(), repo.user_email(claims.get("sub")) or claims.get("sub"),
                                        db.public_row(run) if run else None, results, procs,
                                        {k: (db.public_row(v) if v else None) for k, v in latest.items()},
-                                       iss, repo.list_events(pid, 500), alignment, docs, active_runs, active.writes_allowed())
+                                       iss, repo.list_events(pid, 500), alignment, docs, active_runs, active.writes_allowed(),
+                                       site=repo.get_site(p["site_id"]) if p.get("site_id") else None,
+                                       equipment=equipment,
+                                       acceptance=self._report_acceptance(p, run, equipment))
             if fmt == "json":
                 respond_json(self, 200, rep)
                 return
@@ -860,13 +896,16 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 respond_error(self, 409, f"issue is {issue['status']}")
                 return
             now = now_fn()
-            reason, review_by = issues.check_risk(self.read_json_body(), now.date())
+            body = self.read_json_body()
+            reason, review_by = issues.check_risk(body, now.date())
             sub = claims.get("sub")
             risk = {"id": db.new_id(), "issue_id": iid, "accepted_by": sub, "accepted_email": repo.user_email(sub),
-                    "reason": reason, "review_by": review_by, "created_at": now, "revoked_at": None, "revoked_by": None}
+                    "reason": reason, "review_by": review_by, "created_at": now, "revoked_at": None, "revoked_by": None,
+                    **issues.risk_extras(body)}
             repo.create_risk(risk)
             repo.update_issue(iid, {"status": "risk_accepted", "updated_at": now})
             self._issue_event(iid, "risk.accept", claims, {"risk_id": risk["id"], "reason": reason, "review_by": review_by.isoformat(),
+                                                          "owner": risk["owner"], "retest_trigger": risk["retest_trigger"],
                                                           "from": issue["status"]})
             self._event(project["id"], "risk.accept", claims, {"issue_id": iid, "risk_id": risk["id"]})
             respond_json(self, 201, db.public_row(risk))

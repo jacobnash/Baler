@@ -87,18 +87,17 @@ python -m scripts.publish_weather_station --station-id backyard --demo
 Publishes one made-up round of temp/humidity/wind-speed/wind-direction
 readings under `fbf/weather/backyard/*` and exits. With the default stack
 running (`mqtt_listener` picks the messages up automatically), you'll see
-the raw tags and readings land immediately; **classification into Brick
-doesn't happen automatically for MQTT-sourced entities** — `mqtt_listener.py`
-never calls `mapping.classify_point`, only `ingest_api.py`'s HTTP `/tags`
-route does that inline. Run the same one-shot sweep any other MQTT source
-needs:
+the raw tags and readings land immediately, and each equip/point whose tags
+match a rule exactly is classified into Brick as its tags arrive
+(`mapping.classify_on_ingest`, Baler#82) - the station and its seven point
+classes above all do. Anything without a direct match (no PROJ fallback, no
+LLM on this path) waits for the one-shot sweep:
 
 ```bash
 python -m baler.autotag --no-llm
 ```
 
-(`--no-llm` skips the `ANTHROPIC_API_KEY` requirement — rule-engine-only,
-which is all seven classes above need.)
+(`--no-llm` skips the `ANTHROPIC_API_KEY` requirement — rule-engine-only.)
 
 ## Wiring a real device
 

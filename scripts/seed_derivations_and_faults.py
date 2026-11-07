@@ -323,12 +323,14 @@ DERIVATIONS = [
         "interval_seconds": 60,
         # No sampling-interval is exposed to fn_source, so this reports a
         # fraction of samples "active" rather than claiming actual hours.
+        # MQTT ingest stores BACnet active/inactive as True/False (#81);
+        # history from before that is still the text.
         "fn_source": (
             "def run(inputs, row):\n"
             "    series = inputs.get('fanStatus') or []\n"
             "    if not series:\n"
             "        return None\n"
-            "    active = sum(1 for _, v in series if v == 'active')\n"
+            "    active = sum(1 for _, v in series if v is True or v == 'active')\n"
             "    return active / len(series)"
         ),
         "test_cases": [
@@ -337,11 +339,12 @@ DERIVATIONS = [
                     "fanStatus": [
                         ["2026-01-01T00:00:00Z", "active"],
                         ["2026-01-01T00:05:00Z", "inactive"],
-                        ["2026-01-01T00:10:00Z", "active"],
+                        ["2026-01-01T00:10:00Z", True],
+                        ["2026-01-01T00:15:00Z", False],
                     ]
                 },
                 "row": {},
-                "expected": 2 / 3,
+                "expected": 2 / 4,
             }
         ],
         # 0..1 - Haystack has no "fraction" unit, and an unknown unit made
