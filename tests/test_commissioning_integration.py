@@ -205,6 +205,9 @@ def test_issues_and_risks_round_trip(repo):
     assert [c[2] for c in changes] == ["retest.passed"]
     assert repo.get_issue(issue["id"])["retest"]["run_id"] == "r3"
     assert repo.list_issue_events(issue["id"])[0]["actor"] == "system"
+    # the report reads every issue's events in one query (#150)
+    assert repo.list_issue_events_many([issue["id"], ext["id"]]) == {
+        issue["id"]: repo.list_issue_events(issue["id"]), ext["id"]: repo.list_issue_events(ext["id"])}
     repo.update_issue(issue["id"], {"status": "closed", "closed_at": now, "closed_run": "r3"})  # the person's close
     # closed: a new issue on the same check is allowed again
     repo.create_issue({**issue, "id": db.new_id()})
@@ -235,6 +238,16 @@ def test_procedures_and_test_runs_round_trip(repo):
     repo.update_test_run(tr["id"], {"status": "completed", "equipment": [{"equip_uri": "e", "steps": []}], "finished_at": now})
     assert repo.get_test_run(tr["id"])["equipment"] == [{"equip_uri": "e", "steps": []}]
     assert [r["id"] for r in repo.list_test_runs(proc["id"])] == [tr["id"]]
+    # the report's one-query read: the newest completed run among the newest 20 (#150)
+    newer = {**tr, "id": db.new_id(), "status": "failed", "requested_at": now + timedelta(seconds=1)}
+    repo.create_test_run(newer)
+    other = {"id": db.new_id(), "project_id": pid, **procedures.from_seed("boiler_startup"), "created_by": "it",
+             "created_at": now, "updated_at": now}
+    repo.create_procedure(other)
+    latest = repo.latest_completed_test_runs([proc["id"], other["id"]])
+    assert latest[proc["id"]] == next(t for t in repo.list_test_runs(proc["id"], 20) if t["status"] == "completed")
+    assert latest[other["id"]] is None
+    assert repo.latest_completed_test_runs([proc["id"]], window=1) == {proc["id"]: None}
     repo.update_project(pid, now, settings={"schedule": {"every_hours": 12}})
     assert pid in {p["id"] for p in repo.list_scheduled_projects()}
     repo.update_project(pid, now, archived_at=now)
