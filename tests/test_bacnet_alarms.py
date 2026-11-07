@@ -82,7 +82,8 @@ def table(monkeypatch):
 
 def test_raise_update_and_clear(table):
     fired = []
-    fire = lambda *args: fired.append(args[:4])  # noqa: E731
+    def fire(*args):
+        fired.append(args[:4])
 
     assert bacnet_alarms.handle_alarm(None, TOPIC, _event(), fire=fire) == "opened"
     fault = table.open[("bacnet:alarm", POINT)]
