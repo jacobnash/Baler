@@ -133,6 +133,8 @@ check("ops edges (Connectors page): listing for any role, changes and scans admi
     assert.equal(policy.resolveRoute("GET", "/ops/edges").resource, "devices");
     assert.equal(policy.resolveRoute("POST", "/ops/edges/local/local/actions/list_devices").minRole, "viewer");
     assert.equal(policy.resolveRoute("POST", "/ops/edges/home/pi-1/actions/modbus_list_connections").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/ops/edges/local/local/actions/list_announced").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/ops/edges/home/pi-1/actions/list_announced_and_more").minRole, "admin");
     assert.equal(policy.resolveRoute("POST", "/ops/edges/home/pi-1/actions/create_connection").minRole, "admin");
     assert.equal(policy.resolveRoute("POST", "/ops/edges/home/pi-1/actions/discover").minRole, "admin");
     assert.equal(policy.resolveRoute("POST", "/ops/edges/home/pi-1/actions/list_devices_and_more").minRole, "admin");

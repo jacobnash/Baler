@@ -194,10 +194,14 @@ paths:
       description: >-
         Windrow's command-channel vocabulary, the same for local and remote
         nodes. Reads (viewer) - list_devices, list_connections,
-        modbus_list_connections. Changes and scans (admin) - add_device,
+        modbus_list_connections, list_announced (devices that announced
+        themselves: name, address, services, online, last_seen, history). Changes and scans (admin) - add_device,
         set_device_status {id, status}, recheck_credentials {id},
         set_credential {target device|connection|modbus_connection, id,
-        credential}, create_connection, update_connection {id, ...},
+        credential}, create_connection, update_connection {id, ...} (both,
+        and the modbus_ versions, take device_name: the name a device
+        announces itself under, or a DNS name; BACnet updates may change
+        device_address),
         delete_connection {id}, the modbus_ versions, discover, learn
         {device_address, device_instance}, modbus_discover {cidr},
         modbus_test_read {host, register, port?, device_id?} (reads one
@@ -303,6 +307,9 @@ components:
             for a remote node's broker account (the broker drops the rest).
             Absent when unknown.
         site_name: { type: string, description: "Remote nodes: the Baler site its broker account belongs to." }
+        announced: { type: integer, description: "Devices that have announced themselves to this node (Windrow device announce). Absent from a Windrow without announce." }
+        announced_online: { type: integer, description: Of those, how many announced within the last 3 intervals. }
+        announce_rejected: { type: integer, description: "Announcement datagrams the node refused (source outside --announce-allow, bad signature, too old)." }
         error: { type: [string, "null"] }
     OpsStatus:
       type: object

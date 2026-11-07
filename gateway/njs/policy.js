@@ -78,7 +78,7 @@ const ROUTES = [
   // an edge node (or scans its network) and is admin. Whole-org, like the
   // old /windrow routes (WHOLE_ORG devices).
   ["GET",    /^\/ops\/edges$/,                        "devices", "viewer"],
-  ["POST",   /^\/ops\/edges\/[^/]+\/[^/]+\/actions\/(list_devices|list_connections|modbus_list_connections)$/, "devices", "viewer"],
+  ["POST",   /^\/ops\/edges\/[^/]+\/[^/]+\/actions\/(list_devices|list_connections|modbus_list_connections|list_announced)$/, "devices", "viewer"],
   ["POST",   /^\/ops\/edges\/[^/]+\/[^/]+\/actions\/[a-z_]+$/, "devices", "admin"],
 
   // commissioning_api (Baler#37): reads viewer, changes operator,
