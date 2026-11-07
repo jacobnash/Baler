@@ -310,3 +310,24 @@ def test_agent_rows_round_trip(repo):
     repo.put_rows("cx_agent_proposals", [prop])
     repo.update_row("cx_agent_proposals", prop["id"], {"status": "accepted", "result": {"phase": "functional"}})
     assert repo.find_rows("cx_agent_proposals", project_id=pid, status="accepted")[0]["result"] == {"phase": "functional"}
+
+
+def test_a_point_shared_by_two_equipment_and_a_repeat_dont_abort_the_run(repo):
+    """#72: a computed point attached to two pieces of equipment is checked
+    under each; the (run, check, subject) key made the second a
+    UniqueViolation that cost the run every result."""
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    pid = _new_project(repo, _org(repo, "dup"), now)
+    rid = db.new_id()
+    shared = "urn:point:computed/abc/ahu-1"
+
+    def res(equip):
+        return {"equip_uri": equip, "check_id": "exists", "subject": shared, "status": "pass", "severity": None,
+                "symptom": None, "candidates": [], "evidence": {}}
+
+    results = [res("urn:equip:cx-it/ahu-1"), res("urn:equip:cx-it/building"), res("urn:equip:cx-it/ahu-1")]
+    repo.save_run({"id": rid, "project_id": pid, "phase": "startup", "started_at": now, "finished_at": now,
+                   "window_start": now - timedelta(hours=1), "window_end": now, "triggered_by": "it",
+                   "scope": {"caller": {"prefixes": None, "exclude": []}, "site_prefixes": []}, "summary": {}}, results)
+    stored = repo.get_results(rid)
+    assert sorted(r["equip_uri"] for r in stored) == ["urn:equip:cx-it/ahu-1", "urn:equip:cx-it/building"]

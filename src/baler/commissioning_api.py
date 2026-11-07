@@ -1395,6 +1395,11 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             its window, and the body must repeat the run's id."""
             if not self._require_admin(claims):
                 return
+            # The deployment switch answers first: with writes off, nothing
+            # about the request matters (planning, a dry run, stays allowed).
+            if not active.writes_allowed():
+                respond_error(self, 403, "active tests are switched off for this deployment (BALER_CX_ALLOW_WRITES=1 enables them)")
+                return
             hit = self._visible_active(rid, claims)
             if hit is None:
                 return
@@ -1402,9 +1407,6 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             body = self.read_json_body()
             if body.get("confirm") != rid:
                 raise ValueError("confirm by sending {\"confirm\": \"<this run's id>\"} after reading the plan")
-            if not active.writes_allowed():
-                respond_error(self, 403, "active tests are switched off for this deployment (BALER_CX_ALLOW_WRITES=1 enables them)")
-                return
             if executor is None:
                 respond_error(self, 503, "no point_write route is configured on this server")
                 return

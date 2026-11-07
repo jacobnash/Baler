@@ -100,7 +100,7 @@ CREATE TABLE IF NOT EXISTS cx_results (
     symptom     TEXT,
     candidates  JSONB NOT NULL DEFAULT '[]',
     evidence    JSONB NOT NULL,
-    PRIMARY KEY (run_id, check_id, subject)
+    PRIMARY KEY (run_id, equip_uri, check_id, subject)
 );
 CREATE INDEX IF NOT EXISTS cx_results_equip ON cx_results (run_id, equip_uri);
 
@@ -367,9 +367,24 @@ class RunActive(Exception):
         self.run_id = run_id
 
 
+# #72: a point attached to two pieces of equipment (computed outputs are) is
+# checked under each, so (check_id, subject) alone isn't unique within a
+# run - the duplicate aborted the whole run. Widen an existing table's key.
+RESULTS_KEY_MIGRATION = """
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint
+               WHERE conname = 'cx_results_pkey'
+                 AND pg_get_constraintdef(oid) = 'PRIMARY KEY (run_id, check_id, subject)') THEN
+        ALTER TABLE cx_results DROP CONSTRAINT cx_results_pkey;
+        ALTER TABLE cx_results ADD PRIMARY KEY (run_id, equip_uri, check_id, subject);
+    END IF;
+END $$;
+"""
+
+
 def ensure_schema(conn) -> None:
     auth.ensure_schema(conn)  # orgs/sites (+ sites.topic_prefixes) first: cx_projects references them
-    ddl.run(conn, SCHEMA)
+    ddl.run(conn, SCHEMA, RESULTS_KEY_MIGRATION)
     from baler import faults, record_edit
 
     record_edit.ensure_schema(conn)  # Cx 7 write-back logs to record_edits
@@ -890,7 +905,9 @@ class PgRepo:
         with conn.cursor() as cur:
             cur.executemany(
                 "INSERT INTO cx_results (run_id, equip_uri, check_id, subject, status, severity, symptom, candidates, evidence)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                # a repeated result must never cost the run all its others (#72)
+                " ON CONFLICT (run_id, equip_uri, check_id, subject) DO NOTHING",
                 [(run_id, r["equip_uri"], r["check_id"], r["subject"], r["status"], r.get("severity"),
                   r.get("symptom"), json.dumps(r.get("candidates") or []), json.dumps(r["evidence"], default=str))
                  for r in results],
