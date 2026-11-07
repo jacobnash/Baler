@@ -95,6 +95,7 @@ PREV=\$(cat "\$MARKER" 2>/dev/null || true)
 # every container (~46s). Anything else (compose files, Dockerfile,
 # pyproject.toml, windrow/, no previous deploy recorded) takes the full path.
 FAST=0
+CHANGED=""
 if [ -n "\$PREV" ] && runuser -u "${RUNNER_USER}" -- git cat-file -e "\$PREV^{commit}" 2>/dev/null; then
   CHANGED=\$(runuser -u "${RUNNER_USER}" -- git diff --name-only "\$PREV" "\$HEAD_SHA")
   if [ -n "\$CHANGED" ] && ! printf '%s\\n' "\$CHANGED" | grep -qvE '^(src/|ui/|gateway/|rules/|ontology/|docs-site/|tests/|todo/|scripts/|[^/]*\\.md\$)'; then
@@ -109,6 +110,16 @@ else
   "\${DC[@]}" pull --ignore-pull-failures
   "\${DC[@]}" up -d --build
 fi
+# Infrastructure services read config bind-mounted from the checkout, and
+# 'up -d' only recreates a container when its compose definition changes -
+# not when a mounted file does. So a changed mosquitto/ entrypoint or ACL
+# never took effect (#59). Restart each one whose config dir changed.
+for pair in mosquitto/:mosquitto jaeger/:jaeger grafana/:grafana; do
+  if printf '%s\n' "\$CHANGED" | grep -q "^\${pair%%:*}"; then
+    echo "\${pair%%:*} changed - restarting \${pair#*:}"
+    "\${DC[@]}" restart "\${pair#*:}"
+  fi
+done
 # The app containers bind-mount this checkout (.:/app) and run as root, so
 # anything they write into it ends up root-owned - the *next*
 # actions/checkout runs as github-runner and can't git-clean it, failing
