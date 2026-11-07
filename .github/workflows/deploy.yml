@@ -126,6 +126,16 @@ jobs:
       DEPLOY_START: ${{ needs.deploy.outputs.started_at }}
       DEPLOY_END: ${{ needs.deploy.outputs.finished_at }}
     steps:
+      # Chrome needs writable config/cache dirs. ~github-runner/.config is
+      # root-owned on nash-srv (it holds the credentials file above), so
+      # Chrome couldn't create ~/.config/google-chrome and the browser pass
+      # died at launch. Per-run dirs instead of loosening ~/.config. Set via
+      # GITHUB_ENV because the runner context isn't allowed in job-level env.
+      - name: Give Chrome writable per-run profile dirs
+        run: |
+          mkdir -p "$RUNNER_TEMP/live-check-xdg-config" "$RUNNER_TEMP/live-check-xdg-cache"
+          echo "XDG_CONFIG_HOME=$RUNNER_TEMP/live-check-xdg-config" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/live-check-xdg-cache" >> "$GITHUB_ENV"
       - name: Check the live-check credentials
         id: creds
         run: |
