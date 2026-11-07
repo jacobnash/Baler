@@ -1,0 +1,202 @@
+---
+title: baler_fn API
+description: Reference for baler_fn - connect(), BalerClient, @baler_function, baler_fn.list(), the baler.toml parser and the CLI.
+---
+
+`baler_fn` is the Python package behind [Baler Notebooks](/code/notebooks). It does three things:
+
+- `connect()` returns a Haystack client for Baler, configured from environment variables.
+- `@baler_function` labels a function so it can be listed.
+- `baler_fn.list()` lists the functions that installed packages provide.
+
+It comes preinstalled in the notebook image. Outside the image, install it from a Baler checkout
+with `pip install -e .`, which also installs the rest of Baler. For a light install, run
+`pip install --no-deps -e . && pip install requests pandas`: `baler_fn` itself needs only
+`requests`, plus `pandas` for the `*_df` methods. pip then prints an
+`ERROR: pip's dependency resolver ...` message listing Baler's server dependencies (psycopg, rdflib,
+...). That message is expected and harmless: `baler_fn` doesn't use them.
+
+`baler_fn` runs in your own Python process. Baler never imports or runs it.
+
+```python
+import baler_fn
+
+client = baler_fn.connect()
+baler_fn.list()
+
+@baler_fn.baler_function(tags=["energy"])
+def peak(client, point_id, range="yesterday"):
+    """Highest sample of a point over a range."""
+    return client.his_read_df(point_id, range)["val"].max()
+```
+
+## connect()
+
+```python
+baler_fn.connect(url=None, api_key=None, project=None) -> BalerClient
+```
+
+Each argument falls back to an environment variable:
+
+| argument | env var | example | notes |
+|---|---|---|---|
+| `url` | `BALER_URL` | `http://localhost:8080` | Baler's gateway. In the notebook container: `http://gateway`. |
+| `api_key` | `BALER_API_KEY` | `eyJ...` | from `POST /auth/api-keys`. See [Notebooks](/code/notebooks#1-create-an-api-key). |
+| `project` | `BALER_PROJECT` | `demo` | the `/api/<project>` segment. Default `demo`. |
+
+A missing URL or key raises `baler_fn.ConfigError`, and the message names the variable. `connect()`
+doesn't contact the server. The first call you make does.
+
+## BalerClient
+
+A session against `<url>/api/<project>`. It authenticates every request with
+`Authorization: Bearer <api key>`, and its `repr` never shows the key.
+
+| method | returns |
+|---|---|
+| `about()` | the server's `about` record as a dict (`productName`, `serverTime`, ...) |
+| `read(filter, limit=None)` | records matching a [Haystack filter](https://project-haystack.org/doc/docHaystack/Filters), as a list of dicts |
+| `read_df(filter, limit=None)` | `read()` as a pandas DataFrame, one row per record |
+| `his_read(id, range="today")` | history rows `[{"ts": <epoch seconds>, "val": ...}, ...]` |
+| `his_read_df(id, range="today")` | history as a DataFrame with one column, `val`, indexed by UTC timestamp (`ts`) |
+| `his_write(id, items)` | sends samples to a point's history and returns how many were sent. Needs an `operator` key. |
+| `phable()` | a `phable.HaystackClient` on the same URL and key |
+| `haystack` | the underlying `baler.haystack_client.HaystackClient` |
+| `base_url` | `<url>/api/<project>` |
+
+**Ids.** `id` is a point's ref as `read()` returns it, e.g. `urn:point:fbf~2Fahu-1~2FanalogValue~2C1`.
+A leading `@` is optional.
+
+**Ranges.** `range` is any Haystack `hisRead` range: `"today"`, `"yesterday"`, `"2026-11-01"`,
+`"2026-11-01,2026-11-07"` (the end date is included), or two dateTimes separated by a comma
+(`"2026-11-07T00:00:00Z UTC,2026-11-08T00:00:00Z UTC"`). Baler also accepts Axon span words such as
+`pastWeek`, but other Haystack servers may not.
+
+**Values.** `read` and `his_read` decode Haystack values to plain Python:
+
+| Haystack kind | Python value |
+|---|---|
+| Marker | `True` |
+| Number | `float`. The unit is dropped. |
+| Ref, Uri | the id or URI as a `str` |
+| DateTime | epoch seconds (`float`) |
+| Str, Bool | `str`, `bool` |
+| anything else | the raw Haystack JSON dict, e.g. `{"_kind": "coord", ...}` |
+
+If you need units, typed values or ops that aren't listed above, use `client.phable()`.
+
+**Writing.** `his_write(id, items)` accepts any of these:
+
+- a pandas `Series` indexed by timezone-aware timestamps
+- a one-column `DataFrame` with the same kind of index
+- an iterable of `(datetime, value)` pairs. The datetimes must be timezone-aware. Epoch seconds
+  are also accepted.
+
+Values may be numbers, bools or strings. A naive datetime raises `ValueError`, and an error grid
+from the server raises `HaystackError`.
+
+```python
+import pandas as pd
+s = pd.Series([21.5, 21.7], index=pd.to_datetime(["2026-11-07T10:00Z", "2026-11-07T10:15Z"]))
+client.his_write("urn:point:...", s)   # -> 2
+```
+
+**Errors.**
+
+| error | when |
+|---|---|
+| `baler_fn.ConfigError` | `connect()` has no URL or no key |
+| `baler.haystack_client.HaystackAuthError` | the key was rejected (401): wrong, revoked or expired |
+| `requests.HTTPError` | any other HTTP failure, e.g. 403 when a `viewer` key calls `his_write` |
+| `baler.haystack_client.HaystackError` | `his_write` got a Haystack error grid back |
+
+## @baler_function
+
+```python
+@baler_function
+def f(...): ...
+
+@baler_function(name=None, tags=())
+def f(...): ...
+```
+
+Marks a function as a Baler function. `name` defaults to the function's own name, and `tags` is a
+list of strings. The decorator returns **the same function object**, so calling the function,
+`help(f)`, `inspect` and IDEs all work as before. It only adds metadata and doesn't register the
+function anywhere: functions are found through the entry points their package declares.
+
+By convention a function takes the client as its first argument. That way the caller decides which
+Baler it runs against, and with which key.
+
+## baler_fn.list()
+
+```python
+baler_fn.list(tag=None) -> FunctionList      # same as baler_fn.list_functions
+```
+
+Lists every function declared in the `baler.functions` entry-point group by an installed
+distribution. It reads the installed packages each time you call it, so the list changes only when
+you `pip install` or uninstall something. You don't need to restart the kernel after an install.
+
+An entry point names either one decorated function (`"pkg.module:function"`) or a module
+(`"pkg.module"`). A module means every decorated function defined in that module.
+
+`tag="energy"` keeps only functions carrying that tag.
+
+A `FunctionList` is a `list` of `FunctionInfo`:
+
+- It prints as a table in a terminal and as an HTML table in Jupyter.
+- `fns["his_stats"]` looks a function up by name.
+- `fns.names()` returns the names.
+- `fns.to_frame()` returns a DataFrame.
+- `fns.errors` lists entry points that failed to import, or that point at an undecorated object.
+  One broken package doesn't hide the others, and `list()` warns when there are errors.
+
+`FunctionInfo` fields: `name`, `signature` (e.g. `"(client, point_id, range='today')"`), `doc` (the
+full docstring), `summary` (its first line), `tags`, `module`, `package` and `version` (the
+distribution that provides it), `entry_point`, and `func`. Calling a `FunctionInfo` calls the
+function: `fns["his_stats"](client, point_id)`. For `help()`, pass the function itself:
+`help(fns["his_stats"].func)`.
+
+## describe() and is_baler_function()
+
+```python
+baler_fn.describe(fn) -> FunctionInfo
+baler_fn.is_baler_function(obj) -> bool
+```
+
+`describe` builds a `FunctionInfo` for any callable, decorated or not. Use it for functions defined
+in a notebook cell, which `list()` doesn't see because they aren't installed.
+
+## Manifest API
+
+These parse the [`baler.toml` package manifest](/code/write-a-function#baler-toml-reference):
+
+```python
+baler_fn.load_manifest(path) -> Manifest
+baler_fn.parse_manifest(text, source="baler.toml") -> Manifest
+```
+
+A file that can't be used raises `baler_fn.ManifestError`, a `ValueError`. The message names the
+file, the field and what was expected, for example
+`baler.toml: package.version: 'latest' is not valid (e.g. "0.1.0")`.
+
+`Manifest` has the `[package]` fields as attributes, plus:
+
+- `entry_points` (a dict of name to target)
+- `functions` (`FunctionSpec(name, signature, summary, tags)` entries)
+- `git_ref` (`ref`, or `v<version>` when `ref` isn't set)
+- `install_line` (the `pip install "git+..."` command)
+
+## Command line
+
+Run these where your package is installed, because they import it:
+
+```bash
+python -m baler_fn list                         # installed functions, as a table
+python -m baler_fn check [path/to/baler.toml]   # does the manifest match the installed package?
+python -m baler_fn functions-toml <dist-name>   # print [[functions]] entries to paste into baler.toml
+```
+
+`check` exits with status 1 and prints each difference it finds: version, entry points, functions
+that are missing or extra, and mismatched signatures, docstring summaries or tags.

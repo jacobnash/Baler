@@ -1,0 +1,48 @@
+# Adds this project's own containers to a Baler stack. Run from the Baler
+# checkout (paths below resolve against the first -f file's directory):
+#
+#   docker compose -f docker-compose.yml -f templates/function-project/compose.baler-sample.yml \
+#     --profile baler-sample up -d --build
+#
+# For your own project: copy this directory, rename baler-sample/baler_sample,
+# rename this file compose.<project>.yml, the services and profiles below,
+# and point BALER_SAMPLE_DIR (in Baler's .env) at it. Both services run
+# your code in your own containers; Baler only sees API calls with your key.
+services:
+  # A notebook with this package preinstalled, next to the stock one.
+  baler_sample_notebook:
+    build:
+      context: ${BALER_SAMPLE_DIR:-./templates/function-project}
+      additional_contexts:
+        # Build the base notebook image first and use it as FROM.
+        baler-notebook:local: service:jupyter
+    image: baler-sample-notebook:local
+    profiles: ["baler-sample"]
+    ports:
+      - "127.0.0.1:${BALER_SAMPLE_PORT:-8889}:8888"
+    environment:
+      BALER_URL: ${BALER_NOTEBOOK_URL:-http://gateway}
+      BALER_API_KEY: ${BALER_NOTEBOOK_API_KEY:-}
+      BALER_PROJECT: ${BALER_NOTEBOOK_PROJECT:-demo}
+      JUPYTER_TOKEN: ${BALER_JUPYTER_TOKEN:-}
+    volumes:
+      - notebooks:/home/jovyan/work
+
+  # A scheduled worker: the same image, running a function on a timer
+  # (src/baler_sample/worker.py) instead of Jupyter. Its own profile, so
+  # it only starts when asked for.
+  baler_sample_worker:
+    build:
+      context: ${BALER_SAMPLE_DIR:-./templates/function-project}
+      additional_contexts:
+        baler-notebook:local: service:jupyter
+    image: baler-sample-notebook:local
+    profiles: ["baler-sample-worker"]
+    command: ["python", "-m", "baler_sample.worker"]
+    restart: unless-stopped
+    environment:
+      BALER_URL: ${BALER_NOTEBOOK_URL:-http://gateway}
+      BALER_API_KEY: ${BALER_NOTEBOOK_API_KEY:-}
+      BALER_PROJECT: ${BALER_NOTEBOOK_PROJECT:-demo}
+      BALER_SAMPLE_POINT: ${BALER_SAMPLE_POINT:-}
+      BALER_SAMPLE_INTERVAL_SECONDS: ${BALER_SAMPLE_INTERVAL_SECONDS:-3600}

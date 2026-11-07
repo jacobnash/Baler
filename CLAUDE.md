@@ -43,6 +43,15 @@ integrations). This file is gotchas only — don't duplicate those.
   inside the container; a new service that bind-mounts `.:/app` needs that
   env too, and don't add code that writes new directories under `/app`. CI's
   integration job fails if any appear.
+- **The `jupyter` service (profile `notebook`) deliberately doesn't
+  bind-mount the checkout**: `baler_fn` and `baler/haystack_client.py`
+  are baked into `baler-notebook:local` (`docker/notebook.Dockerfile`), so
+  a change there needs `--build`. Function-project images build `FROM
+  baler-notebook:local` (`templates/function-project/`). Never make Baler
+  itself import or run function-package code; the docs-site index
+  (`scripts/gen_function_index.py`, run by docs-site's `prebuild`/`predev`)
+  reads only `baler.toml` and escapes it for MDX. Its output
+  `docs-site/pages/code/functions.mdx` is generated and git-ignored.
 - **Env vars**: `.env.example` at the repo root is the single source of
   truth for every var any process reads — check there before grepping
   source.

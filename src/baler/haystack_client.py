@@ -1,7 +1,9 @@
 """
-Read-only client for a Haystack REST API server (Haxall, SkySpark, or any
-other Project Haystack-compliant server) - about/read/hisRead, authenticated
-via Haystack's SCRAM handshake (https://project-haystack.org/doc/Auth). Lets
+Client for a Haystack REST API server (Haxall, SkySpark, or any other
+Project Haystack-compliant server) - about/read/hisRead (plus hisWrite, for
+notebooks), authenticated via Haystack's SCRAM handshake
+(https://project-haystack.org/doc/Auth) or a bearer token such as a Baler
+API key (POST /auth/api-keys). Lets
 Baler run passively alongside an existing Haxall/SkySpark deployment:
 pull its already-tagged data using nothing but a read-only API user, with no
 pod install and no change to the target system - contrast fantom-his-ext,
@@ -18,14 +20,43 @@ wire format that modern Haxall/SkySpark servers no longer speak.
 import base64
 import hashlib
 import hmac
+import math
 import secrets
-from datetime import datetime
+from collections.abc import Iterable
+from datetime import datetime, timezone
+from typing import Any
 
 import requests
 
 
 class HaystackAuthError(RuntimeError):
     """Raised when the SCRAM handshake or bearer-token request fails."""
+
+
+class HaystackError(RuntimeError):
+    """Raised when the server answers an op with a Haystack error grid."""
+
+
+def _encode_haystack_scalar(value: Any) -> Any:
+    """Inverse of _decode_haystack_scalar for what hisWrite sends: Haystack
+    3 JSON (`ver: 3.0`). Numbers, bools, strings and datetimes only."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        f = float(value)
+        if math.isnan(f):
+            return "n:NaN"
+        if math.isinf(f):
+            return "n:INF" if f > 0 else "n:-INF"
+        return f"n:{f!r}"
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            raise ValueError(f"naive datetime {value!r}: hisWrite timestamps need a timezone")
+        iso = value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return f"t:{iso} UTC"
+    if isinstance(value, str):
+        return f"s:{value}"
+    raise TypeError(f"can't encode {type(value).__name__} for hisWrite")
 
 
 def _b64url_nopad(data: bytes) -> str:
@@ -61,6 +92,8 @@ def _decode_haystack_scalar(value):
     JSON codec.
     ponytail: add more kinds (coord, uri, xstr, date, time, ...) if a real
     response needs one that isn't handled here yet."""
+    if isinstance(value, dict) and "_kind" in value:
+        return _decode_hayson(value)
     if not isinstance(value, str):
         return value
     if value == "m:":
@@ -79,18 +112,42 @@ def _decode_haystack_scalar(value):
     return value
 
 
+def _decode_hayson(value: dict):
+    """Haystack 4 JSON (Hayson) kinds, decoded to the same native shapes as
+    the classic encoding above: Baler's own /api answers a GET with Hayson
+    (it has no request body whose flavor it could mirror)."""
+    kind = value["_kind"]
+    if kind == "marker":
+        return True
+    if kind == "number":
+        return float(value["val"])
+    if kind in ("ref", "uri"):
+        return value["val"]
+    if kind == "dateTime":
+        return datetime.fromisoformat(value["val"].replace("Z", "+00:00")).timestamp()
+    return value
+
+
 class HaystackClient:
     """One authenticated session against a Haystack REST API server. Mirrors
     remote_store.RemoteStore's shape (Session reuse, base_url handling,
     raise_for_status, public methods delegating to a private transport
     helper) - same kind of long-lived client making many calls."""
 
-    def __init__(self, base_url: str, username: str, password: str):
+    def __init__(self, base_url: str, username: str = "", password: str = "", *, token: str | None = None):
+        """SCRAM with username/password, or skip the handshake and send
+        `token` as `Authorization: Bearer` - what a Baler API key is for
+        (baler_fn.connect, #91). A rejected token is a hard failure: there
+        is no password to re-authenticate with."""
         self.base_url = base_url.rstrip("/")
         self._username = username
         self._password = password
+        self._token = token
         self._session = requests.Session()
         self._authenticated = False
+        if token:
+            self._session.headers["Authorization"] = f"Bearer {token}"
+            self._authenticated = True
 
     def _authenticate(self) -> None:
         hello_resp = self._session.get(
@@ -156,12 +213,26 @@ class HaystackClient:
         if not self._authenticated:
             self._authenticate()
         resp = self._session.get(f"{self.base_url}/{op}", params=params or {}, headers={"Accept": "application/json"})
-        if resp.status_code == 401 and _retry_on_401:
+        return self._check(resp, lambda: self._get(op, params, _retry_on_401=False), _retry_on_401)
+
+    def _post(self, op: str, grid: dict, _retry_on_401: bool = True) -> dict:
+        if not self._authenticated:
+            self._authenticate()
+        resp = self._session.post(
+            f"{self.base_url}/{op}", json=grid,
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+        )
+        return self._check(resp, lambda: self._post(op, grid, _retry_on_401=False), _retry_on_401)
+
+    def _check(self, resp, retry, retry_on_401: bool) -> dict:
+        if resp.status_code == 401 and self._token:
+            raise HaystackAuthError("bearer token rejected (401) - check the API key, or whether it was revoked")
+        if resp.status_code == 401 and retry_on_401:
             # Bearer token expired/revoked mid-session - re-auth once and
             # retry, not a loop (a second 401 is a real failure, not a
             # transient one).
             self._authenticated = False
-            return self._get(op, params, _retry_on_401=False)
+            return retry()
         resp.raise_for_status()
         return resp.json()
 
@@ -179,3 +250,19 @@ class HaystackClient:
     def his_read(self, id: str, range: str) -> list[dict]:
         rows = self._get("hisRead", {"id": id, "range": range})["rows"]
         return [{k: _decode_haystack_scalar(v) for k, v in row.items()} for row in rows]
+
+    def his_write(self, id: str, items: Iterable[tuple[datetime, Any]]) -> None:
+        """Writes (timestamp, value) pairs to one point's history. `id` is
+        the point's ref, with or without the leading `@`; timestamps must
+        be timezone-aware. Needs a role that may hisWrite (Baler: operator)."""
+        rows = [{"ts": _encode_haystack_scalar(ts), "val": _encode_haystack_scalar(val)} for ts, val in items]
+        if not rows:
+            return
+        grid = {
+            "meta": {"ver": "3.0", "id": f"r:{id.lstrip('@')}"},
+            "cols": [{"name": "ts"}, {"name": "val"}],
+            "rows": rows,
+        }
+        body = self._post("hisWrite", grid)
+        if "err" in body.get("meta", {}):
+            raise HaystackError(str(body["meta"].get("dis", "hisWrite failed")))

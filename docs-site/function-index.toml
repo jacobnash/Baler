@@ -1,0 +1,18 @@
+# The Baler function index (docs-site page /code/functions). Each entry
+# points at one package's baler.toml; scripts/gen_function_index.py reads
+# them at docs build time (npm run build/dev run it first) and fails the
+# build if any is missing or malformed.
+#
+# Publishing a package = a PR adding a [[package]] entry here. See
+# docs-site/pages/code/publishing.mdx. For a manifest outside this repo use
+# an https URL pinned to a tag or commit, plus its sha256, so what was
+# reviewed is what gets listed:
+#
+#   [[package]]
+#   manifest = "https://raw.githubusercontent.com/you/your-pkg/v0.1.0/baler.toml"
+#   sha256 = "<sha256sum baler.toml>"
+#
+# Paths without a scheme are relative to this file.
+
+[[package]]
+manifest = "../templates/function-project/baler.toml"
