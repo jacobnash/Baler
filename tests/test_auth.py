@@ -252,6 +252,19 @@ def test_create_user_rules(conn):
 
 
 @pytest.mark.integration
+def test_second_org_with_the_same_admin_email_is_refused(conn):
+    """Baler#173: repeating POST /auth/orgs for the demo account (a deploy
+    race) can't make a second org: EmailTaken, and no orphan org row."""
+    from baler.auth import EmailTaken
+
+    create_org(conn, "Test Org Demo", "demo-dup@test-auth.invalid", "pw")
+    orgs = conn.execute("SELECT count(*) FROM orgs").fetchone()[0]
+    with pytest.raises(EmailTaken):
+        create_org(conn, "Test Org Demo", "Demo-Dup@test-auth.invalid", "pw")
+    assert conn.execute("SELECT count(*) FROM orgs").fetchone()[0] == orgs
+
+
+@pytest.mark.integration
 def test_display_name_set_cleared_and_leaves_sessions_alone(conn):
     """Baler#121: a user record carries how the person signs. Setting it
     alone doesn't sign them out (it isn't in the token); blank clears it."""
