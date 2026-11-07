@@ -1,0 +1,133 @@
+---
+title: Commissioning Walkthrough
+---
+
+A guided tour of commissioning (Cx) in Baler, from a new building's design
+phase through warranty, operations and maintenance, plus a retrofit and a
+campus of many small projects. It uses demo data you can create and remove
+with one script, so you can watch the data come online while you click
+through the Commissioning tab, the equipment tree, Alarms and Derivations.
+
+## What commissioning is
+
+Commissioning is a quality process, not a single test. ASHRAE Guideline 0
+describes it running from pre-design through occupancy and operation, to
+verify the building meets the owner's requirements. Three documents anchor it:
+
+- **OPR** (Owner's Project Requirements): measurable outcomes the owner wants.
+- **BOD** (Basis of Design): how the design meets each OPR item.
+- **Cx Plan**: written in pre-design, updated each phase.
+
+**New construction** adds design and submittal review, start-up checklists,
+**functional performance tests**, an issues log, training, a final report
+and a Systems Manual. **Warranty** brings a review at about month 10 of a
+12-month warranty, seasonal or deferred tests (peak summer, shoulder, peak
+winter) and an end-of-warranty report listing open deficiencies.
+
+**Retro-commissioning (RCx)** is for existing buildings that usually have no
+OPR on file: start from as-found discovery (trends, a walkthrough), fix the
+low-cost items, and re-check. Savings from a one-time RCx tend to fade
+(a Berkeley Lab study cites roughly 35%), which is why
+**monitoring-based commissioning** keeps analytics running afterwards. Cost
+and savings figures in vendor material vary widely, so treat them as rough.
+
+Sources: [ASHRAE Guideline 0 overview](https://cxplanner.com/commissioning-101/ashrae-guideline-0),
+[Newfoundland and Labrador commissioning guide](https://www.gov.nl.ca/ti/files/works-commissioning-guide.pdf),
+[Kentucky commissioning plan outline](https://finance.ky.gov/department-for-facilities-and-support-services/office-of-facility-development-and-efficiency/TechnicalGuidelines/01%2091%2013%20-5%20Sample%20Commissioning%20Plan%20Outline%206-22-13.pdf),
+[University of Maryland general commissioning requirements](https://www.umaryland.edu/media/umb/af/dc/documents/division-01/019113---General-Commissioning-Requirements-8-9-2020.pdf),
+[ASHRAE retro-commissioning two-pager](https://www.ashrae.org/file%20library/about/cebd/presidential-theme-retrocommissioning-and-decarb-two-pager_2026.pdf).
+
+## How Baler maps onto it
+
+| Cx activity | Baler |
+|---|---|
+| Project and phases | A Cx project with an editable phase list (default: design, construction, start-up, functional, acceptance, warranty, operations; the demo adds maintenance) |
+| Expected equipment and points | SHACL templates (`ontology/cx-expected-points.ttl`) checked against the Brick/Haystack model |
+| Is it installed, alive, responding | The verification ladder: existence, liveness (trend data), responsiveness |
+| Sequence checks | Optional ASHRAE Guideline 36 items (`gl36:*` results) |
+| Issues log | Cx issues, tied to a failing result and closed when a later run passes it |
+| Ongoing commissioning | Fault rules and derivations running on live data, shown in Alarms and Derivations |
+
+Limits worth knowing (checked against the live site, November 2026):
+
+- The phase you are in is recorded with each run but does not yet change
+  what a run checks, and one run per project can be active at a time.
+- An operator can only create **whole-organization** projects, so every demo
+  project reports on all equipment in the organization (about 150 pieces),
+  not just its own. Look for rows keyed `fbf/demo-cx/<project>/...` in the
+  results table. Scoping a project to one building needs an admin-created
+  site with a topic prefix; see Baler#75.
+- A run can fail if the same point appears twice in the model, as the
+  duplicated derived "Fan Duty Cycle" points do (Baler#72, Baler#62). Run it
+  again after the duplicates are cleaned up.
+- The gateway allows an operator 300 requests a minute per user, shared by
+  everyone signed in as that user. The seed script paces itself and stops at
+  the first 429 instead of retrying, because retrying keeps the limit locked
+  (Baler#71).
+
+## Seed the demo
+
+Everything is created through the public gateway, so it needs only a login:
+
+```bash
+export BALER_URL=https://your-host BALER_EMAIL=you@example.com BALER_PASSWORD=...
+python -m scripts.seed_cx_demo up        # new build + retrofit + 24 campus projects
+python -m scripts.seed_cx_demo live      # keep fresh readings flowing (Ctrl-C to stop)
+python -m scripts.seed_cx_demo cleanup   # remove it all (admin login)
+```
+
+Equipment keys live under `fbf/demo-cx/...`, names say `DEMO`, and fault
+rules are called `demo-cx-*`. `up` is safe to run twice. Same `--seed`, same
+data. An operator can run everything except `cleanup`, because deleting
+records and Cx projects is admin-only; point history is kept by design.
+
+## Walkthrough: the new build
+
+Run `python -m scripts.seed_cx_demo advance newbuild` between steps to move the
+project one phase at a time and watch the screens change, or use `up` to
+land at the end state.
+
+1. **Design.** The project exists and has no equipment. A run reports every
+   expected point as missing, which is the point: the plan is in place and
+   nothing is built.
+2. **Construction.** Equipment and points appear in the **equipment tree**
+   (AHUs and VAV boxes with their Brick classes) but nothing has a value yet.
+3. **Start-up.** First readings arrive. Open a point and its history chart
+   starts to fill.
+4. **Functional testing.** A day of trends lands with three planted defects:
+   a supply-air sensor stuck at 55 degrees, a mixed-air sensor that stops
+   reporting, and an outside-air sensor reading 140. A run lists them as
+   failing liveness or responsiveness results; in the results table look for
+   `fbf/demo-cx/newbuild/ahu-2` and `ahu-1`. Open an issue from a failing result.
+5. **Acceptance.** Fresh, healthy readings replace the defects. A short-window
+   run passes the checks it failed, and the matching issues close.
+6. **Warranty.** Re-run over a longer window, as the 10-month review would,
+   and record anything deferred.
+7. **Operations.** Fault rules and a derivation are active. Watch **Alarms**
+   for new faults and **Derivations** for fresh computed values.
+8. **Maintenance.** The extra phase marks steady-state work: acknowledge or
+   snooze an alarm, and re-run on a schedule.
+
+## Walkthrough: the retrofit and the campus
+
+**Harbor Office (retrofit)** follows the same tools in a different order:
+start from what is already there, run to find the gaps (as-found), fix the
+records and sensors, then leave fault rules and derivations running as
+monitoring-based commissioning.
+
+**Campus**: 24 small projects sit at mixed phases, some with a stuck or stale
+sensor, so you can see how the project list, filters and concurrent runs
+behave when one organisation manages many buildings at once. Runs are
+queued and workers process them in the background.
+
+## Check it worked
+
+- The equipment tree shows `DEMO` AHUs and VAV boxes. They currently appear
+  in their own "Air_Handling_Unit" and "Variable_Air_Volume_Box" groups, next
+  to the older "AHU" and "VAV" groups (Baler#76).
+- A functional-phase run shows failures for the planted defects, and an
+  acceptance-phase run passes them.
+- Alarms lists faults from the `demo-cx-*` rules (for example a stuck or
+  out-of-range supply-air sensor), and `live` keeps values fresh. The count
+  in the status line can disagree with the number of rows (Baler#63).
+- `cleanup` removes the records, rules and projects, and `up` rebuilds them.
