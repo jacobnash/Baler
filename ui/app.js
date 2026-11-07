@@ -253,12 +253,23 @@ async function loadHistory(topic, seconds = null) {
 // his.html?expr=... - the Axon-style "show me everything this equipment is
 // doing" view (see hisquery.py). `id==@<uri>` selects exactly this entity;
 // an equipment match expands to all of its points server-side.
-function hisLink(uri, text = "📈") {
+// An inline SVG, not an emoji: a box without an emoji font (headless
+// Chrome, many Linux desktops) showed a missing-glyph box instead.
+const CHART_ICON = '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" focusable="false" ' +
+  'style="vertical-align:-2px"><path d="M1 14h14M3 11l3-4 3 2 4-6" fill="none" stroke="currentColor" stroke-width="1.6" ' +
+  'stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+function hisLink(uri, text = null) {
   const a = document.createElement("a");
   a.className = "his-link";
   a.href = `his.html?expr=${encodeURIComponent(`readAll(id==@${uri}).hisRead(today)`)}`;
   a.title = "Chart every point of this equipment for today";
-  a.textContent = text;
+  if (text === null) {
+    a.innerHTML = CHART_ICON;
+    a.setAttribute("aria-label", "Chart this equipment");
+  } else {
+    a.textContent = text;
+  }
   // Inside a <summary>, a click would also toggle the <details> - harmless
   // since we're navigating away, but don't let the tree react to it.
   a.addEventListener("click", (ev) => ev.stopPropagation());
@@ -392,7 +403,7 @@ async function renderLocationSection(equips) {
     return el;
   };
 
-  const root = node("📍 Site");
+  const root = node("Sites");
   for (const site of sites) {
     const siteNode = node(site.dis);
     const siteList = document.createElement("ul");

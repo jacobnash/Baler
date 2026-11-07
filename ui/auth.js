@@ -7,6 +7,41 @@
 // Plain global functions, no module system - same "no build step" spirit
 // as every other file in ui/. Expects a page to declare the login-gate
 // markup with these exact ids (see index.html) before loading this script.
+// A deploy restarts the APIs; for ~30-60 s the gateway answers 502/503/504
+// and every page looked broken (and login failed). Safe requests - GETs,
+// and the login POST - are retried with backoff for up to ~45 s while the
+// page says so, instead of surfacing the error at once.
+(function () {
+  const RETRY_STATUS = new Set([502, 503, 504]);
+  const BUDGET_MS = 45000;
+  const realFetch = window.fetch.bind(window);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  function retryable(input, init) {
+    const method = String((init && init.method) || (input && input.method) || "GET").toUpperCase();
+    const url = String(typeof input === "string" ? input : (input && input.url) || "");
+    return method === "GET" || method === "HEAD" || (method === "POST" && /\/auth\/login$/.test(url));
+  }
+  window.fetch = async function (input, init) {
+    if (!retryable(input, init)) return realFetch(input, init);
+    const started = Date.now();
+    let delay = 1000;
+    for (;;) {
+      let res = null;
+      try {
+        res = await realFetch(input, init);
+      } catch (err) {
+        if (Date.now() - started > BUDGET_MS) throw err;
+      }
+      if (res && !RETRY_STATUS.has(res.status)) return res;
+      if (Date.now() - started > BUDGET_MS) return res || realFetch(input, init);
+      const el = document.getElementById("status");
+      if (el) el.textContent = "Baler is restarting - retrying…";
+      await sleep(delay);
+      delay = Math.min(delay * 2, 8000);
+    }
+  };
+})();
+
 const AUTH_API_URL = new URLSearchParams(location.search).get("auth") || "/auth";
 const TOKEN_KEY = "td_token";
 
