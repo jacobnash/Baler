@@ -635,6 +635,16 @@ def markers_of_brick_class() -> dict[str, frozenset[str]]:
     return out
 
 
+def warm_caches() -> None:
+    """Build the per-process lookup tables now (the vendored Brick, the
+    mapping rules reversed, the Xeto spec table: ~0.2 s together) instead of
+    inside the first request after a deploy (Baler#107)."""
+    brick_vocab.load()
+    markers_of_brick_class()
+    _specs_by_size()
+    _rule_classes_by_tag()
+
+
 def xeto_spec_for(markers, brick_class: str | None = None) -> str | None:
     """The most specific ph Xeto spec (Baler#22) for a record with these
     Haystack markers, plus those its Brick class implies. Shared by
@@ -1109,6 +1119,22 @@ def _uri(text: str) -> str:
     return text
 
 
+_BOUND = re.compile(r"BOUND\(\?\w+\)")
+_BOOL_ONLY = re.compile(r"[()!&|\sFT]*")
+
+
+def _false_without_flags(expr: str) -> bool:
+    """Whether a compiled filter expression is false for a subject in none
+    of its leaf sets (every BOUND(?flag) false). Decided only for
+    expressions made of nothing but flags, &&, ||, ! and parentheses
+    (anything else, e.g. `id ==`'s `?s = <...>`: False, i.e. don't know)."""
+    text = _BOUND.sub("F", expr).replace("true", "T").replace("false", "F")
+    if not _BOOL_ONLY.fullmatch(text):
+        return False
+    py = text.replace("&&", " and ").replace("||", " or ").replace("!", " not ").replace("T", " True ").replace("F", " False ")
+    return not eval(py, {"__builtins__": {}}, {})  # only True/False/and/or/not/() can reach here
+
+
 def compile_filter(node, graph: GraphVocab | None = None, scope=None) -> str:
     """One SELECT over every subject in the graph. Each leaf test of the
     filter is a subject-set (see _Compiler), left-joined once; the whole
@@ -1123,7 +1149,7 @@ def compile_filter(node, graph: GraphVocab | None = None, scope=None) -> str:
     independently, so the result is identical and the query stays a plain
     scan instead of a per-candidate NOT EXISTS)."""
     compiler = _Compiler(graph, scope=scope)
-    body = compiler.expr(node)
+    body = leaf_logic = compiler.expr(node)
     visible = scope.sparql("s") if scope is not None else None
     if visible:  # the caller's scope, in the query itself (Baler#16)
         body = f"({body}) && ({visible})"
@@ -1131,11 +1157,22 @@ def compile_filter(node, graph: GraphVocab | None = None, scope=None) -> str:
         f"  OPTIONAL {{ {{ SELECT DISTINCT ?s (true AS ?{m}) WHERE {{ {pattern} }} }} }}"
         for m, pattern in compiler.flags
     )
+    # nested Dict nodes (urn:baler:dict:) are values, never records
+    record = "FILTER(isIRI(?s) && !STRSTARTS(STR(?s), \"urn:baler:dict:\"))"
+    if compiler.flags and _false_without_flags(leaf_logic):
+        # Nothing outside every leaf set can match, so the candidates are
+        # those sets' union instead of every subject in the graph - the
+        # same answer without the full scan, which was ~0.12 s of every
+        # read, even `site` (Baler#107). The ?s ?cp ?co join keeps "is a
+        # subject", as the full scan had it (a path can reach a bare object).
+        union = " UNION ".join(f"{{ {pattern} }}" for _, pattern in compiler.flags)
+        candidates = f"  {{ SELECT DISTINCT ?s WHERE {{ {{ SELECT DISTINCT ?s WHERE {{ {union} }} }} ?s ?cp ?co . {record} }} }}\n"
+    else:
+        candidates = f"  {{ SELECT DISTINCT ?s WHERE {{ ?s ?p ?o . {record} }} }}\n"
     return (
         PREFIXES
         + "SELECT DISTINCT ?s WHERE {\n"
-        # nested Dict nodes (urn:baler:dict:) are values, never records
-        + "  { SELECT DISTINCT ?s WHERE { ?s ?p ?o . FILTER(isIRI(?s) && !STRSTARTS(STR(?s), \"urn:baler:dict:\")) } }\n"
+        + candidates
         + (flags + "\n" if flags else "")
         + f"  FILTER({body})\n"
         + "}"
@@ -1313,10 +1350,6 @@ def resolve_span(text: str | None, now: datetime, tz: str = "UTC") -> Span:
 _MATCHED_PREVIEW = 200
 
 
-def _split_concat(value) -> list[str]:
-    return [part for part in str(value).split(" ") if part] if value else []
-
-
 def _point_key(uri: str) -> str:
     """The `point` value GET /history takes back - the same identity POST
     /ingest used (see ingest.topic_to_point_uri)."""
@@ -1379,37 +1412,48 @@ def expand_to_points(store, entity_uris: list[str]) -> list[str]:
     return sorted(points)
 
 
+# describe_points' predicates, by the field each fills.
+_DESCRIBE_PREDICATES = {
+    "http://www.w3.org/1999/02/22-rdf-syntax-ns#type": "types", "urn:baler:haystack#hasTag": "tags",
+    TD_NS + "sourceTopic": "topic", "urn:baler:haystack#dis": "dis", "urn:baler:haystack#unit": "unit",
+    "urn:baler:haystack#kind": "kind", BRICK_NS + "isPointOf": "equips",
+}
+_EQUIP_DIS = "urn:baler:describe:equipDis"
+
+
 def describe_points(store, point_uris: list[str]) -> dict[str, dict]:
     if not point_uris:
         return {}
     values = " ".join(f"<{_uri(u)}>" for u in point_uris)
+    # Plain triples, gathered here. (One GROUP BY row per point over seven
+    # OPTIONALs multiplied every point's tags by its types before
+    # GROUP_CONCAT folded them back up: ~0.3 s of Oxigraph time for 800
+    # points, a third of a whole readAll(equip).hisRead(today), Baler#107.)
+    preds = " ".join(f"<{p}>" for p in _DESCRIBE_PREDICATES)
     rows = store.query(
         PREFIXES
-        + f"""SELECT ?point
-                 (GROUP_CONCAT(DISTINCT COALESCE(STR(?type), ""); separator=" ") AS ?types)
-                 (GROUP_CONCAT(DISTINCT COALESCE(STR(?tag), ""); separator=" ") AS ?tags)
-                 (SAMPLE(?topic) AS ?topic_)
-                 (SAMPLE(?dis) AS ?dis_)
-                 (SAMPLE(?unit) AS ?unit_)
-                 (SAMPLE(?kind) AS ?kind_)
-                 (SAMPLE(?equip) AS ?equip_)
-                 (SAMPLE(?equipDis) AS ?equipDis_)
-        WHERE {{
+        + f"""SELECT ?point ?p ?o ?e WHERE {{
             VALUES ?point {{ {values} }}
-            OPTIONAL {{ ?point a ?type }}
-            OPTIONAL {{ ?point haystack:hasTag ?tag }}
-            OPTIONAL {{ ?point td:sourceTopic ?topic }}
-            OPTIONAL {{ ?point haystack:dis ?dis }}
-            OPTIONAL {{ ?point haystack:unit ?unit }}
-            OPTIONAL {{ ?point haystack:kind ?kind }}
-            OPTIONAL {{ ?point brick:isPointOf ?equip . OPTIONAL {{ ?equip haystack:dis ?equipDis }} }}
-        }}
-        GROUP BY ?point"""
+            {{ VALUES ?p {{ {preds} }} ?point ?p ?o }}
+            UNION
+            {{ ?point brick:isPointOf ?e . ?e haystack:dis ?o . BIND(<{_EQUIP_DIS}> AS ?p) }}
+        }}"""
     )
-    out: dict[str, dict] = {}
+    found: dict[str, dict] = {}
     for row in rows:
-        uri = str(row.point)
-        types = _split_concat(getattr(row, "types", None))
+        f = found.setdefault(str(row.point), {"types": set(), "tags": set(), "equips": set(), "equipDis": {}})
+        p = str(row.p)
+        if p == _EQUIP_DIS:
+            f["equipDis"].setdefault(str(row.e), row.o)
+            continue
+        field_ = _DESCRIBE_PREDICATES.get(p)
+        if field_ in ("types", "tags", "equips"):
+            f[field_].add(str(row.o))
+        elif field_ is not None:
+            f.setdefault(field_, row.o)
+    out: dict[str, dict] = {}
+    for uri, f in found.items():
+        types = sorted(f["types"])
         # Any ontology class the point is typed with - Brick's, an
         # extension's, a PROJ fallback - but not Baler's own
         # bookkeeping types (td:RawPoint). A real Brick class first, then an
@@ -1419,14 +1463,14 @@ def describe_points(store, point_uris: list[str]) -> dict[str, dict]:
             key=lambda t: (not t.startswith(BRICK_NS), t.startswith(PROJ_NS), t),
         )
         brick_classes = [_local_name(t) for t in classes]
-        topic = getattr(row, "topic_", None)
-        equip = getattr(row, "equip_", None)
-        equip = str(equip) if equip else None
-        dis_tag = getattr(row, "dis_", None)
+        topic = f.get("topic")
+        equip = min(f["equips"]) if f["equips"] else None
+        dis_tag = f.get("dis")
         dis = dis_tag or (str(topic).rsplit("/", 1)[-1] if topic else _local_name(uri))
-        equip_dis = getattr(row, "equipDis_", None) or (equip.replace("urn:equip:", "", 1) if equip else None)
-        unit = getattr(row, "unit_", None)
-        kind = getattr(row, "kind_", None)
+        equip_dis = f["equipDis"].get(equip) if equip else None
+        equip_dis = equip_dis or (equip.replace("urn:equip:", "", 1) if equip else None)
+        unit = f.get("unit")
+        kind = f.get("kind")
         out[uri] = {
             "id": uri,
             "point": _point_key(uri),
@@ -1435,7 +1479,7 @@ def describe_points(store, point_uris: list[str]) -> dict[str, dict]:
             "unit": str(unit) if unit else None,
             "kind": str(kind) if kind else None,
             "brickClass": brick_classes[0] if brick_classes else None,
-            "tags": sorted(_split_concat(getattr(row, "tags", None))),
+            "tags": sorted(f["tags"]),
             "equip": equip,
             "equipDis": str(equip_dis) if equip_dis else None,
         }

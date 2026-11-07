@@ -425,6 +425,7 @@ def main() -> None:
     with ts_pool.connection() as conn:
         auth.ensure_schema(conn)  # sites.topic_prefixes, read by the /his and /history scope check
         record_edit.ensure_schema(conn)
+    hisquery.warm_caches()
 
     server = ThreadingHTTPServer((args.host, args.port), make_handler(store, ts_pool))
     print(f"POST /ingest listening on {args.host}:{args.port}")

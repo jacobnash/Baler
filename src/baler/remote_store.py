@@ -136,6 +136,14 @@ class RemoteStore:
         self.add_relationship(computed_point, PROV.wasDerivedFrom, source_point)
 
     def query(self, sparql: str):
+        return [SparqlRow(b) for b in self.select(sparql)]
+
+    def select(self, sparql: str) -> list[dict]:
+        """query()'s rows as the raw SPARQL JSON bindings ({var: {"type",
+        "value", "datatype"?}}), for callers reading thousands of rows: each
+        SparqlRow attribute access is a Python call, and those were ~0.1 s
+        of an 800-point /api/read (Baler#107). The bindings also carry each
+        term's kind and datatype, which saves projecting them in SPARQL."""
         resp = self._session.post(
             f"{self.base_url}/query",
             headers={
@@ -145,7 +153,7 @@ class RemoteStore:
             data=sparql.encode("utf-8"),
         )
         resp.raise_for_status()
-        return [SparqlRow(b) for b in resp.json()["results"]["bindings"]]
+        return resp.json()["results"]["bindings"]
 
     def __len__(self) -> int:
         rows = self.query("SELECT (COUNT(*) as ?c) WHERE { ?s ?p ?o }")

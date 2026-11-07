@@ -477,6 +477,18 @@ def test_describe_points_metadata_shape(graph):
     assert meta["urn:point:nowhere"]["dis"] == "nowhere" and meta["urn:point:nowhere"]["tags"] == []
 
 
+def test_describe_points_equip_dis_is_the_chosen_equips_own(graph):
+    """A point on two equips reports one of them, the same one every time,
+    with that equip's own dis - not another's."""
+    b = URIRef("urn:equip:fbf/ahu-0")
+    graph.add_many([(AHU, HAYSTACK.dis, Literal("AHU One")), (b, HAYSTACK.dis, Literal("AHU Zero")),
+                    (DAT, BRICK.isPointOf, b)])
+    dat = h.describe_points(graph, [str(DAT)])[str(DAT)]
+    assert dat["equip"] == str(b) and dat["equipDis"] == "AHU Zero"
+    graph.add_many([(FAN, BRICK.isPointOf, AHU)])
+    assert h.describe_points(graph, [str(FAN)])[str(FAN)]["equipDis"] == "AHU One"
+
+
 def test_run_query_read_singular_with_no_match_is_nomatcherror(graph):
     class NoTs:  # never reached - the filter matches nothing first
         pass
@@ -527,3 +539,25 @@ def test_his_interpolate_sort_first_and_clip():
     clipped = h._apply_post([{"dis": "x", "tags": [], "history": [{"ts": day - 60, "value": 1}, {"ts": day + 60, "value": 2}]}],
                             (("hisClip", "today"),), now, "UTC")
     assert [p["value"] for p in clipped[0]["history"]] == [2]
+
+
+def test_false_without_flags_decides_only_pure_flag_logic():
+    assert h._false_without_flags("BOUND(?m1)")
+    assert h._false_without_flags("(BOUND(?m1) && (!BOUND(?m2)))")
+    assert h._false_without_flags("(BOUND(?m1) || BOUND(?p1_m2))")
+    assert not h._false_without_flags("(!BOUND(?m1))")
+    assert not h._false_without_flags("((!BOUND(?m1)) || BOUND(?m2))")
+    assert h._false_without_flags("false")
+    # anything but flags and boolean operators: not decided (full scan)
+    assert not h._false_without_flags("(?s = <urn:equip:x>)")
+    assert not h._false_without_flags("(BOUND(?m1) && STRSTARTS(STR(?s), \"urn:\"))")
+
+
+def test_positive_filters_start_from_their_leaf_sets_not_every_subject(graph):
+    """Same matches either way (match_entities tests above); a filter that
+    can't match outside its leaf sets skips the scan of every subject."""
+    assert "{ ?s ?p ?o ." not in h.compile_filter(h.parse_query("point and his").filter)
+    assert "{ ?s ?p ?o ." in h.compile_filter(h.parse_query("not point").filter)
+    assert h.match_entities(graph, h.parse_query("not point").filter) == sorted(
+        set(h.match_entities(graph, h.parse_query("equip or site or point or not point").filter))
+        - set(h.match_entities(graph, h.parse_query("point").filter)))
