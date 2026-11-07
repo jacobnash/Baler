@@ -104,6 +104,14 @@ gateway using the same demo account. Run as `jacob` (already in the
 `docker` group on this box) - not through the runner's sudoers wrapper,
 this needs `docker compose exec`, not just `up`.
 
+## Edge nodes on the LAN
+
+The Pis of the Home Edge Pilot (`192.168.128.228` BACnet, `.230` Modbus) are
+polled by `windrow_api` by IP. `deploy/nash-srv/check-edge.sh` checks them end
+to end, and an opt-in host-network Windrow (`docker-compose.lan.yml`,
+`BALER_WINDROW_LAN=1`) adds broadcast discovery on nash-srv's LAN. See
+[Edge nodes](/edge-nodes).
+
 ## Windrow submodule
 
 `fbf/` is a separate, independently-versioned public repo (`jacobnash/windrow`),
