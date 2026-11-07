@@ -128,6 +128,17 @@ check("windrow (Devices page): reads for any role, every change admin-only", () 
     assert.equal(policy.resolveRoute("GET", "/windrow/openapi.yaml").minRole, null); // the public spec row
 });
 
+check("post-deploy verification reads (Baler#178): GET only, freshness for viewers, gateway 5xx for operators org-wide", () => {
+    assert.equal(policy.resolveRoute("GET", "/ops/freshness").minRole, "viewer");
+    assert.equal(policy.resolveRoute("GET", "/ops/freshness").resource, "ops");
+    assert.equal(policy.resolveRoute("GET", "/ops/gateway-errors").minRole, "operator");
+    assert.equal(policy.roleSatisfies("viewer", policy.resolveRoute("GET", "/ops/gateway-errors").minRole), false);
+    assert.equal(policy.scopeSatisfies("gateway", { site_ids: ["s1"] }), false);
+    assert.equal(policy.scopeSatisfies("gateway", {}), true);
+    assert.equal(policy.resolveRoute("POST", "/ops/freshness"), null);
+    assert.equal(policy.resolveRoute("DELETE", "/ops/gateway-errors"), null);
+});
+
 check("ops edges (Connectors page): listing for any role, changes and scans admin-only", () => {
     assert.equal(policy.resolveRoute("GET", "/ops/edges").minRole, "viewer");
     assert.equal(policy.resolveRoute("GET", "/ops/edges").resource, "devices");
