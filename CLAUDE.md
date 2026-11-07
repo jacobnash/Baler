@@ -62,14 +62,17 @@ integrations). This file is gotchas only — don't duplicate those.
   policy in `gateway/njs/policy.js`), not per-backend Python auth code.
   `POST /auth/orgs` (public) creates the first admin account;
   `POST /auth/login` exchanges credentials for a token.
-- **Gateway caches upstream addresses at its own startup.** If you
-  restart a backend API container independently (e.g. `docker compose up
-  -d --build ingest_api` after a code change) without also restarting
-  `gateway`, routes through it can start returning 404/502 even though
-  the backend is healthy. `docker compose restart gateway` fixes it —
-  this is a real, reproducible gap between what the README documents as
-  a supported independent-restart workflow and what actually works
-  without the extra step.
+- **Gateway upstreams re-resolve at runtime; keep it that way.** Each
+  backend is an `upstream { server x:port resolve max_fails=0; }` block in
+  `gateway/nginx.conf` (or a variable `proxy_pass`), resolved through
+  `resolver 127.0.0.11`, so `docker compose up -d --build ingest_api` needs
+  no gateway restart (#108). A new location written as a literal
+  `proxy_pass http://host:port/` brings back the old bug (address pinned at
+  boot, 502s after that backend is recreated). Don't switch to
+  `proxy_pass http://$var` plus `rewrite`: njs's policy reads `r.uri`,
+  which a rewrite changes. Gateway config changes need `nginx -s reload`
+  (the deploy does `exec gateway nginx -t && nginx -s reload`), not a
+  restart.
 - **`pytest -m "integration or not integration"` runs everything**, not a
   filtered subset — it's a tautology. It needs `docker compose up -d`
   first (hits live Postgres/Oxigraph/MQTT). Use
