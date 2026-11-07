@@ -101,10 +101,17 @@
             <option value="fail">equipment with failures</option>
             <option value="inconclusive">failures or inconclusive</option>
           </select></label>
+          <label>Equipment <input type="search" id="results-search" placeholder="filter, e.g. campus-07 or ahu" /></label>
+          <span id="results-count" class="hint"></span>
           <button type="button" id="report-btn">Printable report</button>
           <button type="button" id="issues-from-run-btn" data-min-role="operator">Open issues for failures</button>
         </div>
         <div class="cx-grid-wrap"><table id="results-grid" class="cx-grid"></table></div>
+        <div class="toolbar" id="results-pager" hidden>
+          <button type="button" id="results-prev">Previous</button>
+          <span id="results-page" class="hint"></span>
+          <button type="button" id="results-next">Next</button>
+        </div>
         <p class="hint">Each cell counts results: <span class="chip chip-fail">fail</span> <span class="chip chip-inconclusive">inconclusive</span> <span class="chip chip-pass">pass</span>. Inconclusive means no evidence either way; it is never a pass. Click a cell for the evidence.</p>
       </section>
 
@@ -241,6 +248,8 @@
       <h3>New project</h3>
       <label>Name <input type="text" id="project-name" required /></label>
       <label>Site <select id="project-site"></select></label>
+      <label>Topic prefixes <input type="text" id="project-prefixes" placeholder="optional, e.g. fbf/hospital-a, fbf/annex" /></label>
+      <p class="hint">Limits the project to equipment under these prefixes (one building, say) - within what you can already see.</p>
       <label>Starting phase <select id="project-phase"></select></label>
       <p id="project-error" class="field-error" hidden></p>
       <menu>

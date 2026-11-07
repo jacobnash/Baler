@@ -86,6 +86,23 @@ _RUN = re.compile(r"/runs/([^/]+)")
 _RUN_REPORT = re.compile(r"/runs/([^/]+)/report")
 
 
+def _check_prefixes(value) -> list[str]:
+    """settings.prefixes: topic prefixes the project covers (#75), e.g.
+    ["fbf/hospital-a"]. Narrowing only - never more than the caller sees."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(p, str) for p in value) or len(value) > 50:
+        raise TypeError("settings.prefixes is a list of up to 50 topic prefixes, e.g. [\"fbf/hospital-a\"]")
+    out = []
+    for p in value:
+        p = p.strip().strip("/")
+        if not p or any(c in p for c in "#+ ") or p.startswith(("urn:", "http")):
+            raise ValueError(f"settings.prefixes: {p!r} isn't a topic prefix like fbf/hospital-a")
+        if p not in out:
+            out.append(p)
+    return out
+
+
 def _check_settings(settings) -> dict:
     if settings is None:
         return {}
@@ -93,6 +110,8 @@ def _check_settings(settings) -> dict:
         raise TypeError("settings must be an object")
     if "window_hours" in settings:
         engine.window_hours(settings["window_hours"])
+    if "prefixes" in settings:
+        settings["prefixes"] = _check_prefixes(settings["prefixes"])
     if "gl36" in settings:
         gl36.validate_settings(settings["gl36"])
     if "ladder" in settings:

@@ -102,3 +102,54 @@ def test_worker_runs_jobs_in_the_background(repo):
     w.submit(_queue(repo))
     w.join()
     assert repo.get_run("r1")["status"] == "completed"
+
+
+class _ScopeRepo:
+    """Just what project_scopes reads."""
+
+    def __init__(self, caller, sites=None):
+        self.caller = caller
+        self.sites = sites or {}
+
+    def scope_for(self, claims):
+        return self.caller
+
+    def get_site(self, site_id):
+        return self.sites.get(site_id)
+
+
+def test_project_prefixes_narrow_an_org_wide_project():
+    """#75: an operator's org-wide project can cover one building by prefix."""
+    from baler.commissioning.runner import project_scopes
+    from baler.scope import Scope
+
+    project = {"site_id": None, "settings": {"prefixes": ["fbf/demo-cx/campus-07"]}}
+    scopes, prefixes = project_scopes(_ScopeRepo(Scope.everything()), project, {})
+    assert prefixes == ["fbf/demo-cx/campus-07"]
+    visible = lambda uri: all(s.allows(uri) for s in scopes)
+    assert visible("urn:equip:fbf/demo-cx/campus-07/ahu-1")
+    assert not visible("urn:equip:fbf/demo-cx/campus-08/ahu-1")
+    assert not visible("urn:equip:fbf/hospital-a/ahu-1")
+
+
+def test_project_prefixes_never_widen_the_callers_scope():
+    from baler.commissioning.runner import project_scopes
+    from baler.scope import Scope
+
+    project = {"site_id": None, "settings": {"prefixes": ["fbf/other-org"]}}
+    scopes, _ = project_scopes(_ScopeRepo(Scope(("fbf/mine",))), project, {})
+    assert not all(s.allows("urn:equip:fbf/other-org/ahu-1") for s in scopes)
+
+
+@pytest.mark.parametrize("bad", ["fbf/x", ["fbf/#"], [""], ["urn:equip:x"], [1]])
+def test_bad_prefix_settings_are_refused(bad):
+    from baler.commissioning_api import _check_settings
+
+    with pytest.raises((TypeError, ValueError)):
+        _check_settings({"prefixes": bad})
+
+
+def test_prefix_settings_are_normalized():
+    from baler.commissioning_api import _check_settings
+
+    assert _check_settings({"prefixes": [" fbf/a/ ", "fbf/a", "fbf/b"]})["prefixes"] == ["fbf/a", "fbf/b"]

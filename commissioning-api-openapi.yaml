@@ -1632,6 +1632,15 @@ components:
       type: object
       properties:
         window_hours: { type: number, exclusiveMinimum: 0, maximum: 744 }
+        prefixes:
+          type: array
+          maxItems: 50
+          items: { type: string }
+          description: >-
+            Topic prefixes the project covers, e.g. ["fbf/hospital-a"] for one
+            building (Baler#75). Narrows the project's inventory, runs, issues and
+            status to equipment under them, on top of the site (if any) and the
+            caller's own scope - it never shows more than the caller can see.
         gl36:
           type: object
           description: >-
