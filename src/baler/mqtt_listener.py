@@ -7,8 +7,9 @@ listener subscribing to a topic pattern is the whole ingestion surface.
 import argparse
 import json
 import os
+from functools import lru_cache
 
-from baler import mqtt_util, tracing
+from baler import mapping, mqtt_util, tracing
 from baler.ingest import (
     ingest_equip_tags,
     ingest_haystack_equip_tags,
@@ -22,6 +23,36 @@ from baler.remote_store import RemoteStore
 from baler.timeseries import connect
 
 tracer = tracing.get_tracer(__name__)
+
+# BACnet's BinaryPV states, as Windrow publishes a binary object's
+# present-value (bacpypes3 Enumerated -> its name). Stored as a Bool, the
+# way Haxall's BACnet connector models it: a text "active" got no chart, a
+# text history list and no samples in Query rollups (Baler#81), while the
+# same fan status over Modbus (0/1) charted fine. Multi-state values are
+# unsigned integers in BACnet, so these two names mean binary only.
+BINARY_STATES = {"active": True, "inactive": False}
+
+
+def binary_state(value):
+    """"active"/"inactive" -> True/False; anything else unchanged."""
+    return BINARY_STATES.get(value, value) if isinstance(value, str) else value
+
+
+@lru_cache(maxsize=2)
+def _rules(path: str):
+    return mapping.load_rules(path)
+
+
+def _classify(store, uri, rules_path: str) -> None:
+    """mapping.classify_on_ingest; a failure here never drops the tags
+    message that was already stored (autotag can still classify it)."""
+    try:
+        cls = mapping.classify_on_ingest(store, uri, _rules(rules_path))
+    except Exception as exc:  # noqa: BLE001 - classification is best-effort on this path
+        print(f"auto-classify of {uri} skipped: {exc!r}")
+        return
+    if cls:
+        print(f"auto-classified {uri} as {cls}")
 
 
 def make_on_connect(topic_pattern):
@@ -92,6 +123,7 @@ def make_on_message(store, ts_conn):
                 equip_uri = ingest_equip_tags(store, topic_prefix, data.get("tags", {}))
                 for label in data.get("points", []):
                     link_point_to_equip(store, topic_to_point_uri(f"{topic_prefix}/{label}"), equip_uri)
+                _classify(store, equip_uri, mapping.EQUIP_RULES_PATH)
                 return
 
             # Haystack-sourced equip: one message per equip/site rec,
@@ -108,7 +140,8 @@ def make_on_message(store, ts_conn):
                     span.set_attribute("error", str(exc))
                     print(f"malformed haystack equip payload on {msg.topic}: {exc!r}")
                     return
-                ingest_haystack_equip_tags(store, ref, tags)
+                equip_uri = ingest_haystack_equip_tags(store, ref, tags)
+                _classify(store, equip_uri, mapping.EQUIP_RULES_PATH)
                 return
 
             if msg.topic.endswith("/tags"):
@@ -126,9 +159,10 @@ def make_on_message(store, ts_conn):
                 # first one (a point re-tagged after its equip arrives
                 # should still get linked).
                 link_equip_ref(store, point_uri)
+                _classify(store, point_uri, mapping.DEFAULT_RULES_PATH)
                 return
 
-            ingest_reading(store, ts_conn, msg.topic, value, ts)
+            ingest_reading(store, ts_conn, msg.topic, binary_state(value), ts)
 
     return on_message
 
