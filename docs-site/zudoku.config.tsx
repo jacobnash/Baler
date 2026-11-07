@@ -57,7 +57,7 @@ const config: ZudokuConfig = {
       type: "category",
       label: "Documentation",
       icon: "book",
-      items: ["/introduction", "/architecture", "/multi-site", "/edge-nodes", "/gateway-auth", "/his-query", "/fault-detection", "/derivation", "/webhooks", "/validate", "/commissioning-llm", "/commissioning-walkthrough", "/haxall-drop-in", "/haystack-api", "/haystack-conformance", "/haystack-puller", "/adding-a-data-source", "/weather-stations", "/backups", "/nash-srv-deploy", "/windrow", "/windrow-adding-a-new-source", "/windrow-periodic-discovery"],
+      items: ["/introduction", "/architecture", "/multi-site", "/edge-nodes", "/gateway-auth", "/his-query", "/fault-detection", "/derivation", "/webhooks", "/validate", "/commissioning-llm", "/commissioning-walkthrough", "/haxall-drop-in", "/haystack-api", "/haystack-conformance", "/haystack-puller", "/adding-a-data-source", "/weather-stations", "/backups", "/nash-srv-deploy", "/live-check", "/windrow", "/windrow-adding-a-new-source", "/windrow-periodic-discovery"],
     },
     {
       // Baler Notebooks (the "Code" epic, #90-#95). functions.mdx is
