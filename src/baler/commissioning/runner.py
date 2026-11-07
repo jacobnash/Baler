@@ -243,8 +243,9 @@ def execute_test(repo, job: TestJob, clock: Callable[[], datetime], run_fn=engin
             _, results = run_fn(repo.store, hist, job.scopes, job.end, hours, equips=equips, site_equips=site,
                                 **job.engine_kwargs)
             ids = _range_points(job.procedure, site)
-            series = hist.window(ids, job.start, job.end + timedelta(seconds=1)) if ids else {}
-        per = procedures.evaluate(job.procedure, equips, results, series)
+            truncated: set[str] = set()
+            series = hist.window(ids, job.start, job.end + timedelta(seconds=1), truncated=truncated) if ids else {}
+        per = procedures.evaluate(job.procedure, equips, results, series, truncated)
         prev = next((r for r in repo.list_test_runs(job.procedure["id"], 20)
                      if r["id"] != job.run_id and r["status"] == "completed"), None)
         summary = procedures.summarize(per)

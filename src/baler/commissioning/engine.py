@@ -63,6 +63,10 @@ def run(store, history: History, scopes: list[Scope], now: datetime, window_h: f
     report("history", 0, len(equips), len(point_ids))
     latest = history.latest(point_ids) if point_ids else {}
     window = timedelta(hours=window_h)
+    # Only points with no recent real value need the second probe: it tells
+    # "silent" apart from "publishing empty readings" (checks.existence).
+    quiet = [u for u in point_ids if u not in latest or latest[u][0] < now - window]
+    raw = history.latest_raw(quiet) if quiet else {}
     # window() is half-open on the end (point_history reads are); a sample
     # stamped exactly `now` is still evidence, so nudge the bound past it.
     series = history.window(point_ids, now - window, now + timedelta(seconds=1)) if point_ids else {}
@@ -71,7 +75,7 @@ def run(store, history: History, scopes: list[Scope], now: datetime, window_h: f
     without_template = []
     for i, e in enumerate(equips):
         report("checks", i, len(equips), len(point_ids))
-        exists = checks.existence(e, latest, now, window)
+        exists = checks.existence(e, latest, now, window, raw)
         results.extend(exists)
         results.extend(ladder.climb(e, exists, series, now, window, ladder_config))
         if tpl.templates_for(e["brickClasses"], templates):
