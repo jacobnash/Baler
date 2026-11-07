@@ -12,7 +12,16 @@ import re
 from http.server import ThreadingHTTPServer
 from urllib.parse import urlparse
 
-from baler import auth, docs_ui, gateway_auth, orphans, record_edit, sources, tracing
+from baler import (
+    auth,
+    docs_ui,
+    edges,
+    gateway_auth,
+    orphans,
+    record_edit,
+    sources,
+    tracing,
+)
 from baler.http_handler_base import BaseAPIHandler, respond_error, respond_json
 from baler.ops_status import collect_status
 from baler.scope import claims_from_header, scope_for
@@ -23,7 +32,17 @@ tracer = tracing.get_tracer(__name__)
 OPENAPI_SPEC_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "ops-api-openapi.yaml")
 
 
-def make_handler(ts_pool=None, store=None):
+_EDGE_ACTION = re.compile(r"/edges/([^/]+)/([^/]+)/actions/([a-z_]+)")
+
+
+def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
+    edge_holder = [edge_api]
+
+    def _edges() -> edges.Edges:
+        if edge_holder[0] is None:
+            edge_holder[0] = edges.Edges()
+        return edge_holder[0]
+
     class OpsHandler(BaseAPIHandler):
         TRACER = tracer
         ALLOWED_METHODS = "GET, POST, PATCH, DELETE, OPTIONS"
@@ -96,8 +115,37 @@ def make_handler(ts_pool=None, store=None):
             span.set_attribute("removed", len(result["removed"]))
             respond_json(self, 200, result)
 
+        # --- edge nodes and connectors (Connectors page); policy.js rows
+
+        def _edges_get(self, span) -> None:
+            try:
+                nodes = _edges().nodes()
+            except edges.EdgeError as exc:
+                respond_error(self, exc.status, str(exc))
+                return
+            span.set_attribute("count", len(nodes))
+            respond_json(self, 200, nodes)
+
+        def _edge_action(self, site: str, instance: str, action: str, span) -> None:
+            span.set_attribute("edge", f"{site}/{instance}")
+            span.set_attribute("action", action)
+            body = self.read_json_body() if int(self.headers.get("Content-Length") or 0) else {}
+            if not isinstance(body, dict):
+                respond_error(self, 400, "body must be a JSON object")
+                return
+            try:
+                result = _edges().call(site, instance, action, body)
+            except edges.EdgeError as exc:
+                respond_error(self, exc.status, str(exc))
+                return
+            respond_json(self, 200, {"result": result})
+
         def do_POST(self):
             if not self._gateway():
+                return
+            m = _EDGE_ACTION.fullmatch(urlparse(self.path).path)
+            if m:
+                self.handle_traced("ops_api.edge_action", lambda span: self._edge_action(m.group(1), m.group(2), m.group(3), span))
                 return
             if urlparse(self.path).path == "/orphans/remove":
                 self.handle_traced("ops_api.remove_orphans", self._orphans_remove)
@@ -144,6 +192,11 @@ def make_handler(ts_pool=None, store=None):
                 if not self._gateway():
                     return
                 self.handle_traced("ops_api.get_orphans", self._orphans_get)
+                return
+            if urlparse(self.path).path == "/edges":
+                if not self._gateway():
+                    return
+                self.handle_traced("ops_api.get_edges", self._edges_get)
                 return
             if self.path == "/status":
                 if not gateway_auth.request_came_through_gateway(self):
