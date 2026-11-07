@@ -54,7 +54,7 @@ function parseTagValue(text) {
 }
 
 function recordEditButton(entity, onSaved) {
-  const btn = Object.assign(document.createElement("button"), { type: "button", className: "edit-btn", textContent: "✎ Edit" });
+  const btn = Object.assign(document.createElement("button"), { type: "button", className: "edit-btn", textContent: "Edit" });
   btn.title = "Edit name, Brick class and tags";
   btn.addEventListener("click", (ev) => {
     ev.stopPropagation(); // inside a <summary>, don't toggle the tree node

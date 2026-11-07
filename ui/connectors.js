@@ -87,6 +87,7 @@ async function loadNodes() {
   }
   renderNodes();
   $("node-body").hidden = !state.node;
+  if (!state.nodes.length && !statusEl.textContent.startsWith("can")) statusEl.textContent = "no edge nodes yet";
 }
 
 async function selectNode(n) {
