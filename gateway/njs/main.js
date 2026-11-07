@@ -79,7 +79,7 @@ async function authorize(r) {
     }
 
     if (!ratelimit.checkRateLimit(r, claims)) {
-        r.headersOut["Retry-After"] = "60";
+        r.headersOut["Retry-After"] = String(ratelimit.retryAfterSeconds(Date.now()));
         r.return(429, "rate limit exceeded\n");
         return;
     }
