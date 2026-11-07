@@ -376,9 +376,9 @@ def collect_status(scope=None) -> dict[str, Any]:
         "first_actions": [
             {
                 "id": "connect_source",
-                "label": "Connect a source",
-                "href": "devices.html",
-                "description": "Point MQTT / Windrow at this stack so live readings land.",
+                "label": "Add a connector",
+                "href": "connectors.html",
+                "description": "Connect a BACnet or Modbus controller through a Windrow edge node so live readings land.",
                 "enabled": True,
             },
             {
