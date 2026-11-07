@@ -20,3 +20,8 @@ pattern readwrite cmd/%u/#
 user baler
 topic readwrite #
 topic readwrite $CONTROL/dynamic-security/#
+
+# The compose healthcheck (entrypoint.sh creates it with a random password
+# per start, Baler#109): reads the broker's uptime, nothing else.
+user healthcheck
+topic read $SYS/broker/uptime
