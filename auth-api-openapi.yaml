@@ -316,6 +316,7 @@ paths:
                 email: { type: string, format: email, description: Trimmed and lower-cased. }
                 password: { type: string, minLength: 12 }
                 role: { type: string, enum: [admin, operator, viewer] }
+                display_name: { type: [string, "null"], maxLength: 120, description: "How the person signs, e.g. Jacob Nash (Cx waivers name them by it)" }
                 site_ids:
                   type: array
                   items: { type: string }
@@ -332,6 +333,7 @@ paths:
                   org_id: { type: string }
                   email: { type: string }
                   role: { type: string }
+                  display_name: { type: [string, "null"] }
                   site_ids: { type: array, items: { type: string } }
         "400":
           description: Bad role (only admin, operator, viewer), email, password (12+ characters) or site.
@@ -360,16 +362,18 @@ paths:
                     created_at: { type: string, format: date-time }
                     site_ids: { type: array, items: { type: string } }
                     disabled: { type: boolean, description: "Can't log in until enabled again." }
+                    display_name: { type: [string, "null"], description: How the person signs; null when unset }
         "401":
           $ref: "#/components/responses/Unauthorized"
   /users/{user_id}:
     patch:
       operationId: updateUser
       tags: [Directory]
-      summary: Change a user's role and/or sites, or disable/enable them
+      summary: Change a user's role, sites or display name, or disable/enable them
       description: >-
         admin-only, own org only. Role and sites are carried in the user's
-        session token, so their sessions end and they log in again; disabling
+        session token, so their sessions end and they log in again (a
+        display_name change alone leaves them signed in); disabling
         also ends them, and a disabled user's login (password or Haystack
         SCRAM) fails exactly like a wrong password. You can't change your own
         role or disable yourself, and the org's last active admin can't be
@@ -389,6 +393,7 @@ paths:
                   items: { type: string }
                   description: Empty = the whole org.
                 disabled: { type: boolean }
+                display_name: { type: [string, "null"], maxLength: 120, description: "How the person signs, e.g. Jacob Nash; null or blank clears it" }
       responses:
         "200":
           description: Updated.
@@ -401,6 +406,7 @@ paths:
                   role: { type: string }
                   site_ids: { type: array, items: { type: string } }
                   disabled: { type: boolean }
+                  display_name: { type: [string, "null"] }
         "400":
           description: Nothing to change, a bad role or site, or your own role or account.
         "401":
@@ -608,6 +614,7 @@ components:
         site_ids: { type: array, items: { type: string } }
         kind: { type: string, enum: [session, api_key] }
         email: { type: [string, "null"], description: "The login's email; null for an API key." }
+        display_name: { type: [string, "null"], description: "How the login signs (set by an admin); null when unset or for an API key." }
     ApiKey:
       type: object
       required: [id, org_id, role]

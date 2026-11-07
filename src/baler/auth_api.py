@@ -254,14 +254,16 @@ def make_handler(ts_pool, broker=None):
             caller = self._require_caller(span)
             if not caller:
                 return
-            email = None
+            email = name = None
             if caller.get("kind") == "session":
                 with ts_pool.connection() as conn:
                     user = auth.get_user(conn, caller["sub"])
+                    name = auth.get_display_name(conn, caller["sub"]) if user else None
                 email = user["email"] if user else None
             _respond_json(self, 200, {
                 "sub": caller["sub"], "org_id": caller["org_id"], "role": caller["role"],
                 "site_ids": caller.get("site_ids", []), "kind": caller.get("kind"), "email": email,
+                "display_name": name,
             })
 
         def _create_org(self, span) -> None:
@@ -383,7 +385,8 @@ def make_handler(ts_pool, broker=None):
             auth.check_new_password(body["password"])
             try:
                 with ts_pool.connection() as conn:
-                    user = auth.create_user(conn, caller["org_id"], body["email"], body["password"], body["role"])
+                    user = auth.create_user(conn, caller["org_id"], body["email"], body["password"], body["role"],
+                                            body.get("display_name"))
                     if body.get("site_ids"):
                         auth.update_user(conn, caller["org_id"], user["id"], site_ids=body["site_ids"])
                         user["site_ids"] = auth.user_site_ids(conn, user["id"])
@@ -470,8 +473,8 @@ def make_handler(ts_pool, broker=None):
                 return
             span.set_attribute("target_user_id", user_id)
             body = self.read_json_body()
-            if not {"role", "site_ids", "disabled"} & body.keys():
-                raise ValueError("nothing to change: send role, site_ids and/or disabled")
+            if not {"role", "site_ids", "disabled", "display_name"} & body.keys():
+                raise ValueError("nothing to change: send role, site_ids, disabled and/or display_name")
             if user_id == caller["sub"] and body.get("role", caller["role"]) != caller["role"]:
                 _respond_error(self, 400, "you can't change your own role")
                 return
@@ -480,8 +483,9 @@ def make_handler(ts_pool, broker=None):
                 return
             try:
                 with ts_pool.connection() as conn:
+                    extra = {"display_name": body["display_name"]} if "display_name" in body else {}
                     user = auth.update_user(conn, caller["org_id"], user_id, body.get("role"), body.get("site_ids"),
-                                            body.get("disabled"))
+                                            body.get("disabled"), **extra)
             except auth.LastAdmin as exc:
                 _respond_error(self, 409, str(exc))
                 return
