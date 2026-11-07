@@ -224,7 +224,7 @@ paths:
                 required: [result]
                 properties:
                   result: {}
-        "400": { description: "Unknown action, bad body, or the node refused it" }
+        "400": { description: "Unknown action, bad body, a topic_prefix outside the node's allowed prefixes (checked on create, and on update when it changes the prefix), or the node refused it" }
         "404": { description: No local Windrow configured }
         "502": { description: "The node errored or can't be reached" }
         "504": { description: "A remote node didn't answer in time (offline commands expire, never apply late)" }

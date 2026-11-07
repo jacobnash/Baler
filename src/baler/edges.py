@@ -58,6 +58,25 @@ LOCAL_ID = ("local", "local")
 LOCAL_TOPIC_ROOTS = ("fbf",)
 
 
+# Actions that set a connector's topic prefix; ops_api checks it against the
+# node's allowed prefixes before the node sees it (Baler#111, #147).
+PREFIX_ACTIONS = ("create_connection", "update_connection", "modbus_create_connection", "modbus_update_connection")
+
+
+def prefix_problem(prefix, allowed: list[str] | None) -> str | None:
+    """Why `prefix` can't be a connector's topic prefix on a node whose data
+    is only taken in under `allowed` (None: not known, nothing to check)."""
+    if not isinstance(prefix, str) or not prefix.strip("/"):
+        return "topic_prefix is required"
+    prefix = prefix.rstrip("/")
+    if not allowed:
+        return None
+    if any(prefix.startswith(a.rstrip("/") + "/") for a in allowed):
+        return None
+    under = " or ".join(f"{a.rstrip('/')}/" for a in allowed)
+    return f"topic prefix {prefix} isn't under {under}, so its data would never reach Baler"
+
+
 class EdgeError(RuntimeError):
     def __init__(self, message: str, status: int = 502):
         super().__init__(message)

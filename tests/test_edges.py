@@ -284,3 +284,41 @@ def test_ops_edges_attach_the_broker_accounts_site_prefixes(monkeypatch):
         assert nodes["other"]["allowed_prefixes"] == ["fbf/x"]
     finally:
         server.shutdown()
+
+
+@pytest.mark.parametrize("prefix,allowed,ok", [
+    ("fbf/home/ahu-1", ["fbf/home"], True),
+    ("fbf/home", ["fbf/home"], False),          # the site itself isn't a piece of equipment
+    ("fbf/homeward/x", ["fbf/home"], False),    # a lookalike isn't under it
+    ("site/ahu-1", ["fbf"], False),
+    ("anything/goes", None, True),              # unknown: the page says it couldn't check
+    ("", ["fbf"], False),
+])
+def test_prefix_problem(prefix, allowed, ok):
+    assert (edges.prefix_problem(prefix, allowed) is None) is ok
+
+
+def test_ops_refuses_a_prefix_outside_the_nodes_own(monkeypatch):
+    """#147: the check doesn't depend on the admin-only /auth/sites - ops_api
+    reads the broker account's site prefixes itself and refuses server-side."""
+    monkeypatch.setenv("BALER_GATEWAY_SECRET", SECRET)
+    c = FakeCommander({("home", "pi-1"): {"online": True, "received_at": 990.0}}, results={"create_connection": {"id": "c1"}})
+    pool = FakePool([("home", "org-1", "Home", ["fbf/home"])])
+    handler = make_handler(ts_pool=pool, edge_api=edges.Edges(commander=c, local_url="", secret=SECRET, now=lambda: 1000.0))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server.daemon_threads = True
+    Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        body = {"device_address": "10.0.0.5", "device_instance": 7, "points": [], "topic_prefix": "fbf/elsewhere/x"}
+        r = requests.post(f"{base}/edges/home/pi-1/actions/create_connection", headers=H, json=body)
+        assert r.status_code == 400 and "fbf/home/" in r.json()["error"] and c.calls == []
+        r = requests.post(f"{base}/edges/home/pi-1/actions/create_connection", headers=H, json={**body, "topic_prefix": "fbf/home/x"})
+        assert r.status_code == 200
+        r = requests.post(f"{base}/edges/home/pi-1/actions/update_connection", headers=H, json={"id": "c1", "poll_interval": 9})
+        assert r.status_code == 200  # an update that doesn't move the prefix isn't checked
+        r = requests.post(f"{base}/edges/local/local/actions/modbus_create_connection", headers=H,
+                          json={"host": "h", "points": {"a": 0}, "topic_prefix": "site/x"})
+        assert r.status_code == 400 and "fbf/" in r.json()["error"]
+    finally:
+        server.shutdown()
