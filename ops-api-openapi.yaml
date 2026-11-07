@@ -194,8 +194,18 @@ paths:
         set_credential {target device|connection|modbus_connection, id,
         credential}, create_connection, update_connection {id, ...},
         delete_connection {id}, the modbus_ versions, discover, learn
-        {device_address, device_instance}, modbus_discover {cidr}. The body
-        is the action's fields.
+        {device_address, device_instance}, modbus_discover {cidr},
+        modbus_test_read {host, register, port?, device_id?} (reads one
+        holding register once; stores nothing), and background jobs for the
+        slow ones - start_job {job: discover|learn|modbus_discover, ...that
+        action's fields} answers at once with a job id, get_job {id} returns
+        its state (running|done|failed), progress ({done, total} for a sweep)
+        and result, list_jobs. Use the jobs for scans and learns: the edge
+        node gives up on a synchronous one after 15 s. The body is the
+        action's fields. list_connections and modbus_list_connections results carry
+        each connection's poll_status (state, last_poll_at,
+        last_success_at, last_value_at, last_error, last_error_at,
+        failing_count, failing_points) when the node's Windrow reports it.
       parameters:
         - { name: site, in: path, required: true, schema: { type: string }, description: '"local" for the Windrow beside Baler' }
         - { name: instance, in: path, required: true, schema: { type: string } }
@@ -214,7 +224,7 @@ paths:
                 required: [result]
                 properties:
                   result: {}
-        "400": { description: "Unknown action, bad body, or the node refused it" }
+        "400": { description: "Unknown action, bad body, a topic_prefix outside the node's allowed prefixes (checked on create, and on update when it changes the prefix), or the node refused it" }
         "404": { description: No local Windrow configured }
         "502": { description: "The node errored or can't be reached" }
         "504": { description: "A remote node didn't answer in time (offline commands expire, never apply late)" }
@@ -275,6 +285,19 @@ components:
         pending_devices: { type: [integer, "null"] }
         bacnet_connections: { type: [integer, "null"] }
         modbus_connections: { type: [integer, "null"] }
+        networks:
+          type: array
+          items: { type: string }
+          description: Subnets the node sits on, as CIDRs, when its Windrow reports them (prefills a Modbus sweep).
+        allowed_prefixes:
+          type: array
+          items: { type: string }
+          description: >-
+            Topic prefixes this node's connectors must sit under: "fbf" for the
+            local node (what mqtt_listener ingests), the site's topic_prefixes
+            for a remote node's broker account (the broker drops the rest).
+            Absent when unknown.
+        site_name: { type: string, description: "Remote nodes: the Baler site its broker account belongs to." }
         error: { type: [string, "null"] }
     OpsStatus:
       type: object

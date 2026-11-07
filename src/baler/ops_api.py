@@ -123,8 +123,48 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
             except edges.EdgeError as exc:
                 respond_error(self, exc.status, str(exc))
                 return
+            self._attach_site_prefixes(nodes)
             span.set_attribute("count", len(nodes))
             respond_json(self, 200, nodes)
+
+        def _site_prefixes(self, usernames: list[str]) -> dict[str, tuple[str, list[str]]] | None:
+            """{broker username: (site name, topic_prefixes)} for the
+            caller's org. A remote node's site_id is its broker account's
+            username, not a Baler site id: the account (broker_accounts)
+            names the site whose prefixes the broker holds it to. Read here,
+            for any role - the page used to call /auth/sites, which is
+            admin-only, so other roles silently got no check (Baler#147).
+            None when it can't be read (no auth schema yet)."""
+            if ts_pool is None or not usernames:
+                return {}
+            claims = claims_from_header(self.headers.get("Authorization")) or {}
+            try:
+                with ts_pool.connection() as conn:
+                    rows = conn.execute(
+                        "SELECT b.username, b.org_id, s.name, s.topic_prefixes FROM broker_accounts b "
+                        "JOIN sites s ON s.id = b.site_id WHERE b.username = ANY(%s)",
+                        (usernames,),
+                    ).fetchall()
+            except Exception as exc:  # noqa: BLE001 - the page says it couldn't check; the broker still enforces
+                print(f"edge site prefixes unavailable: {exc!r}")
+                return None
+            org = claims.get("org_id")
+            return {r[0]: (r[2], list(r[3] or [])) for r in rows if not org or r[1] == org}
+
+        def _attach_site_prefixes(self, nodes: list[dict]) -> None:
+            """Each remote node's allowed_prefixes and site_name, for the
+            Connectors page (Baler#111)."""
+            remote = [n for n in nodes if n.get("kind") == "remote"]
+            found = self._site_prefixes([n["site_id"] for n in remote]) or {}
+            for n in remote:
+                if n["site_id"] in found:
+                    n["site_name"], n["allowed_prefixes"] = found[n["site_id"]]
+
+        def _allowed_prefixes(self, site: str, instance: str) -> list[str] | None:
+            if (site, instance) == edges.LOCAL_ID:
+                return list(edges.LOCAL_TOPIC_ROOTS)
+            found = self._site_prefixes([site]) or {}
+            return found[site][1] if site in found else None
 
         def _edge_action(self, site: str, instance: str, action: str, span) -> None:
             span.set_attribute("edge", f"{site}/{instance}")
@@ -133,6 +173,13 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
             if not isinstance(body, dict):
                 respond_error(self, 400, "body must be a JSON object")
                 return
+            if action in edges.PREFIX_ACTIONS and (action.endswith("create_connection") or "topic_prefix" in body):
+                # Checked here as well as on the page, so no client can make a
+                # connector whose data the broker or the listener drops.
+                problem = edges.prefix_problem(body.get("topic_prefix"), self._allowed_prefixes(site, instance))
+                if problem:
+                    respond_error(self, 400, problem)
+                    return
             try:
                 result = _edges().call(site, instance, action, body)
             except edges.EdgeError as exc:

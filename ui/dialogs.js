@@ -42,18 +42,25 @@
   // Resolves true only when the person confirms. With typeToConfirm the
   // action button stays disabled until they type that exact text - for
   // deletes that lose data or configuration.
+  let confirmSeq = 0;
   window.confirmDanger = function confirmDanger({ title, body = "", action = "Delete", typeToConfirm = null, danger = true }) {
     return new Promise((resolve) => {
       const dlg = document.createElement("dialog");
       dlg.className = "confirm-dialog";
+      // Named by its heading and described by its text, for screen readers.
+      const id = `confirm-${++confirmSeq}`;
+      dlg.setAttribute("aria-labelledby", `${id}-title`);
       const form = document.createElement("form");
       form.method = "dialog";
       const h = document.createElement("h2");
+      h.id = `${id}-title`;
       h.textContent = title;
       form.append(h);
       if (body) {
         const p = document.createElement("p");
+        p.id = `${id}-body`;
         p.textContent = body;
+        dlg.setAttribute("aria-describedby", p.id);
         form.append(p);
       }
       let input = null;
