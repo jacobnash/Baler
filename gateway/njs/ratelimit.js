@@ -8,7 +8,7 @@
 
 // Requests/minute per role. Arbitrary starting defaults, not derived
 // from load data - tune once real traffic exists.
-const LIMITS = { viewer: 120, operator: 300, admin: 600, service: 1200 };
+const LIMITS = { viewer: 1200, operator: 3000, admin: 6000, service: 12000 };
 const WINDOW_MS = 60000;
 
 /*

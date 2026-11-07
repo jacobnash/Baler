@@ -146,8 +146,8 @@ a hard failure, not silently-permitted traffic.
    `401` if so. Session tokens skip this check entirely — their own
    short expiry is treated as the guard, so there's no revocation list
    to check against.
-7. Per-token rate limit (`gateway/njs/ratelimit.js`, `viewer: 120,
-   operator: 300, admin: 600, service: 1200` requests/minute, keyed by
+7. Per-token rate limit (`gateway/njs/ratelimit.js`, `viewer: 1200,
+   operator: 3000, admin: 6000, service: 12000` requests/minute, keyed by
    `claims.sub`) → `429` if exceeded.
 
 Only after all six checks pass does the request reach a backend at all.
