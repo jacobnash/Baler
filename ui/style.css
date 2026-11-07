@@ -246,12 +246,14 @@ button.danger { margin-left: auto; color: var(--color-critical, #c53030); }
 
 /* Equipment page on a phone (Baler#160): side by side, the tree took up
    to 320px and left the detail pane ~70px. Stack them instead - tree
-   first (capped so the detail stays reachable), detail at full width
-   below, and the page scrolls as a whole. app.js scrolls the detail into
-   view when a point is picked. */
+   first at its natural height, detail at full width below, and the page
+   scrolls as a whole. The tree is not a scroll box of its own here: a
+   45vh one clipped the points of a group opened near its bottom edge,
+   with no visible scrollbar on a phone to say they were there. app.js
+   scrolls the detail into view when a point is picked. */
 @media (max-width: 700px) {
   main:has(> #tree) { display: block; height: auto; }
-  #tree { max-height: 45vh; border-right: none; border-bottom: 1px solid var(--border); }
+  #tree { max-height: none; overflow: visible; border-right: none; border-bottom: 1px solid var(--border); }
   #detail { overflow-y: visible; }
   /* the 640px-wide history canvas scales down without squashing */
   #detail canvas { height: auto; }
