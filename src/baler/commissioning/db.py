@@ -15,6 +15,7 @@ import contextlib
 import copy
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import psycopg
@@ -483,6 +484,9 @@ class MemoryRepo:
     def history(self):
         yield self._history
 
+    def availability(self, point_uris: list[str], start, end, max_gap) -> dict[str, tuple[int, float]]:
+        return self._history.availability(point_uris, start, end, max_gap)
+
     def create_project(self, project: dict) -> None:
         self.projects[project["id"]] = copy.deepcopy(project)
 
@@ -819,6 +823,24 @@ class PgRepo:
     def history(self):
         with self.run_pool.connection() as conn:
             yield PostgresHistory(conn)
+
+    # Request-time availability folds every sample of a long window: split
+    # over a few pool connections, Postgres folds the parts side by side.
+    AVAILABILITY_PARTS = 4
+
+    def availability(self, point_uris: list[str], start, end, max_gap) -> dict[str, tuple[int, float]]:
+        parts = [p for p in (point_uris[i::self.AVAILABILITY_PARTS] for i in range(self.AVAILABILITY_PARTS)) if p]
+
+        def one(part):
+            with self.pool.connection() as conn:
+                return PostgresHistory(conn).availability(part, start, end, max_gap)
+
+        out: dict[str, tuple[int, float]] = {}
+        if parts:
+            with ThreadPoolExecutor(max_workers=len(parts)) as ex:
+                for got in ex.map(one, parts):
+                    out.update(got)
+        return out
 
     def create_project(self, project: dict) -> None:
         with self.pool.connection() as conn, conn.transaction():

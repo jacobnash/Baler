@@ -29,6 +29,7 @@ import logging
 import os
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -569,16 +570,24 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             self.end_headers()
             self.wfile.write(body)
 
-        def _report_equipment(self, p: dict, claims: dict) -> dict[str, dict] | None:
-            """uri -> {dis, brickClass, points}: names and types for the
-            report instead of raw URIs (#99)."""
+        def _report_inventory(self, p: dict, claims: dict) -> list[dict] | None:
+            """The project's inventory, once per report: the equipment names
+            and the spec section both read it (it was built twice, Baler#150)."""
             try:
                 scopes, _ = self._scopes(p, claims)
-                return {e["id"]: {"dis": e.get("dis"), "brickClass": e.get("brickClass"), "points": e.get("points") or []}
-                        for e in inventory.build(repo.store, scopes)}
+                return inventory.build(repo.store, scopes)
             except Exception:  # the report stands without names, and says so (equipment_names_unavailable)
                 log.warning("cx report %s: inventory failed", p["id"], exc_info=True)
                 return None
+
+        @staticmethod
+        def _report_equipment(equips: list[dict] | None) -> dict[str, dict] | None:
+            """uri -> {dis, brickClass, points}: names and types for the
+            report instead of raw URIs (#99)."""
+            if equips is None:
+                return None
+            return {e["id"]: {"dis": e.get("dis"), "brickClass": e.get("brickClass"), "points": e.get("points") or []}
+                    for e in equips}
 
         def _report_acceptance(self, p: dict, run: dict | None, equipment: dict[str, dict] | None) -> dict | None:
             """Per-point availability over the latest verification run's
@@ -590,9 +599,10 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             start = run["window_start"] if isinstance(run["window_start"], datetime) else datetime.fromisoformat(run["window_start"])
             end = run["window_end"] if isinstance(run["window_end"], datetime) else datetime.fromisoformat(run["window_end"])
             points = {pt["id"]: pt for e in equipment.values() for pt in e.get("points") or []}
-            with repo.history() as h:
-                series = h.window(sorted(points), start, end + timedelta(seconds=1)) if points else {}
-            return report.acceptance_availability(series, points, start, end, float(cfg["settle_minutes"]),
+            judged_from = start + timedelta(minutes=float(cfg["settle_minutes"]))
+            measured = repo.availability(sorted(points), judged_from, end,
+                                         timedelta(minutes=float(cfg["max_gap_minutes"]))) if points and end > judged_from else {}
+            return report.acceptance_availability(measured, points, start, end, float(cfg["settle_minutes"]),
                                                   float(cfg["min_pct"]), float(cfg["max_gap_minutes"]))
 
         def _project_report(self, span, claims, pid) -> None:
@@ -608,6 +618,12 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             scope = repo.scope_for(claims)
             runner.reconcile_issues(repo, pid, None, [], now_fn())
             run = next((r for r in repo.list_runs(pid, 20) if r.get("status") == "completed"), None)
+            equips = self._report_inventory(p, claims)
+            equipment = self._report_equipment(equips)
+            # Availability folds every sample of the run's window (the slow
+            # part, Baler#150): in the background while the rest is read.
+            side = ThreadPoolExecutor(max_workers=1)
+            acceptance_f = side.submit(self._report_acceptance, p, run, equipment)
             results = [r for r in repo.get_results(run["id"]) if scope.allows(r["equip_uri"])] if run else []
             procs = [x for x in repo.list_procedures(pid) if x["status"] != "archived"]
             latest = {pr["id"]: next((t for t in repo.list_test_runs(pr["id"], 20) if t["status"] == "completed"), None)
@@ -616,19 +632,24 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             active_runs = [db.public_row(a) for a in repo.find_rows("cx_active_runs", project_id=pid)
                            if a["status"] not in ("planned", "cancelled") and scope.allows(a["equip_uri"])]
             try:
-                alignment, _, _ = self._alignment_for(p, claims)
+                if equips is None:
+                    raise RuntimeError("no inventory")
+                alignment, _, _ = self._alignment_for(p, claims, equips)
             except Exception:  # the report stands without the spec section
                 log.warning("cx report %s: spec alignment failed", pid, exc_info=True)
                 alignment = None
             docs = [db.public_row(d) for d in repo.find_rows("cx_spec_documents", project_id=pid)]
-            equipment = self._report_equipment(p, claims)
+            try:
+                acceptance = acceptance_f.result()
+            finally:
+                side.shutdown(wait=False)
             rep = report.project_build(db.public_project(p), now_fn(), repo.user_email(claims.get("sub")) or claims.get("sub"),
                                        db.public_row(run) if run else None, results, procs,
                                        {k: (db.public_row(v) if v else None) for k, v in latest.items()},
                                        iss, repo.list_events(pid, 500), alignment, docs, active_runs, active.writes_allowed(),
                                        site=repo.get_site(p["site_id"]) if p.get("site_id") else None,
                                        equipment=equipment,
-                                       acceptance=self._report_acceptance(p, run, equipment))
+                                       acceptance=acceptance)
             if fmt == "json":
                 respond_json(self, 200, rep)
                 return
@@ -1337,9 +1358,10 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             self._event(pid, "spec.review", claims, {"status": status, "count": done})
             respond_json(self, 200, {"updated": done})
 
-        def _alignment_for(self, p: dict, claims: dict) -> tuple[dict, list[dict], list[dict]]:
-            scopes, _ = self._scopes(p, claims)
-            equips = inventory.build(repo.store, scopes)
+        def _alignment_for(self, p: dict, claims: dict, equips: list[dict] | None = None) -> tuple[dict, list[dict], list[dict]]:
+            if equips is None:
+                scopes, _ = self._scopes(p, claims)
+                equips = inventory.build(repo.store, scopes)
             items = repo.find_rows("cx_spec_items", project_id=p["id"])
             decisions = [d for d in repo.find_rows("cx_mappings", project_id=p["id"]) if d["status"] in ("confirmed", "rejected")]
             latest = {d["spec_item_id"]: d for d in decisions}  # oldest first, so the newest wins
