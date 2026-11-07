@@ -523,6 +523,42 @@ async function selectPoint(point, btn) {
   if (historyKey) refreshTimer = setInterval(reload, REFRESH_INTERVAL_MS);
 }
 
+// BACnet BinaryPV names, as text (history from before #81's ingest fix).
+const BINARY_TEXT = new Map([["active", 1], ["inactive", 0]]);
+const isTwoState = (v) => typeof v === "boolean" || BINARY_TEXT.has(v);
+const twoStateValue = (v) => (typeof v === "boolean" ? (v ? 1 : 0) : BINARY_TEXT.get(v));
+
+// [{ts, value}] -> runs of one unchanged value, oldest first: a status
+// sampled every 5 s was a wall of identical lines (Baler#81).
+function valueRuns(history) {
+  const runs = [];
+  for (const row of history) {
+    const key = isTwoState(row.value) ? twoStateValue(row.value) : String(row.value);
+    const last = runs[runs.length - 1];
+    if (last && last.key === key) {
+      last.end = row.ts;
+      last.count++;
+    } else {
+      runs.push({ key, value: row.value, start: row.ts, end: row.ts, count: 1 });
+    }
+  }
+  return runs;
+}
+
+function valueRunsList(history) {
+  const ul = document.createElement("ul");
+  const fmtState = (v) => (typeof v === "boolean" ? (v ? "on" : "off") : String(v));
+  for (const run of valueRuns(history).slice(-20).reverse()) {
+    const li = document.createElement("li");
+    const from = new Date(run.start * 1000).toLocaleString();
+    li.textContent = run.count === 1
+      ? `${from} — ${fmtState(run.value)}`
+      : `${from} – ${new Date(run.end * 1000).toLocaleTimeString()} — ${fmtState(run.value)} (${run.count} samples)`;
+    ul.appendChild(li);
+  }
+  return ul;
+}
+
 function renderHistoryInto(container, view, reload) {
   const { history, unit, hisEnd } = view;
   container.innerHTML = "";
@@ -554,17 +590,15 @@ function renderHistoryInto(container, view, reload) {
     return;
   }
 
-  const numeric = history.every((row) => typeof row.value === "number");
-  if (!numeric) {
-    const ul = document.createElement("ul");
-    for (const row of history.slice(-20)) {
-      const li = document.createElement("li");
-      li.textContent = `${new Date(row.ts * 1000).toLocaleString()} — ${row.value}`;
-      ul.appendChild(li);
-    }
-    container.appendChild(ul);
+  // A two-state status (Bool, or BACnet's text from before MQTT ingest
+  // stored it as a Bool) charts as an off/on step line (Baler#81).
+  const twoState = history.every((row) => isTwoState(row.value));
+  const numeric = !twoState && history.every((row) => typeof row.value === "number");
+  if (!numeric && !twoState) {
+    container.appendChild(valueRunsList(history));
     return;
   }
+  const series = twoState ? history.map((row) => ({ ts: row.ts, value: twoStateValue(row.value) })) : history;
 
   const canvas = document.createElement("canvas");
   canvas.width = 640;
@@ -572,10 +606,18 @@ function renderHistoryInto(container, view, reload) {
   container.appendChild(canvas);
   const now = Date.now() / 1000;
   const win = historyRange ? { start: now - historyRange, end: now } : {};
-  const drawn = drawLineChart(canvas, history, 30, unit, { ...win, fullRange: historyFullScale });
+  const opts = { ...win, fullRange: historyFullScale, states: twoState ? ["off", "on"] : undefined };
+  const drawn = drawLineChart(canvas, series, 30, twoState ? "" : unit, opts);
   const caption = document.createElement("p");
   caption.className = "hint";
-  caption.textContent = `${history.length.toLocaleString()} samples${unit ? ` · ${unit}` : " · no unit recorded"}`;
+  caption.textContent = twoState
+    ? `${history.length.toLocaleString()} samples · on ${Math.round((100 * series.filter((r) => r.value).length) / series.length)}% of them`
+    : `${history.length.toLocaleString()} samples${unit ? ` · ${unit}` : " · no unit recorded"}`;
+  if (twoState) {
+    container.appendChild(caption);
+    container.appendChild(valueRunsList(history));
+    return;
+  }
   if (drawn.clipped || historyFullScale) {
     const fmt = (v) => `${fmtNum(v)}${unit ? ` ${unit}` : ""}`;
     caption.append(
