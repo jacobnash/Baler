@@ -1,0 +1,3 @@
+# per-host secrets and results of the scale harness (Baler#190)
+scale.env
+results/

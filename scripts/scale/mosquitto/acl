@@ -1,0 +1,20 @@
+# The scale stack's broker ACL (Baler#190): mosquitto/acl's rules, plus the
+# load generator's own account. Mounted over /mosquitto/config/acl by
+# scripts/scale/compose.scale.yml - never used by a live install.
+topic write fbf/#
+pattern readwrite cmd/%u/#
+
+user baler
+topic readwrite #
+topic readwrite $CONTROL/dynamic-security/#
+
+user healthcheck
+topic read $SYS/broker/uptime
+
+# The generator publishes telemetry and the ladder reads the broker's $SYS
+# counters (queue depth, dropped messages). The fbf/# grant has to be here:
+# mosquitto applies the global lines above only to clients without a user
+# block of their own, so without it every publish is silently dropped.
+user scalegen
+topic write fbf/#
+topic read $SYS/#

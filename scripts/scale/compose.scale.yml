@@ -1,0 +1,144 @@
+# The isolated scale-test stack (Baler#190 R6). Always used together with
+# docker-compose.yml, a project name of its own and its own env file:
+#
+#   docker compose -p scale --env-file scripts/scale/scale.env \
+#     -f docker-compose.yml -f scripts/scale/compose.scale.yml up -d
+#
+# (scripts/scale/ladder.py builds that command and refuses to run it unless
+# the effective config is clearly not a live install's.) This file:
+#   - moves every published port off the live defaults, onto 127.0.0.1;
+#   - gives the broker the generator's account (scalegen) and an ACL that
+#     lets it read $SYS;
+#   - caps each container's CPU and memory (SCALE_CPUS_<SVC>, SCALE_MEM_<SVC>
+#     in scale.env; SCALE_CPUSET pins the whole stack to some host CPUs), so
+#     the stack can't starve a live install on the same host;
+#   - caps each container's json log at 3 x 50 MB: postgres runs with
+#     log_statement=all, which at scale-test rates is GBs per hour.
+# Everything else - images, commands, settings, durability - is exactly
+# what docker-compose.yml runs, so the numbers mean what they'd mean live.
+# Paths are relative to the repo root (the first -f file's directory).
+
+x-scale-logging: &scale-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
+services:
+  migrate:
+    cpus: ${SCALE_CPUS_MIGRATE:-0.5}
+    mem_limit: ${SCALE_MEM_MIGRATE:-512m}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+  mosquitto:
+    cpus: ${SCALE_CPUS_MOSQUITTO:-1.0}
+    mem_limit: ${SCALE_MEM_MOSQUITTO:-2g}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+    ports: !override
+      - "127.0.0.1:${SCALE_MQTT_PORT:-21883}:1883"
+    environment:
+      MOSQUITTO_USERS: baler:${MQTT_PASSWORD:?set in scripts/scale/scale.env},scalegen:${SCALE_GEN_MQTT_PASSWORD:?set in scripts/scale/scale.env}
+    volumes:
+      - ./scripts/scale/mosquitto/acl:/mosquitto/config/acl:ro
+  oxigraph:
+    cpus: ${SCALE_CPUS_OXIGRAPH:-1.0}
+    mem_limit: ${SCALE_MEM_OXIGRAPH:-4g}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+    ports: !override
+      - "127.0.0.1:${SCALE_OXIGRAPH_PORT:-27878}:7878"
+  postgres:
+    cpus: ${SCALE_CPUS_POSTGRES:-2.0}
+    mem_limit: ${SCALE_MEM_POSTGRES:-6g}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+    ports: !override
+      - "127.0.0.1:${SCALE_PG_PORT:-25433}:5432"
+  jaeger:
+    cpus: ${SCALE_CPUS_JAEGER:-0.5}
+    mem_limit: ${SCALE_MEM_JAEGER:-1g}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+    ports: !override
+      - "127.0.0.1:${SCALE_JAEGER_UI_PORT:-26686}:16686"
+      - "127.0.0.1:${SCALE_OTLP_PORT:-24318}:4318"
+  grafana:
+    cpus: ${SCALE_CPUS_GRAFANA:-0.25}
+    mem_limit: ${SCALE_MEM_GRAFANA:-256m}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+    ports: !override
+      - "127.0.0.1:${SCALE_GRAFANA_PORT:-23033}:3000"
+  mqtt_listener:
+    cpus: ${SCALE_CPUS_MQTT_LISTENER:-1.0}
+    mem_limit: ${SCALE_MEM_MQTT_LISTENER:-1g}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+  ingest_api:
+    cpus: ${SCALE_CPUS_INGEST_API:-1.0}
+    mem_limit: ${SCALE_MEM_INGEST_API:-2g}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+  fault_api:
+    cpus: ${SCALE_CPUS_FAULT_API:-0.5}
+    mem_limit: ${SCALE_MEM_FAULT_API:-512m}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+  fault_detector:
+    cpus: ${SCALE_CPUS_FAULT_DETECTOR:-1.0}
+    mem_limit: ${SCALE_MEM_FAULT_DETECTOR:-1g}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+  derivation_api:
+    cpus: ${SCALE_CPUS_DERIVATION_API:-0.25}
+    mem_limit: ${SCALE_MEM_DERIVATION_API:-512m}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+  derivation_engine:
+    cpus: ${SCALE_CPUS_DERIVATION_ENGINE:-0.5}
+    mem_limit: ${SCALE_MEM_DERIVATION_ENGINE:-1g}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+  validate_api:
+    cpus: ${SCALE_CPUS_VALIDATE_API:-0.25}
+    mem_limit: ${SCALE_MEM_VALIDATE_API:-512m}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+  auth_api:
+    cpus: ${SCALE_CPUS_AUTH_API:-0.25}
+    mem_limit: ${SCALE_MEM_AUTH_API:-256m}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+  ops_api:
+    cpus: ${SCALE_CPUS_OPS_API:-0.5}
+    mem_limit: ${SCALE_MEM_OPS_API:-1g}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+  commissioning_api:
+    cpus: ${SCALE_CPUS_COMMISSIONING_API:-0.5}
+    mem_limit: ${SCALE_MEM_COMMISSIONING_API:-1g}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+  haystack_api:
+    cpus: ${SCALE_CPUS_HAYSTACK_API:-1.0}
+    mem_limit: ${SCALE_MEM_HAYSTACK_API:-2g}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+  source_runner:
+    cpus: ${SCALE_CPUS_SOURCE_RUNNER:-0.25}
+    mem_limit: ${SCALE_MEM_SOURCE_RUNNER:-256m}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+  gateway:
+    cpus: ${SCALE_CPUS_GATEWAY:-0.5}
+    mem_limit: ${SCALE_MEM_GATEWAY:-256m}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+    ports: !override
+      - "127.0.0.1:${SCALE_GATEWAY_PORT:-28080}:80"
+  # profile-gated, never started by the harness; moved off 8888 anyway so
+  # `docker compose config` (the guard's input) never shows a live port
+  jupyter:
+    ports: !override
+      - "127.0.0.1:${SCALE_JUPYTER_PORT:-28888}:8888"
