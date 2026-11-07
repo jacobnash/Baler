@@ -396,14 +396,21 @@ to close — see `todo/skyspark-haxall-migration-gaps.md` in the repo.
 `point_history` has two TimescaleDB continuous aggregates, created on first
 start: `point_history_5m` and `point_history_1h`. They hold sum, count, min
 and max per point per bucket, and are refreshed every 5 and 30 minutes over
-the last 35 days. A rollup reads from the coarsest one that gives the exact
-same answer as folding raw samples:
-- its bucket divides the requested interval;
-- the span starts on one of its boundaries;
-- the span is within the last 30 days.
+the last 35 days. A rollup can use a view when the view's bucket divides the
+requested interval and the span starts on one of its boundaries.
 
-The newest partial bucket, and anything not yet materialized, comes from raw
-rows at query time, so results are never stale. Anything else, such as
-calendar (month/year) rollups, odd intervals or older spans, folds raw samples
-as before. A day of 600 points at 10-second samples folds from about 150k
-pre-summed rows instead of 5M raw ones.
+It then covers the span with the coarsest pieces that give exactly the raw
+answer: whole 1-hour buckets that are up to date, 5-minute buckets for what
+the hourly view hasn't caught up on, and raw rows for the rest. "Up to date"
+comes from TimescaleDB's own bookkeeping (its invalidation logs and each
+view's watermark), so the unrefreshed tail, a source backfilling history
+since the last refresh, or a span that was never materialized are all read
+from raw rows. Results are the raw fold's, never stale. Calendar
+(month/year) rollups and odd intervals fold raw samples as before. A day of
+614 points at 5-second samples (6.2M rows) folds from about 100k pre-summed
+rows; `readAll(equip).hisRead(today)` takes about 0.4 s end to end on a dev
+machine.
+
+Big responses are encoded and decoded in small pieces (`timeseries.iter_rows`,
+`http_handler_base.json_pieces`), so one large `/his` read never holds
+Python's GIL long enough to stall other requests, such as Ops' health probe.
