@@ -18,12 +18,13 @@ from urllib.parse import parse_qs, urlparse
 
 from baler import auth, docs_ui, gateway_auth, json_store, tracing
 from baler.faults import (
+    DEFAULT_PAGE,
     ack_fault,
     close_rule_faults,
     enable_webhook,
     ensure_schema,
     fault_point_uri,
-    list_faults,
+    list_faults_page,
     list_webhook_health,
     snooze_fault,
 )
@@ -240,12 +241,24 @@ def make_handler(rules_path: str, webhooks_path: str, ts_pool):
             status = query.get("status", [None])[0]
             point_uri = query.get("point_uri", [None])[0]
             rule_id = query.get("rule_id", [None])[0]
+            limit = int(query.get("limit", [DEFAULT_PAGE])[0])
+            before = int(query["before"][0]) if "before" in query else None
+            since = datetime.fromisoformat(query["since"][0]) if "since" in query else None
+            if since is not None and since.tzinfo is None:
+                raise ValueError("since needs a UTC offset, e.g. 2026-11-07T00:00:00Z")
             with ts_pool.connection() as conn:
-                faults = list_faults(conn, status=status, point_uri=point_uri, rule_id=rule_id)
                 scope = request_scope(conn, self.headers)
-            faults = [f for f in faults if scope.allows(f["point_uri"])]
+                faults, total, next_before = list_faults_page(
+                    conn, status=status, point_uri=point_uri, rule_id=rule_id, limit=limit, before=before, since=since,
+                    allows=None if scope.unrestricted else scope.allows)
             span.set_attribute("count", len(faults))
-            _respond_json(self, 200, faults)
+            span.set_attribute("total", total)
+            # Still a bare array (the shape every client reads); the paging
+            # facts ride in headers.
+            headers = {"X-Total-Count": str(total), "Access-Control-Expose-Headers": "X-Total-Count, X-Next-Before"}
+            if next_before is not None:
+                headers["X-Next-Before"] = str(next_before)
+            _respond_json(self, 200, faults, headers=headers)
 
     return FaultHandler
 

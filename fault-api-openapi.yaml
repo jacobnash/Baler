@@ -211,9 +211,44 @@ paths:
           description: Filter to faults raised by one rule - the rule's `id` (from `POST /fault/rules`'s response), not its `name`.
           schema:
             type: string
+        - name: limit
+          in: query
+          description: >-
+            Page size. The list is paged so a long-running install doesn't answer
+            with every fault it ever raised (5 MB on nash-srv, Baler#107); omit for
+            the newest 500.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5000
+            default: 500
+        - name: before
+          in: query
+          description: >-
+            A fault id from a previous page (its `X-Next-Before` header): return the
+            faults after that one, in the same order.
+          schema:
+            type: integer
+        - name: since
+          in: query
+          description: Only faults that started at or after this time (ISO 8601, with a UTC offset).
+          schema:
+            type: string
+            format: date-time
       responses:
         "200":
-          description: Every matching fault, most recent first.
+          description: >-
+            One page of the matching faults, most recent first (ties by id). The body
+            is the same bare array it always was; the paging facts are headers.
+          headers:
+            X-Total-Count:
+              description: How many faults match in all (visible to the caller), across every page.
+              schema:
+                type: integer
+            X-Next-Before:
+              description: Pass as `before` for the next page. Absent on the last page.
+              schema:
+                type: integer
           content:
             application/json:
               schema:

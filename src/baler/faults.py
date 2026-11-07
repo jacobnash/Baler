@@ -37,6 +37,8 @@ ALTER TABLE faults ADD COLUMN IF NOT EXISTS severity TEXT NOT NULL DEFAULT 'warn
 ALTER TABLE faults ADD COLUMN IF NOT EXISTS acked_at TIMESTAMPTZ;
 ALTER TABLE faults ADD COLUMN IF NOT EXISTS acked_by TEXT;
 ALTER TABLE faults ADD COLUMN IF NOT EXISTS snoozed_until TIMESTAMPTZ;
+-- GET /faults' order (newest first), which it pages through.
+CREATE INDEX IF NOT EXISTS faults_started ON faults (started_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS webhook_health (
     webhook_id            TEXT PRIMARY KEY,
@@ -165,27 +167,82 @@ def list_faults(
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
     rows = conn.execute(
-        f"""SELECT id, rule_id, point_uri, status, started_at, ended_at, detail,
-                   severity, acked_at, acked_by, snoozed_until
-            FROM faults {where} ORDER BY started_at DESC""",
+        f"""SELECT {_FAULT_COLUMNS} FROM faults {where} ORDER BY started_at DESC""",
         params,
     ).fetchall()
-    return [
-        {
-            "id": r[0],
-            "rule_id": r[1],
-            "point_uri": r[2],
-            "status": r[3],
-            "started_at": r[4].isoformat(),
-            "ended_at": r[5].isoformat() if r[5] else None,
-            "detail": r[6],
-            "severity": r[7],
-            "acked_at": r[8].isoformat() if r[8] else None,
-            "acked_by": r[9],
-            "snoozed_until": r[10].isoformat() if r[10] else None,
-        }
-        for r in rows
-    ]
+    return [_fault_row(r) for r in rows]
+
+
+_FAULT_COLUMNS = "id, rule_id, point_uri, status, started_at, ended_at, detail, severity, acked_at, acked_by, snoozed_until"
+
+# GET /faults pages by default: the whole table (every resolved fault ever
+# raised) was a 5 MB answer on nash-srv by its second week (Baler#107).
+DEFAULT_PAGE = 500
+MAX_PAGE = 5000
+
+
+def list_faults_page(
+    conn: psycopg.Connection,
+    status: str | None = None,
+    point_uri: str | None = None,
+    rule_id: str | None = None,
+    *,
+    limit: int = DEFAULT_PAGE,
+    before: int | None = None,
+    since: datetime | None = None,
+    allows=None,
+) -> tuple[list[dict], int, int | None]:
+    """One page of list_faults' answer (same rows, same order: newest
+    started_at first, ties by id): the faults after fault `before` in that
+    order, at most `limit` of them. `allows(point_uri)` is the caller's
+    scope, applied before paging so a page is never short because rows
+    were hidden. Returns (page, how many match in all, the `before` for
+    the next page or None when this is the last).
+
+    Ids and point URIs of every match come back first (a few hundred kB
+    at 100k faults); only the page's rows are fetched whole."""
+    if not 1 <= limit <= MAX_PAGE:
+        raise ValueError(f"limit must be between 1 and {MAX_PAGE}")
+    clauses: list[str] = []
+    params: list = []
+    for column, value in (("status", status), ("point_uri", point_uri), ("rule_id", rule_id)):
+        if value is not None:
+            clauses.append(f"{column} = %s")
+            params.append(value)
+    if since is not None:
+        clauses.append("started_at >= %s")
+        params.append(since)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    keys = conn.execute(f"SELECT id, point_uri FROM faults {where} ORDER BY started_at DESC, id DESC", params).fetchall()
+    ids = [fid for fid, uri in keys if allows is None or allows(uri)]
+    start = 0
+    if before is not None:
+        try:
+            start = ids.index(before) + 1
+        except ValueError:
+            raise ValueError(f"before: fault {before} is not in this listing") from None
+    page_ids = ids[start:start + limit]
+    rows = conn.execute(
+        f"SELECT {_FAULT_COLUMNS} FROM faults WHERE id = ANY(%s) ORDER BY started_at DESC, id DESC", (page_ids,)
+    ).fetchall() if page_ids else []
+    more = start + limit < len(ids)
+    return [_fault_row(r) for r in rows], len(ids), (page_ids[-1] if more else None)
+
+
+def _fault_row(r) -> dict:
+    return {
+        "id": r[0],
+        "rule_id": r[1],
+        "point_uri": r[2],
+        "status": r[3],
+        "started_at": r[4].isoformat(),
+        "ended_at": r[5].isoformat() if r[5] else None,
+        "detail": r[6],
+        "severity": r[7],
+        "acked_at": r[8].isoformat() if r[8] else None,
+        "acked_by": r[9],
+        "snoozed_until": r[10].isoformat() if r[10] else None,
+    }
 
 
 def record_webhook_failure(conn: psycopg.Connection, webhook_id: str, error: str, disable_threshold: int = 5) -> bool:
