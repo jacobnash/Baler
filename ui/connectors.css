@@ -16,7 +16,7 @@
 button.primary { background: var(--accent); color: #fff; border: 1px solid var(--accent); border-radius: var(--radius-sm); padding: 0.35rem 0.8rem; }
 button.primary:disabled { opacity: 0.6; }
 .table-wrap { overflow-x: auto; }
-dialog.wide { width: min(46rem, calc(100vw - 2rem)); }
+dialog.wide { width: min(46rem, calc(100vw - 2rem)); max-width: none; }
 dialog .row { display: flex; flex-wrap: wrap; gap: 0.75rem; }
 dialog .row label { flex: 1 1 10rem; }
 fieldset.inline { border: 0; padding: 0; margin: 0 0 0.75rem; display: flex; gap: 1rem; align-items: center; }
@@ -34,3 +34,8 @@ fieldset.inline label { display: inline-flex; align-items: center; gap: 0.3rem; 
 }
 fieldset.inline label { white-space: nowrap; }
 .points-wrap td.mono { white-space: nowrap; }
+/* Ten columns: lay them out at their natural width and scroll sideways. */
+.points-wrap #modbus-points { width: max-content; }
+#modbus-points select { margin: 0; width: auto; }
+#modbus-points .reg-label { width: 10rem; }
+#modbus-points .reg-num, #modbus-points .reg-scale, #modbus-points .reg-offset, #modbus-points .reg-unit { width: 5rem; }
