@@ -201,15 +201,16 @@ deliberately *not* supported (tag paths, arithmetic, other Axon
 functions):
 [`docs-site/pages/his-query.mdx`](docs-site/pages/his-query.mdx).
 
-`ui/devices.html` is a dashboard for Windrow's periodic BACnet/Modbus device
-discovery: review discovered devices, set per-device credentials, and
-provision connections (see
-[`docs-site/pages/windrow-periodic-discovery.mdx`](docs-site/pages/windrow-periodic-discovery.mdx)).
-It calls `windrow.api` through the gateway's `/windrow/` route: login
-required, every change admin-only, and site-restricted logins refused
-(Windrow has no per-site filter yet). A deploy without a `windrow_api`
-service answers `/windrow/` with 502. Pass `?windrow=<url>` to point the
-page at another instance when serving `ui/` standalone.
+`ui/connectors.html` (Connectors) manages every Windrow edge node: the
+one beside Baler (`WINDROW_API_URL`, over HTTP) and remote ones on site
+gateways (found by their `cmd/<site>/<instance>/status` heartbeat, driven
+over the MQTT command channel). Add a connector by address or connect a
+device a scan found, read a BACnet point list and pick points, enter Modbus
+registers in a table, edit or delete connectors, set device logins and scan.
+It talks only to ops_api's `/ops/edges` routes (`baler.edges`): listing is
+viewer, changes and scans admin, site-restricted logins refused. See
+[`docs-site/pages/windrow-periodic-discovery.mdx`](docs-site/pages/windrow-periodic-discovery.mdx).
+The old `ui/devices.html` redirects there.
 
 `autotag.py` sweeps every point/equip with tags but no direct Brick match,
 runs `mapping.classify_point_with_fallback` on each (rule engine first,

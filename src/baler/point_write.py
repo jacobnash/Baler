@@ -97,11 +97,14 @@ def expired(conn, now: datetime) -> list[tuple[str, int, str]]:
 
 
 class Commander:
-    """Sends point_write commands over MQTT and waits for each result.
+    """Sends commands to Windrow instances over MQTT and waits for each result.
 
     One client per process, connected lazily on first use and subscribed to
     every site's result topic; results are matched to callers by command id,
-    so concurrent writes from different request threads don't mix."""
+    so concurrent writes from different request threads don't mix. It also
+    follows every instance's retained `cmd/<site>/<instance>/status`
+    heartbeat (Windrow publishes it, with an offline last will), which is
+    how Baler knows which edge nodes exist and whether they're up."""
 
     def __init__(self, client_factory=None, host: str | None = None, port: int | None = None,
                  timeout: float = RESULT_TIMEOUT_SECONDS, ttl: float = COMMAND_TTL_SECONDS):
@@ -113,11 +116,19 @@ class Commander:
         self._client = None
         self._lock = threading.Lock()
         self._pending: dict[str, tuple[threading.Event, dict]] = {}
+        self._status: dict[tuple[str, str], dict] = {}
 
     def _on_message(self, client, userdata, msg) -> None:
         try:
-            outcome = json.loads(msg.payload.decode("utf-8"))
+            outcome = json.loads(msg.payload.decode("utf-8")) if msg.payload else {}
         except (ValueError, UnicodeDecodeError):
+            return
+        parts = msg.topic.split("/")
+        if len(parts) == 4 and parts[3] == "status":
+            if not msg.payload:  # a cleared retained status: the node is gone
+                self._status.pop((parts[1], parts[2]), None)
+            elif isinstance(outcome, dict):
+                self._status[(parts[1], parts[2])] = {**outcome, "received_at": time.time()}
             return
         waiter = self._pending.get(str(outcome.get("id")))
         if waiter:
@@ -134,34 +145,53 @@ class Commander:
                     client.on_message = self._on_message
                     client.connect(self._host, self._port)
                     client.subscribe("cmd/+/+/result", qos=1)
+                    client.subscribe("cmd/+/+/status", qos=1)
                     client.loop_start()
                 else:
                     client = self._factory(self._on_message)
                 self._client = client
             return self._client
 
-    def point_write(self, site: str, instance: str, topic: str, value, priority: int) -> dict:
+    def statuses(self, settle: float = 0.5) -> dict[tuple[str, str], dict]:
+        """(site, instance) -> its latest status message. Retained statuses
+        arrive just after subscribing, so the first call waits `settle`."""
+        first = self._client is None
+        self._ensure_client()
+        if first and settle:
+            time.sleep(settle)
+        return dict(self._status)
+
+    def command(self, site: str, instance: str, action: str, body: dict | None = None,
+                timeout: float | None = None, suffix: str | None = None) -> object:
+        """Run one Windrow command-channel action and return its result.
+        Raises CommandError if the site refuses it or doesn't answer."""
         client = self._ensure_client()
         command_id = uuid.uuid4().hex
         event = threading.Event()
         outcome: dict = {}
         self._pending[command_id] = (event, outcome)
+        wait = self.timeout if timeout is None else timeout
         try:
             client.publish(
-                f"cmd/{site}/{instance}/point-write",
-                json.dumps({
-                    "action": "point_write", "id": command_id, "topic": topic,
-                    "value": value, "priority": priority, "expires_at": time.time() + self.ttl,
-                }),
+                f"cmd/{site}/{instance}/{suffix or action.replace('_', '-')}",
+                json.dumps({**(body or {}), "action": action, "id": command_id, "expires_at": time.time() + self.ttl}),
                 qos=1,
             )
-            if not event.wait(self.timeout):
+            if not event.wait(wait):
                 raise CommandError(
-                    f"site {site}/{instance} didn't confirm within {self.timeout:.0f}s; if it is offline the "
+                    f"site {site}/{instance} didn't answer within {wait:.0f}s; if it is offline the "
                     f"command expires after {self.ttl:.0f}s and is not applied"
                 )
         finally:
             self._pending.pop(command_id, None)
         if not outcome.get("ok"):
-            raise CommandError(f"site refused the write: {outcome.get('error', 'unknown error')}")
-        return outcome.get("result") or {}
+            raise CommandError(f"site refused {action}: {outcome.get('error', 'unknown error')}")
+        return outcome.get("result")
+
+    def point_write(self, site: str, instance: str, topic: str, value, priority: int) -> dict:
+        try:
+            return self.command(site, instance, "point_write", {"topic": topic, "value": value, "priority": priority},
+                                suffix="point-write") or {}
+        except CommandError as exc:
+            msg = str(exc).replace("site refused point_write:", "site refused the write:")
+            raise CommandError(msg.replace("didn't answer", "didn't confirm")) from None

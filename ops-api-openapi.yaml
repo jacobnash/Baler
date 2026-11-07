@@ -166,6 +166,58 @@ paths:
           description: Deleted.
         "404":
           description: No such source.
+  /edges:
+    get:
+      summary: Edge nodes (Windrow instances) the Connectors page can manage
+      description: >-
+        The Windrow beside Baler (WINDROW_API_URL, reached over HTTP) as
+        site_id/instance_id "local", plus every remote Windrow that has
+        published a cmd/<site>/<instance>/status heartbeat. A remote node is
+        online while its last heartbeat says so and is under 3 minutes old.
+        Viewer; whole-org logins only.
+      responses:
+        "200":
+          description: Nodes
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/EdgeNode" } }
+        "401": { description: Not through the gateway }
+        "502": { description: "No local Windrow, and the MQTT broker can't be reached" }
+  /edges/{site}/{instance}/actions/{action}:
+    post:
+      summary: Run one action on an edge node
+      description: >-
+        Windrow's command-channel vocabulary, the same for local and remote
+        nodes. Reads (viewer) - list_devices, list_connections,
+        modbus_list_connections. Changes and scans (admin) - add_device,
+        set_device_status {id, status}, recheck_credentials {id},
+        set_credential {target device|connection|modbus_connection, id,
+        credential}, create_connection, update_connection {id, ...},
+        delete_connection {id}, the modbus_ versions, discover, learn
+        {device_address, device_instance}, modbus_discover {cidr}. The body
+        is the action's fields.
+      parameters:
+        - { name: site, in: path, required: true, schema: { type: string }, description: '"local" for the Windrow beside Baler' }
+        - { name: instance, in: path, required: true, schema: { type: string } }
+        - { name: action, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: The node's answer
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [result]
+                properties:
+                  result: {}
+        "400": { description: "Unknown action, bad body, or the node refused it" }
+        "404": { description: No local Windrow configured }
+        "502": { description: "The node errored or can't be reached" }
+        "504": { description: "A remote node didn't answer in time (offline commands expire, never apply late)" }
 components:
   schemas:
     OrphanedPoint:
@@ -207,6 +259,23 @@ components:
         href:
           type: string
           description: A page to go to about this card (building cards only).
+    EdgeNode:
+      type: object
+      required: [site_id, instance_id, kind, label, online]
+      properties:
+        site_id: { type: string }
+        instance_id: { type: string }
+        kind: { type: string, enum: [local, remote] }
+        label: { type: string }
+        online: { type: boolean }
+        last_seen: { type: [string, "null"] }
+        version: { type: [string, "null"] }
+        started_at: { type: [string, "null"] }
+        devices: { type: [integer, "null"] }
+        pending_devices: { type: [integer, "null"] }
+        bacnet_connections: { type: [integer, "null"] }
+        modbus_connections: { type: [integer, "null"] }
+        error: { type: [string, "null"] }
     OpsStatus:
       type: object
       required: [summary, generated_at, building, platform, jobs, tools, attention, first_actions]
