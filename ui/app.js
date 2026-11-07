@@ -306,6 +306,7 @@ function cxDot(uri) {
 
 function buildEquipNode(equip, label) {
   const equipDetails = document.createElement("details");
+  equipDetails.dataset.equip = equip.uri;
   const equipSummary = document.createElement("summary");
   equipSummary.textContent = `${label} `;
   const dot = cxDot(equip.uri);
@@ -668,10 +669,27 @@ async function init() {
       bar.appendChild(recordNewButton("+ New equipment", "equip", null, [...locations, ...equips], () => init()));
       treeEl.insertBefore(bar, treeEl.firstChild);
     }
+    revealEquip(params.get("equip"));
   } catch (err) {
     if (err instanceof SessionExpired) return;
     statusEl.textContent = `failed to load from the Haystack API at ${HAYSTACK_API_URL}: ${err.message}`;
   }
+}
+
+// ?equip=<uri> (the Connectors page links each connector here, Baler#110):
+// open the tree down to that equipment, expand it and put focus on it.
+function revealEquip(uri) {
+  if (!uri) return;
+  const node = [...treeEl.querySelectorAll("details[data-equip]")].find((d) => d.dataset.equip === uri);
+  if (!node) {
+    statusEl.textContent = `${uri.replace(/^urn:equip:/, "")} isn't in the equipment tree yet - its points appear once they report`;
+    return;
+  }
+  for (let d = node; d; d = d.parentElement && d.parentElement.closest("details")) d.open = true;
+  const summary = node.querySelector("summary");
+  summary.scrollIntoView({ block: "center" });
+  summary.focus();
+  summary.classList.add("selected");
 }
 
 initAuth(init);
