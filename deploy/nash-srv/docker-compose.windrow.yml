@@ -65,6 +65,11 @@ services:
     depends_on:
       - windrow_mock_device
 
+  # The Connectors page reaches this windrow_api through ops_api (baler.edges).
+  ops_api:
+    environment:
+      WINDROW_API_URL: http://windrow_api:8001
+
 # Pinned name, like the core volumes in docker-compose.yml. A box set up
 # before the rename keeps its provisioned connections with
 # BALER_VOLUME_PREFIX=timberdoodle and WINDROW_STATE_VOLUME=fbf-state; Windrow

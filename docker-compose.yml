@@ -25,6 +25,8 @@ x-daemon-env: &daemon-env
   # gateway auth - until then the stack runs exactly as before.
   BALER_GATEWAY_SECRET: ${BALER_GATEWAY_SECRET:-${TIMBERDOODLE_GATEWAY_SECRET:-}}
   BALER_SOURCES_KEY: ${BALER_SOURCES_KEY:-}
+  # Blank-safe: only ops_api reads it (the Connectors page's local Windrow).
+  WINDROW_API_URL: ${WINDROW_API_URL:-}
   # Only auth_api.py (issues tokens) actually needs this - blanket-added
   # to the anchor like the var above, harmless for daemons that never
   # read it.

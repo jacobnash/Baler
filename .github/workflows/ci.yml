@@ -38,6 +38,33 @@ jobs:
       - run: pip install -e ".[dev,validate,cx-gl36,cx-spec]"
       # parallel across the runner's cores: ~3 min serial (#27)
       - run: pytest -m "not integration" -n auto
+
+  # The static checks and the live LLM check, split out of `unit` so they run
+  # beside its pytest instead of after it (~35 s off what was, once the
+  # integration shards got faster, CI's critical path - #27). Same install as
+  # `unit` (openhay included), so mypy sees exactly what it saw there.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      # openhay's Rust build is the slow part of the install (~1 min): build
+      # its wheel once per openhay commit and cache it (#23).
+      - id: openhay
+        run: echo "sha=$(git ls-remote https://github.com/jacobnash/openhay refs/heads/main | cut -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: openhay-wheel
+        with:
+          path: openhay-wheel
+          key: openhay-wheel-${{ steps.openhay.outputs.sha }}
+      - if: steps.openhay-wheel.outputs.cache-hit != 'true'
+        run: pip wheel --no-deps -w openhay-wheel "openhay @ git+https://github.com/jacobnash/openhay@${{ steps.openhay.outputs.sha }}#subdirectory=crates/openhay-py"
+      - run: pip install openhay-wheel/openhay-*.whl
+      - run: pip install -e ".[dev,validate,cx-gl36,cx-spec]"
       - run: openapi-spec-validator openapi.yaml fault-api-openapi.yaml derivation-api-openapi.yaml validate-api-openapi.yaml auth-api-openapi.yaml haystack-api-openapi.yaml commissioning-api-openapi.yaml
       # Both blocking (PLAN.md Guardrails): ruff went 63 -> 0 and mypy
       # 19 -> 0 against the rule sets in ruff.toml/pyproject.toml, see
@@ -66,12 +93,14 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
-    # Two shards, each with its own stack, split the integration files
-    # (tests/conftest.py, BALER_SHARD) - this job was CI's critical path (#27).
+    # Three shards, each with its own stack, split the integration files
+    # (tests/conftest.py, BALER_SHARD, balanced by measured per-file time) -
+    # this job was CI's critical path (#27). test_gateway_auth.py alone is
+    # ~50 s, so a fourth shard wouldn't shorten the slowest one.
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3]
     # Job-level so every docker-compose step (up, ps, logs) can interpolate
     # them, not just `up`. These are throwaway CI-only values so the stack can
     # start at all (auth_api/gateway refuse to start without the two secrets;
@@ -90,8 +119,6 @@ jobs:
       MQTT_USERNAME: baler
       MQTT_PASSWORD: ci-only-mqtt-password
       BALER_ALLOW_PRIVATE_WEBHOOKS: "1"
-      # base file + the CI layer cache (#27); every docker compose call below
-      COMPOSE_FILE: docker-compose.yml:.github/ci/compose.cache.yml
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -101,20 +128,16 @@ jobs:
           cache-dependency-path: pyproject.toml
       - run: pip install -e ".[dev,validate]"
       # docker-container builder + Actions cache token: the type=gha layer
-      # cache in .github/ci/compose.cache.yml needs both (#27)
+      # cache in .github/ci/build-app-image.sh needs both (#27)
       - uses: docker/setup-buildx-action@v3
       - uses: crazy-max/ghaction-github-runtime@v3
-      - run: docker compose up -d --build
-      - name: Wait for postgres to be healthy
-        run: |
-          for i in $(seq 1 60); do
-            status=$(docker compose ps postgres --format json | python3 -c "import json,sys; print(json.load(sys.stdin).get('Health',''))")
-            [ "$status" = "healthy" ] && exit 0
-            sleep 2
-          done
-          echo "postgres never became healthy" >&2
-          docker compose logs
-          exit 1
+      # One app image build for every service (not one per service), from
+      # the Actions layer cache; shard 1 writes the cache for the next run.
+      - run: .github/ci/build-app-image.sh ${{ matrix.shard == 1 && '--write-cache' || '' }}
+      # --wait: every healthcheck green (postgres, mosquitto, each API, the
+      # gateway) before pytest starts, instead of a postgres-only poll loop.
+      # It costs ~1 s: the gateway already waits on the APIs' health.
+      - run: docker compose up -d --no-build --wait --wait-timeout 300
       # Coverage is reporting-only for now (PLAN.md Stage 0.2/Guardrails) -
       # baseline is 81% (BASELINE.md). No --cov-fail-under yet: the floor
       # should ratchet up from a real baseline, not block on day one.
@@ -122,7 +145,7 @@ jobs:
       # of them here was most of this job's ~5 min of pytest (#27).
       - run: pytest -m integration --cov=baler --cov-report=term-missing --durations=15
         env:
-          BALER_SHARD: ${{ matrix.shard }}/2
+          BALER_SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
       # Regression guard for #29: the app containers run as root with the
       # checkout bind-mounted, so any directory they create in it is
       # root-owned, and on nash-srv the next actions/checkout can't clean it
@@ -154,7 +177,6 @@ jobs:
       HAXALL_API: http://localhost:8280/api/sys
       HAXALL_SU_USERNAME: su
       HAXALL_SU_PASSWORD: ci-only-haxall-password
-      COMPOSE_FILE: docker-compose.yml:.github/ci/compose.cache.yml
     steps:
       - uses: actions/checkout@v4
         with:
@@ -182,10 +204,11 @@ jobs:
           docker run -d --name haxall -p 8280:8080 haxall:ci sh -c
           "bin/hx init -headless -suUser su -suPass $HAXALL_SU_PASSWORD -httpPort 8080 /haxall/var/ci && bin/hx run /haxall/var/ci"
       # docker-container builder + Actions cache token: the type=gha layer
-      # cache in .github/ci/compose.cache.yml needs both (#27)
+      # cache in .github/ci/build-app-image.sh needs both (#27)
       - uses: docker/setup-buildx-action@v3
       - uses: crazy-max/ghaction-github-runtime@v3
-      - run: docker compose up -d --build --wait
+      - run: .github/ci/build-app-image.sh  # reads the cache; integration (1) writes it
+      - run: docker compose up -d --no-build --wait --wait-timeout 300
       - name: Wait for Haxall
         run: |
           for i in $(seq 1 90); do
