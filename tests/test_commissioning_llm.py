@@ -391,3 +391,17 @@ def test_api_without_a_model(monkeypatch):
         assert d["status"] == "completed" and d["items"] == 3, d
     finally:
         server.shutdown()
+
+
+def test_openai_agent_replays_provider_extras_on_tool_calls():
+    """Gemini's thinking models sign each tool call (extra_content.google.
+    thought_signature) and 400 the next request if the replayed history
+    drops it - found running the agent against Gemini's free tier."""
+    repo = ta._repo()
+    ctx = ta._ctx(repo)
+    signed = _call(1, "inventory_summary")
+    signed["extra_content"] = {"google": {"thought_signature": "sig-abc"}}
+    client = FakeOpenAI(_completion(None, [signed], "tool_calls"), _completion("done"))
+    agent.run_turn(ctx, [], "What's here?", client)
+    replayed = [m for m in client.requests[1]["messages"] if m.get("tool_calls")]
+    assert replayed[0]["tool_calls"][0]["extra_content"] == {"google": {"thought_signature": "sig-abc"}}

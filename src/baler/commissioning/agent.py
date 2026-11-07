@@ -508,8 +508,14 @@ def _run_turn_openai(ctx: Ctx, messages: list[dict], user_text: str, client=None
         calls = [c for c in msg.get("tool_calls") or [] if isinstance(c, dict)]
         text: str = msg["content"] if isinstance(msg.get("content"), str) else ""
         stored: dict = {"role": "assistant", "content": text or None}
+        # Provider extras ride along unchanged: Gemini's thinking models put a
+        # thought signature on each tool call (extra_content.google.
+        # thought_signature) and reject the next request if the replayed
+        # history drops it ("Function call is missing a thought_signature").
+        if isinstance(msg.get("extra_content"), dict):
+            stored["extra_content"] = msg["extra_content"]
         if calls:
-            stored["tool_calls"] = [{"id": c.get("id") or f"call_{i}", "type": "function",
+            stored["tool_calls"] = [{**c, "id": c.get("id") or f"call_{i}", "type": "function",
                                      "function": {"name": (c.get("function") or {}).get("name", ""),
                                                   "arguments": (c.get("function") or {}).get("arguments") or "{}"}}
                                     for i, c in enumerate(calls)]

@@ -54,6 +54,15 @@ jobs:
       # WebCrypto-based logic njs runs inside nginx (GitHub Actions
       # runners have Node preinstalled, no setup-node action needed).
       - run: node gateway/njs/test_jwt.mjs && node gateway/njs/test_policy.mjs && node gateway/njs/test_ratelimit.mjs
+      # Live check of the non-Anthropic LLM path (Cx 7/10) against Gemini's free
+      # tier: a real PDF extraction and agent turn. Skips without the
+      # GEMINI_API_KEY repo secret; informational only - a free-tier rate
+      # limit or "high demand" 503 must never turn main red and block deploys.
+      - name: Live LLM check (Gemini free tier, non-blocking)
+        continue-on-error: true
+        env:
+          BALER_LIVE_LLM_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: pytest tests/test_llm_live.py -ra
 
   integration:
     runs-on: ubuntu-latest
