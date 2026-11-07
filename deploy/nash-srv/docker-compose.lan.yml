@@ -1,0 +1,67 @@
+# Optional: a second Windrow on the host's own network, for broadcast
+# discovery of BACnet/Modbus devices on nash-srv's LAN (Baler#78). Off by
+# default. The deploy wrapper adds this file only when nash-srv.env sets
+# BALER_WINDROW_LAN=1 (setup-runner.sh). Background and when you need it:
+# docs-site/pages/edge-nodes.mdx.
+#
+# Why a second instance, not a change to windrow_api: windrow_api lives on
+# the bacnet-mock bridge with the mock hospital (172.30.0.0/24), whose
+# Who-Is broadcasts must stay on that bridge. A broadcast from a bridge
+# never reaches the LAN, so discovering *unknown* LAN devices needs a
+# process bound to the LAN interface itself. Known devices don't: unicast
+# BACnet and Modbus TCP reach the LAN from windrow_api through NAT, so
+# adding them by IP works without this file.
+#
+# What listens where (nothing collides with windrow_api, which publishes no
+# host ports and binds 172.30.0.11:47820 inside its own namespace):
+#   UDP  ${WINDROW_LAN_ADDRESS}  (e.g. 192.168.128.145/24:47808) - BACnet.
+#        The only thing this service exposes to the LAN. It has to be
+#        47808: bacpypes3 sends Who-Is to its own port (Baler#52).
+#   TCP  127.0.0.1:${WINDROW_LAN_API_PORT:-8011} - Windrow's HTTP API,
+#        loopback only, and it still wants X-Gateway-Secret.
+#   MQTT out to 127.0.0.1:1883 (mosquitto, published on loopback by the
+#        override file) with a per-site edge account from Ops -> Edge nodes.
+#
+# The gateway doesn't route to this instance: with --site-id it's managed
+# like a Pi gateway, over the MQTT command channel (cmd/<site>/<instance>/#),
+# which is how Baler's Connectors page reaches remote edge nodes.
+#
+#   docker compose -f docker-compose.yml \
+#     -f deploy/nash-srv/docker-compose.override.yml \
+#     -f deploy/nash-srv/docker-compose.windrow.yml \
+#     -f deploy/nash-srv/docker-compose.lan.yml \
+#     --env-file ~/.config/baler/nash-srv.env up -d --build windrow_lan
+services:
+  windrow_lan:
+    build:
+      context: windrow
+      dockerfile: ../deploy/nash-srv/windrow.Dockerfile
+    network_mode: host
+    command: >
+      python -m windrow.api
+      --address ${WINDROW_LAN_ADDRESS:?set WINDROW_LAN_ADDRESS to the host's LAN address, e.g. 192.168.128.145/24:47808}
+      --host 127.0.0.1 --port ${WINDROW_LAN_API_PORT:-8011}
+      --mqtt-host 127.0.0.1 --mqtt-port 1883
+      --site-id ${WINDROW_LAN_SITE_ID:?set WINDROW_LAN_SITE_ID to the edge account's username (its site)}
+      --instance-id ${WINDROW_LAN_INSTANCE_ID:-nash-srv-lan}
+      --modbus-scan-cidr ${WINDROW_LAN_MODBUS_CIDR:?set WINDROW_LAN_MODBUS_CIDR to the LAN to sweep, e.g. 192.168.128.0/24}
+      --state-file /app/state/windrow-connections.json
+      --devices-state-file /app/state/windrow-devices.json
+      --modbus-state-file /app/state/windrow-modbus-connections.json
+    environment:
+      # An edge-node account (Ops -> Edge nodes), not the "baler" backend
+      # account: the broker then holds this instance to its site's topic
+      # prefixes and its own cmd/<username>/#, like any Pi gateway.
+      MQTT_USERNAME: ${WINDROW_LAN_SITE_ID}
+      MQTT_PASSWORD: ${WINDROW_LAN_MQTT_PASSWORD:?set WINDROW_LAN_MQTT_PASSWORD (the edge account's password)}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://127.0.0.1:4318/v1/traces
+      WINDROW_GATEWAY_SECRET: ${BALER_GATEWAY_SECRET:-${TIMBERDOODLE_GATEWAY_SECRET:?set BALER_GATEWAY_SECRET in .env}}
+    volumes:
+      - windrow-lan-state:/app/state
+    restart: unless-stopped
+    depends_on:
+      - mosquitto
+
+volumes:
+  windrow-lan-state:
+    name: ${BALER_VOLUME_PREFIX:-baler}_windrow-lan-state
