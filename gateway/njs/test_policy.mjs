@@ -183,6 +183,11 @@ check("per-user session cutoff: parse denylist rows, reject older sessions only"
     assert.equal(policy.sessionCutOff({ iat: 99, exp: 99 + 43200 }, "100"), true);
     assert.equal(policy.sessionCutOff({ iat: 100, exp: 100 + 43200 }, "100"), false); // a fresh login that second
     assert.equal(policy.sessionCutOff({ iat: 99 }, undefined), false);
+    // The jti denylist applies to session tokens too (Haystack close), not only API keys.
+    assert.equal(policy.jtiRevoked({ kind: "session", jti: "s-1" }, "1"), true);
+    assert.equal(policy.jtiRevoked({ kind: "api_key", jti: "k-1" }, "1"), true);
+    assert.equal(policy.jtiRevoked({ kind: "session", jti: "s-2" }, undefined), false);
+    assert.equal(policy.jtiRevoked({ kind: "session" }, "1"), false);
     assert.equal(policy.sessionCutOff({ exp: 50 + 43200 }, "100"), true); // pre-iat token: iat = exp - TTL
     // #50: ms precision - a token from earlier in the cutoff's second is cut off,
     // one issued after it in the same second (a fresh login) isn't

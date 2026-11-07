@@ -539,7 +539,8 @@ def test_ops_are_op_defs_for_served_ops(backend):
     names = {r["def"].val for r in g.rows}
     assert {"op:about", "op:read", "op:hisRead", "op:pointWrite", "op:close"} <= names
     assert all(r["def"].val.startswith("op:") and oh.Symbol("op") in r["is"] for r in g.rows)
-    assert all(n[len("op:"):] in {o for o, _ in ha.OPS} | {"pointWrite", "invokeAction"} for n in names)
+    assert all(n[len("op:"):] in {o for o, _ in ha.OPS} | {"pointWrite"} for n in names)
+    assert "op:invokeAction" not in names  # deliberately unsupported (Baler#134)
     about = ha.dispatch(backend, "about", oh.Grid()).rows[0]
     assert about["moduleName"] and about["moduleVersion"]
 
@@ -722,3 +723,51 @@ def test_records_advertise_the_xeto_spec_they_fit():
     assert ha.best_spec({"point": m, "brickClass": "Zone_Air_Temperature_Sensor"}) == "ph.points::ZoneAirTempSensor"
     assert ha.best_spec({"point": m}) == "ph::Point"  # not BoolPoint: same markers, base spec wins
     assert ha.best_spec({"dis": "x"}) is None
+
+
+# --- Baler#134: the gaps once listed in todo/haystack-spec-comparison.md ---
+
+
+def test_invoke_action_is_a_clear_error_grid_not_a_404(http, backend):
+    """invokeAction is deliberately unsupported: an error grid that says so
+    and points at pointWrite, over HTTP as a normal 200 Haystack error."""
+    req = oh.Grid.from_rows([{"id": oh.Ref(ha.uri_to_ref(DAT)), "action": "on"}])
+    with pytest.raises(ha.OpError, match="not supported.*pointWrite"):
+        ha.dispatch(backend, "invokeAction", req)
+    status, _, body = _req(f"{http}/api/demo/invokeAction", oh.encode_grid(req, "zinc"),
+                           {"Content-Type": "text/zinc"})
+    g = oh.decode_grid(body)
+    assert status == 200 and g.is_error and "pointWrite" in g.meta["dis"]
+
+
+def test_close_then_the_same_token_is_refused(http, backend, monkeypatch):
+    """close revokes the session's jti; haystack_api refuses it at once (the
+    gateway refuses it everywhere else once its denylist refreshes)."""
+    import jwt as pyjwt
+
+    monkeypatch.setenv("BALER_JWT_SECRET", "test-jwt-secret-of-at-least-32-bytes")
+    exp = int(datetime.now(timezone.utc).timestamp()) + 3600
+    claims = {"sub": "u1", "jti": "sess-close-1", "exp": exp, "kind": "session"}
+    token = pyjwt.encode(claims, "test-jwt-secret-of-at-least-32-bytes", algorithm="HS256")
+    auth_h = {"Authorization": f"Bearer {token}"}
+    assert _req(f"{http}/api/demo/about", headers=auth_h)[0] == 200
+    assert _req(f"{http}/api/demo/close", headers=auth_h)[0] == 200
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _req(f"{http}/api/demo/about", headers=auth_h)
+    assert exc.value.code == 401
+
+
+def test_tag_paths_units_and_literals_in_filters():
+    """-> paths, units and date/time/uri/^symbol literals all parse (each is
+    also matched end to end in the tests above); a Symbol as a comparison
+    value isn't Haystack filter grammar and is a parse error, not a guess."""
+    parse = lambda f: hisquery.parse_query(f).filter
+    assert isinstance(parse("point and equipRef->ahu").right, hisquery.Path)
+    assert parse('equipRef->siteRef->dis == "HQ"').hops == ("equipRef", "siteRef")
+    assert parse("area > 1000ft²").value == hisquery.Num(1000.0, "ft²")
+    assert isinstance(parse("occ == 08:30").value, hisquery.TimeLit)
+    assert isinstance(parse("d == 2024-01-01").value, hisquery.DateLit)
+    assert isinstance(parse("link == `http://x/`").value, hisquery.UriLit)
+    assert parse("^hot-water") == parse("hot and water")
+    with pytest.raises(hisquery.HisQueryError):
+        parse("kind == ^elec")
