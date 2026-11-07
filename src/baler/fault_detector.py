@@ -22,7 +22,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from baler import heartbeat, his_checks, json_store, mqtt_util, tracing
+from baler import bacnet_alarms, heartbeat, his_checks, json_store, mqtt_util, tracing
 from baler.faults import (
     close_fault,
     close_orphaned_faults,
@@ -179,7 +179,21 @@ def make_on_message(fault_conn, rule_cache: RuleCache, webhooks_path: str):
             payload = json.loads(msg.payload.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
             return
-        handle_cur_reading(fault_conn, rule_cache, webhooks_path, msg.topic, payload.get("value"))
+        if not isinstance(payload, dict):
+            return
+        value = payload.get("value")
+        # A controller's own alarm, forwarded by Windrow (Baler#168): raised
+        # and cleared as a fault here, never evaluated as a reading.
+        if bacnet_alarms.is_alarm(msg.topic, value):
+            def fire(event, rule_id, point_uri, status, detail):
+                _fire_webhooks(webhooks_path, event, rule_id, point_uri, status, detail)
+
+            with tracer.start_as_current_span("fault_detector.bacnet_alarm") as span:
+                span.set_attribute("topic", msg.topic)
+                outcome = bacnet_alarms.handle_alarm(fault_conn, msg.topic, value, payload.get("ts"), fire=fire)
+                span.set_attribute("outcome", outcome or "unchanged")
+            return
+        handle_cur_reading(fault_conn, rule_cache, webhooks_path, msg.topic, value)
 
     return on_message
 
