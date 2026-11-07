@@ -67,6 +67,9 @@ ALTER TABLE revoked_tokens ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
 -- Set while a user is disabled (Baler#17): they can't log in, by password
 -- or Haystack SCRAM, until an admin enables them again.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ;
+-- Baler#121: how the person signs ("Jacob Nash"), e.g. on a Cx waiver;
+-- NULL when unset (the email stands in).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT;
 """
 
 SESSION_TTL_SECONDS = 12 * 3600
@@ -252,8 +255,26 @@ def _check_role(role) -> str:
     return role
 
 
-def create_user(conn: psycopg.Connection, org_id: str, email: str, password: str, role: str) -> dict:
+MAX_DISPLAY_NAME = 120
+
+
+def check_display_name(name) -> str | None:
+    """A display name trimmed to one line, or None for "unset" (None or
+    blank)."""
+    if name is None:
+        return None
+    if not isinstance(name, str):
+        raise TypeError("display_name must be a string")
+    clean = " ".join(name.split())
+    if len(clean) > MAX_DISPLAY_NAME:
+        raise ValueError(f"display_name must be at most {MAX_DISPLAY_NAME} characters")
+    return clean or None
+
+
+def create_user(conn: psycopg.Connection, org_id: str, email: str, password: str, role: str,
+                display_name: str | None = None) -> dict:
     _check_role(role)
+    name = check_display_name(display_name)
     email = normalize_email(email)
     if not email or "@" not in email:
         raise ValueError("email must be an email address")
@@ -262,12 +283,13 @@ def create_user(conn: psycopg.Connection, org_id: str, email: str, password: str
     try:
         with conn.transaction():
             conn.execute(
-                "INSERT INTO users (id, org_id, email, password_hash, role, created_at) VALUES (%s, %s, %s, %s, %s, %s)",
-                (user_id, org_id, email, hash_password(password), role, now),
+                "INSERT INTO users (id, org_id, email, password_hash, role, created_at, display_name) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (user_id, org_id, email, hash_password(password), role, now, name),
             )
     except psycopg.errors.UniqueViolation as exc:
         raise EmailTaken("that email can't be used") from exc
-    return {"id": user_id, "org_id": org_id, "email": email, "role": role}
+    return {"id": user_id, "org_id": org_id, "email": email, "role": role, "display_name": name}
 
 
 def list_sites(conn: psycopg.Connection, org_id: str) -> list[dict]:
@@ -284,15 +306,21 @@ def _admin_count(conn: psycopg.Connection, org_id: str) -> int:
     return int(row[0]) if row else 0
 
 
+_UNSET = object()
+
+
 def update_user(conn: psycopg.Connection, org_id: str, user_id: str,
                 role: str | None = None, site_ids: list[str] | None = None,
-                disabled: bool | None = None) -> dict | None:
+                disabled: bool | None = None, display_name=_UNSET) -> dict | None:
     """Change a user's role and/or the sites they're limited to (empty =
-    the whole org), or disable/enable them. Role and sites live in their
-    session tokens, so their sessions end (as they do on disable). None
-    when there's no such user in the org."""
+    the whole org), disable/enable them, or set their display name (None
+    or "" clears it). Role and sites live in their session tokens, so their
+    sessions end (as they do on disable); a display name isn't in the token,
+    so changing only that leaves them signed in. None when there's no such
+    user in the org."""
     if disabled is not None and not isinstance(disabled, bool):
         raise ValueError("disabled must be true or false")
+    name = None if display_name is _UNSET else check_display_name(display_name)
     if role is not None:
         _check_role(role)
     if site_ids is not None:
@@ -324,9 +352,14 @@ def update_user(conn: psycopg.Connection, org_id: str, user_id: str,
             conn.execute("DELETE FROM user_sites WHERE user_id = %s", (user_id,))
             for sid in sorted(set(site_ids)):
                 conn.execute("INSERT INTO user_sites (user_id, site_id) VALUES (%s, %s)", (user_id, sid))
-        end_user_sessions(conn, user_id)
+        if display_name is not _UNSET:
+            conn.execute("UPDATE users SET display_name = %s WHERE id = %s", (name, user_id))
+        if role is not None or site_ids is not None or disabled is not None:
+            end_user_sessions(conn, user_id)
+        shown = conn.execute("SELECT display_name FROM users WHERE id = %s", (user_id,)).fetchone()
     now_disabled = row[1] is not None if disabled is None else disabled
-    return {"id": user_id, "role": role or row[0], "site_ids": user_site_ids(conn, user_id), "disabled": now_disabled}
+    return {"id": user_id, "role": role or row[0], "site_ids": user_site_ids(conn, user_id), "disabled": now_disabled,
+            "display_name": shown[0] if shown else None}
 
 
 def get_user_by_email(conn: psycopg.Connection, email: str) -> dict | None:
@@ -345,13 +378,13 @@ def list_users(conn: psycopg.Connection, org_id: str) -> list[dict]:
     rows = conn.execute(
         """SELECT u.id, u.email, u.role, u.created_at,
                   COALESCE(array_agg(us.site_id) FILTER (WHERE us.site_id IS NOT NULL), '{}'),
-                  u.disabled_at IS NOT NULL
+                  u.disabled_at IS NOT NULL, u.display_name
            FROM users u LEFT JOIN user_sites us ON us.user_id = u.id
            WHERE u.org_id = %s GROUP BY u.id ORDER BY u.email""",
         (org_id,),
     ).fetchall()
     return [{"id": r[0], "email": r[1], "role": r[2], "created_at": r[3].isoformat(), "site_ids": list(r[4]),
-             "disabled": bool(r[5])} for r in rows]
+             "disabled": bool(r[5]), "display_name": r[6]} for r in rows]
 
 
 # Sessions are stateless JWTs, so ending a user's sessions (deleted, or
@@ -410,6 +443,13 @@ def get_user(conn: psycopg.Connection, user_id: str) -> dict | None:
     if not row:
         return None
     return {"id": row[0], "org_id": row[1], "email": row[2], "password_hash": row[3], "role": row[4]}
+
+
+def get_display_name(conn: psycopg.Connection, user_id: str) -> str | None:
+    """The user's display name (Baler#121), or None. Apart from get_user so
+    services that don't run this module's schema can keep calling that."""
+    row = conn.execute("SELECT display_name FROM users WHERE id = %s", (user_id,)).fetchone()
+    return row[0] if row else None
 
 
 def user_site_ids(conn: psycopg.Connection, user_id: str) -> list[str]:

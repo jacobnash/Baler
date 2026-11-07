@@ -11,3 +11,5 @@ docs-site/node_modules/
 docs-site/dist/
 backups/
 docs-site/pages/code/functions.mdx
+tools/live-check/node_modules/
+tools/live-check/out/

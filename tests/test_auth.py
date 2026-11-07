@@ -252,6 +252,27 @@ def test_create_user_rules(conn):
 
 
 @pytest.mark.integration
+def test_display_name_set_cleared_and_leaves_sessions_alone(conn):
+    """Baler#121: a user record carries how the person signs. Setting it
+    alone doesn't sign them out (it isn't in the token); blank clears it."""
+    from baler.auth import get_display_name, list_users, update_user
+
+    org = create_org(conn, "Test Org Name", "admin-nm@test-auth.invalid", "pw")
+    user = create_user(conn, org["id"], "cxa-nm@test-auth.invalid", "pw", "operator", display_name="  Jacob   Nash ")
+    assert user["display_name"] == "Jacob Nash" and get_display_name(conn, user["id"]) == "Jacob Nash"
+    assert {u["email"]: u["display_name"] for u in list_users(conn, org["id"])}["cxa-nm@test-auth.invalid"] == "Jacob Nash"
+    cutoffs = conn.execute("SELECT count(*) FROM revoked_tokens WHERE jti LIKE %s", (f"user:{user['id']}:%",)).fetchone()[0]
+    assert update_user(conn, org["id"], user["id"], display_name="J. Nash")["display_name"] == "J. Nash"
+    assert conn.execute("SELECT count(*) FROM revoked_tokens WHERE jti LIKE %s",
+                        (f"user:{user['id']}:%",)).fetchone()[0] == cutoffs  # still signed in
+    assert update_user(conn, org["id"], user["id"], display_name=" ")["display_name"] is None
+    with pytest.raises(ValueError):
+        update_user(conn, org["id"], user["id"], display_name="x" * 121)
+    with pytest.raises(TypeError):
+        create_user(conn, org["id"], "bad-nm@test-auth.invalid", "pw", "viewer", display_name=7)
+
+
+@pytest.mark.integration
 def test_update_user_role_sites_and_last_admin_guard(conn):
     from baler.auth import LastAdmin, delete_user, update_user
 
@@ -262,7 +283,7 @@ def test_update_user_role_sites_and_last_admin_guard(conn):
     user = create_user(conn, org["id"], "op-up@test-auth.invalid", "pw", "operator")
 
     assert update_user(conn, org["id"], user["id"], role="viewer", site_ids=[site["id"]]) == {
-        "id": user["id"], "role": "viewer", "site_ids": [site["id"]], "disabled": False}
+        "id": user["id"], "role": "viewer", "site_ids": [site["id"]], "disabled": False, "display_name": None}
     assert user_site_ids(conn, user["id"]) == [site["id"]]
     with pytest.raises(ValueError):
         update_user(conn, org["id"], user["id"], site_ids=[other_site["id"]])  # not this org's site

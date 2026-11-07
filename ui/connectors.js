@@ -551,16 +551,87 @@ function protocol() {
   return document.querySelector('input[name="protocol"]:checked').value;
 }
 
-function addRegisterRow(label = "", register = "") {
+// A Modbus point is a bare holding-register number (the original form) or
+// {register, function, type, word_order, byte_order, scale, offset, unit,
+// writable} (Baler#128). modbusSpec sends only what differs from the
+// defaults, so a plain holding/uint16 row stays a bare number and old
+// connectors round-trip unchanged; a unit on a bare row goes in the
+// connection's `units` map instead, which older Windrows understand too.
+const MB_FUNCTIONS = [["holding", "Holding reg"], ["input", "Input reg"], ["coil", "Coil"], ["discrete", "Discrete in"]];
+const MB_TYPES = ["uint16", "int16", "uint32", "int32", "float32"];
+const MB_BITS = ["coil", "discrete"];
+const MODBUS_HELP = "Register numbers are 0-based protocol addresses: holding register 40001 is 0, input register 30010 is 9. "
+  + "32-bit types use the register and the next one. Published value = raw × scale + offset. "
+  + "Writable points (holding registers and coils) can be commanded from Baler.";
+
+function modbusSpec(f) {
+  const bits = MB_BITS.includes(f.function);
+  const spec = { register: f.register };
+  if (f.function !== "holding") spec.function = f.function;
+  if (!bits) {
+    if (f.type !== "uint16") spec.type = f.type;
+    if (f.type.endsWith("32") && f.word_order !== "big") spec.word_order = f.word_order;
+    if (f.byte_order && f.byte_order !== "big") spec.byte_order = f.byte_order;
+    if (f.scale !== 1) spec.scale = f.scale;
+    if (f.offset !== 0) spec.offset = f.offset;
+  }
+  if (f.writable && (f.function === "holding" || f.function === "coil")) spec.writable = true;
+  if (Object.keys(spec).length === 1) return { spec: f.register, unit: f.unit || null };
+  if (f.unit) spec.unit = f.unit;
+  return { spec, unit: null };
+}
+
+// One register row's fields, read back from the form.
+function registerRow(tr) {
+  const q = (cls) => tr.querySelector(cls);
+  return {
+    label: q(".reg-label").value.trim(), reg: q(".reg-num").value,
+    function: q(".reg-fn").value, type: q(".reg-type").value, word_order: q(".reg-word").value,
+    byte_order: tr.dataset.byteOrder, scale: Number(q(".reg-scale").value || 1), offset: Number(q(".reg-offset").value || 0),
+    unit: q(".reg-unit").value.trim(), writable: q(".reg-write").checked,
+  };
+}
+
+function addRegisterRow(label = "", spec = "", unit = "") {
+  const p = typeof spec === "object" && spec ? spec : { register: spec };
   const tbody = $("modbus-points").querySelector("tbody");
   const n = tbody.children.length + 1;
   const del = el("button", { type: "button", textContent: "Remove", className: "danger" });
   del.setAttribute("aria-label", `Remove register row ${n}`);
+  const select = (cls, options, value, aria) => {
+    const s = el("select", { className: cls, "aria-label": `${aria}, row ${n}` },
+      options.map(([v, t]) => el("option", { value: v, textContent: t })));
+    s.value = value;
+    return s;
+  };
+  const fn = select("reg-fn", MB_FUNCTIONS, p.function || "holding", "Function");
+  const type = select("reg-type", MB_TYPES.map((t) => [t, t]), p.type || "uint16", "Data type");
+  const word = select("reg-word", [["big", "high first"], ["little", "low first"]], p.word_order || "big", "Word order");
+  const scale = el("input", { type: "number", className: "reg-scale", value: p.scale ?? 1, step: "any", "aria-label": `Scale, row ${n}` });
+  const offset = el("input", { type: "number", className: "reg-offset", value: p.offset ?? 0, step: "any", "aria-label": `Offset, row ${n}` });
+  const write = el("input", { type: "checkbox", className: "reg-write", checked: !!p.writable, "aria-label": `Writable, row ${n}` });
+  const sync = () => {
+    const bits = MB_BITS.includes(fn.value);
+    type.disabled = scale.disabled = offset.disabled = bits;
+    word.disabled = bits || !type.value.endsWith("32");
+    write.disabled = fn.value === "input" || fn.value === "discrete";
+  };
+  fn.addEventListener("change", sync);
+  type.addEventListener("change", sync);
   const tr = el("tr", {}, [
     el("td", {}, [el("input", { type: "text", className: "reg-label", value: label, placeholder: "zone_temp", "aria-label": `Point name, row ${n}` })]),
-    el("td", {}, [el("input", { type: "number", className: "reg-num", value: register, min: 0, max: 65535, "aria-label": `Register, row ${n}` })]),
+    el("td", {}, [fn]),
+    el("td", {}, [el("input", { type: "number", className: "reg-num", value: p.register, min: 0, max: 65535, "aria-label": `Register, row ${n}` })]),
+    el("td", {}, [type]),
+    el("td", {}, [word]),
+    el("td", {}, [scale]),
+    el("td", {}, [offset]),
+    el("td", {}, [el("input", { type: "text", className: "reg-unit", value: p.unit || unit || "", placeholder: "°F", "aria-label": `Unit, row ${n}` })]),
+    el("td", {}, [write]),
     el("td", {}, [del]),
   ]);
+  tr.dataset.byteOrder = p.byte_order || "";  // no column for it; kept as loaded
+  sync();
   del.addEventListener("click", () => tr.remove());
   tbody.append(tr);
 }
@@ -707,9 +778,7 @@ function setEditHints(kind, record, device) {
     : device
       ? "Address and instance come from the scan. Press Read to list the device's points."
       : "The controller's IP (and port, if not 47808) and its BACnet device instance number. Press Enter to read its point list.";
-  mh.textContent = device && !record
-    ? "Host and port come from the scan. Holding registers, one register per point, numbered as in the device's manual."
-    : "Holding registers, one register per point. Register numbers are the device's own (from its manual).";
+  mh.textContent = device && !record ? `Host and port come from the scan. ${MODBUS_HELP}` : MODBUS_HELP;
 }
 
 function openConnector({ kind, record = null, device = null }) {
@@ -736,7 +805,7 @@ function openConnector({ kind, record = null, device = null }) {
     $("c-port").value = record?.port || device?.port || 502;
     $("c-unit").value = record?.device_id ?? device?.device_id ?? 1;
     const pts = Object.entries(record?.points || {});
-    if (pts.length) pts.forEach(([l, r]) => addRegisterRow(l, r)); else addRegisterRow();
+    if (pts.length) pts.forEach(([l, r]) => addRegisterRow(l, r, record?.units?.[l])); else addRegisterRow();
   } else {
     $("c-address").value = record?.device_address || device?.address || "";
     $("c-instance").value = record?.device_instance ?? device?.device_instance ?? "";
@@ -798,13 +867,17 @@ async function testRead() {
   const row = [...$("modbus-points").querySelectorAll("tbody tr")].find((tr) => tr.querySelector(".reg-num").value !== "");
   if (!host) return showError("Enter the device's host or IP first.");
   if (!row) return showError("Enter a register number to test.");
-  const register = Number(row.querySelector(".reg-num").value);
-  const label = row.querySelector(".reg-label").value.trim() || `register ${register}`;
+  const f = registerRow(row);
+  const register = Number(f.reg);
+  const label = f.label || `register ${register}`;
+  const { spec } = modbusSpec({ ...f, register });
   $("connector-error").hidden = true;
   $("test-read").disabled = true;
   status.textContent = `Reading register ${register}…`;
   try {
-    const r = await act("modbus_test_read", { host, port: Number($("c-port").value) || 502, device_id: Number($("c-unit").value) || 0, register });
+    // The row's type, function and scale go along, so the value reads as it will publish.
+    const r = await act("modbus_test_read", { host, port: Number($("c-port").value) || 502, device_id: Number($("c-unit").value) || 0, register,
+                                              ...(typeof spec === "object" ? { point: spec } : {}) });
     status.textContent = `OK: ${label} (register ${register}) = ${r && r.value !== undefined ? r.value : "?"}`;
   } catch (err) {
     status.textContent = "";
@@ -869,18 +942,23 @@ async function saveConnector(ev) {
     if (!state.editing) Object.assign(body, { device_address: $("c-address").value.trim(), device_instance: Number($("c-instance").value) });
   } else {
     const points = {};
+    const units = {};
     for (const tr of $("modbus-points").querySelectorAll("tbody tr")) {
-      const label = tr.querySelector(".reg-label").value.trim();
-      const reg = tr.querySelector(".reg-num").value;
-      if (!label && reg === "") continue;
-      if (!label || reg === "" || !(Number(reg) >= 0)) return showError("Each register row needs a name and a register number.");
-      if (label in points) return showError(`"${label}" is used twice - names must be unique.`);
-      points[label] = Number(reg);
+      const f = registerRow(tr);
+      if (!f.label && f.reg === "") continue;
+      if (!f.label || f.reg === "" || !Number.isInteger(Number(f.reg)) || Number(f.reg) < 0 || Number(f.reg) > 65535) {
+        return showError("Each register row needs a name and a register number 0-65535.");
+      }
+      if (f.label in points) return showError(`"${f.label}" is used twice - names must be unique.`);
+      if (!Number.isFinite(f.scale) || f.scale === 0 || !Number.isFinite(f.offset)) return showError(`"${f.label}": scale must be a non-zero number, offset a number.`);
+      const out = modbusSpec({ ...f, register: Number(f.reg) });
+      points[f.label] = out.spec;
+      if (out.unit) units[f.label] = out.unit;
     }
     if (!Object.keys(points).length) return showError("Add at least one register.");
     const host = $("c-host").value.trim();
     if (!host) return showError("Enter the device's host or IP.");
-    body = { topic_prefix: prefix, poll_interval: poll, points, host, port: Number($("c-port").value) || 502, device_id: Number($("c-unit").value) || 0 };
+    body = { topic_prefix: prefix, poll_interval: poll, points, units, host, port: Number($("c-port").value) || 502, device_id: Number($("c-unit").value) || 0 };
   }
   $("connector-save").disabled = true;
   try {
@@ -908,7 +986,7 @@ function onConnectorKey(ev) {
   if (t.id === "c-address" || t.id === "c-instance") {
     ev.preventDefault();
     learn();
-  } else if (t.matches(".pt-label, .pt-on, .reg-label, .reg-num, #pt-search, #pt-type, #c-host, #c-port, #c-unit")) {
+  } else if (t.matches(".pt-label, .pt-on, .reg-label, .reg-num, .reg-scale, .reg-offset, .reg-unit, .reg-write, #pt-search, #pt-type, #c-host, #c-port, #c-unit")) {
     ev.preventDefault();
   }
 }

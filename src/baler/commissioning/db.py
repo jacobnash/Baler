@@ -167,6 +167,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS cx_risks_one_standing ON cx_risks (issue_id) W
 ALTER TABLE cx_risks ADD COLUMN IF NOT EXISTS owner TEXT;
 ALTER TABLE cx_risks ADD COLUMN IF NOT EXISTS retest_trigger TEXT;
 ALTER TABLE cx_risks ADD COLUMN IF NOT EXISTS accepted_name TEXT;
+-- Baler#121: "account" when accepted_name is the accepter's user-record
+-- display name, "typed" when typed in the form; NULL on older waivers
+-- (read as typed - never labelled the CxA).
+ALTER TABLE cx_risks ADD COLUMN IF NOT EXISTS accepted_name_source TEXT;
 
 -- Cx 6 (#42): start-up / power-on / functional test procedures as data,
 -- and their passive test runs (commissioning.procedures).
@@ -354,7 +358,7 @@ ISSUE_COLS = ("id", "project_id", "equip_uri", "check_id", "subject", "status", 
               "created_at", "updated_at", "closed_at", "resolved_at", "resolved_by", "retest")
 _ISSUE_JSON = ("detail", "resolved_by", "retest")
 RISK_COLS = ("id", "issue_id", "accepted_by", "accepted_email", "reason", "review_by", "created_at", "revoked_at",
-             "revoked_by", "owner", "retest_trigger", "accepted_name")
+             "revoked_by", "owner", "retest_trigger", "accepted_name", "accepted_name_source")
 
 
 class IssueExists(Exception):
@@ -448,11 +452,12 @@ class MemoryRepo:
     """In-process twin of PgRepo for tests and service-free runs."""
 
     def __init__(self, store=None, history: InMemoryHistory | None = None, sites: dict | None = None,
-                 scope_fn=None, users: dict | None = None):
+                 scope_fn=None, users: dict | None = None, names: dict | None = None):
         self.store = store
         self._history = history or InMemoryHistory()
         self.sites = sites or {}  # id -> {id, org_id, name, topic_prefixes}
         self.users = users or {}  # sub -> email
+        self.names = names or {}  # sub -> display name (users.display_name)
         self._scope_fn = scope_fn or (lambda claims: Scope.everything())
         self.projects: dict[str, dict] = {}
         self.events: list[dict] = []
@@ -478,6 +483,9 @@ class MemoryRepo:
 
     def user_email(self, sub: str | None) -> str | None:
         return self.users.get(sub) if sub else None
+
+    def user_name(self, sub: str | None) -> str | None:
+        return self.names.get(sub) if sub else None
 
     @contextlib.contextmanager
     def history(self):
@@ -814,6 +822,13 @@ class PgRepo:
         with self.pool.connection() as conn:
             user = auth.get_user(conn, sub)
         return user["email"] if user else None
+
+    def user_name(self, sub: str | None) -> str | None:
+        """The display name on the user record (Baler#121), if one is set."""
+        if not sub:
+            return None
+        with self.pool.connection() as conn:
+            return auth.get_display_name(conn, sub) or None
 
     @contextlib.contextmanager
     def history(self):

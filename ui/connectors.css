@@ -72,6 +72,12 @@ fieldset.inline input { width: auto; display: inline; margin: 0; }
 .points-wrap td.cb input, .points-wrap th.cb input { width: 1.1rem; height: 1.1rem; display: inline; margin: 0; }
 .points-wrap input[type="text"], .points-wrap input[type="number"] { width: 100%; min-width: 9rem; margin: 0; }
 .points-wrap td.mono { white-space: nowrap; }
+/* Modbus register editor (Baler#128): ten columns at their natural width, scrolling sideways. */
+.points-wrap #modbus-points { width: max-content; }
+#modbus-points select { margin: 0; width: auto; }
+#modbus-points .reg-label { width: 10rem; min-width: 0; }
+#modbus-points .reg-num, #modbus-points .reg-scale, #modbus-points .reg-offset, #modbus-points .reg-unit { width: 5rem; min-width: 0; }
+#modbus-points .reg-write { width: auto; display: inline; margin: 0; }
 .pt-meta { font-size: 0.75rem; color: var(--muted); margin-top: 0.15rem; overflow-wrap: anywhere; }
 .narrow-only { display: none; }
 
