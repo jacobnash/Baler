@@ -507,6 +507,7 @@ def _read_rollup_planned(conn, parts: list[tuple], point_uris: list[str], start_
     direct_params: list = []
     grouped_params: list = []
     for part in parts:
+        branch: sql.Composable
         if part[0] == "view":
             _, schema, table, size, a, b = part
             branch = sql.SQL(
