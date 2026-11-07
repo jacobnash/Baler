@@ -69,3 +69,9 @@ button.danger { border-color: var(--color-critical); color: var(--color-critical
 .agent-transcript .msg.user { font-weight: 600; }
 .agent-transcript .msg.tool { color: var(--muted); font-size: 0.75rem; }
 .agent-input textarea { flex: 1; font: inherit; font-size: 0.85rem; padding: 0.3rem; }
+/* phone width (Baler#125): toolbars wrap instead of widening the page */
+.cx-main .toolbar { flex-wrap: wrap; }
+/* an absolutely positioned .sr-only inside a scrolled table (the risks
+   table's Actions header) escaped an unpositioned wrapper and widened the
+   page to ~700px at phone width */
+.cx-main .table-scroll, .cx-main .cx-grid-wrap { position: relative; }

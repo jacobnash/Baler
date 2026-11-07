@@ -28,7 +28,7 @@ def spec() -> dict:
 @pytest.fixture
 def repo():
     return db.MemoryRepo(store=fx.store(), history=fx.history(), sites=api.SITES, scope_fn=api._scope,
-                         users={"u-a": "a@example.com"})
+                         users={"u-a": "a@example.com"}, names={"u-a": "Ann Example"})
 
 
 @pytest.fixture

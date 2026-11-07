@@ -108,7 +108,7 @@ function renderUsers() {
     const lastAdmin = user.role === "admin" && !user.disabled && adminCount() <= 1;
 
     const email = document.createElement("td");
-    email.textContent = user.email;
+    email.textContent = user.display_name ? `${user.display_name} · ${user.email}` : user.email;
     if (isMe) email.append(" ", badge("you", ""));
     if (user.disabled) {
       email.append(" ", badge("disabled", "user-disabled"));
@@ -180,6 +180,7 @@ function openUserDialog(user) {
   $("user-dialog-title").textContent = user ? `Edit ${user.email}` : "New user";
   $("user-email-label").hidden = Boolean(user);
   $("user-email").required = !user;
+  $("user-display-name").value = (user && user.display_name) || "";
   $("user-role").value = user ? user.role : "viewer";
   $("user-role").disabled = Boolean(isMe || lastAdmin);
   $("user-role").title = isMe ? "You can't change your own role" : lastAdmin ? "The organization's last admin" : "";
@@ -204,14 +205,21 @@ function wireUserDialog() {
     const editing = usersState.editing;
     try {
       if (editing) {
-        const patch = { site_ids: chosenSites() };
-        if (!$("user-role").disabled) patch.role = $("user-role").value;
-        await authApi("PATCH", `/users/${encodeURIComponent(editing.id)}`, patch);
+        // only what changed: a role or sites change signs them out, a
+        // display name alone doesn't
+        const patch = {};
+        const sites = chosenSites();
+        if (sites.slice().sort().join() !== editing.site_ids.slice().sort().join()) patch.site_ids = sites;
+        if (!$("user-role").disabled && $("user-role").value !== editing.role) patch.role = $("user-role").value;
+        const name = $("user-display-name").value.trim();
+        if (name !== (editing.display_name || "")) patch.display_name = name || null;
+        if (Object.keys(patch).length) await authApi("PATCH", `/users/${encodeURIComponent(editing.id)}`, patch);
         $("user-dialog").close();
       } else {
         const email = $("user-email").value.trim();
         const password = generatePassword();
-        await authApi("POST", "/users", { email, password, role: $("user-role").value, site_ids: chosenSites() });
+        await authApi("POST", "/users", { email, password, role: $("user-role").value, site_ids: chosenSites(),
+          display_name: $("user-display-name").value.trim() || null });
         $("user-dialog").close();
         showSecret("User created", `Give ${email} this password to sign in with. They can change it under Ops -> Your account.`, password);
       }

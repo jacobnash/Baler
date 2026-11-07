@@ -125,7 +125,7 @@
       <div class="toolbar"><button type="button" id="new-user-btn">New user</button>
         <span id="users-status" class="hint"></span></div>
       <table>
-        <thead><tr><th>Email</th><th>Role</th><th>Sites</th><th>Added</th><th></th></tr></thead>
+        <thead><tr><th>User</th><th>Role</th><th>Sites</th><th>Added</th><th></th></tr></thead>
         <tbody id="users-body"></tbody>
       </table>
     </section>
@@ -151,6 +151,7 @@
     <form id="user-form" method="dialog">
       <h3 id="user-dialog-title">New user</h3>
       <label id="user-email-label">Email <input type="email" id="user-email" autocomplete="off" required /></label>
+      <label>Display name <input type="text" id="user-display-name" maxlength="120" autocomplete="off" placeholder="how they sign, e.g. Jacob Nash" /></label>
       <label>Role
         <select id="user-role">
           <option value="viewer">Viewer</option>

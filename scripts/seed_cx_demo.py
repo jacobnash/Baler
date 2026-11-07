@@ -33,6 +33,7 @@ import os
 import random
 import sys
 import time
+from urllib.parse import urlsplit
 
 import requests
 
@@ -359,7 +360,9 @@ def cmd_report(b, slug):
     """Save the project's Cx report (GET /cx/projects/{id}/report?format=html)."""
     title = PROJECTS[slug][0]
     p = b.project(title, "design", slug, GATED)
-    r = b.req("GET", f"/cx/projects/{p['id']}/report", params={"format": "html"})
+    # origin: the saved file's trend links point at this Baler, not at a
+    # root-relative path that means nothing in a file (Baler#125)
+    r = b.req("GET", f"/cx/projects/{p['id']}/report", params={"format": "html", "origin": "{0.scheme}://{0.netloc}".format(urlsplit(b.url))})
     if r.status_code != 200:
         raise SystemExit(f"report -> {r.status_code}: {r.text[:200]}")
     path = f"cx-report-{slug}.html"

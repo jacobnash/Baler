@@ -395,12 +395,46 @@ paths:
         - name: format
           in: query
           schema: { type: string, enum: [json, html], default: json }
+        - { $ref: "#/components/parameters/ReportOrigin" }
       responses:
         "200":
           description: The report
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Report" }
+            text/html:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/report:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Runs]
+      operationId: getCxProjectReport
+      summary: The project's Cx report - JSON, or a printable HTML page
+      description: >-
+        The whole project for the CxA (Baler#87): scope and limitations,
+        sequences of operation, acceptance criteria (each rule exactly as
+        its test run judged it, from the procedure snapshot stored on the
+        run - a procedure edited since is flagged, Baler#118), per-point
+        availability over the latest verification run, phase history, spec
+        vs installed, equipment verdicts with waived results marked, test
+        procedure results, the issues log with waivers, and a sign-off
+        block. Equipment names are read in the project's own scope, so they
+        don't depend on who generates it (Baler#123); results are still
+        filtered by the caller's scope.
+      parameters:
+        - name: format
+          in: query
+          schema: { type: string, enum: [json, html], default: json }
+        - { $ref: "#/components/parameters/ReportOrigin" }
+      responses:
+        "200":
+          description: The report
+          content:
+            application/json:
+              schema: { type: object }
             text/html:
               schema: { type: string }
         "400": { $ref: "#/components/responses/BadRequest" }
@@ -748,19 +782,25 @@ paths:
         Not a fault and not a closed issue. While the risk stands, the check
         failing again is recorded against it rather than reopening the
         issue. Once `review_by` passes, the risk lapses and the issue
-        reopens.
+        reopens. A waiver names who carries it and what retest lifts it
+        (both required, Baler#121). The accepter is named by the display
+        name on their own user record (set by an admin, PATCH
+        /auth/users/{id}); `accepted_name` is then ignored. Only an account
+        with no display name must send `accepted_name`, which is kept as
+        typed and never labelled the CxA in the report.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [reason, review_by]
+              required: [reason, review_by, owner, retest_trigger]
               properties:
                 reason: { type: string }
                 review_by: { type: string, format: date }
-                owner: { type: string, description: Who carries the open item }
-                retest_trigger: { type: string, description: "What retest lifts it, e.g. when real equipment is installed" }
+                owner: { type: string, minLength: 1, description: Who carries the open item }
+                retest_trigger: { type: string, minLength: 1, description: "What retest lifts it, e.g. when real equipment is installed" }
+                accepted_name: { type: string, description: "How the accepter signs; used only when their account has no display name" }
       responses:
         "201":
           description: The risk
@@ -1704,6 +1744,15 @@ components:
       in: path
       required: true
       schema: { type: string }
+    ReportOrigin:
+      name: origin
+      in: query
+      description: >-
+        Where Baler is, as scheme and host (e.g. https://baler.example.com).
+        Trend links in the HTML report point there, so they still work from
+        a saved file or the UI's blob: page, where a root-relative link
+        resolves to nothing (Baler#125). Omitted: root-relative links.
+      schema: { type: string, pattern: "^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$" }
   responses:
     BadRequest:
       description: Invalid input
@@ -2339,6 +2388,14 @@ components:
         revoked_by: { type: [string, "null"] }
         owner: { type: [string, "null"], description: Who is responsible for the open item (not necessarily who accepted it) }
         retest_trigger: { type: [string, "null"], description: "What retest lifts the waiver, e.g. first seasonal changeover" }
+        accepted_name: { type: [string, "null"], description: "Who accepted it, by name (null on waivers from before Baler#100)" }
+        accepted_name_source:
+          type: [string, "null"]
+          enum: [account, typed, null]
+          description: >-
+            account: the display name on the accepter's user record,
+            snapshotted when accepted; typed: entered in the form; null on
+            older waivers (read as typed).
     EquipVerdict:
       type: object
       required: [status, counts]

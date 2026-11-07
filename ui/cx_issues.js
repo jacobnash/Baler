@@ -74,6 +74,13 @@ async function loadIssues() {
   }
 }
 
+// Who accepted a waiver: the name from their account, or a typed one
+// (marked), or - on waivers from before names - the account email.
+function acceptedBy(k) {
+  if (!k.accepted_name) return k.accepted_email || k.accepted_by || "";
+  return k.accepted_name_source === "account" ? k.accepted_name : `${k.accepted_name} (as typed)`;
+}
+
 async function loadRisks() {
   if (!cx.project) return;
   const body = $("risks-body");
@@ -83,7 +90,7 @@ async function loadRisks() {
     for (const k of risks) {
       const tr = el("tr");
       tr.innerHTML = `<td>${esc(k.issue.title || k.issue_id)}</td><td>${esc(k.reason)}</td>
-        <td>${esc(k.accepted_name || k.accepted_email || k.accepted_by || "")}${k.accepted_name && k.accepted_email ? `<br><span class="hint">via ${esc(k.accepted_email)}</span>` : ""}</td><td>${esc(k.owner || "")}</td>
+        <td>${esc(acceptedBy(k))}${k.accepted_name && k.accepted_email ? `<br><span class="hint">via ${esc(k.accepted_email)}</span>` : ""}</td><td>${esc(k.owner || "")}</td>
         <td>${esc(k.retest_trigger || "")}</td><td>${esc(k.review_by)}</td><td></td>`;
       if (can("admin")) {
         const rv = el("button", { type: "button", textContent: "Revoke" });
@@ -100,9 +107,9 @@ async function loadRisks() {
       }
       body.append(tr);
     }
-    if (!risks.length) body.innerHTML = '<tr><td colspan="5" class="hint">No standing risks.</td></tr>';
+    if (!risks.length) body.innerHTML = '<tr><td colspan="7" class="hint">No standing risks.</td></tr>';
   } catch (err) {
-    body.innerHTML = `<tr><td colspan="5" class="st-fail">${esc(err.message)}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="7" class="st-fail">${esc(err.message)}</td></tr>`;
   }
 }
 
@@ -144,7 +151,7 @@ async function openIssue(id) {
     lines.push(`Closed citing retest: ${rt.test_run_id ? "procedure test run" : "verification run"} ${String(issue.closed_run).slice(0, 8)} (${issue.closed_run})`);
   }
   if (issue.risk) {
-    lines.push(`Risk accepted by ${issue.risk.accepted_email || issue.risk.accepted_by || "?"}: ${issue.risk.reason} - review by ${issue.risk.review_by}`
+    lines.push(`Risk accepted by ${acceptedBy(issue.risk) || "?"}${issue.risk.accepted_name && issue.risk.accepted_email ? ` (via ${issue.risk.accepted_email})` : ""}: ${issue.risk.reason} - review by ${issue.risk.review_by}`
       + (issue.risk.owner ? ` · owner ${issue.risk.owner}` : "") + (issue.risk.retest_trigger ? ` · retest when ${issue.risk.retest_trigger}` : ""));
   }
   $("issue-detail").innerHTML = lines.map((l) => `<p>${esc(l)}</p>`).join("");
@@ -166,7 +173,12 @@ async function openIssue(id) {
   $("risk-reason").value = "";
   $("risk-owner").value = "";
   $("risk-retest").value = "";
-  $("risk-name").value = (cx.project.settings && cx.project.settings.cxa_name) || "";
+  // The accepter is named by their account's display name; only an account
+  // without one types a name, and a typed name is never labelled the CxA.
+  const mine = (cx.me && cx.me.display_name) || "";
+  $("risk-name").value = mine;
+  $("risk-name").readOnly = Boolean(mine);
+  $("risk-name-hint").textContent = mine ? "from your account" : "your account has no display name (an admin sets it in Ops -> Users): type how you sign";
   $("risk-review").value = "";
   const ev = $("issue-events");
   ev.innerHTML = "";
@@ -205,6 +217,13 @@ async function saveIssue(ev) {
 
 async function acceptRisk() {
   const i = issueState.current;
+  const missing = [["risk-reason", "a reason"], ["risk-owner", "an owner"], ["risk-retest", "a retest trigger"],
+    ["risk-name", "who is accepting it"], ["risk-review", "a review-by date"]].filter(([id]) => !$(id).value.trim());
+  if (missing.length) {
+    issueError(`A waiver needs ${missing.map(([, what]) => what).join(", ")}.`);
+    $(missing[0][0]).focus();
+    return;
+  }
   try {
     await cxApi("POST", `/issues/${i.id}/risk`, { reason: $("risk-reason").value.trim(), review_by: $("risk-review").value,
       owner: $("risk-owner").value.trim(), retest_trigger: $("risk-retest").value.trim(),
