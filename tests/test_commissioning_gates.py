@@ -195,7 +195,7 @@ def test_an_inconclusive_check_can_be_waived_for_acceptance(base, repo):
     before = requests.get(f"{base}/projects/{p['id']}/gate", params={"to": "acceptance"}, headers=A).json()["gate"]
     unwaived = next(u for u in before["unmet"] if u["rule"] == "no_unwaived_inconclusive")["count"]
     risk = requests.post(f"{base}/issues/{r.json()['id']}/risk", headers=ti.ADMIN,
-                         json={"reason": "read-only controller; retest when writes are enabled",
+                         json={"reason": "read-only controller", "owner": "Controls Co", "retest_trigger": "writes enabled",
                                "review_by": (fx.NOW.date() + timedelta(days=90)).isoformat()})
     assert risk.status_code in (200, 201), risk.text
     after = requests.get(f"{base}/projects/{p['id']}/gate", params={"to": "acceptance"}, headers=A).json()["gate"]
@@ -235,3 +235,68 @@ def test_report_round_two_waivers_sequences_and_criteria(base, repo):
                  "Acceptance criteria and results", "available at least 95%", "Sequences of operation", "UTC",
                  'id="waivers"', f'id="issue-{issue["id"]}"', "waived (risk accepted)"):
         assert want in page, want
+
+
+def test_report_review_100_rules_as_judged_waived_badges_and_acceptance(base, repo):
+    """#100 review: (1) rules print as the run judged them, and an edit after
+    the run is flagged; (2) acceptance availability is data; (3) waived
+    results carry a text badge and a per-equipment count; (4) accepted-by is
+    a name labelled CxA, owner and retest trigger are required; explicit
+    sequence tags; thead/scope."""
+    p, run = ti._completed_run(base)
+    assert requests.patch(f"{base}/projects/{p['id']}", headers=A, json={"settings": {
+        "cxa_name": "Jacob Nash", "acceptance": {"min_pct": 90, "max_gap_minutes": 10, "settle_minutes": 30}}}).status_code == 200
+    inc = next(r for r in repo.get_results(run["id"]) if r["status"] == "inconclusive")
+    issue = requests.post(f"{base}/projects/{p['id']}/issues", headers=A,
+                          json={"from_result": {"run_id": run["id"], "check_id": inc["check_id"], "subject": inc["subject"]}}).json()
+    review = (fx.NOW.date() + timedelta(days=60)).isoformat()
+    bad = requests.post(f"{base}/issues/{issue['id']}/risk", headers=ti.ADMIN, json={"reason": "x", "review_by": review})
+    assert bad.status_code == 400 and "owner" in bad.json()["error"]
+    assert requests.post(f"{base}/issues/{issue['id']}/risk", headers=ti.ADMIN, json={
+        "reason": "read-only", "owner": "Controls Co", "retest_trigger": "writes enabled", "accepted_name": "Jacob Nash",
+        "review_by": review}).status_code == 201
+    # a plain range explicitly tagged S2 counts as a sequence
+    proc = requests.post(f"{base}/projects/{p['id']}/procedures", headers=A, json={
+        "name": "AHU seq", "kind": "startup", "equip_class": "Air_Handling_Unit",
+        "steps": [{"id": "s2", "title": "Supply air band",
+                   "criteria": [{"range": {"min": 40, "max": 80, "unit": "F"}, "point_class": "Discharge_Air_Temperature_Sensor",
+                                 "sequence": "S2"}]}]}).json()
+    tr = requests.post(f"{base}/procedures/{proc['id']}/runs", headers=A,
+                       json={"started_at": (fx.NOW - timedelta(hours=2)).isoformat(), "hours": 2})
+    assert tr.status_code in (200, 201, 202), tr.text
+    for _ in range(100):
+        if repo.list_test_runs(proc["id"])[0]["status"] in ("completed", "failed"):
+            break
+        import time as _t
+        _t.sleep(0.05)
+    # edit the threshold after the run
+    assert requests.patch(f"{base}/procedures/{proc['id']}", headers=A, json={"steps": [{"id": "s2", "title": "Supply air band",
+        "criteria": [{"range": {"min": 50, "max": 60, "unit": "F"}, "point_class": "Discharge_Air_Temperature_Sensor",
+                      "sequence": "S2"}]}]}).status_code == 200
+    rep = requests.get(f"{base}/projects/{p['id']}/report", headers=A).json()
+    [sq] = [s for s in rep["sequences"] if s["procedure_id"] == proc["id"]]
+    assert sq["sequence"] == "S2" and sq["procedure_edited"] is True and "40..80" in sq["rule"]  # the rule the run judged
+    assert "no_sequences" not in {x["kind"] for x in rep["limitations"]}
+    assert "procedure_edited" in {x["kind"] for x in rep["limitations"]}
+    acc = rep["acceptance"]
+    assert acc["min_pct"] == 90 and acc["settle_minutes"] == 30 and acc["points"]
+    assert all({"samples", "expected", "availability_pct", "pass"} <= set(pt) for pt in acc["points"])
+    assert rep["issue_counts"]["total"] == sum(rep["issue_counts"][k] for k in ("open", "waived", "closed", "other"))
+    waived_eq = [e for e in rep["latest_run"]["equipment"] if e["waived"]]
+    assert waived_eq and any(r["waived_by"] == issue["id"] for e in waived_eq for r in e["results"])
+    page = requests.get(f"{base}/projects/{p['id']}/report", params={"format": "html"}, headers=A).text
+    for want in ("procedure edited after this run", "Per-point availability", "settle 30 min", ">waived<",
+                 f'href="#issue-{issue["id"]}"', "Jacob Nash, CxA", "via ", "<thead>", 'scope="col"', "<caption>"):
+        assert want in page, want
+
+
+def test_report_says_when_equipment_names_are_unavailable(base, monkeypatch):
+    p, _run = ti._completed_run(base)
+    from baler.commissioning import inventory
+
+    def boom(*a, **k):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(inventory, "build", boom)
+    rep = requests.get(f"{base}/projects/{p['id']}/report", headers=A).json()
+    assert rep["equipment_names"] is False and "equipment_names_unavailable" in {x["kind"] for x in rep["limitations"]}

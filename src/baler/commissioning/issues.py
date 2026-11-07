@@ -215,7 +215,17 @@ def check_risk(body: dict, today: date) -> tuple[str, date]:
 
 
 def risk_extras(body: dict) -> dict:
-    return {"owner": _text(body.get("owner"), 200), "retest_trigger": _text(body.get("retest_trigger"), 500)}
+    """A waiver must say who carries the open item and what retest lifts it
+    - a blank Owner / Retest trigger printed "-" in the report (Baler#100
+    review). accepted_name is how the person accepting it signs (e.g.
+    "Jacob Nash"); the account email stays as accepted_email."""
+    owner = _text(body.get("owner"), 200)
+    trigger = _text(body.get("retest_trigger"), 500)
+    if not owner:
+        raise ValueError("owner is required: who is responsible for the open item")
+    if not trigger:
+        raise ValueError("retest_trigger is required: what retest lifts the waiver (e.g. first seasonal changeover)")
+    return {"owner": owner, "retest_trigger": trigger, "accepted_name": _text(body.get("accepted_name"), 200)}
 
 
 # ------------------------------------------------------------ import/export

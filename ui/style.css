@@ -208,3 +208,6 @@ button.danger { margin-left: auto; color: var(--color-critical, #c53030); }
 .range-picker button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
 /* a deleted derivation's leftover output in the point list (Baler#62) */
 #tree button.orphan { opacity: 0.6; }
+
+/* Visually hidden, still read by screen readers (table captions, icon-only headers). */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }

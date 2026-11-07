@@ -166,6 +166,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS cx_risks_one_standing ON cx_risks (issue_id) W
 -- accepted it) and what retest lifts it, as fields rather than prose.
 ALTER TABLE cx_risks ADD COLUMN IF NOT EXISTS owner TEXT;
 ALTER TABLE cx_risks ADD COLUMN IF NOT EXISTS retest_trigger TEXT;
+ALTER TABLE cx_risks ADD COLUMN IF NOT EXISTS accepted_name TEXT;
 
 -- Cx 6 (#42): start-up / power-on / functional test procedures as data,
 -- and their passive test runs (commissioning.procedures).
@@ -353,7 +354,7 @@ ISSUE_COLS = ("id", "project_id", "equip_uri", "check_id", "subject", "status", 
               "created_at", "updated_at", "closed_at", "resolved_at", "resolved_by", "retest")
 _ISSUE_JSON = ("detail", "resolved_by", "retest")
 RISK_COLS = ("id", "issue_id", "accepted_by", "accepted_email", "reason", "review_by", "created_at", "revoked_at",
-             "revoked_by", "owner", "retest_trigger")
+             "revoked_by", "owner", "retest_trigger", "accepted_name")
 
 
 class IssueExists(Exception):

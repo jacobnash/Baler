@@ -11,6 +11,7 @@ script and loads nothing, so it prints the same offline.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from html import escape
 from urllib.parse import quote
@@ -110,17 +111,25 @@ def equipment_summary(results: list[dict]) -> dict[str, dict]:
     return out
 
 
+def waiver_index(issues: list[dict] | None) -> dict[tuple, str]:
+    """(check_id, subject) -> the id of the issue whose accepted risk waives it."""
+    return {(i.get("check_id"), i.get("subject")): i["id"] for i in issues or []
+            if i.get("status") == "risk_accepted" and i.get("check_id")}
+
+
 def build(project: dict, run: dict, results: list[dict], issues: list[dict] | None = None,
           active_runs: list[dict] | None = None) -> dict:
     summary = equipment_summary(results)
+    waivers = waiver_index(issues)
     equipment = []
     for equip in sorted(summary, key=lambda e: (ORDER[summary[e]["status"]], e)):
         rs = sorted(({**r, "reason": reason(r), "evidence_link": evidence_link(r["subject"], run.get("window_start"),
-                                                                               run.get("window_end"))}
+                                                                               run.get("window_end")),
+                      "waived_by": waivers.get((r["check_id"], r["subject"])) if r["status"] != "pass" else None}
                      for r in results if r["equip_uri"] == equip),
                     key=lambda r: (ORDER.get(r["status"], 9), r["check_id"], r["subject"]))
         equipment.append({"equip_uri": equip, **summary[equip], "verdict": VERDICT_WORD[summary[equip]["status"]],
-                          "results": rs})
+                          "waived": sum(1 for r in rs if r["waived_by"]), "results": rs})
     return {
         "project": {"id": project["id"], "name": project["name"], "site_id": project.get("site_id"),
                     "phase": project.get("phase")},
@@ -138,7 +147,8 @@ h3 { font-size: 11pt; margin: .8em 0 .2em; } .muted { color: #555; } table { bor
 th, td { text-align: left; vertical-align: top; padding: 2px 6px; border-bottom: 1px solid #ddd; font-size: 9.5pt; }
 .s { font-weight: 600; text-transform: uppercase; font-size: 8.5pt; }
 .fail { color: #b00; } .pass { color: #186b2f; } .inconclusive { color: #8a5a00; } .not_applicable { color: #666; }
-.equip { break-inside: avoid; } ul { margin: .2em 0 .2em 1.2em; padding: 0; } li { font-size: 9pt; }
+.equip h3 { break-after: avoid; } .waived { color: #5a3d8a; border: 1px solid currentColor; border-radius: 3px; padding: 0 3px; }
+tr, .signoff { break-inside: avoid; } thead { display: table-header-group; } ul { margin: .2em 0 .2em 1.2em; padding: 0; } li { font-size: 9pt; }
 @media print { body { margin: 0; } a { color: inherit; text-decoration: none; } }
 """
 
@@ -151,6 +161,15 @@ def _verdict(s: str) -> str:
     return f'<span class="s {escape(s)}">{escape(VERDICT_WORD.get(s, s))}</span>'
 
 
+def _waived(issue_id: str | None) -> str:
+    """A text badge (not colour alone) linking to the waiver's issue row."""
+    return f' <a class="s waived" href="#issue-{escape(str(issue_id))}">waived</a>' if issue_id else ""
+
+
+def _waived_count(e: dict) -> str:
+    return f' · <span class="s waived">{e["waived"]} waived</span>' if e.get("waived") else ""
+
+
 def _link(href: str | None, text: str = "trend") -> str:
     return f'<a href="{escape(href)}">{escape(text)}</a>' if href else ""
 
@@ -160,8 +179,9 @@ def _when(v) -> str:
     d = _dt(v)
     if not d:
         return escape(str(v or "-"))
-    if d.tzinfo is not None:
-        d = d.astimezone(timezone.utc)
+    # A naive timestamp is UTC in this codebase (every writer stores UTC);
+    # say so rather than guess a local zone.
+    d = d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d.astimezone(timezone.utc)
     return d.strftime("%Y-%m-%d %H:%M UTC")
 
 
@@ -174,7 +194,19 @@ def _history(events: list[dict]) -> str:
     return " → ".join(f"{escape(e['action'])} ({escape(_actor(e))}, {_when(e['ts'])})" for e in reversed(events or []))
 
 
-def issues_html(issues: list[dict]) -> str:
+def _accepted_by(risk: dict, cxa: str | None) -> str:
+    """The signer's name, labelled CxA when it is the project's CxA, with
+    the account it came through as secondary (Baler#100 review)."""
+    name = risk.get("accepted_name")
+    email = risk.get("accepted_email") or risk.get("accepted_by") or ""
+    if not name:
+        return escape(email or "-")
+    want = (cxa or "").strip().lower()
+    is_cxa = bool(want) and (name.strip().lower() == want or want.startswith(name.strip().lower()))
+    return f'{escape(name)}{", CxA" if is_cxa else ""}<br><span class=muted>via {escape(email)}</span>'
+
+
+def issues_html(issues: list[dict], cxa: str | None = None) -> str:
     """The issues log: one row per issue with its point, severity,
     opened/closed (run, time, who) and status history; waivers listed as
     open items with owner, reason and review-by (Baler#87)."""
@@ -200,19 +232,31 @@ def issues_html(issues: list[dict]) -> str:
     if waivers:
         wrows = "".join(
             f'<tr><td><a href="#issue-{escape(str(i["id"]))}">{escape(str(i["id"])[:8])}</a> {escape(i.get("title", ""))}</td>'
-            f'<td>{escape(str(i["risk"].get("accepted_email") or i["risk"].get("accepted_by") or "-"))}</td>'
+            f'<td>{_accepted_by(i["risk"], cxa)}</td>'
             f'<td>{escape(i["risk"].get("owner") or "-")}</td>'
             f'<td>{escape(i["risk"].get("reason") or "")}</td>'
             f'<td>{escape(i["risk"].get("retest_trigger") or "-")}</td>'
             f'<td>{escape(str(i["risk"].get("review_by")))}</td></tr>' for i in waivers)
-        wtab = ('<h3 id="waivers">Waivers (accepted risks) - still open</h3><table><tr><th>Item</th><th>Accepted by</th>'
+        wtab = ('<h3 id="waivers">Waivers (accepted risks) - still open</h3><table><caption>Waivers: inconclusive or failing '
+                'results accepted as risk; each stays open until its retest</caption><tr><th>Item</th><th>Accepted by</th>'
                 "<th>Owner / responsible</th><th>Reason</th><th>Retest trigger</th><th>Review by</th></tr>"
                 f"{wrows}</table>")
-    return ("<h2>Issues log</h2><table><tr><th>ID</th><th>Status</th><th>Issue / point</th><th>Severity</th><th>Opened</th>"
+    return ("<h2>Issues log</h2><table><caption>Every issue, with who opened, resolved and closed it</caption><tr><th>ID</th><th>Status</th><th>Issue / point</th><th>Severity</th><th>Opened</th>"
             f"<th>Closed</th><th>History</th></tr>{''.join(rows)}</table>{wtab}")
 
 
+def _a11y_tables(page: str) -> str:
+    """Every table's header row becomes a <thead> (repeats across printed
+    pages) and its cells get scope=col (screen readers)."""
+    page = re.sub(r"(<table[^>]*>(?:<caption>.*?</caption>)?)(<tr>(?:<th>.*?</th>)+</tr>)", r"\1<thead>\2</thead>", page, flags=re.DOTALL)
+    return page.replace("<th>", '<th scope="col">')
+
+
 def html(report: dict, title: str = "Commissioning report") -> str:
+    return _a11y_tables(_html(report, title))
+
+
+def _html(report: dict, title: str = "Commissioning report") -> str:
     p, run = report["project"], report["run"]
     summ = run.get("summary") or {}
     by = summ.get("by_status") or {}
@@ -220,7 +264,7 @@ def html(report: dict, title: str = "Commissioning report") -> str:
     for e in report["equipment"]:
         c = e["counts"]
         rung = "" if e["highest_rung_passed"] is None else f" · highest rung passed {e['highest_rung_passed']}"
-        rows.append(f'<tr><td>{escape(e["equip_uri"])}</td><td>{_verdict(e["status"])}</td>'
+        rows.append(f'<tr><td>{escape(e["equip_uri"])}</td><td>{_verdict(e["status"])}{_waived_count(e)}</td>'
                     f'<td>{c.get("fail", 0)} fail · {c.get("inconclusive", 0)} inconclusive · {c.get("pass", 0)} pass{rung}</td></tr>')
     details = []
     for e in report["equipment"]:
@@ -232,7 +276,7 @@ def html(report: dict, title: str = "Commissioning report") -> str:
                             for c in r.get("candidates") or [])
             sev = f' <span class="muted">({escape(r["severity"])})</span>' if r.get("severity") else ""
             link = _link(r.get("evidence_link") or evidence_link(r["subject"], run.get("window_start"), run.get("window_end")))
-            items.append(f'<tr><td>{_status(r["status"])}</td><td>{escape(r["check_id"])}{sev}</td>'
+            items.append(f'<tr><td>{_status(r["status"])}{_waived(r.get("waived_by"))}</td><td>{escape(r["check_id"])}{sev}</td>'
                          f'<td>{escape(short_point(r["subject"]))} {link}</td><td>{escape(r.get("reason") or reason(r))}'
                          f'{f"<ul>{cands}</ul>" if cands else ""}</td></tr>')
         passed = e["counts"].get("pass", 0)
@@ -302,64 +346,96 @@ _SEQ_KINDS = ("availability", "response")
 
 
 def _is_sequence(c: dict) -> bool:
+    """A criterion that tests a sequence of operation: tagged explicitly
+    (`"sequence": "S2"`), or - as a fallback - shaped like one (availability,
+    response, a range limited to occupied hours)."""
+    if c.get("sequence"):
+        return True
     return any(k in c for k in _SEQ_KINDS) or ("range" in c and bool(c["range"].get("hours")))
 
 
 def _rule_text(c: dict) -> str:
     """A criterion as a person reads it."""
+    tag = f'{c["sequence"]}: ' if c.get("sequence") else ""
     if "availability" in c:
         a = c["availability"]
-        return f'available at least {a["min_pct"]:g}% (a sample at least every {a["max_gap_minutes"]:g} min)'
+        return f'{tag}available at least {a["min_pct"]:g}% (a sample at least every {a["max_gap_minutes"]:g} min)'
     if "response" in c:
         w, t = c["response"]["when"], c["response"]["then"]
-        return (f'when {w.get("point_class") or short_point(w.get("point"))} = {w["equals"]}, '
+        return (f'{tag}when {w.get("point_class") or short_point(w.get("point"))} = {w["equals"]}, '
                 f'{t.get("point_class") or short_point(t.get("point"))} moves at least {t["changes_by"]:g} within {t["within_minutes"]:g} min')
     if "range" in c:
         r = c["range"]
         lo = "-inf" if r.get("min") is None else f'{r["min"]:g}'
         hi = "inf" if r.get("max") is None else f'{r["max"]:g}'
-        txt = f'{c.get("point_class") or short_point(c.get("point"))} within {lo}..{hi} {r.get("unit") or ""}'.rstrip()
+        txt = f'{tag}{c.get("point_class") or short_point(c.get("point"))} within {lo}..{hi} {r.get("unit") or ""}'.rstrip()
         h = r.get("hours")
         if h:
             days = "weekdays" if h.get("days") == [0, 1, 2, 3, 4] else ("days " + ",".join(map(str, h["days"])) if h.get("days") else "every day")
             txt += f', {h.get("from", 0):02d}:00-{h.get("to", 24):02d}:00 {h.get("tz") or "UTC"} {days}'
         return txt
-    return f'check {c.get("check")}' + (" (strict)" if c.get("strict") else "")
+    return f'{tag}check {c.get("check")}' + (" (strict)" if c.get("strict") else "")
+
+
+def recorded_criteria(proc: dict, tr: dict | None) -> tuple[list[dict], bool]:
+    """The criteria as the run judged them - each evaluated criterion carries
+    the rule it was judged on - so a procedure edited after the run can't
+    put new rule text next to an old verdict (Baler#100 review). Returns
+    ([{step_id, title, index, criterion, judged: [...]}], edited)."""
+    rows: dict[tuple, dict] = {}
+    titles = {st["id"]: st.get("title") or st["id"] for st in proc.get("steps") or []}
+    for e in (tr or {}).get("equipment") or []:
+        for st in e.get("steps") or []:
+            for ci, j in enumerate(st.get("criteria") or []):
+                key = (st["id"], ci)
+                row = rows.setdefault(key, {"step_id": st["id"], "title": st.get("title") or titles.get(st["id"], st["id"]),
+                                            "index": ci, "criterion": j.get("criterion") or {}, "judged": []})
+                row["judged"].append(j)
+    current = {(st["id"], ci): c for st in proc.get("steps") or [] for ci, c in enumerate(st.get("criteria") or [])}
+    if not rows:  # never run, or nothing applied: the procedure as it stands, unjudged
+        return ([{"step_id": k[0], "title": titles.get(k[0], k[0]), "index": k[1], "criterion": c, "judged": []}
+                 for k, c in current.items()], False)
+    edited = any(current.get(k) != r["criterion"] for k, r in rows.items()) or set(current) - set(rows) != set()
+    return sorted(rows.values(), key=lambda r: (list(titles).index(r["step_id"]) if r["step_id"] in titles else 99, r["index"])), edited
+
+
+def _worst(judged: list[dict]) -> str | None:
+    statuses = [j["status"] for j in judged if j["status"] != "not_applicable"]
+    return min(statuses, key=lambda x: ORDER[x]) if statuses else None
 
 
 def sequences(procedures: list[dict], latest_test_runs: dict) -> list[dict]:
-    """Every sequence criterion (S1-S3 style: availability, response, a
-    range limited to hours) and where it ran - by criterion, not by the
+    """Every sequence criterion and where it ran - by criterion, not by the
     procedure's kind (Baler#99: S2 ran inside a start-up procedure)."""
     out = []
     for proc in procedures:
         if proc.get("status") != "active":
             continue
         tr = latest_test_runs.get(proc["id"])
-        for st in proc.get("steps") or []:
-            for ci, c in enumerate(st.get("criteria") or []):
-                if not _is_sequence(c):
-                    continue
-                row = {"procedure_id": proc["id"], "procedure": proc.get("name"), "step": st.get("title") or st["id"],
-                       "rule": _rule_text(c), "test_run_id": tr["id"] if tr else None, "status": "not_evaluated",
-                       "reason": "the procedure has never been run" if tr is None else None, "observed": []}
-                if tr is not None:
-                    judged = [e_st["criteria"][ci] for e in tr.get("equipment") or [] for e_st in e.get("steps") or []
-                              if e_st["id"] == st["id"] and ci < len(e_st.get("criteria") or [])]
-                    statuses = [j["status"] for j in judged if j["status"] != "not_applicable"]
-                    if statuses:
-                        row["status"] = min(statuses, key=lambda x: ORDER[x])
-                        why = next((f.get("symptom") for j in judged for f in j.get("failing") or [] if f.get("symptom")), None)
-                        row["reason"] = why
-                        row["observed"] = [o for j in judged for o in j.get("observed") or []][:20]
-                    else:
-                        row["reason"] = "no equipment had the points it needs"
-                out.append(row)
+        crit, edited = recorded_criteria(proc, tr)
+        for r in crit:
+            c = r["criterion"]
+            if not _is_sequence(c):
+                continue
+            row = {"procedure_id": proc["id"], "procedure": proc.get("name"), "step": r["title"],
+                   "sequence": c.get("sequence"), "rule": _rule_text(c), "test_run_id": tr["id"] if tr else None,
+                   "status": "not_evaluated", "reason": "the procedure has never been run" if tr is None else None,
+                   "observed": [], "procedure_edited": edited}
+            if tr is not None:
+                worst = _worst(r["judged"])
+                if worst:
+                    row["status"] = worst
+                    row["reason"] = next((f.get("symptom") for j in r["judged"] for f in j.get("failing") or [] if f.get("symptom")), None)
+                    row["observed"] = [o for j in r["judged"] for o in j.get("observed") or []][:20]
+                else:
+                    row["reason"] = "no equipment had the points it needs"
+            out.append(row)
     return out
 
 
 def limitations(run: dict | None, results: list[dict], procedures: list[dict], latest_test_runs: dict,
-                active_runs: list[dict], writes_enabled: bool, issues: list[dict] | None = None) -> list[dict]:
+                active_runs: list[dict], writes_enabled: bool, issues: list[dict] | None = None,
+                equipment_names: bool = True) -> list[dict]:
     """Scope and limitations, generated from what the records show the
     project couldn't do. Structured: {kind, text}."""
     out: list[dict] = []
@@ -392,6 +468,12 @@ def limitations(run: dict | None, results: list[dict], procedures: list[dict], l
     if not seqs:
         add("no_sequences", "No sequence-of-operation criteria are defined (availability, response, or occupied-hours bands), "
             "so sequences were not evaluated.")
+    if not equipment_names:
+        add("equipment_names_unavailable", "Equipment names and types were unavailable when this report was built; "
+            "raw equipment ids are shown.")
+    if any(sq.get("procedure_edited") for sq in seqs):
+        add("procedure_edited", "At least one procedure was edited after its latest test run; the rules shown are the "
+            "ones that run judged.")
     for sq in seqs:
         if sq["status"] == "not_evaluated":
             add("sequence_not_evaluated", f"{sq['step']} ({sq['procedure']}) not evaluated: {sq['reason']}.")
@@ -403,7 +485,8 @@ def limitations(run: dict | None, results: list[dict], procedures: list[dict], l
 def project_build(project: dict, generated_at: datetime, generated_by: str | None, run: dict | None,
                   results: list[dict], procedures: list[dict], latest_test_runs: dict, issues: list[dict],
                   events: list[dict], alignment: dict | None, spec_documents: list[dict], active_runs: list[dict],
-                  writes_enabled: bool, site: dict | None = None, equipment: dict[str, dict] | None = None) -> dict:
+                  writes_enabled: bool, site: dict | None = None, equipment: dict[str, dict] | None = None,
+                  acceptance: dict | None = None) -> dict:
     latest = build(project, run, results, issues, active_runs) if run else None
     verdicts = {s: 0 for s in ORDER}
     for e in (latest or {}).get("equipment", []):
@@ -419,6 +502,8 @@ def project_build(project: dict, generated_at: datetime, generated_by: str | Non
     counts = {"open": sum(1 for i in issues if i.get("status") in ("open", "in_progress", "ready_for_retest")),
               "waived": sum(1 for i in issues if i.get("status") == "risk_accepted"),
               "closed": sum(1 for i in issues if i.get("status") == "closed")}
+    counts["other"] = len(issues) - sum(counts.values())  # the parts always sum to the whole
+    counts["total"] = len(issues)
     return {
         "project": {"id": project["id"], "name": project["name"], "site_id": project.get("site_id"),
                     "site_name": (site or {}).get("name"), "phase": project.get("phase"), "phases": project.get("phases") or []},
@@ -430,13 +515,16 @@ def project_build(project: dict, generated_at: datetime, generated_by: str | Non
         "verdicts": verdicts,
         "issue_counts": counts,
         "inconclusive": {"total": len(inconc), "waived": sum(1 for r in inconc if (r["check_id"], r["subject"]) in waived)},
-        "limitations": limitations(run, results, procedures, latest_test_runs, active_runs, writes_enabled, issues),
+        "limitations": limitations(run, results, procedures, latest_test_runs, active_runs, writes_enabled, issues,
+                                   equipment_names=equipment is not None),
+        "acceptance": acceptance,
         "sequences": sequences(procedures, latest_test_runs),
         "phase_history": [e for e in events if e["action"] == "phase.set"],
         "spec": {"items": len(mappings), "matched": sum(1 for m in mappings if m.get("equip_uri")),
                  "unmatched": sum(1 for m in mappings if not m.get("equip_uri")),
                  "deviations": (alignment or {}).get("deviations") or []},
         "equipment": equipment or {},
+        "equipment_names": equipment is not None,
         "latest_run": latest,
         "procedures": fpts,
         "issues": issues,
@@ -463,7 +551,10 @@ def _short(i) -> str:
 
 
 def _run_link(run_id) -> str:
-    return f'<a href="/cx/runs/{escape(str(run_id))}/report?format=html">run {_short(run_id)}</a>' if run_id else "-"
+    """A run id as text, full id on hover. Not a link: the API's run report
+    needs the login's Authorization header, so following a plain link from
+    a saved or printed report answers 401."""
+    return f'<span title="{escape(str(run_id))}">run {_short(run_id)}</span>' if run_id else "-"
 
 
 def _tr_link(tr_id) -> str:
@@ -513,38 +604,76 @@ def _fpt_html(fpts: list[dict], equipment: dict[str, dict]) -> str:
 
 
 def _criteria_html(fpts: list[dict]) -> str:
-    """Acceptance criteria and results, from the procedures themselves:
-    each rule as written, the window it was judged over, and what every
-    point showed - passing points included (Baler#99)."""
+    """Acceptance criteria and results: each rule as the run judged it, the
+    window it was judged over, and what every point showed - passing
+    points included (Baler#99, #100 review)."""
     rows = []
     for f in fpts:
         tr = f["test_run"]
-        judged: dict[tuple, list[dict]] = {}
-        for e in (tr or {}).get("equipment") or []:
-            for st in e.get("steps") or []:
-                for ci, c in enumerate(st.get("criteria") or []):
-                    judged.setdefault((st["id"], ci), []).append(c)
-        for st in f["steps"]:
-            for ci, c in enumerate(st.get("criteria") or []):
-                got = judged.get((st["id"], ci), [])
-                statuses = [g["status"] for g in got if g["status"] != "not_applicable"]
-                status = min(statuses, key=lambda x: ORDER[x]) if statuses else ("not_applicable" if got else None)
-                obs = "<br>".join(escape(_obs_text(o)) for g in got for o in (g.get("observed") or [])[:10])
-                window = (f'{_when(tr.get("started_at"))} to {_when(tr.get("window_end"))} ({_duration(tr.get("started_at"), tr.get("window_end"))})'
-                          if tr else "never run")
-                rows.append(f'<tr><td>{escape(f["name"] or "")}<br><span class=muted>{escape(st.get("title") or st["id"])}</span></td>'
-                            f'<td>{escape(_rule_text(c))}</td><td class=muted>{window}<br>{_tr_link(tr["id"]) if tr else ""}</td>'
-                            f'<td>{_verdict(status) if status else "<span class=muted>-</span>"}</td><td class=muted>{obs}</td></tr>')
+        crit, edited = recorded_criteria({"steps": f["steps"]}, tr)
+        note = ('<br><span class="s inconclusive">procedure edited after this run: the rules shown are the ones this run '
+                'judged</span>') if edited else ""
+        for r in crit:
+            status = _worst(r["judged"]) or ("not_applicable" if r["judged"] else None)
+            obs = "<br>".join(escape(_obs_text(o)) for j in r["judged"] for o in (j.get("observed") or [])[:10])
+            window = (f'{_when(tr.get("started_at"))} to {_when(tr.get("window_end"))} ({_duration(tr.get("started_at"), tr.get("window_end"))})'
+                      if tr else "never run")
+            rows.append(f'<tr><td>{escape(f["name"] or "")}<br><span class=muted>{escape(r["title"])}</span>{note}</td>'
+                        f'<td>{escape(_rule_text(r["criterion"]))}</td><td class=muted>{window}<br>{_tr_link(tr["id"]) if tr else ""}</td>'
+                        f'<td>{_verdict(status) if status else "<span class=muted>-</span>"}</td><td class=muted>{obs}</td></tr>')
+            note = ""
     if not rows:
         return "<p class=muted>No procedures, so no acceptance criteria were defined.</p>"
-    return ("<table><tr><th>Procedure / step</th><th>Criterion</th><th>Judged over</th><th>Result</th><th>Observed</th></tr>"
+    return ("<table><caption>Each procedure criterion as judged by its latest test run</caption>"
+            "<tr><th>Procedure / step</th><th>Criterion</th><th>Judged over</th><th>Result</th><th>Observed</th></tr>"
             + "".join(rows) + "</table>")
+
+
+def acceptance_availability(series: dict[str, list], points: dict[str, dict], start: datetime, end: datetime,
+                            settle_minutes: float, min_pct: float, max_gap_minutes: float) -> dict:
+    """Per-point availability over the acceptance verification run's window,
+    after a settle time - as data, not a phase note (Baler#100 review).
+    expected = the samples a point reporting every max_gap would send."""
+    from datetime import timedelta
+
+    from baler.commissioning.procedures import availability_pct
+
+    judged_from = start + timedelta(minutes=settle_minutes)
+    span = max((end - judged_from).total_seconds(), 0.0)
+    expected = int(span // (max_gap_minutes * 60)) if max_gap_minutes > 0 else 0
+    rows = []
+    for uri, pt in sorted(points.items()):
+        times = [t for t, v in series.get(uri, []) if v is not None and judged_from <= t < end]
+        pct = availability_pct(times, judged_from, end, timedelta(minutes=max_gap_minutes)) if span else 0.0
+        rows.append({"subject": uri, "dis": pt.get("dis"), "samples": len(times), "expected": expected,
+                     "availability_pct": pct, "pass": pct + 1e-9 >= min_pct})
+    return {"window_start": start.isoformat(), "window_end": end.isoformat(), "settle_minutes": settle_minutes,
+            "judged_from": judged_from.isoformat(), "min_pct": min_pct, "max_gap_minutes": max_gap_minutes, "points": rows}
+
+
+def _acceptance_html(acc: dict | None, run_id: str | None) -> str:
+    if not acc:
+        return "<p class=muted>No completed verification run to judge availability over.</p>"
+    rows = "".join(f'<tr><td>{escape(r["dis"] or short_point(r["subject"]))}</td><td>{r["samples"]} / {r["expected"]}</td>'
+                   f'<td>{r["availability_pct"]:g}%</td><td>{_verdict("pass" if r["pass"] else "fail")}</td></tr>'
+                   for r in acc["points"])
+    passed = sum(1 for r in acc["points"] if r["pass"])
+    return (f'<p>Verification run <a href="#run-latest">{_short(run_id)}</a>: {_when(acc["window_start"])} to {_when(acc["window_end"])} '
+            f'({_duration(acc["window_start"], acc["window_end"])}); settle {acc["settle_minutes"]:g} min, so judged from '
+            f'{_when(acc["judged_from"])}. Threshold: available at least {acc["min_pct"]:g}% (a sample at least every '
+            f'{acc["max_gap_minutes"]:g} min). {passed} of {len(acc["points"])} point(s) meet it.</p>'
+            '<table><caption>Per-point availability over the acceptance window</caption>'
+            "<tr><th>Point</th><th>Samples / expected</th><th>Availability</th><th>Result</th></tr>" + rows + "</table>")
 
 
 _NOT_EVALUATED = '<span class="s inconclusive">not evaluated</span>'
 
 
 def project_html(rep: dict) -> str:
+    return _a11y_tables(_project_html(rep))
+
+
+def _project_html(rep: dict) -> str:
     p = rep["project"]
     v = rep["verdicts"]
     ic = rep["issue_counts"]
@@ -556,7 +685,7 @@ def project_html(rep: dict) -> str:
                    for d in rep["spec_documents"]) or "<li class=muted>none uploaded</li>"
     lim = "".join(f'<li data-kind="{escape(x["kind"])}">{escape(x["text"])}</li>' for x in rep["limitations"]) \
         or "<li>None found in the records.</li>"
-    seq = "".join(f'<tr><td>{escape(sq["step"])}<br><span class=muted>{escape(sq["procedure"] or "")}</span></td>'
+    seq = "".join(f'<tr><td>{escape(sq["sequence"] or "-")}</td><td>{escape(sq["step"])}<br><span class=muted>{escape(sq["procedure"] or "")}</span></td>'
                   f'<td>{escape(sq["rule"])}</td><td>{_verdict(sq["status"]) if sq["status"] in ORDER else _NOT_EVALUATED}</td>'
                   f'<td>{_tr_link(sq["test_run_id"])}</td><td class=muted>{escape(sq["reason"] or "")}</td></tr>' for sq in rep["sequences"])
     phase_rows = "".join(
@@ -579,34 +708,37 @@ def project_html(rep: dict) -> str:
     if latest:
         run = latest["run"]
         eq = "".join(f'<tr><td>{_equip_label(e["equip_uri"], equipment)}<br><span class=muted>{escape(e["equip_uri"])}</span></td>'
-                     f'<td>{_verdict(e["status"])}</td>'
+                     f'<td>{_verdict(e["status"])}{_waived_count(e)}</td>'
                      f'<td>{e["counts"].get("fail", 0)} fail · {e["counts"].get("inconclusive", 0)} inconclusive · '
                      f'{e["counts"].get("pass", 0)} pass</td></tr>' for e in latest["equipment"])
-        latest_html = (f'<p class=muted>{_run_link(run["id"])} · {_when(run.get("finished_at"))} · phase '
+        latest_html = (f'<p class=muted id="run-latest">Verification run {_short(run["id"])}: window {_when(run.get("window_start"))} to '
+                       f'{_when(run.get("window_end"))} ({_duration(run.get("window_start"), run.get("window_end"))}) · finished '
+                       f'{_when(run.get("finished_at"))} · phase '
                        f'{escape(str(run.get("phase") or "-"))}</p><table><tr><th>Equipment</th><th>Verdict</th><th>Results</th></tr>'
                        f'{eq}</table><p class=muted>{escape(LADDER_HELP)}</p>')
     findings = ""
     if latest:
-        findings = html(latest, title="Latest verification run").split("<h2>Findings</h2>", 1)[-1].split("</body>", 1)[0]
+        findings = _html(latest, title="Latest verification run").split("<h2>Findings</h2>", 1)[-1].split("</body>", 1)[0]
     # The headline stays honest (incomplete is never green) but a waived
     # inconclusive is accounted for, not a contradiction of the sign-off.
     verdict_line = f'{v.get("fail", 0)} equipment fail · {v.get("inconclusive", 0)} incomplete · {v.get("pass", 0)} pass.'
     if inc["total"]:
         verdict_line += (f' Incomplete because {inc["total"]} check(s) were inconclusive: {inc["waived"]} accepted as risk '
                          f'(see <a href="#waivers">Waivers</a>), {inc["total"] - inc["waived"]} not waived.')
-    issue_line = f'Issues: {ic["open"]} open · {ic["waived"]} waived (risk accepted) · {ic["closed"]} closed.'
+    issue_line = (f'Issues: {ic["open"]} open · {ic["waived"]} waived (risk accepted) · {ic["closed"]} closed'
+                  + (f' · {ic["other"]} other' if ic.get("other") else "") + f' (of {ic.get("total", 0)}).')
     site = escape(p.get("site_name") or "-")
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Commissioning report - {escape(p["name"])}</title>
 <style>{_CSS}
 .sign td {{ height: 2.2em; }} code.hash {{ font-size: 8pt; color: #555; word-break: break-all; user-select: all; }}
 footer {{ margin-top: 2em; font-size: 8.5pt; color: #555; border-top: 1px solid #999; padding-top: .4em; }}
-@media print {{ table, .sign, h3 {{ break-inside: avoid; }} h2, h3 {{ break-after: avoid; }} .signoff {{ break-before: auto; break-inside: avoid; }} }}
+@media print {{ tr, .signoff {{ break-inside: avoid; }} thead {{ display: table-header-group; }} h2, h3 {{ break-after: avoid; }} }}
 </style></head><body>
 <h1>Commissioning report: {escape(p["name"])}</h1>
 <p>Site <b>{site}</b> <span class=muted>({escape(str(p.get("site_id") or "-"))})</span> · current phase {escape(str(p.get("phase") or "-"))}<br>
-<span class=muted>Generated {_when(rep["generated_at"])} by {escape(rep["generated_by"] or "-")}{f" from {_run_link(run_id)}" if run_id else ""}.
-All times UTC.</span><br>
+<span class=muted>Generated {_when(rep["generated_at"])} by {escape(rep["generated_by"] or "-")}{f" from verification run {_short(run_id)}" if run_id else ""}.
+All times UTC. Trend links open Baler's Query page and need a Baler login.</span><br>
 Commissioning authority: {escape(rep["cxa"] or "________________")}</p>
 <h3>Specification documents</h3><ul>{docs}</ul>
 <h2>Summary</h2>
@@ -616,8 +748,11 @@ Commissioning authority: {escape(rep["cxa"] or "________________")}</p>
 incomplete - never a pass - whether or not it was waived.</p>
 <h2>Scope and limitations</h2><ul>{lim}</ul>
 <h2>Sequences of operation</h2>
-{"<table><tr><th>Sequence</th><th>Rule</th><th>Result</th><th>Where it ran</th><th>Reason</th></tr>" + seq + "</table>" if seq else "<p class=muted>No sequence criteria defined.</p>"}
+{"<table><caption>Each sequence-of-operation criterion and where it ran</caption><tr><th>Tag</th><th>Criterion</th><th>Rule</th><th>Result</th><th>Where it ran</th><th>Reason</th></tr>" + seq + "</table>" if seq else "<p class=muted>No sequence criteria defined.</p>"}
 <h2>Acceptance criteria and results</h2>
+<h3>Availability over the acceptance verification run</h3>
+{_acceptance_html(rep.get("acceptance"), run_id)}
+<h3>Procedure criteria</h3>
 {_criteria_html(rep["procedures"])}
 <h2>Phase history</h2>
 <table><tr><th>Phase</th><th>Status</th><th>Started</th><th>Completed</th></tr>{phase_rows}</table>
@@ -629,12 +764,12 @@ incomplete - never a pass - whether or not it was waived.</p>
 {latest_html}
 <h2>Procedure / functional test results</h2>
 {_fpt_html(rep["procedures"], equipment)}
-{issues_html(rep["issues"])}
+{issues_html(rep["issues"], rep.get("cxa"))}
 <h2>Findings (latest verification run)</h2>
 {findings}
 <div class="signoff">
 <h2>Sign-off</h2>
-<p class=muted>Report generated {_when(rep["generated_at"])}{f" from {_run_link(run_id)}" if run_id else ""}. Verdicts above are computed, not typed.</p>
+<p class=muted>Report generated {_when(rep["generated_at"])}{f" from verification run {_short(run_id)}" if run_id else ""}. Verdicts above are computed, not typed.</p>
 <table class="sign"><tr><th>Role</th><th>Name</th><th>Signature</th><th>Date</th></tr>
 <tr><td>Commissioning authority</td><td>{escape(rep["cxa"] or "")}</td><td></td><td></td></tr>
 <tr><td>Owner's representative</td><td></td><td></td><td></td></tr>
