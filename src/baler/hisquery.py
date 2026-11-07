@@ -1606,7 +1606,7 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
                     uri: (rows, False)
                     for uri, rows in timeseries.read_rollup(
                         ts_conn, point_uris, date_span.start, date_span.end, rollup_spec.fold,
-                        interval.seconds, interval.months, tz,
+                        interval.seconds, interval.months, tz, epoch=True,
                     ).items()
                 }
         except ValueError as exc:
@@ -1630,7 +1630,9 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
             info["kind"] = "Number"
         elif not info.get("kind"):
             info["kind"] = _infer_kind(rows)
-        info["history"] = [{"ts": ts.timestamp(), "value": value} for ts, value in rows]
+        # rollup rows already carry Unix seconds (read_rollup epoch=True)
+        info["history"] = ([{"ts": ts, "value": value} for ts, value in rows] if rollup
+                           else [{"ts": ts.timestamp(), "value": value} for ts, value in rows])
         info["truncated"] = truncated
         series.append(info)
     series.sort(key=lambda s: ((s["equipDis"] or ""), s["dis"], s["id"]))

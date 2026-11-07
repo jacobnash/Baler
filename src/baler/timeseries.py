@@ -513,7 +513,7 @@ def _ts(us: int) -> datetime:
 
 
 def _read_rollup_planned(conn, parts: list[tuple], point_uris: list[str], start_ts: datetime,
-                         fold: str, interval_seconds: int) -> list[tuple]:
+                         fold: str, interval_seconds: int, epoch: bool = False) -> list[tuple]:
     """Fold the plan's pieces together into date_bin buckets aligned to
     start_ts: pre-summed (vsum, vcount, vmin, vmax) rows from the views,
     raw samples as one-sample parts. A view whose bucket IS the output
@@ -553,8 +553,14 @@ def _read_rollup_planned(conn, parts: list[tuple], point_uris: list[str], start_
             "FROM ({parts}) parts GROUP BY point_uri, 2 HAVING SUM(vcount) > 0"
         ).format(fold=sql.SQL(_PART_FOLD_SQL[fold]), parts=sql.SQL(" UNION ALL ").join(grouped)))
         params += [interval_seconds, start_ts, *grouped_params]
-    query = sql.SQL("SELECT * FROM ({}) r ORDER BY bucket").format(sql.SQL(" UNION ALL ").join(selects))
+    query = sql.SQL("SELECT point_uri, {}, agg FROM ({}) r ORDER BY bucket").format(
+        sql.SQL(_EPOCH_SQL if epoch else "bucket"), sql.SQL(" UNION ALL ").join(selects))
     return list(iter_rows(conn.cursor(binary=True).execute(query, params)))
+
+
+# A bucket's start as Unix seconds, the float datetime.timestamp() gives
+# (both are integer microseconds / 1e6). date_part, not EXTRACT: float8.
+_EPOCH_SQL = "date_part('epoch', bucket)"
 
 
 def read_rollup(
@@ -566,6 +572,7 @@ def read_rollup(
     interval_seconds: int | None,
     interval_months: int | None,
     tz: str,
+    epoch: bool = False,
 ) -> dict[str, list]:
     """Axon hisRollup(fold, interval), done in Postgres rather than
     shipping a month of raw samples to Python (or the browser) to fold
@@ -579,7 +586,11 @@ def read_rollup(
     Fixed intervals read the continuous aggregates where they are up to
     date and raw rows elsewhere (_rollup_plan), inside one REPEATABLE READ
     snapshot so the bookkeeping read and the data read agree - the answer
-    is the raw fold's as of that snapshot, never a stale one."""
+    is the raw fold's as of that snapshot, never a stale one.
+
+    `epoch`: buckets as Unix-seconds floats instead of datetimes - what
+    /his sends anyway; skips building ~100k datetimes only to convert them
+    back (Baler#107)."""
     if not point_uris:
         return {}
     if fold not in _FOLD_SQL:
@@ -592,7 +603,8 @@ def read_rollup(
             if outermost:  # inside a caller's transaction, its snapshot rules apply
                 conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             parts = _rollup_plan(conn, levels, start_ts, end_ts)
-            rows = _read_rollup_planned(conn, parts, point_uris, start_ts, fold, int(interval_seconds or 0)) if parts else None
+            rows = (_read_rollup_planned(conn, parts, point_uris, start_ts, fold, int(interval_seconds or 0), epoch)
+                    if parts else None)
         if rows is not None:
             for point_uri, bucket, agg in rows:
                 out[point_uri].append((bucket, float(agg) if agg is not None else None))
@@ -614,7 +626,7 @@ def read_rollup(
     # the client-side decode cost of text for ~100k rows.
     cur = conn.cursor(binary=True).execute(
         f"""
-        SELECT point_uri, bucket, {_FOLD_SQL[fold]} AS agg FROM (
+        SELECT point_uri, {_EPOCH_SQL if epoch else "bucket"}, {_FOLD_SQL[fold]} AS agg FROM (
             SELECT point_uri, {bucket_sql} AS bucket,
                    COALESCE(value, value_bool::int::float8) AS v
             FROM point_history
