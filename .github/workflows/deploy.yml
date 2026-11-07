@@ -54,26 +54,13 @@ jobs:
         run: sudo /usr/local/sbin/baler-deploy.sh
 
       - name: Seed demo account if needed
-        # Deploy stack (above) already blocks until gateway responds again
-        # after its post-restart - nothing left to race here, just a
-        # single login check.
+        # Exists -> nothing; missing -> create; auth_api not answering (5xx,
+        # no answer) -> retry, then fail, never create (Baler#174). See the
+        # script's header for how it tells them apart.
         env:
           DEMO_ADMIN_EMAIL: ${{ secrets.DEMO_ADMIN_EMAIL }}
           DEMO_ADMIN_PASSWORD: ${{ secrets.DEMO_ADMIN_PASSWORD }}
-        run: |
-          set -euo pipefail
-          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8080/auth/login \
-            -H 'Content-Type: application/json' \
-            -d "{\"email\":\"${DEMO_ADMIN_EMAIL}\",\"password\":\"${DEMO_ADMIN_PASSWORD}\"}")
-          if [ "$code" != "200" ]; then
-            # POST /auth/orgs is not safe to call twice for the same email
-            # (leaves an orphan org row and 500s - see auth.py), so this
-            # only ever runs the very first time the demo account is missing.
-            echo "demo account doesn't exist yet (login returned $code) - creating it"
-            curl -sf -X POST http://127.0.0.1:8080/auth/orgs \
-              -H 'Content-Type: application/json' \
-              -d "{\"name\":\"Demo\",\"admin_email\":\"${DEMO_ADMIN_EMAIL}\",\"admin_password\":\"${DEMO_ADMIN_PASSWORD}\"}"
-          fi
+        run: bash deploy/nash-srv/seed-demo-account.sh
 
       - name: Build and publish docs
         # Only when docs-site/ changed since the commit the published docs were
