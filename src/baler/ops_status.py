@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import os
 import socket
+import threading
+import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
@@ -126,6 +128,14 @@ COMPONENTS: list[dict[str, Any]] = [
 ]
 
 QUIET_INGEST_SECONDS = int(os.environ.get("OPS_QUIET_INGEST_SECONDS", "900"))
+# How long a probe may take before it counts as down. Each probe's own
+# timeouts don't cover everything: name resolution has none, and right after
+# a deploy a container being recreated can leave a lookup hanging for tens
+# of seconds (/ops/status took 8.8 s, and 28 s locally, Baler#106).
+PROBE_DEADLINE_SECONDS = 2.5
+# ops_api probes in the background this often and answers /status from the
+# latest round, so no request waits on a probe (Baler#106).
+PROBE_INTERVAL_SECONDS = 10.0
 
 
 def _http_ok(url: str, timeout: float = 2.0) -> tuple[str, str | None]:
@@ -186,8 +196,13 @@ def _building_signals(scope=None) -> dict[str, Any]:
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=timezone.utc)
                 out["last_ingest_at"] = ts.astimezone(timezone.utc).isoformat()
+            # GROUP BY, not DISTINCT: on a hypertable the planner can pick
+            # TimescaleDB's SkipScan for DISTINCT, which walked each point's
+            # index entries one point at a time (2-3 s at ~800 points x 10 s
+            # data, depending on the stats of the moment, Baler#106). This
+            # is one ts-index range scan and a hash (~0.1 s).
             out["points_seen_last_hour"] = _count_visible(
-                conn, "SELECT DISTINCT point_uri FROM point_history WHERE ts > now() - interval '1 hour'", scope)
+                conn, "SELECT point_uri FROM point_history WHERE ts > now() - interval '1 hour' GROUP BY point_uri", scope)
             try:
                 out["open_faults"] = _count_visible(
                     conn, "SELECT point_uri FROM faults WHERE status = 'open'", scope)
@@ -328,19 +343,99 @@ def _rank_summary(states: list[str]) -> str:
     return "ok"
 
 
+def _run_probes(components: list[dict[str, Any]], deadline: float = PROBE_DEADLINE_SECONDS) -> dict[str, dict[str, Any]]:
+    """Every direct probe at once, each on its own daemon thread, for at most
+    `deadline` seconds: one that hasn't answered by then is down ("no answer
+    within ..."), and its thread is left to finish on its own instead of
+    holding up the answer or a pool slot."""
+    results: dict[str, dict[str, Any]] = {}
+    lock = threading.Lock()
+
+    def run(comp):
+        item = _probe_one(comp, {}, {})
+        with lock:
+            results[comp["id"]] = item
+
+    threads = [threading.Thread(target=run, args=(c,), daemon=True, name=f"probe-{c['id']}") for c in components]
+    for t in threads:
+        t.start()
+    end = time.monotonic() + deadline
+    for t in threads:
+        t.join(max(0.0, end - time.monotonic()))
+    with lock:
+        out = dict(results)
+    for comp in components:
+        out.setdefault(comp["id"], {
+            "id": comp["id"], "label": comp["label"], "layer": comp["layer"], "service": comp["service"],
+            "state": "down", "detail": f"no answer within {deadline:g}s",
+        })
+    return out
+
+
+class _ProbeCache:
+    """The latest round of direct probes, refreshed by a background thread
+    (start()). Probing is not per-caller (scope only changes the Building
+    counts), so one round serves every request."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._results: dict[str, dict[str, Any]] | None = None
+        self._at = 0.0
+        self._interval = PROBE_INTERVAL_SECONDS
+        self._thread: threading.Thread | None = None
+
+    def start(self, interval: float = PROBE_INTERVAL_SECONDS) -> None:
+        with self._lock:
+            if self._thread is not None:
+                return
+            self._interval = interval
+            self._thread = threading.Thread(target=self._loop, daemon=True, name="ops-probes")
+            self._thread.start()
+
+    def _loop(self) -> None:
+        while True:
+            try:
+                self.refresh()
+            except Exception as exc:  # noqa: BLE001 - never let the prober die
+                print(f"ops probes: {exc}")
+            time.sleep(self._interval)
+
+    def refresh(self) -> dict[str, dict[str, Any]]:
+        results = _run_probes([c for c in COMPONENTS if not str(c["probe"]).startswith("inferred_")])
+        with self._lock:
+            self._results, self._at = results, time.monotonic()
+        return results
+
+    def latest(self) -> dict[str, dict[str, Any]] | None:
+        """The last round, unless the prober isn't running or has fallen
+        three rounds behind (then the caller probes for itself)."""
+        with self._lock:
+            if self._results is None or time.monotonic() - self._at > 3 * self._interval:
+                return None
+            return dict(self._results)
+
+
+_probes = _ProbeCache()
+
+
+def start_background_probes(interval: float = PROBE_INTERVAL_SECONDS) -> None:
+    """For ops_api: probe every `interval` seconds from now on, so /status
+    answers from the latest round instead of probing per request."""
+    _probes.start(interval)
+
+
 def collect_status(scope=None) -> dict[str, Any]:
     """`scope`: the caller's site scope (scope.scope_for); None = everything."""
-    building = _building_signals(scope)
-
     direct = [c for c in COMPONENTS if not str(c["probe"]).startswith("inferred_")]
     inferred = [c for c in COMPONENTS if str(c["probe"]).startswith("inferred_")]
-    results: dict[str, dict[str, Any]] = {}
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        futs = {pool.submit(_probe_one, c, building, {}): c["id"] for c in direct}
-        for fut in as_completed(futs):
-            item = fut.result()
-            results[item["id"]] = item
+    # The Building counts (Postgres) and, without a fresh background round,
+    # the probes: side by side rather than one after the other.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        building_future = pool.submit(_building_signals, scope)
+        cached = _probes.latest()
+        results = cached if cached is not None else _run_probes(direct)
+        building = building_future.result()
 
     platform_states = {
         r["id"]: r["state"] for r in results.values() if r["layer"] == "platform"
