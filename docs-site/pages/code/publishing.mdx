@@ -1,0 +1,75 @@
+---
+title: Publishing a package
+description: How a function package gets listed in the docs-site function index.
+---
+
+The [function index](/code/functions) is Baler's counterpart of SkySpark's Eggbox: one page that
+lists published function packages with their version, author, date, description, tags, functions
+and install line. It's a static page, generated when the docs site is built. There's no registry
+service, and nothing to log in to.
+
+**To publish a package, open a pull request that adds its manifest to `docs-site/function-index.toml`.**
+
+## Before you open the PR
+
+1. Your package follows [Write and publish a function](/code/write-a-function): it has a
+   `pyproject.toml` with `baler.functions` entry points and a valid `baler.toml`.
+2. `python -m baler_fn check baler.toml` passes where the package is installed.
+3. The release is tagged, and the tag matches the manifest. The install line pins
+   `package.ref`, or `v<version>` when `ref` isn't set.
+4. `pip install "git+<repository>@<tag>"` works in a fresh Baler notebook.
+
+## The index entry
+
+Add one `[[package]]` table to `docs-site/function-index.toml`:
+
+```toml
+[[package]]
+manifest = "https://raw.githubusercontent.com/you/my-fns/v0.1.0/baler.toml"
+sha256 = "<output of: sha256sum baler.toml>"
+```
+
+- `manifest` is an `https://` URL of the raw `baler.toml`, or a path relative to the index file for
+  a package inside the Baler repo (the sample package uses
+  `../templates/function-project/baler.toml`). Plain `http://` is rejected.
+- Pin the URL to your release tag or a commit, not a branch, so the listing doesn't change under
+  the reviewer.
+- `sha256` is optional, but you should set it for any URL outside the Baler repo. The build fails
+  if the manifest's content no longer matches, so the index always shows what was reviewed.
+
+To publish a new version, open another PR that updates the URL and the `sha256`.
+
+## What the build checks
+
+`scripts/gen_function_index.py` runs before every docs build (`npm run build`) and every dev server
+start (`npm run dev`). It writes `docs-site/pages/code/functions.mdx`. The build fails, naming the
+entry and the reason, if:
+
+- an entry has no `manifest`, has an unknown key, or uses a non-https URL
+- a manifest can't be fetched, isn't UTF-8 or is bigger than 256 KB
+- a manifest doesn't pass the `baler.toml` rules (see the
+  [reference](/code/write-a-function#baler-toml-reference))
+- a `sha256` doesn't match
+- two entries declare the same package name
+
+You can run it yourself before opening the PR:
+
+```bash
+python3 scripts/gen_function_index.py     # from the Baler checkout; needs Python 3.11+
+```
+
+or build the whole site with `cd docs-site && npm ci && npm run build`.
+
+## What reviewers look at
+
+The generator never imports or runs package code, and it escapes every manifest field before it
+reaches the page. The index is a list of links, not an endorsement. Before merging, a reviewer
+should still:
+
+- open the repository at the pinned tag, and check that the code matches the description
+- check that it doesn't hide side effects: writes (`his_write`, `pointWrite`) should be obvious
+  from the function's name and docstring
+- check that the package doesn't contact other hosts or ship credentials
+
+Anyone installing a listed package should still read its source first, and should install it in
+their own notebook or container, never on the shared Baler host.

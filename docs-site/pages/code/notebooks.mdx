@@ -1,0 +1,195 @@
+---
+title: Notebooks
+description: Start the Baler notebook (JupyterLab with baler_fn, phable and pandas) and connect it with an API key.
+---
+
+Baler Notebooks is JupyterLab next to your Baler stack, for reports, statistics and data fixes in
+Python. It's the Baler counterpart of SkySpark's Code and Shell apps, and the
+[function index](/code/functions) plays the part of Eggbox.
+
+The notebook is an ordinary Haystack client. It reaches Baler through the gateway with an API key,
+like any other tool, and **Baler never runs notebook code**. Your code runs in the `jupyter`
+container, and all Baler sees is HTTP requests made with your key.
+
+The image ships with:
+
+- `baler_fn`: `connect()`, `@baler_function` and `baler_fn.list()`. See the [baler_fn API](/code/baler-fn).
+- [phable](https://pypi.org/project/phable/) with pandas and pyarrow, for Haystack ops that `baler_fn` doesn't wrap.
+- pandas, numpy, matplotlib, scipy and the rest of Jupyter's `scipy-notebook` image.
+- The sample function package `baler-sample`, and a starter notebook, `getting-started.ipynb`.
+
+## Before you start
+
+You need Docker with Compose v2.24 or newer, and a Baler checkout. All commands run from the
+checkout's root directory.
+
+If the Baler stack isn't running yet, start it first:
+
+```bash
+cp .env.example .env
+echo "BALER_JWT_SECRET=$(openssl rand -hex 32)" >> .env
+echo "BALER_GATEWAY_SECRET=$(openssl rand -hex 32)" >> .env
+echo "MQTT_PASSWORD=$(openssl rand -hex 16)" >> .env
+docker compose up -d --wait
+```
+
+The gateway is now at `http://localhost:8080`. The notebook is opt-in, so plain
+`docker compose up -d` never starts it.
+
+## 1. Create an API key
+
+API keys are created by an admin. If this is a new install, first create your organization and
+its admin account. This only works once per email address:
+
+```bash
+curl -s -X POST localhost:8080/auth/orgs -H 'Content-Type: application/json' \
+  -d '{"name": "Acme", "admin_email": "admin@acme.example", "admin_password": "change-me-please"}'
+```
+
+Log in to get a session token, then use it to create the API key:
+
+```bash
+TOKEN=$(curl -s -X POST localhost:8080/auth/login -H 'Content-Type: application/json' \
+  -d '{"email": "admin@acme.example", "password": "change-me-please"}' \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')
+
+curl -s -X POST localhost:8080/auth/api-keys \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"role": "viewer"}'
+# -> {"id": "...", "role": "viewer", "site_ids": [], "token": "eyJ..."}
+```
+
+The `token` value is the API key. It's shown only this once, so copy it now.
+
+Pick the role for the job:
+
+| role | can |
+|---|---|
+| `viewer` | `about`, `read`, `hisRead` |
+| `operator` | the above, plus `hisWrite` (and `pointWrite`, which commands real equipment) |
+
+Start with `viewer`. Use an `operator` key only when a notebook really needs to write. To limit a key
+to certain sites, add `"site_ids": ["<site id>"]`. To make it expire, add `"expires_in_seconds": 86400`.
+
+To revoke a key, look up its `id` with `GET /auth/api-keys` and call `DELETE /auth/api-keys/<id>`.
+The gateway stops accepting it within about 30 seconds.
+
+## 2. Configure the notebook in `.env`
+
+Add these two lines to `.env`. The first sets the password for opening JupyterLab, the second
+holds the API key from step 1:
+
+```bash
+echo "BALER_JUPYTER_TOKEN=$(openssl rand -hex 24)" >> .env
+echo "BALER_NOTEBOOK_API_KEY=<the token from step 1>" >> .env
+```
+
+The notebook refuses to start without `BALER_JUPYTER_TOKEN`. An empty token would leave JupyterLab
+open to anyone who can reach the port.
+
+The other settings have working defaults:
+
+| `.env` variable | default | meaning |
+|---|---|---|
+| `BALER_JUPYTER_TOKEN` | *(none, required)* | the token for logging in to JupyterLab |
+| `BALER_NOTEBOOK_API_KEY` | *(blank)* | the API key the notebook uses. `connect()` fails with a clear message until it's set. |
+| `BALER_NOTEBOOK_URL` | `http://gateway` | Baler as seen from inside the container. Set an `https://` URL to use a remote Baler instead. |
+| `BALER_NOTEBOOK_PROJECT` | `demo` | the `<project>` in `/api/<project>/<op>`. It doesn't scope anything yet. |
+| `BALER_JUPYTER_PORT` | `8888` | host port. It's bound to `127.0.0.1` only. |
+
+Inside the container these become `BALER_API_KEY`, `BALER_URL` and `BALER_PROJECT`, which is what
+`baler_fn.connect()` reads.
+
+## 3. Start it
+
+```bash
+docker compose --profile notebook up -d
+```
+
+This starts the stack plus the `jupyter` service. The first run builds the image on top of Jupyter's
+`scipy-notebook`, which downloads about 1.3 GB and needs about 5 GB of free disk.
+
+Open `http://localhost:8888/lab?token=<your BALER_JUPYTER_TOKEN>`. Your token is in `.env`:
+
+```bash
+grep ^BALER_JUPYTER_TOKEN .env
+```
+
+To start only the notebook against a Baler that's already running (or a remote one set in
+`BALER_NOTEBOOK_URL`), name the service:
+
+```bash
+docker compose --profile notebook up -d jupyter
+```
+
+## 4. Run the starter notebook
+
+Open `getting-started.ipynb` in the file browser and run all cells. It does the following:
+
+```python
+import baler_fn
+
+client = baler_fn.connect()          # reads BALER_URL / BALER_API_KEY / BALER_PROJECT
+client.about()                       # {'productName': 'Baler', ...}
+points = client.read_df("point")     # a DataFrame of points
+his = client.his_read_df(points["id"].iloc[0], "today")
+baler_fn.list()                      # functions installed packages provide
+baler_fn.list()["his_stats"](client, points["id"].iloc[0], "today")
+```
+
+On a brand-new install there are no points yet, so `read_df("point")` comes back empty and the
+next cell fails. You can push a few test readings with your session `TOKEN` from step 1. Each call
+creates the point the first time, then adds a sample:
+
+```bash
+for v in 70 71 72; do
+  curl -s -X POST localhost:8080/ingest/ingest -H "Authorization: Bearer $TOKEN" \
+    -d "{\"point\": \"fbf/demo-ahu-1/analogValue,1\", \"value\": $v}"
+  sleep 1
+done
+```
+
+A real site's data comes from Windrow or a configured source (Ops → Sources).
+
+You can also run code from a terminal instead of the browser:
+
+```bash
+docker compose exec jupyter python -c "import baler_fn; print(baler_fn.connect().about()['productName'])"
+docker compose exec jupyter python -m baler_fn list
+```
+
+## Where things live
+
+- **Notebooks** are saved in the `notebooks` Docker volume, mounted at `/home/jovyan/work`. They
+  survive `docker compose down` and rebuilds. `docker compose down -v` deletes them, along with
+  every other volume.
+- **The container does not mount your Baler checkout**, so editing `src/baler_fn` on the host does
+  nothing until you rebuild: `docker compose --profile notebook up -d --build jupyter`.
+- **Packages you `%pip install`** in a notebook last until the container is recreated. To keep
+  packages installed, build them into an image of your own. See
+  [Write and publish a function](/code/write-a-function#4-run-it-in-its-own-container).
+
+## Security
+
+- **Install packages in your own container only, never on the shared Baler host.** A function
+  package is arbitrary Python. It runs with your API key and whatever else it can reach from where
+  it runs. Read a package's source before you install it.
+- Use the smallest role that does the job (`viewer` unless you write), and revoke keys you no
+  longer need.
+- JupyterLab is published on `127.0.0.1` only. To use it from another machine, tunnel to it, for
+  example `ssh -L 8888:localhost:8888 you@baler-host`. Don't publish the port on a public
+  interface: a notebook is a shell.
+- Baler never executes notebook code. Running a function inside Baler (as a derivation or fault
+  rule) is a possible later phase, and would need its own security review first.
+
+## Troubleshooting
+
+| symptom | fix |
+|---|---|
+| `jupyter` exits right away; `docker compose logs jupyter` says `BALER_JUPYTER_TOKEN is not set` | add it to `.env` (step 2) and run `docker compose --profile notebook up -d` again |
+| `ConfigError: BALER_API_KEY is not set` | set `BALER_NOTEBOOK_API_KEY` in `.env`, then `docker compose --profile notebook up -d jupyter` to recreate the container with it |
+| `HaystackAuthError: bearer token rejected (401)` | the key is wrong, revoked or expired. Create a new one. |
+| `403` on `his_write` | the key is `viewer`. Writing needs an `operator` key. |
+| `404`/`502` from every call after you rebuilt or restarted a backend service | the gateway still has the old container's address. Run `docker compose restart gateway`. |
+| `ConnectionError` to `gateway` | the stack isn't running in this compose project. Run `docker compose up -d --wait`, or point `BALER_NOTEBOOK_URL` at your Baler. |
+| port 8888 is taken | set `BALER_JUPYTER_PORT=8890` in `.env` and start again |
