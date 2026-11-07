@@ -158,6 +158,16 @@ services:
       # classic file-based grafana/provisioning/ YAML - disabling it falls
       # back to the classic provisioner, which works correctly.
       GF_FEATURE_TOGGLES_DISABLE: "provisioning"
+      # First boot on a fresh volume: grafana's startup modules contend for
+      # its SQLite file, give up after the default 5 transaction retries
+      # ("database is locked (5) (SQLITE_BUSY)") and the process exits -
+      # which with `compose up --wait` failed whole CI jobs (#77, #97). WAL
+      # lets readers and the writer coexist; more retries cover the rest,
+      # and a restart covers anything left.
+      GF_DATABASE_WAL: "true"
+      GF_DATABASE_TRANSACTION_RETRIES: "30"
+      GF_DATABASE_QUERY_RETRIES: "10"
+    restart: unless-stopped
     volumes:
       - grafana-data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
