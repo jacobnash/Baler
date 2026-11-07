@@ -1,0 +1,74 @@
+---
+title: Live check (UI testing against a live install)
+---
+
+`tools/live-check` signs in to a running Baler and opens every UI page in a real browser, at desktop
+(1440 px) and phone (390 px) width. It also opens the Cx project report and run report. Each finding
+goes into the GitHub issue log, with a fingerprint so it isn't filed twice.
+
+It is **read-only**: the browser aborts every request that isn't a GET. The only exception is the
+Connectors page's named edge-node reads (`list_devices`, `list_connections`,
+`modbus_list_connections`), which are POSTs by design. So it is safe to point at production, even
+with an operator account.
+
+## What it finds
+
+| Finding | Label |
+|---|---|
+| Uncaught JavaScript errors and `console.error` output | `bug` |
+| Same-origin requests that return 4xx/5xx or fail (URL ids are folded to `:id`) | `bug` |
+| A page calling an endpoint the signed-in role gets 403 from | `bug` |
+| A page showing the sign-in screen although the token is valid | `bug` |
+| Sideways scrolling at 390 px | `bug` |
+| Any API request slower than `LIVE_CHECK_SLOW_MS` (default 2000) | `optimization` |
+| axe-core WCAG 2.1 A/AA violations of impact *serious* or *critical* (desktop pass) | `accessibility` |
+
+Every issue it files also gets the `live-check` label, and a `[live-check]` title prefix.
+
+## Run it
+
+You need Node 20+, Google Chrome (or set `CHROME_PATH`), and the `gh` CLI signed in with
+write access to the repo.
+
+```bash
+cd tools/live-check
+npm install
+npm test                 # unit tests for fingerprints and the issue plan
+npm run dry-run          # check and print, change no issues
+npm run check            # check and sync the issue log
+```
+
+Credentials come from the environment or from `~/.config/baler-tests/baler.env` (mode 600), which
+holds `BALER_TEST_URL`, `BALER_TEST_EMAIL` and `BALER_TEST_PASSWORD`. Use a viewer or operator
+account. A viewer sees fewer controls, so it checks less.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BALER_TEST_ENV` | `~/.config/baler-tests/baler.env` | env file to read |
+| `LIVE_CHECK_SLOW_MS` | `2000` | slow-request threshold |
+| `LIVE_CHECK_SETTLE_MS` | `5000` | wait after page load before checking |
+| `LIVE_CHECK_PROJECT` | `Home Edge Pilot` | Cx project whose reports are opened |
+| `LIVE_CHECK_REPO` | the checkout's repo | `owner/name` to file issues in |
+| `CHROME_PATH` | system Chrome | browser binary (e.g. `/opt/pw-browsers/chromium`) |
+
+Screenshots and `findings.json` land in `tools/live-check/out/`.
+
+## How it keeps the issue log tidy
+
+- A new finding creates an issue. The fingerprint is `<!-- live-check fp:… -->` in the body.
+- A finding that is already open is updated in place: *Last seen*, pages and viewports change, but *First
+  seen* is kept. Editing a body doesn't notify anyone.
+- A closed issue whose finding comes back is reopened with a comment.
+- An open `live-check` issue that a **complete** run (signed in, every page and report loaded) no
+  longer sees is closed with a comment. An incomplete run (the site was down, a page failed to load,
+  axe failed) closes nothing.
+
+So the loop is: fix and deploy, run `npm run check`, and the issue closes itself if the fix worked.
+
+Issues you file by hand are never touched. The tool only reads issues that carry its fingerprint.
+
+## What it doesn't do
+
+It doesn't click through flows that write: adding connectors, phase moves, waivers. It doesn't judge
+layout beyond sideways scroll (a squeezed column, for example). It doesn't check report content
+against the data. Review the screenshots in `out/` for those, and file what you see by hand.
