@@ -1,0 +1,6 @@
+{
+  "_comment": "Edge nodes that must be online after every deploy (Baler#178), as site/instance from GET /ops/edges (\"local\" is the Windrow beside Baler). announced: the node that hears device announcements, the devices it must hear, and whether connections naming a device must poll its announced address. See docs-site/pages/post-deploy-verify.mdx.",
+  "max_last_seen_s": 120,
+  "nodes": ["local/local", "home-gateway/modbus"],
+  "announced": { "node": "local/local", "devices": ["bacnet", "modbus"], "check_connections": true }
+}

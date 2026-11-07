@@ -1,0 +1,265 @@
+---
+title: Post-deploy verification (runbook)
+---
+
+After every successful deploy to nash-srv, the Deploy workflow's `verify` job checks the live install
+by itself: the browser pass, performance budgets, data flow, edge nodes, phone layout and gateway
+errors during the deploy. It files, updates and closes GitHub issues (label `live-check`), so a
+person only looks when its job turns red. It is [`tools/live-check`](/live-check) with more modules.
+
+It is **report-only and read-only**. It never rolls back or blocks a deploy (the deploy job's status
+is its own), and the only requests it sends to the install are GETs, the login, and the named
+edge-node reads (below). Its only writes are GitHub issues, the job summary and the artifact.
+
+## What runs, and when
+
+| Step | What | Modules |
+|---|---|---|
+| `Verify (cold)` | right after the deploy finishes | `perf` (cold budgets), `browser`, `layout`, `deploy` |
+| `Let the install warm up` | `sleep 300` | |
+| `Verify (warm)` | five minutes later | `perf` (warm budgets), `dataflow`, `edges` |
+
+`perf` runs first in each phase, before the browser warms any cache. Data flow and edge nodes run in
+the warm phase: a deploy restarts the listener and reconnects nodes, and five minutes later the
+install should be settled.
+
+The job holds the `deploy-nash-srv` concurrency group (and the runner) for about eight minutes. A
+deploy queued meanwhile starts once it's done, so verification never measures a deploy in flight.
+
+Each phase writes a table of every check (pass/fail and its numbers) to the job summary, and both
+phases go into the artifact `live-verify-<sha>` (`live-verify-<sha>.json`, the summaries and the
+screenshots), kept 30 days, for comparing deploys.
+
+To run it by hand: Actions, Deploy, Run workflow. Tick **verify_only** to check what's live without
+deploying (there's no deploy window then, so the `deploy` check is skipped).
+
+## The checks, what a failure means, and what to do
+
+Every finding is one issue, titled `[live-check] …`, with the latest numbers in a table, the commit
+that was deployed, related issues, and the exact command to reproduce it. The fingerprint at the
+bottom (`<!-- live-check fp:… scope:… -->`) is how the next run finds it again.
+
+### browser (R3)
+
+Every UI page at desktop width and the Cx project and run reports, in a real browser: uncaught
+errors, `console.error`, failed and 4xx/5xx requests, 403s the role shouldn't trigger, the sign-in
+screen despite a valid token, requests slower than `LIVE_CHECK_SLOW_MS`, and axe-core WCAG 2.1 A/AA
+violations (serious or critical). See [Live check](/live-check) for the details.
+
+**When it fails:** open the issue, then the page it names with the browser's console and network
+tabs open, signed in as an operator. The screenshots are in the artifact.
+
+### perf (R4): budgets, cold and warm
+
+Each route in `tools/live-check/budgets.json` is fetched 5 times (`runs`) through the public gateway
+with the operator's token. The median and max time and the largest (uncompressed) body are recorded
+and judged against that phase's budget.
+
+| Route | Warm | Cold | Baseline 2026-11-07 (warm / cold) |
+|---|---|---|---|
+| `GET /api/read?filter=equip` | median ≤ 0.5 s | ≤ 1.5 s | 0.11-0.29 / 0.71 |
+| `GET /api/read?filter=point` | ≤ 1.5 s | ≤ 3 s | 0.91-0.95 / 2.99 |
+| `GET /fault/faults` | ≤ 0.5 s, ≤ 500 kB | ≤ 1 s | 0.08-0.11 / 0.37, 188 kB |
+| `GET /ops/status` | ≤ 1 s | ≤ 2 s | 0.27-0.38 / 0.83 |
+| his `readAll(equip)` (`GET /ingest/his?expr=readAll(equip)`) | ≤ 2 s | ≤ 5 s | 1.64-1.65 / 4.92 (#107) |
+| Cx project report (Home Edge Pilot) | ≤ 2 s | ≤ 5 s | 3.3-3.5 / 10.2, over budget (#150) |
+
+A breach is one issue per route and phase (labels `live-check` and `optimization`). A later run of
+the same phase that is back under budget closes it.
+
+**When it fails:** compare the numbers in the issue with earlier artifacts. One slow run right after a
+deploy is usually a cold cache; a breach in the warm phase is real. Jaeger (`ssh -L 16686:…`, see
+[nash-srv deploy](/nash-srv-deploy)) shows where the time goes. A route that errors is an
+error in the summary (the job is red), not an issue, and nothing in that phase closes.
+
+**Change a budget:** edit the number in `budgets.json` and merge. The next run judges against it,
+and if the observed value is now under budget, it closes the issue. Budgets are deliberate: loosen
+one only when the slower number is accepted, and say why in the commit.
+
+```json
+{ "name": "GET /fault/faults", "path": "/fault/faults",
+  "warm": { "median_s": 0.5, "max_bytes": 500000 }, "cold": { "median_s": 1 }, "refs": [107] }
+```
+
+Each route has `path` (or `cx_report`: a Cx project name, whose HTML report is timed;
+`LIVE_CHECK_PROJECT` overrides it), and per phase any of `median_s`, `max_s` and `max_bytes`.
+`refs` are related issues, linked from the finding.
+
+### dataflow (R5)
+
+Read from `GET /ops/freshness?prefix=…` (ops_api, viewer, scoped to the caller's sites), never from
+the database:
+
+- **Samples are arriving:** rows in `point_history` over the last 60 s are at least
+  `dataflow.rows_last_60s_min` (2900; live runs about 5800 a minute).
+- **Every point under each prefix is fresh:** each point under `fbf/home/` reported within
+  `stale_factor` (3) times its poll interval, and never needs to be younger than `min_stale_s` (30 s).
+  Baler doesn't store poll intervals (they live in the edge node's connection), so ops_api estimates
+  each one from the point's own samples: the mean spacing over its last hour of data. A point quiet
+  for more than an hour is found through the hourly rollup (up to 7 days back).
+
+Stale points are reported per device group, the segment under the prefix: stopping
+`windrow-modbus` on the modbus Pi gives one finding, `fbf/home/modbus/* points are stale (n of n)`,
+listing each point's last sample. When it reports again, the next complete run closes it.
+
+**When it fails:** check the node in Ops, Connectors (is it online? what does its connection's poll
+status say?), then the Pi itself (`systemctl status windrow-*`, its MQTT connection). Below the rate
+floor with every group fresh means points or a whole prefix disappeared: compare
+`points_seen_last_hour` on Ops with earlier.
+
+To watch more prefixes, add `{ "prefix": "fbf/site-b" }` to `dataflow.prefixes`. `expect_groups`
+lists groups that must exist even if they sent nothing all week (otherwise a group that vanished
+entirely can't be missed).
+
+### edges (R6)
+
+From `GET /ops/edges`, against `tools/live-check/expected-edges.json`:
+
+```json
+{ "max_last_seen_s": 120,
+  "nodes": ["local/local", "home-gateway/modbus"],
+  "announced": { "node": "local/local", "devices": ["bacnet", "modbus"], "check_connections": true } }
+```
+
+- every listed node (`site/instance`; `local` is the Windrow beside Baler) is listed, online, and
+  seen within `max_last_seen_s`;
+- on the `announced` node, each device in `devices` has announced itself and is online
+  (`list_announced`);
+- every BACnet or Modbus connection on that node with a `device_name` polls the address that device
+  announced (`list_connections`, `modbus_list_connections`).
+
+**When it fails:** an offline node is the Pi or its MQTT link (see [Edge nodes](/edge-nodes)). A
+device that stopped announcing is the device or its `windrow-announce` timer. A connection that
+doesn't follow its device: check the node's resolver log ("device … moved").
+
+**Add or remove a node:** edit `nodes`. A node that's offline on purpose should come out of the list,
+not stay red.
+
+### layout (R7)
+
+- Every `ui/*.html` in the checkout, as served by the install, has
+  `<meta name="viewport" content="width=device-width, initial-scale=1">` (#177). Without it a phone
+  lays the page out 980 px wide and shrinks it, which no overflow check can see. All pages missing it
+  are one finding.
+- On an iPhone 13 profile (390 px, mobile), no page scrolls sideways, and on the Equipment page the
+  detail pane is at least `layout.min_detail_px` (300) wide after selecting the first point (#160).
+  This pass also reports errors and failed requests that only the phone layout hits.
+
+**When it fails:** the issue lists the pages. Open them in the browser's device toolbar at 390 px;
+the phone screenshots are in the artifact.
+
+### deploy (R8)
+
+The gateway answered no 5xx (`deploy.max_5xx`, 0) between the deploy job's start and end. The
+gateway writes every 5xx it answers, one JSON line each (time, status, method, path; never the query
+string or headers), to `5xx.log` on the `gateway-logs` volume, and ops_api reads it for
+`GET /ops/gateway-errors?since=&until=` (operator, whole-org logins only). The finding lists the
+routes and statuses.
+
+**When it fails:** a burst of 502s on one backend means it was recreated before its replacement was
+healthy (the rolling deploy, #166, should prevent that). A 5xx the gateway didn't answer (Caddy, the
+gateway itself down) can't be seen here. "the gateway's 5xx log isn't available" means the gateway
+runs an older `nginx.conf` or lacks the volume: an error, not a pass.
+
+## How it keeps the issue log tidy
+
+- A finding with no issue opens one; an open issue is updated in place (*First seen* kept); a
+  closed one is reopened with a comment, **unless it was closed as "not planned"**: a won't-fix
+  is left alone for good.
+- An issue labelled **`live-check:ignore`** is never touched: not updated, reopened or closed. Use it
+  for a known finding you don't want the job to keep reporting. Ignored and won't-fix findings don't
+  turn the job red.
+- An open issue that a run no longer sees is closed, but only if the check that owns it (its
+  *scope*: `browser`, `layout`, `perf:cold`, `perf:warm`, `dataflow`, `edges` or `deploy`) ran
+  completely: signed in, and every page, route or endpoint answered. A cold run never closes a warm
+  issue, and an incomplete run closes nothing in that scope.
+- The job is red when there is any open finding or any check that couldn't run.
+
+## The write guard
+
+`tools/live-check/guard.mjs` replaces `fetch` and routes every browser request through one rule:
+GET, HEAD and OPTIONS pass; so does `POST /auth/login` (from Node only); and so do POSTs to
+`/ops/edges/<site>/<instance>/actions/<action>` when `<action>` is in `READ_ACTIONS` in
+`src/baler/edges.py`, read from the checkout (the same list ops_api and the gateway's viewer row use,
+and a unit test checks they agree). Everything else is refused before it leaves the runner and listed
+as "blocked" in the summary. The summary and the artifact list every request sent (method and route,
+ids folded), so a run's log shows exactly what it did.
+
+## One-time setup on nash-srv
+
+This needs Jacob (sudo and a credential); the job fails with a message naming the file until it's done.
+
+1. **An operator test account** on the live install, in the demo org: sign in as an admin, Ops,
+   Users, add a user with role **operator** (not admin: it needs no more), for example
+   `live-check@<your domain>`, with a long random password.
+2. **The credentials file**, readable only by the runner user:
+
+   ```bash
+   sudo -u github-runner mkdir -p ~github-runner/.config/baler
+   sudo -u github-runner install -m 600 /dev/null ~github-runner/.config/baler/live-check.env
+   sudo -u github-runner editor ~github-runner/.config/baler/live-check.env
+   ```
+
+   with exactly these three lines (no quotes needed, no spaces around `=`):
+
+   ```
+   BALER_TEST_URL=https://<the live install's public host>
+   BALER_TEST_EMAIL=live-check@<your domain>
+   BALER_TEST_PASSWORD=<the password>
+   ```
+
+   `BALER_TEST_URL` is the public URL people use (through Caddy), so the timings are what a user
+   sees. Optional lines: `CHROME_PATH=` (a browser binary, if the box has no Google Chrome),
+   `LIVE_CHECK_PROJECT=` (the Cx project to time and open, default `Home Edge Pilot`).
+3. **A browser.** The job uses Google Chrome if `google-chrome` is on the runner's PATH; otherwise it
+   downloads Playwright's Chromium into `~github-runner/.cache/ms-playwright` on its first run. If that
+   Chromium can't start (missing system libraries), install them once:
+   `sudo npx -y playwright-core@1.57.0 install-deps chromium`, or install Google Chrome.
+4. Nothing else: the job's `GH_TOKEN` is the workflow's own token (`issues: write` on that job only).
+
+The file lives outside the checkout because `actions/checkout` cleans the workspace. It is never
+printed: the job only checks it exists, is readable, has the three keys, and warns if its mode isn't 600.
+
+## Run it locally
+
+```bash
+cd tools/live-check
+npm ci
+npm test                                   # unit tests and a dry run against a stub install
+node live-check.mjs --dry-run              # every module, report only (perf against warm budgets)
+node live-check.mjs --dry-run --phase cold --deploy-start 2026-11-07T22:00:00Z --deploy-end 2026-11-07T22:03:00Z
+node live-check.mjs --dry-run --only perf,edges
+```
+
+`--dry-run` changes no issue. Without it, issues are synced with `gh` (signed in, write access).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BALER_TEST_ENV` | `~/.config/baler-tests/baler.env` | env file with `BALER_TEST_URL`, `BALER_TEST_EMAIL`, `BALER_TEST_PASSWORD` |
+| `LIVE_CHECK_BUDGETS` | `budgets.json` | an alternative budgets file (e.g. a local stack's lower ingest floor) |
+| `LIVE_CHECK_EXPECTED_EDGES` | `expected-edges.json` | an alternative expected-edges file |
+| `LIVE_CHECK_OUT` | `tools/live-check/out` | where the artifact, summaries and screenshots go |
+| `LIVE_CHECK_SHA` | `git rev-parse HEAD` | the commit named in the artifact and issues |
+| `LIVE_CHECK_DEPLOY_START` / `_END` | none | the deploy window, like `--deploy-start` / `--deploy-end` |
+| `LIVE_CHECK_SLOW_MS`, `LIVE_CHECK_SETTLE_MS`, `LIVE_CHECK_PROJECT`, `LIVE_CHECK_REPO`, `CHROME_PATH` | | see [Live check](/live-check) |
+
+Against a local stack: bring it up with its own project name and volumes
+(`BALER_VOLUME_PREFIX=verify docker compose -p verify up -d`), create an operator account
+(`POST /auth/orgs`, then `POST /auth/users` as that admin), point a test env file at
+`http://127.0.0.1:<gateway port>`, and give it a budgets file with a lower ingest floor.
+
+## Add a check
+
+1. Write `tools/live-check/<name>.mjs` exporting `run(ctx)`. `ctx.api` has `get`, `json`, `time` and
+   `action` (only the edge read actions), `ctx.budgets` and `ctx.expected` are the two JSON files, and
+   `ctx.browser()` gives a Playwright browser. Return
+   `{ scope, complete, checks, raw }`: `checks` are summary rows
+   (`{module, name, status: pass|fail|error|skip, value, budget, detail}`), `raw` are findings
+   (`{kind, key, scope, title, detail, rows?, refs?}`). `kind` and `key` make the fingerprint, so keep
+   numbers out of `key`.
+2. Keep the judging pure (`evaluate(...)`) and test it on fixtures in `checks.test.mjs`.
+3. Give the `kind` a label in `KIND_LABEL` (`findings.mjs`), register the module in
+   `live-check.mjs` (`MODULES`, `PHASE_MODULES` and the run order), and add it to this page.
+4. If it needs data the API doesn't expose, add a small read-only endpoint (like
+   `GET /ops/freshness`) with a policy row in `gateway/njs/policy.js`. Never give the job database or
+   docker access.
