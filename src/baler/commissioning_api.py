@@ -25,6 +25,7 @@ import argparse
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -65,7 +66,7 @@ PORT = 8009
 RUN_STATEMENT_TIMEOUT = "10min"
 
 _PROJECT = re.compile(r"/projects/([^/]+)")
-_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|gate|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|agent/sessions|agent/proposals)")
+_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|gate|report|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|agent/sessions|agent/proposals)")
 _PROJECT_ISSUES = re.compile(r"/projects/([^/]+)/issues/(import|export)")
 _RUN_ISSUES = re.compile(r"/runs/([^/]+)/issues")
 _ISSUE = re.compile(r"/issues/([^/]+)")
@@ -134,6 +135,7 @@ def _check_settings(settings) -> dict:
 
 
 engine_kwargs = runner.engine_kwargs
+log = logging.getLogger(__name__)
 
 
 def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None):
@@ -205,6 +207,7 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                     ("PUT", "phases"): ("put_phases", self._put_phases),
                     ("POST", "phase"): ("set_phase", self._set_phase),
                     ("GET", "gate"): ("phase_gate", self._phase_gate),
+                    ("GET", "report"): ("project_report", self._project_report),
                     ("GET", "events"): ("events", self._events),
                     ("GET", "inventory"): ("inventory", self._inventory),
                     ("POST", "runs"): ("create_run", self._create_run),
@@ -555,7 +558,20 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             if fmt == "json":
                 respond_json(self, 200, rep)
                 return
-            body = report.html(rep).encode("utf-8")
+            self._send_html(report.html(rep).encode("utf-8"))
+
+        def _report_issues(self, project_id: str) -> list[dict]:
+            """Every issue with its status history (actors and times) and
+            standing risk - the report's issues log and waivers (#87)."""
+            risks = {r["issue_id"]: r for r in repo.list_risks(project_id)}
+            out = []
+            for i in repo.list_issues(project_id):
+                row = self._public_issue(i, risks)
+                row["events"] = repo.list_issue_events(i["id"])
+                out.append(row)
+            return out
+
+        def _send_html(self, body: bytes) -> None:
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -564,8 +580,40 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             self.end_headers()
             self.wfile.write(body)
 
-        def _report_issues(self, project_id: str) -> list[dict]:
-            return [db.public_row(i) for i in repo.list_issues(project_id)]
+        def _project_report(self, span, claims, pid) -> None:
+            """The Cx report for the whole project (#87), as JSON or a
+            printable page: scope and limitations, phase history, spec vs
+            installed, latest verdicts, procedure results, issues log."""
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            fmt = parse_qs(urlparse(self.path).query).get("format", ["json"])[0]
+            if fmt not in ("json", "html"):
+                raise ValueError("format must be json or html")
+            scope = repo.scope_for(claims)
+            runner.reconcile_issues(repo, pid, None, [], now_fn())
+            run = next((r for r in repo.list_runs(pid, 20) if r.get("status") == "completed"), None)
+            results = [r for r in repo.get_results(run["id"]) if scope.allows(r["equip_uri"])] if run else []
+            procs = [x for x in repo.list_procedures(pid) if x["status"] != "archived"]
+            latest = {pr["id"]: next((t for t in repo.list_test_runs(pr["id"], 20) if t["status"] == "completed"), None)
+                      for pr in procs}
+            iss = [i for i in self._report_issues(pid) if not i.get("equip_uri") or scope.allows(i["equip_uri"])]
+            active_runs = [db.public_row(a) for a in repo.find_rows("cx_active_runs", project_id=pid)
+                           if a["status"] not in ("planned", "cancelled") and scope.allows(a["equip_uri"])]
+            try:
+                alignment, _, _ = self._alignment_for(p, claims)
+            except Exception:  # the report stands without the spec section
+                log.warning("cx report %s: spec alignment failed", pid, exc_info=True)
+                alignment = None
+            docs = [db.public_row(d) for d in repo.find_rows("cx_spec_documents", project_id=pid)]
+            rep = report.project_build(db.public_project(p), now_fn(), repo.user_email(claims.get("sub")) or claims.get("sub"),
+                                       db.public_row(run) if run else None, results, procs,
+                                       {k: (db.public_row(v) if v else None) for k, v in latest.items()},
+                                       iss, repo.list_events(pid, 500), alignment, docs, active_runs, active.writes_allowed())
+            if fmt == "json":
+                respond_json(self, 200, rep)
+                return
+            self._send_html(report.project_html(rep).encode("utf-8"))
 
         def _equipment_status(self, span, claims) -> None:
             """One verdict per equipment from each visible project's latest
@@ -663,8 +711,11 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                                if r["check_id"] == ref.get("check_id") and r["subject"] == ref.get("subject")), None)
                 if result is None or not repo.scope_for(claims).allows(result["equip_uri"]):
                     raise ValueError("no such result in that run")
-                if result["status"] != "fail":
-                    raise ValueError("only a failing result opens an issue")
+                if result["status"] not in ("fail", "inconclusive"):
+                    # inconclusive opens one too: it's how a check that can't
+                    # be judged here (rung 3 on read-only controllers) gets an
+                    # explicit waiver - accept the issue as a risk (#96)
+                    raise ValueError("only a failing or inconclusive result opens an issue")
                 issue = issues.from_result(result, run["id"], pid, db.new_id, now, claims.get("sub"))
             else:
                 title = issues._text(body.get("title"), issues.MAX_TITLE)
@@ -696,7 +747,9 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
         def _issues_from_run(self, span, claims, rid) -> None:
             """Open an issue for every failing result of a run that no
             active issue tracks yet. Optional filters: check_prefix,
-            equip_uri, severity (template severities)."""
+            equip_uri, severity (template severities); include_inconclusive
+            also opens one per inconclusive result, so each can be waived
+            (accepted as a risk) for the acceptance gate (#96)."""
             hit = self._visible_run(rid, claims)
             if hit is None:
                 return
@@ -705,11 +758,12 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             prefix = body.get("check_prefix") or ""
             equip = body.get("equip_uri")
             sev = body.get("severity")
+            wanted = ("fail", "inconclusive") if body.get("include_inconclusive") is True else ("fail",)
             scope = repo.scope_for(claims)
             now = now_fn()
             opened, skipped = [], 0
             for r in repo.get_results(rid):
-                if (r["status"] != "fail" or not r["check_id"].startswith(prefix) or not scope.allows(r["equip_uri"])
+                if (r["status"] not in wanted or not r["check_id"].startswith(prefix) or not scope.allows(r["equip_uri"])
                         or (equip and r["equip_uri"] != equip) or (sev and r.get("severity") != sev)):
                     continue
                 issue = issues.from_result(r, rid, project["id"], db.new_id, now, claims.get("sub"))
@@ -945,7 +999,12 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 return
             body = self.read_json_body()
             now = now_fn()
-            if body.get("seed") == "all":
+            if body.get("from_spec") is True:
+                specs = self._procedures_from_spec(p, claims, body.get("availability", {"min_pct": 99, "max_gap_minutes": 5}))
+                if not specs:
+                    raise ValueError("no accepted spec equipment with points matched in the field - import and accept "
+                                     "the spec, and confirm the equipment mappings first")
+            elif body.get("seed") == "all":
                 have = {x.get("template") for x in repo.list_procedures(pid)}
                 specs = [procedures.from_seed(t) for t in procedures.SEED_BY_ID if t not in have]
             elif body.get("template"):
@@ -964,7 +1023,27 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 made.append(proc)
             self._event(pid, "procedure.create", claims, {"procedures": [{"id": x["id"], "name": x["name"]} for x in made]})
             out = [self._public_proc(x) for x in made]
-            respond_json(self, 201, out if body.get("seed") == "all" else out[0])
+            respond_json(self, 201, out if body.get("seed") == "all" or body.get("from_spec") is True else out[0])
+
+        def _procedures_from_spec(self, p: dict, claims: dict, availability) -> list[dict]:
+            """One PFC procedure per accepted spec equipment item that maps to
+            field equipment: present, in pfc range, in band, available (#86)."""
+            if availability is not None:
+                procedures._criterion({"availability": availability, "point_class": "x"}, "availability")
+            alignment, equips, items = self._alignment_for(p, claims)
+            by_uri = {e["id"]: e for e in equips}
+            by_id = {i["id"]: i for i in items}
+            point_items = [i for i in items if i["kind"] == "point"]
+            out = []
+            for m in alignment["mappings"]:
+                if not m.get("equip_uri") or m["equip_uri"] not in by_uri:
+                    continue
+                item = by_id[m["spec_item_id"]]
+                rows = spec.points_alignment(item, by_uri[m["equip_uri"]], point_items)
+                made = procedures.from_spec(by_uri[m["equip_uri"]], item, rows, {i["id"]: i for i in point_items}, availability)
+                if made:
+                    out.append({**procedures.normalize(made), "template": None})
+            return out
 
         def _get_procedure(self, span, claims, proc_id) -> None:
             hit = self._visible_procedure(proc_id, claims)

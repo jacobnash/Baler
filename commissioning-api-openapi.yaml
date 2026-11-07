@@ -496,11 +496,14 @@ paths:
     post:
       tags: [Issues]
       operationId: createCxIssue
-      summary: Open an issue by hand, or from a failing result (operator)
+      summary: Open an issue by hand, or from a failing or inconclusive result (operator)
       description: >-
-        With `from_result`, the issue is tied to that check and subject and
-        closes only when a later run passes it. Without, it's a manual issue
-        that closes by hand.
+        With `from_result`, the issue is tied to that check and subject: a
+        later passing run resolves it, and a person closes it after a passing
+        retest. An inconclusive result can open one too, so a check that
+        can't be judged here (e.g. rung 3 on read-only controllers) can be
+        waived by accepting the issue as a risk, which the acceptance gate
+        honours. Without `from_result`, it's a manual issue that closes by hand.
       requestBody:
         content:
           application/json:
@@ -647,6 +650,9 @@ paths:
                 check_prefix: { type: string, description: "e.g. template: or pair:" }
                 equip_uri: { type: string }
                 severity: { type: string, enum: [required, expected, optional] }
+                include_inconclusive:
+                  type: boolean
+                  description: Also open one per inconclusive result, so each can be waived for the acceptance gate
       responses:
         "200":
           description: Opened issue ids, and how many failures already had one
@@ -811,7 +817,13 @@ paths:
         Body is a procedure (ProcedureSpec), or `{"template": "<id>"}` (with
         optional name, equip_uris, window_hours, schedule, status
         overrides), or `{"seed": "all"}` to add every seed the project
-        doesn't have yet (answers a list).
+        doesn't have yet (answers a list), or `{"from_spec": true}` to seed
+        one PFC procedure per accepted spec equipment item matched in the
+        field (answers a list): its spec points must be present (strict
+        exists), inside their pfc_min/pfc_max and band_min/band_max columns,
+        and available (`availability`, default {min_pct 99,
+        max_gap_minutes 5}; null leaves that step out). Specified points not
+        found in the field are named in the description, never invented.
       requestBody:
         required: true
         content:
@@ -825,9 +837,18 @@ paths:
                 - type: object
                   required: [seed]
                   properties: { seed: { type: string, enum: [all] } }
+                - type: object
+                  required: [from_spec]
+                  properties:
+                    from_spec: { type: boolean, enum: [true] }
+                    availability:
+                      type: [object, "null"]
+                      properties:
+                        min_pct: { type: number }
+                        max_gap_minutes: { type: number }
       responses:
         "201":
-          description: The procedure (or, for seed=all, the list added)
+          description: The procedure (or, for seed=all and from_spec, the list added)
           content:
             application/json:
               schema:
@@ -1962,13 +1983,20 @@ components:
     Criterion:
       type: object
       description: >-
-        Either `check` (a Cx check id or prefix - `exists`, `live`,
+        Exactly one of: `check` (a Cx check id or prefix - `exists`, `live`,
         `pair:`, `template:`, `gl36:hw_reset`, `cx:econ_*` - optionally
         filtered by severity, pair_kind or point_class; `strict` counts
-        inconclusive as failing) or `range` ({min, max, unit}) over a
-        point_class's points or one named `point`, e.g. a derivation
-        output. A criterion matching nothing is not_applicable unless
-        `required`.
+        inconclusive as failing); `range` ({min, max, unit, hours}) over a
+        point_class's points or one named `point`, with `hours` limiting it
+        to local occupied hours (S2); `availability` ({min_pct,
+        max_gap_minutes}): the point reported at least every max_gap
+        minutes for min_pct of the window (S3); or `response` ({when:
+        {point|point_class, equals}, then: {point|point_class, changes_by,
+        within_minutes}}): each time `when` starts, `then` moves at least
+        changes_by within that time; never started is inconclusive (S1). A
+        criterion matching nothing is not_applicable unless `required`.
+        Evaluated criteria carry `observed` per point (min/max/last, sample
+        count, availability, the edges judged) - passing ones too.
       properties:
         check: { type: string }
         strict: { type: boolean }
@@ -1983,6 +2011,36 @@ components:
             min: { type: number }
             max: { type: number }
             unit: { type: string, enum: [C, F] }
+            hours:
+              type: object
+              properties:
+                from: { type: integer, minimum: 0, maximum: 23 }
+                to: { type: integer, minimum: 1, maximum: 24 }
+                days: { type: array, items: { type: integer, minimum: 0, maximum: 6 }, description: "0 = Monday" }
+                tz: { type: string, description: IANA time zone; UTC when omitted }
+        availability:
+          type: object
+          required: [min_pct, max_gap_minutes]
+          properties:
+            min_pct: { type: number, exclusiveMinimum: 0, maximum: 100 }
+            max_gap_minutes: { type: number, exclusiveMinimum: 0 }
+        response:
+          type: object
+          required: [when, then]
+          properties:
+            when:
+              type: object
+              properties:
+                point: { type: string }
+                point_class: { type: string }
+                equals: { description: The value that starts it, e.g. 1, true, "active" }
+            then:
+              type: object
+              properties:
+                point: { type: string }
+                point_class: { type: string }
+                changes_by: { type: number, exclusiveMinimum: 0 }
+                within_minutes: { type: number, exclusiveMinimum: 0 }
     ProcedureSpec:
       type: object
       required: [name, kind, equip_class, steps]

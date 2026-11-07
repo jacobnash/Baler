@@ -85,13 +85,27 @@ def actor(user_sub) -> str:
 
 
 def title_for(result: dict) -> str:
+    """Names the point, not just the equipment: two exists failures on one
+    device read "home/bacnet/zone_temp: offline - ..." and
+    "home/bacnet/fan_status: offline - ..." rather than the same line twice."""
     what = result.get("symptom") or f"{result['check_id']} {result['status']}"
-    equip = str(result.get("equip_uri") or "").replace("urn:equip:", "", 1)
-    return f"{equip}: {what}"[:MAX_TITLE]
+    subject = str(result.get("subject") or "")
+    where = subject.replace("urn:point:", "", 1) if subject.startswith("urn:point:") else \
+        str(result.get("equip_uri") or "").replace("urn:equip:", "", 1)
+    return f"{where}: {what}"[:MAX_TITLE]
+
+
+def default_severity(result: dict) -> str:
+    """Auto-opened issues always carry a severity (CxAlloy / Facility Grid
+    exports want one): required template gaps and points not reporting are
+    major, the rest minor."""
+    if result.get("severity") == "required" or result.get("check_id") == "exists":
+        return "major"
+    return "minor"
 
 
 def from_result(result: dict, run_id: str, project_id: str, new_id, now: datetime, user_sub: str | None) -> dict:
-    sev = "major" if result.get("severity") == "required" else ("minor" if result.get("severity") else None)
+    sev = default_severity(result)
     return {
         "id": new_id(), "project_id": project_id, "equip_uri": result["equip_uri"], "check_id": result["check_id"],
         "subject": result["subject"], "status": "open", "title": title_for(result), "severity": sev,

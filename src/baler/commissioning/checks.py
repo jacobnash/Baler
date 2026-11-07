@@ -18,6 +18,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from baler.commissioning import templates as tpl
+from baler.commissioning.report import human_duration
 
 STATUSES = ("pass", "fail", "inconclusive", "not_applicable")
 
@@ -86,7 +87,8 @@ def existence(equip: dict, latest: dict, now: datetime, window: timedelta, raw: 
         else:
             out.append(_result(
                 equip["id"], "exists", p["id"], "fail", ev,
-                symptom=f"last sample {ts.isoformat()} is older than the {window.total_seconds() / 3600:g} h window",
+                symptom=f"offline - last sample {ts.strftime('%Y-%m-%d %H:%M:%S')} is older than the "
+                        f"{human_duration(window.total_seconds())} window",
                 candidates=[
                     {"cause": "controller offline or unreachable", "distinguish": "do sibling points on the same device also stop then?"},
                     {"cause": "polling/COV subscription stopped", "distinguish": "other devices on the same Windrow connection still reporting?"},

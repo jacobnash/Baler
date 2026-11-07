@@ -140,3 +140,64 @@ def test_a_clean_project_passes_the_startup_gate(base, repo):
 def test_gate_preview_validates_target(base):
     p = ti._project(base)
     assert requests.get(f"{base}/projects/{p['id']}/gate", params={"to": "nope"}, headers=A).status_code == 400
+
+
+# ------------------------------------------------------------- Cx report (#87)
+
+
+def test_project_report_tells_the_whole_story(base, repo, spec):
+    p, run = ti._completed_run(base)
+    issue = ti._rat_issue(base, run)
+    assert issue["severity"] == "major" and issue["title"].startswith(ti.RAT.replace("urn:point:", "", 1))
+    requests.post(f"{base}/projects/{p['id']}/phase", headers=A, json={"key": "functional", "note": "started"})
+    r = requests.get(f"{base}/projects/{p['id']}/report", headers=A)
+    assert r.status_code == 200, r.text
+    rep = r.json()
+    assert rep["latest_run"]["run"]["id"] == run["id"]
+    assert any("Passive only" in x for x in rep["limitations"])
+    assert rep["phase_history"][0]["detail"]["to"] == "functional"
+    [logged] = [i for i in rep["issues"] if i["id"] == issue["id"]]
+    assert logged["events"][0]["action"] == "create" and logged["events"][0]["actor"] == "user"
+    page = requests.get(f"{base}/projects/{p['id']}/report", params={"format": "html"}, headers=A)
+    assert page.status_code == 200 and page.headers["Content-Type"].startswith("text/html")
+    body = page.text
+    for section in ("Scope and limitations", "Phase history", "Specification vs installed", "Procedure / functional test results",
+                    "Issues log", "Sign-off", "his.html?expr="):
+        assert section in body, section
+    assert "<script" not in body
+
+
+def test_run_report_never_calls_incomplete_equipment_a_pass(base):
+    _p, run = ti._completed_run(base)
+    rep = requests.get(f"{base}/runs/{run['id']}/report", headers=A).json()
+    for e in rep["equipment"]:
+        if e["counts"].get("inconclusive") and not e["counts"].get("fail"):
+            assert e["status"] == "inconclusive" and e["verdict"] == "incomplete"
+    for e in rep["equipment"]:
+        for r in e["results"]:
+            if r["status"] == "inconclusive":
+                assert r["reason"]  # never an empty cell
+    page = requests.get(f"{base}/runs/{run['id']}/report", params={"format": "html"}, headers=A).text
+    assert "verification ladder" in page and " h)" in page  # ladder explained; window length in human units
+
+
+def test_an_inconclusive_check_can_be_waived_for_acceptance(base, repo):
+    """#96: rung 3 on read-only controllers can never pass; a waiver
+    (an accepted risk on an issue opened from the inconclusive result) has
+    to be possible, or the acceptance gate is unreachable."""
+    p, run = ti._completed_run(base)
+    inc = next(r for r in repo.get_results(run["id"]) if r["status"] == "inconclusive")
+    r = requests.post(f"{base}/projects/{p['id']}/issues", headers=A,
+                      json={"from_result": {"run_id": run["id"], "check_id": inc["check_id"], "subject": inc["subject"]}})
+    assert r.status_code == 201, r.text
+    bulk = requests.post(f"{base}/runs/{run['id']}/issues", headers=A, json={"include_inconclusive": True}).json()
+    assert bulk["already_tracked"] >= 1  # the one above
+    before = requests.get(f"{base}/projects/{p['id']}/gate", params={"to": "acceptance"}, headers=A).json()["gate"]
+    unwaived = next(u for u in before["unmet"] if u["rule"] == "no_unwaived_inconclusive")["count"]
+    risk = requests.post(f"{base}/issues/{r.json()['id']}/risk", headers=ti.ADMIN,
+                         json={"reason": "read-only controller; retest when writes are enabled",
+                               "review_by": (fx.NOW.date() + timedelta(days=90)).isoformat()})
+    assert risk.status_code in (200, 201), risk.text
+    after = requests.get(f"{base}/projects/{p['id']}/gate", params={"to": "acceptance"}, headers=A).json()["gate"]
+    left = next((u["count"] for u in after["unmet"] if u["rule"] == "no_unwaived_inconclusive"), 0)
+    assert left == unwaived - 1
