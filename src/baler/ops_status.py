@@ -384,15 +384,28 @@ class _ProbeCache:
         self._interval = PROBE_INTERVAL_SECONDS
         self._thread: threading.Thread | None = None
 
-    def start(self, interval: float = PROBE_INTERVAL_SECONDS) -> None:
+    def start(self, interval: float = PROBE_INTERVAL_SECONDS, prime: bool = False) -> None:
+        """Probe every `interval` seconds from now on. `prime`: run the
+        first round here, before returning, so a request arriving the
+        moment the API listens already has one (Baler#172)."""
         with self._lock:
             if self._thread is not None:
                 return
             self._interval = interval
-            self._thread = threading.Thread(target=self._loop, daemon=True, name="ops-probes")
+        if prime:
+            try:
+                self.refresh()
+            except Exception as exc:  # noqa: BLE001 - the loop below retries
+                print(f"ops probes: {exc}")
+        with self._lock:
+            if self._thread is not None:
+                return
+            self._thread = threading.Thread(target=self._loop, args=(prime,), daemon=True, name="ops-probes")
             self._thread.start()
 
-    def _loop(self) -> None:
+    def _loop(self, primed: bool = False) -> None:
+        if primed:
+            time.sleep(self._interval)
         while True:
             try:
                 self.refresh()
@@ -418,10 +431,11 @@ class _ProbeCache:
 _probes = _ProbeCache()
 
 
-def start_background_probes(interval: float = PROBE_INTERVAL_SECONDS) -> None:
+def start_background_probes(interval: float = PROBE_INTERVAL_SECONDS, prime: bool = False) -> None:
     """For ops_api: probe every `interval` seconds from now on, so /status
-    answers from the latest round instead of probing per request."""
-    _probes.start(interval)
+    answers from the latest round instead of probing per request; `prime`
+    runs the first round before returning."""
+    _probes.start(interval, prime)
 
 
 def collect_status(scope=None) -> dict[str, Any]:

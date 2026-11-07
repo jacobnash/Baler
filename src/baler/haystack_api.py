@@ -50,7 +50,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 import openhay as oh
 
-from baler import auth, gateway_auth, hisquery, timeseries, tracing
+from baler import auth, gateway_auth, hisquery, timeseries, tracing, warmup
 from baler import point_write as pw
 from baler.http_handler_base import BaseAPIHandler
 from baler.scope import EVERYTHING, Scope, claims_from_header, scope_for
@@ -1250,6 +1250,12 @@ def make_handler(backend: Backend, login: ScramLogin | None):
     return HaystackHandler
 
 
+# The Equipment page's first reads (ui/app.js), run once before the API
+# listens (baler.warmup): on nash-srv the first `point` read after a deploy
+# took 3 s against 0.9 s warm.
+WARM_FILTERS = ("point", "equip", "Site or Building or Floor or Zone")
+
+
 def main() -> None:
     from baler.remote_store import RemoteStore
 
@@ -1267,7 +1273,13 @@ def main() -> None:
         pw.ensure_schema(conn)
     login = ScramLogin(ts_pool) if os.environ.get("BALER_JWT_SECRET") else None
     backend = Backend(RemoteStore(), ts_pool)
-    hisquery.warm_caches()
+
+    def warm():
+        hisquery.warm_caches()
+        for text in WARM_FILTERS:
+            oh.encode_grid(_rows_grid(backend.read_filter(text, None)), "hayson")
+
+    warmup.run("haystack reads", warm)
 
     def expire_loop():
         while True:

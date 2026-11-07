@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 from rdflib import URIRef
 
-from baler import auth, docs_ui, gateway_auth, hisquery, record_edit, tracing
+from baler import auth, docs_ui, gateway_auth, hisquery, record_edit, tracing, warmup
 from baler.http_handler_base import BaseAPIHandler, respond_json_streamed
 from baler.http_handler_base import respond_error as _respond_error
 from baler.http_handler_base import respond_json as _respond_json
@@ -425,7 +425,16 @@ def main() -> None:
     with ts_pool.connection() as conn:
         auth.ensure_schema(conn)  # sites.topic_prefixes, read by the /his and /history scope check
         record_edit.ensure_schema(conn)
-    hisquery.warm_caches()
+
+    def warm():
+        # The Equipment page's history read, once before listening
+        # (baler.warmup): 4.9 s cold against 1.6 s warm on nash-srv.
+        hisquery.warm_caches()
+        with ts_pool.connection() as conn:
+            hisquery.run_query(store, conn, hisquery.parse_query("readAll(equip).hisRead(today)"),
+                               now=datetime.now(timezone.utc), tz=DEFAULT_TZ, max_samples=hisquery.DEFAULT_MAX_SAMPLES)
+
+    warmup.run("his read", warm)
 
     server = ThreadingHTTPServer((args.host, args.port), make_handler(store, ts_pool))
     print(f"POST /ingest listening on {args.host}:{args.port}")
