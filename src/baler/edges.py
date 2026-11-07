@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 
 from baler import point_write
 
-READ_ACTIONS = ("list_devices", "list_connections", "modbus_list_connections")
+READ_ACTIONS = ("list_devices", "list_connections", "modbus_list_connections", "list_announced")
 WRITE_ACTIONS = (
     "add_device", "set_device_status", "recheck_credentials", "set_credential",
     "create_connection", "update_connection", "delete_connection",
@@ -101,6 +101,8 @@ def _local_route(action: str, body: dict) -> tuple[str, str, dict | None]:
         if prefix is None:
             raise EdgeError("set_credential target is device, connection or modbus_connection", 400)
         return "PATCH", f"{prefix}/{oid}/credential", body.get("credential") or {}
+    if action == "list_announced":
+        return "GET", "/announced", None
     if action in ("list_connections", "modbus_list_connections"):
         return "GET", "/modbus/connections" if action.startswith("modbus") else "/connections", None
     if action in ("create_connection", "modbus_create_connection"):
@@ -126,6 +128,13 @@ def _local_route(action: str, body: dict) -> tuple[str, str, dict | None]:
     if action == "list_jobs":
         return "GET", "/jobs", None
     raise EdgeError(f"unknown action {action!r}", 400)
+
+
+def _announce_counts(st: dict) -> dict:
+    """Device announce (Windrow's windrow.announce): how many devices this
+    node has heard say "I am here", how many are still online, and how many
+    datagrams it refused. Absent from a Windrow without announce."""
+    return {k: st[k] for k in ("announced", "announced_online", "announce_rejected") if k in st}
 
 
 def _iso(ts: float | None) -> str | None:
@@ -174,7 +183,7 @@ class Edges:
                     st = None
                 if isinstance(st, dict):
                     node.update(version=st.get("version"), started_at=st.get("started_at"),
-                                networks=list(st.get("networks") or []))
+                                networks=list(st.get("networks") or []), **_announce_counts(st))
             out.append(node)
         try:
             statuses = self._commander().statuses()
@@ -190,7 +199,7 @@ class Edges:
                         "devices": st.get("devices"), "pending_devices": st.get("pending_devices"),
                         "bacnet_connections": st.get("bacnet_connections"),
                         "modbus_connections": st.get("modbus_connections"),
-                        "networks": list(st.get("networks") or []), "error": None})
+                        "networks": list(st.get("networks") or []), **_announce_counts(st), "error": None})
         return out
 
     # ------------------------------------------------------------ actions

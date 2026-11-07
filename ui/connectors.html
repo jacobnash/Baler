@@ -88,6 +88,17 @@
           </table>
         </div>
       </section>
+
+      <section id="announced-section" aria-labelledby="announced-h" hidden>
+        <h2 id="announced-h">Announced devices <span class="hint">(devices that told this node where they are)</span></h2>
+        <p id="announced-summary" class="hint small"></p>
+        <div class="table-wrap">
+          <table id="announced-table">
+            <thead><tr><th>Name</th><th>Address</th><th>Services</th><th>Last seen</th><th>Online</th><th>Connectors following it</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
     </div>
 
     <dialog id="connector-dialog" class="wide" aria-labelledby="connector-title">
@@ -153,6 +164,10 @@
             </div>
           </div>
 
+          <div class="row">
+            <label>Device name (for announce) <input id="c-device-name" autocomplete="off" spellcheck="false" placeholder="e.g. ahu-3-controller" aria-describedby="device-name-help" /></label>
+          </div>
+          <p class="field-help" id="device-name-help">Optional. When a device with this name announces a new address (or, failing that, when this DNS name resolves to one), Windrow re-points the connector to it. Leave empty to keep the address fixed.</p>
           <div class="row">
             <label>Topic prefix <input id="c-prefix" required placeholder="fbf/site/ahu-1" autocomplete="off" aria-describedby="prefix-help" /></label>
             <label class="narrow">Poll every (s) <input id="c-poll" type="number" min="1" max="3600" step="1" value="5" /></label>

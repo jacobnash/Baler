@@ -77,6 +77,7 @@ class FakeCommander:
     ("start_job", {"job": "modbus_discover", "cidr": "10.0.0.0/24"},
      ("POST", "/jobs", {"job": "modbus_discover", "cidr": "10.0.0.0/24"})),
     ("get_job", {"id": "j1"}, ("GET", "/jobs/j1", None)),
+    ("list_announced", {}, ("GET", "/announced", None)),
     ("list_jobs", {}, ("GET", "/jobs", None)),
     ("modbus_test_read", {"host": "10.0.0.6", "register": 3},
      ("POST", "/modbus/test-read", {"host": "10.0.0.6", "register": 3})),
@@ -322,3 +323,21 @@ def test_ops_refuses_a_prefix_outside_the_nodes_own(monkeypatch):
         assert r.status_code == 400 and "fbf/" in r.json()["error"]
     finally:
         server.shutdown()
+
+
+def test_nodes_carry_announce_counts_from_status_and_heartbeat():
+    op = Opener({("GET", "/devices"): [], ("GET", "/status"): {"announced": 2, "announced_online": 1, "announce_rejected": 3}})
+    statuses = {("home", "pi-1"): {"online": True, "received_at": 999.0, "announced": 4, "announced_online": 4, "announce_rejected": 0}}
+    e = edges.Edges(commander=FakeCommander(statuses), local_url="http://windrow_api:8001", secret=SECRET, opener=op,
+                    now=lambda: 1000.0)
+    nodes = {n["site_id"]: n for n in e.nodes()}
+    assert (nodes["local"]["announced"], nodes["local"]["announced_online"], nodes["local"]["announce_rejected"]) == (2, 1, 3)
+    assert nodes["home"]["announced_online"] == 4
+    # a Windrow without announce reports none of them
+    bare = edges.Edges(commander=FakeCommander({("x", "y"): {"online": True, "received_at": 999.0}}), local_url="",
+                       secret=SECRET, now=lambda: 1000.0)
+    assert "announced" not in bare.nodes()[0]
+
+
+def test_list_announced_is_a_read_action():
+    assert "list_announced" in edges.READ_ACTIONS

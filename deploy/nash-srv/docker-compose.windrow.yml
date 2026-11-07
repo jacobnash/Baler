@@ -45,6 +45,15 @@ services:
       --state-file /app/state/windrow-connections.json
       --devices-state-file /app/state/windrow-devices.json
       --modbus-state-file /app/state/windrow-modbus-connections.json
+      --announce-port 47900 --announce-allow ${WINDROW_ANNOUNCE_ALLOW:-192.168.128.0/24}
+      --announce-state-file /app/state/windrow-announced.json
+    # Device announce (Windrow docs/edge-nodes.md): devices on the LAN send
+    # "I am here" over UDP, and connections with a matching device_name
+    # follow them to a new address. Only sources inside
+    # WINDROW_ANNOUNCE_ALLOW are heard; the address is the datagram's
+    # source IP, never its payload.
+    ports:
+      - "${WINDROW_ANNOUNCE_PORT:-47900}:47900/udp"
     environment:
       # Credentials as env, not flags: a --mqtt-password argument shows in
       # ps / docker top to anyone on the host (#49). windrow.api reads both.

@@ -116,6 +116,39 @@ them from Baler; everything else is read-only.
 Modbus has no point list to read: registers are whatever the manual says.
 Each register is read as one unsigned 16-bit value.
 
+## Follow a device that moves (device announce)
+
+A device on DHCP, or one that gets swapped or re-addressed, leaves a
+connector polling an address nobody answers on. Give the connector a
+**Device name (for announce)** in its dialog (BACnet or Modbus), and the
+node keeps it pointed at the device:
+
+- **Announce.** A device that can run Windrow's small sender
+  (`python -m windrow.announce --name <name> --to <node>`, or
+  `install-edge.sh announce` on a Pi) tells its node "I am here" over UDP
+  port 47900 every 30 s, and at once when its address changes. The node
+  takes the address from where the datagram came from, and only from the
+  subnets it allows.
+- **DNS.** For a device that can't run anything, use its DNS name as the
+  device name; the node re-resolves it every few minutes.
+
+When the address behind a device name changes, the node re-points every
+connector with that name, the same way an edit would. Leave the field empty
+to keep the address fixed. An existing BACnet connector's address can also be
+changed by hand in the dialog (its instance can't).
+
+The node's card shows how many devices announced themselves and how many are
+online (`2 of 3 announced online`), and how many announcements it refused.
+Under the node, **Announced devices** lists each one: its name, address (and
+where it moved from), services, when it was last seen, whether it's online,
+and the connectors that follow it.
+
+For the Windrow beside Baler, the `deploy/nash-srv` overlay publishes UDP
+`WINDROW_ANNOUNCE_PORT` (default 47900) and hears only
+`WINDROW_ANNOUNCE_ALLOW` (default `192.168.128.0/24`): set both in `.env`.
+Details, including signed announcements, are in Windrow's
+[edge-nodes guide](https://github.com/jacobnash/Windrow/blob/main/docs/edge-nodes.md#device-announce-i-am-here).
+
 ## Check that it's working
 
 The **Status** column of the connectors table answers "is it polling?"
