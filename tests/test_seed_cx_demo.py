@@ -43,3 +43,17 @@ def test_project_prefix_covers_exactly_its_own_equipment():
     for slug in ("newbuild", "campus-07"):
         assert all(key.startswith(seed.prefix(slug) + "/") for key, *_ in seed.equips(slug, 2))
     assert not any(k.startswith(seed.prefix("campus-1") + "/") for k, *_ in seed.equips("campus-10", 1))
+
+
+def test_vav_points_arrive_only_with_the_fix():
+    vav = lambda fixed: next(e for e in seed.equips("newbuild", 1, fixed) if e[2] == "Variable_Air_Volume_Box")
+    assert {p[1] for p in vav(False)[3]} == {"Zone_Air_Temperature_Sensor", "Zone_Air_Temperature_Setpoint"}
+    assert {"Damper_Position_Command", "Air_Flow_Sensor"} <= {p[1] for p in vav(True)[3]}
+    rows = seed.readings("newbuild", 1, 0, 60, {}, random.Random(2), fixed=True, step=15)
+    assert {r["ts"] for r in rows if r["point"].endswith("vav-1/airflow")} == {0, 15, 30, 45, 60}
+
+
+def test_gate_text_lists_each_unmet_rule():
+    gate = {"unmet": [{"rule": "no_open_issues", "message": "2 issue(s) not closed"}]}
+    assert seed.gate_text(gate) == "  - no_open_issues: 2 issue(s) not closed"
+    assert seed.gate_text({"unmet": []}) == "  (met)"
