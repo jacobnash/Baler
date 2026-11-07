@@ -143,6 +143,20 @@ def connect_pool(dsn: str = DEFAULT_DSN, min_size: int = 2, max_size: int = 10,
     return pool
 
 
+# Rows decoded per fetchmany call. Decoding a result into Python objects
+# holds the GIL for the whole call: fetchall() on a 6M-row /his read held it
+# ~3 s, long enough to time out ingest_api's 2 s health probe and stall every
+# other request in the process (#51). 10k rows is ~5 ms of decoding, and
+# the interpreter can switch threads between batches.
+FETCH_BATCH = 10_000
+
+
+def iter_rows(cur):
+    """cur's rows, decoded FETCH_BATCH at a time (see above)."""
+    while batch := cur.fetchmany(FETCH_BATCH):
+        yield from batch
+
+
 def write_point_value(conn: psycopg.Connection, point_uri: str, value, ts: datetime, unit: str | None = None, label: str | None = None) -> None:
     """Dispatches on type(value) into the right nullable column. bool must
     be checked before int/float - bool is a subclass of int in Python, the
@@ -243,7 +257,7 @@ def read_range(conn: psycopg.Connection, point_uri: str, start_ts: datetime, end
         """,
         (point_uri, start_ts, end_ts),
     )
-    return [(ts, _row_to_value((value, value_text, value_bool))) for ts, value, value_text, value_bool in cur.fetchall()]
+    return [(ts, _row_to_value((value, value_text, value_bool))) for ts, value, value_text, value_bool in iter_rows(cur)]
 
 
 def read_range_many(
@@ -273,7 +287,7 @@ def read_range_many(
         (point_uris, start_ts, end_ts, limit + 1),
     )
     out: dict[str, tuple[list, bool]] = {uri: ([], False) for uri in point_uris}
-    for point_uri, ts, value, value_text, value_bool in cur.fetchall():
+    for point_uri, ts, value, value_text, value_bool in iter_rows(cur):
         rows, _ = out[point_uri]
         rows.append((ts, _row_to_value((value, value_text, value_bool))))
     for uri, (rows, _) in out.items():
@@ -521,7 +535,7 @@ def _read_rollup_planned(conn, parts: list[tuple], point_uris: list[str], start_
         ).format(fold=sql.SQL(_PART_FOLD_SQL[fold]), parts=sql.SQL(" UNION ALL ").join(grouped)))
         params += [interval_seconds, start_ts, *grouped_params]
     query = sql.SQL("SELECT * FROM ({}) r ORDER BY bucket").format(sql.SQL(" UNION ALL ").join(selects))
-    return conn.cursor(binary=True).execute(query, params).fetchall()
+    return list(iter_rows(conn.cursor(binary=True).execute(query, params)))
 
 
 def read_rollup(
@@ -591,7 +605,7 @@ def read_rollup(
         """,
         (*bucket_params, point_uris, start_ts, end_ts),
     )
-    for point_uri, bucket, agg in cur.fetchall():
+    for point_uri, bucket, agg in iter_rows(cur):
         out[point_uri].append((bucket, float(agg) if agg is not None else None))
     return out
 

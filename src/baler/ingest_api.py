@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlparse
 from rdflib import URIRef
 
 from baler import auth, docs_ui, gateway_auth, hisquery, record_edit, tracing
-from baler.http_handler_base import BaseAPIHandler
+from baler.http_handler_base import BaseAPIHandler, respond_json_streamed
 from baler.http_handler_base import respond_error as _respond_error
 from baler.http_handler_base import respond_json as _respond_json
 from baler.ingest import (
@@ -263,7 +263,7 @@ def make_handler(store, ts_pool):
                     return
                 span.set_attribute("matched", result["matchedCount"])
                 span.set_attribute("series", len(result["series"]))
-                _respond_json(self, 200, result)
+                respond_json_streamed(self, 200, result)
 
         def do_PATCH(self):
             if not self._require_gateway():
@@ -385,7 +385,7 @@ def make_handler(store, ts_pool):
                         return
                     rows = read_range(conn, point_uri, start, end)
                 span.set_attribute("count", len(rows))
-                _respond_json(self, 200, [{"ts": ts.timestamp(), "value": value} for ts, value in rows])
+                respond_json_streamed(self, 200, [{"ts": ts.timestamp(), "value": value} for ts, value in rows])
 
         def _delete_history(self) -> None:
             with tracer.start_as_current_span("ingest_api.delete_history") as span:
