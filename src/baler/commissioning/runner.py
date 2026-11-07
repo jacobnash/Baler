@@ -131,13 +131,20 @@ def reconcile_issues(repo, project_id: str, run_id: str | None, results: list[di
 
 
 def project_scopes(repo, project: dict, claims: dict) -> tuple[list[Scope], list[str]]:
-    """The caller's own scope, plus the project site's topic prefixes."""
+    """The caller's own scope, plus the project site's topic prefixes, plus
+    the project's own `settings.prefixes` (#75: a building's project sees
+    only that building, without an admin creating a site for it). Each one
+    only narrows: the caller's scope always applies on top."""
     scopes = [repo.scope_for(claims)]
     prefixes: list[str] = []
     if project.get("site_id"):
         site = repo.get_site(project["site_id"])
         prefixes = list((site or {}).get("topic_prefixes") or [])
         scopes.append(inventory.site_scope(prefixes))
+    own = list(((project.get("settings") or {}).get("prefixes")) or [])
+    if own:
+        scopes.append(inventory.site_scope(own))
+        prefixes = prefixes + [p for p in own if p not in prefixes]
     return scopes, prefixes
 
 

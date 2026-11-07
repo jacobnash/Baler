@@ -124,7 +124,7 @@ function renderProjects() {
     if (cx.project && cx.project.id === p.id) tr.classList.add("selected");
     const phase = (p.phases.find((x) => x.key === p.phase) || {}).name || p.phase || "-";
     tr.innerHTML = `<td>${esc(p.name)}${p.archived_at ? ' <span class="hint">(archived)</span>' : ""}</td>
-      <td>${esc(siteName(p.site_id))}</td><td>${esc(phase)}</td><td>${esc(when(p.created_at))}</td>`;
+      <td>${esc(scopeLabel(p))}</td><td>${esc(phase)}</td><td>${esc(when(p.created_at))}</td>`;
     tr.addEventListener("click", () => selectProject(p.id).catch((err) => flash($("projects-status"), err.message, true)));
     body.append(tr);
   }
@@ -144,10 +144,15 @@ async function selectProject(id, runId = null) {
   if (typeof cxProjectHooks !== "undefined") for (const hook of cxProjectHooks) hook(cx.project);
 }
 
+function scopeLabel(p) {
+  const prefixes = (p.settings && p.settings.prefixes) || [];
+  return prefixes.length ? `${siteName(p.site_id)} · ${prefixes.join(", ")}` : siteName(p.site_id);
+}
+
 function renderProject() {
   const p = cx.project;
   $("project-title").textContent = p.name;
-  $("project-meta").textContent = `${siteName(p.site_id)} · created ${when(p.created_at)}${p.archived_at ? ` · archived ${when(p.archived_at)}` : ""}`;
+  $("project-meta").textContent = `${scopeLabel(p)} · created ${when(p.created_at)}${p.archived_at ? ` · archived ${when(p.archived_at)}` : ""}`;
   $("run-window").placeholder = String((p.settings && p.settings.window_hours) || 24);
   $("archive-project-btn").disabled = !!p.archived_at;
   $("run-btn").disabled = !!p.archived_at;
@@ -249,6 +254,7 @@ function openNewProject() {
   const defaults = [["design", "Design"], ["construction", "Construction / installation"], ["startup", "Start-up / power-on"],
     ["functional", "Functional testing"], ["acceptance", "Acceptance"], ["warranty", "Warranty"], ["operations", "Operations"]];
   for (const [k, n] of defaults) phase.append(el("option", { value: k, textContent: n, selected: k === "startup" }));
+  $("project-prefixes").value = "";
   $("project-error").hidden = true;
   $("project-dialog").showModal();
 }
@@ -257,6 +263,8 @@ async function createProject(ev) {
   ev.preventDefault();
   const body = { name: $("project-name").value.trim(), phase: $("project-phase").value };
   if ($("project-site").value) body.site_id = $("project-site").value;
+  const prefixes = $("project-prefixes").value.split(",").map((s) => s.trim()).filter(Boolean);
+  if (prefixes.length) body.settings = { prefixes };
   try {
     const p = await cxApi("POST", "/projects", body);
     $("project-dialog").close();
@@ -425,6 +433,7 @@ async function showRun(runId) {
   const got = await cxApi("GET", `/runs/${runId}`);
   cx.run = got.run;
   cx.results = got.results;
+  cx.resultsPage = 0;
   setUrl();
   renderRuns();
   renderResults();
@@ -434,6 +443,8 @@ async function showRun(runId) {
     openDrawer(`${equip}`, cx.results.filter((r) => r.equip_uri === equip));
   }
 }
+
+const RESULTS_PAGE = 40;
 
 function equipLabel(uri) {
   return uri.replace(/^urn:equip:/, "");
@@ -445,6 +456,7 @@ function renderResults() {
   $("results-title").textContent = `Results · ${when(run.started_at)} · ${run.phase || "no phase"}`;
   $("results-freshness").textContent = (run.summary && run.summary.freshness) || "";
   const filter = $("results-filter").value;
+  const search = $("results-search").value.trim().toLowerCase();
   const families = [...new Set(cx.results.map((r) => familyOf(r.check_id)))]
     .sort((a, b) => (FAMILY_ORDER.indexOf(a) + 99) % 99 - (FAMILY_ORDER.indexOf(b) + 99) % 99 || a.localeCompare(b));
   const byEquip = new Map();
@@ -455,7 +467,17 @@ function renderResults() {
   const worst = (rs) => Math.min(...rs.map((r) => STATUS_ORDER[r.status] ?? 9));
   const equips = [...byEquip.keys()]
     .filter((e) => !filter || worst(byEquip.get(e)) <= STATUS_ORDER[filter])
+    .filter((e) => !search || equipLabel(e).toLowerCase().includes(search))
     .sort((a, b) => worst(byEquip.get(a)) - worst(byEquip.get(b)) || a.localeCompare(b));
+  // One page at a time (#75: a whole-org run was one ~7,500px table).
+  const pages = Math.max(1, Math.ceil(equips.length / RESULTS_PAGE));
+  cx.resultsPage = Math.min(cx.resultsPage || 0, pages - 1);
+  const shown = equips.slice(cx.resultsPage * RESULTS_PAGE, (cx.resultsPage + 1) * RESULTS_PAGE);
+  $("results-count").textContent = `${equips.length} of ${byEquip.size} equipment`;
+  $("results-pager").hidden = pages <= 1;
+  $("results-page").textContent = `page ${cx.resultsPage + 1} of ${pages}`;
+  $("results-prev").disabled = cx.resultsPage === 0;
+  $("results-next").disabled = cx.resultsPage >= pages - 1;
 
   const grid = $("results-grid");
   grid.innerHTML = "";
@@ -463,7 +485,7 @@ function renderResults() {
   for (const f of families) head.append(el("th", { textContent: FAMILY_LABEL[f] || f, title: f }));
   grid.append(el("thead", {}, [head]));
   const tbody = el("tbody");
-  for (const e of equips) {
+  for (const e of shown) {
     const rs = byEquip.get(e);
     const tr = el("tr");
     const name = el("th", { className: "equip", textContent: equipLabel(e), title: e });
@@ -632,7 +654,10 @@ function wire() {
   $("phases-cancel").addEventListener("click", () => $("phases-dialog").close());
   $("phase-add").addEventListener("click", () => $("phases-edit-body").append(phaseRow({ key: "", name: "", status: "pending", isNew: true })));
   $("run-btn").addEventListener("click", startRun);
-  $("results-filter").addEventListener("change", renderResults);
+  $("results-filter").addEventListener("change", () => { cx.resultsPage = 0; renderResults(); });
+  $("results-search").addEventListener("input", () => { cx.resultsPage = 0; renderResults(); });
+  $("results-prev").addEventListener("click", () => { cx.resultsPage -= 1; renderResults(); });
+  $("results-next").addEventListener("click", () => { cx.resultsPage += 1; renderResults(); });
   $("report-btn").addEventListener("click", () => cx.run && openReport(cx.run.id));
   $("gaps-btn").addEventListener("click", loadGaps);
   $("drawer-close").addEventListener("click", closeDrawer);
