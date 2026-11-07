@@ -1,0 +1,247 @@
+---
+title: Adding a BACnet or Modbus connector
+---
+
+A **connector** polls one controller on a building network and sends its
+points to Baler. It runs on a **Windrow edge node**: the Windrow beside
+Baler, or one on a site gateway such as a Raspberry Pi
+([Edge nodes](/edge-nodes)). You manage connectors on the
+**Connectors** page (`/ui/connectors.html`, *Connectors* in the top
+navigation).
+
+One connector is one piece of equipment. Its **topic prefix**, such as
+`fbf/home/ahu-1`, becomes the equipment's id in Baler, and each point is
+published under it, for example `fbf/home/ahu-1/zone-temp`.
+
+Remote systems that already store data (SkySpark, SQL, weather) are
+[Sources](/adding-a-data-source), not connectors.
+
+## Who can do what
+
+Every signed-in user can see edge nodes, connectors, their status and the
+devices found. Only an **admin** can add, edit or delete connectors, run
+scans, and set device logins. Other roles see the page without those
+buttons, with the note *Ask an admin to add or change connectors.*
+
+## Pick an edge node
+
+The **Edge nodes** row at the top lists every node Baler can reach:
+
+- **Windrow beside Baler**: the `windrow_api` container, set by
+  `WINDROW_API_URL` in `.env` (the `deploy/nash-srv/docker-compose.windrow.yml`
+  overlay sets it for you).
+- **A remote node** (`<site> / <instance>`): a Windrow that publishes a
+  status heartbeat over MQTT with its edge account
+  ([Edge nodes](/edge-nodes#1-broker-account-b-and-c)).
+
+Each node shows a green (online) or red (offline) dot, when it was last
+seen, and how many new devices it has found. Click a node to select it; the
+page remembers it in the address (`#local/local`).
+
+When a node is **offline**, a banner says since when, its buttons are
+disabled, and the page stops asking it for lists until it reports in again.
+
+## The topic prefix rule
+
+The prefix must sit **under the node's allowed prefix**, or the data never
+reaches Baler. The dialog shows the allowed prefix under the field and
+refuses anything else, naming the prefix it expects:
+
+| Node | Allowed prefix | Why |
+|---|---|---|
+| Windrow beside Baler | `fbf/` | Baler's `mqtt_listener` takes in `fbf/#` only |
+| Remote node | its site's prefix, e.g. `fbf/home/` | The broker drops anything a site's account publishes outside its site's prefixes |
+
+A remote node's site is the site its broker account belongs to
+(**Ops → Edge nodes**). Baler checks the prefix again when the connector is
+saved, for every role and every client (the API too), and refuses one
+outside the node's allowed prefix. If it can't look the site up, the dialog
+says so under the field, and you have to make sure of the prefix yourself.
+
+Two more rules, also checked in the dialog:
+
+- No two connectors on a node share a prefix, and one can't sit inside
+  another's (`fbf/home/ahu-1` and `fbf/home/ahu-1/fan`): their points would
+  mix into one piece of equipment.
+- No spaces, no `#` or `+`, and no leading, trailing or double `/`.
+
+## Add a BACnet connector
+
+1. Select the node and click **+ Add connector**. BACnet/IP is selected.
+2. Enter the **Device address**, the controller's IP, with `:port` if it
+   isn't 47808 (e.g. `192.168.1.20` or `172.30.0.10:47808`), and the
+   **Device instance** (e.g. `10228`).
+3. Click **Read the point list from the device**, or press **Enter** in
+   either field. A big controller takes a minute; the line beside the
+   button counts the seconds, and **Stop waiting** gives up. The read runs on
+   the node as a background job, so it isn't cut off however long it takes.
+4. Pick the points to poll:
+   - **Search** matches the name, the device's own object name, the
+     description, the object (`AI 3`, `analog-input,3`) and the units.
+   - **Object type** filters to AI, AO, AV, BI, BO, BV, MSI, MSO, MSV (only
+     the types the device has, with counts).
+   - The header checkbox ticks or unticks every point shown; **Select none**
+     clears them all. The count above the table says how many are selected
+     (*12 of 340 points selected · 40 shown*).
+   - On a small device (50 points or fewer) every point starts ticked; on a
+     bigger one none do, so search or filter, then tick the ones you want.
+5. Rename points in **Name in Baler** if you like (e.g. `zone-temp` instead
+   of `ZN-T`). The name is the last part of the point's topic, and must be
+   unique within the connector. The device's own name and description stay
+   visible under the field. Pressing Enter in a name does nothing.
+6. Enter the **Topic prefix** (see the rule above) and **Poll every** (seconds,
+   default 5).
+7. Click **Add connector**.
+
+If you fix the address and read again, your ticks and renamed points are
+kept for every object the device still has.
+
+Connectors read every point you pick. Commandable points (outputs and values
+that aren't sensors) are also tagged `writable`, so an operator can command
+them from Baler; everything else is read-only.
+
+## Add a Modbus connector
+
+1. Click **+ Add connector** and choose **Modbus TCP**.
+2. Enter the **Host** (IP or name), **Port** (default 502) and **Unit id**
+   (default 1).
+3. Add one row per point: a **name** and the **holding register** number,
+   as numbered in the device's manual. **+ Add register** adds a row.
+4. Click **Test read**. It reads the first register in the list once,
+   before anything is saved, and shows the value (*OK: zone_temp (register 0)
+   = 70*) or what went wrong (can't connect, or the device refused the
+   register).
+5. Enter the topic prefix and poll interval, and click **Add connector**.
+
+Modbus has no point list to read: registers are whatever the manual says.
+Each register is read as one unsigned 16-bit value.
+
+## Check that it's working
+
+The **Status** column of the connectors table answers "is it polling?"
+without opening the equipment:
+
+| Status | Meaning |
+|---|---|
+| **Starting**, *no reads yet* | Just added or edited; the first read hasn't happened |
+| **OK**, *last value 10:42:07* | Every point read on its last try |
+| **3 of 20 failing** | Some points fail; the last error and their names are shown |
+| **Not reading** | Every point fails, e.g. the device is unreachable; the error is shown in red |
+
+Under it: when it last polled and, if it's failing, when it last read
+anything. Status is kept by the edge node since it started, and resets when
+you edit the connector. A node running an older Windrow shows `—`.
+
+The prefix in each row links to the equipment in **Equipment**
+(`index.html?equip=urn:equip:<prefix>`), which opens the tree at it. Its
+points appear there as they report.
+
+## Find a connector
+
+With more than one connector, a **Filter** box above the table matches the
+topic prefix and the device: type `vav-42` and only `fbf/vav-42` is left.
+**Only ones not OK** narrows to connectors whose status isn't OK.
+
+Connectors are grouped by controller, one header per device with its count
+and how many aren't OK; click the header to collapse it. Within a group they
+are sorted by prefix, numbers in order (`vav-2` before `vav-10`), and a big
+group shows 25 at a time with **Show more**. A filter shows every match.
+
+## Edit or delete a connector
+
+**Edit** opens the same dialog. You can change the points, their names, the
+topic prefix and the poll interval.
+
+- **BACnet**: the address and instance are fixed. To poll another device,
+  add a new connector. **Read the point list** again to add points the
+  device has gained: points not polled yet come back unticked, and the
+  status line says how many.
+- **Modbus**: the host, port and unit id can change too.
+
+Changing the prefix moves the equipment: the old topics are cleared, and the
+points appear under the new prefix.
+
+**Delete** asks you to type the prefix to confirm. Polling stops; history
+already recorded is kept.
+
+## Scan for devices
+
+- **Scan for BACnet devices** sends a Who-Is from the node (broadcast, and a
+  directed one to each device it already polls).
+- **Sweep a subnet for Modbus…** opens a dialog prefilled with the node's
+  own subnet (when its Windrow reports one). It probes TCP port 502 on every
+  address in the subnet, so only sweep networks you're allowed to. Up to /22
+  (1,024 addresses) starts at once; /16 to /21 asks you to press the button
+  again to confirm; anything larger is refused.
+
+A scan runs on the node as a background job. A progress line under the
+toolbar counts the seconds (and, for a sweep, the addresses probed), and the
+scan buttons stay disabled until it finishes, so a double click can't start
+two. **Stop waiting** stops the page waiting; the node finishes the scan
+anyway.
+
+Everything a scan finds appears under **Devices found**, as do the node's own
+periodic scans (BACnet every 5 minutes; a Modbus sweep of any
+`--modbus-scan-cidr`). A **pending** device isn't polled yet: click
+**Add connector…** on its row and the dialog opens with its address filled
+in. **Ignore** hides a device from the new ones; **Restore** brings it back.
+
+Broadcast discovery doesn't cross Docker's NAT, so the Windrow beside Baler
+only finds devices by directed Who-Is. See
+[Edge nodes](/edge-nodes#three-ways-a-device-reaches-baler) for when you
+need a gateway on the site's LAN.
+
+## Device logins
+
+**Set** (or **Change**) in a row's **Login** column stores a username and
+password for that device or connector, encrypted on the edge node. Listings
+only ever show the username. The dialog names the device, and stays open
+with an error if the save fails, so nothing you typed is lost.
+
+A device that accepts a well-known factory login shows **factory login
+works** with a note: change the password on the device. **Recheck login**
+tests again after you have.
+
+## Try it against the mock devices
+
+With the Windrow overlay, Baler runs a simulated BACnet controller (a mock
+hospital) and you can start a simulated Modbus server inside `windrow_api`:
+
+```bash
+git submodule update --init windrow   # the overlay builds Windrow from it
+docker compose -f docker-compose.yml -f deploy/nash-srv/docker-compose.windrow.yml up -d --build --wait
+docker compose -f docker-compose.yml -f deploy/nash-srv/docker-compose.windrow.yml \
+  exec -d windrow_api python -m windrow.mock_modbus_device --port 5020
+```
+
+Sign in at `http://localhost:8080/ui/connectors.html` as an admin (the first
+one comes from `POST /auth/orgs`, see the README) and select **Windrow beside
+Baler**.
+
+**BACnet**: **+ Add connector**, address `172.30.0.10:47808`, instance
+`3456`, **Read the point list**. Search for `zone`, tick a few points, prefix
+`fbf/mock/ahu-1`, **Add connector**. Within a poll interval the row shows
+**OK, last value …**.
+
+**Modbus**: **+ Add connector**, **Modbus TCP**, host `127.0.0.1`, port
+`5020`, unit `1`. Rows `zone_temp` → register `0` and `fan_status` →
+register `1`. **Test read** shows `zone_temp (register 0) = 70` (it cycles
+69-71). Prefix `fbf/mock/modbus-1`, **Add connector**.
+
+**Scan**: **Scan for BACnet devices** finds the mock controller (instance
+`3456`) once a connector polls it, by directed Who-Is. **Sweep a subnet for
+Modbus…** is prefilled with `172.30.0.0/24`, the node's BACnet network; the
+mock Modbus server listens on 5020, not 502, so a sweep doesn't find it. Use
+a sweep on a real network.
+
+## Doing it over the API
+
+The page calls `POST /ops/edges/<site>/<instance>/actions/<action>`
+([`ops-api-openapi.yaml`](https://github.com/jacobnash/Baler/blob/main/ops-api-openapi.yaml),
+also at `/ops/docs` on a running Baler), with Windrow's
+command-channel action names: `learn`, `create_connection`,
+`modbus_create_connection`, `modbus_test_read`, `update_connection`,
+`delete_connection`, and `start_job` / `get_job` for scans and reads. The
+Windrow beside Baler is `local/local`. See Windrow's
+[command channel](https://github.com/jacobnash/Windrow/blob/main/docs/command-channel.md)
+for each action's fields.

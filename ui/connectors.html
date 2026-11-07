@@ -11,7 +11,7 @@
 <body>
   <header>
     <h1>Connectors</h1>
-    <span id="status">connecting…</span>
+    <span id="status" role="status" aria-live="polite">connecting…</span>
     <nav class="top-nav">
       <a href="index.html">Equipment</a>
       <a href="his.html">Query</a>
@@ -37,33 +37,44 @@
       A <b>connector</b> polls one controller on a building network (BACnet or Modbus) through a
       <b>Windrow edge node</b> and sends its points to Baler. Remote systems that already hold data
       (SkySpark, SQL, weather) are <a href="ops.html#sources-section">Sources</a> instead.
+      <a class="docs-link" href="/docs/connectors" target="_blank" rel="noopener">How to add a connector</a>
     </p>
+    <p id="role-hint" class="notice" hidden>You can see connectors here but not change them. Ask an admin to add or change connectors.</p>
 
     <section aria-labelledby="nodes-h">
       <h2 id="nodes-h">Edge nodes</h2>
-      <div id="nodes" class="node-list" role="radiogroup" aria-label="Edge node"></div>
+      <div id="nodes" class="node-list" role="group" aria-labelledby="nodes-h"></div>
       <p id="nodes-empty" class="hint" hidden>
-        No edge nodes yet. Run Windrow next to Baler (set <code>WINDROW_API_URL</code>), or install it on a
-        site gateway and give it an edge account in <a href="ops.html#edge-section">Ops → Edge nodes</a>; it shows up
-        here once it reports in.
+        No edge nodes yet. An edge node is Windrow running beside Baler, or on a gateway at a site with an
+        account from <a href="ops.html#edge-section">Ops → Edge nodes</a>. It shows up here once it reports in.
+        <a href="/docs/connectors#pick-an-edge-node" target="_blank" rel="noopener">How to set one up</a>
       </p>
     </section>
 
     <div id="node-body" hidden>
+      <div id="offline-banner" class="banner banner-warn" hidden></div>
       <div class="toolbar">
         <button type="button" id="add-connector" class="primary admin-only">+ Add connector</button>
         <button type="button" id="scan-bacnet" class="admin-only">Scan for BACnet devices</button>
-        <button type="button" id="scan-modbus" class="admin-only">Scan a subnet for Modbus…</button>
+        <button type="button" id="scan-modbus" class="admin-only">Sweep a subnet for Modbus…</button>
         <button type="button" id="refresh">Refresh</button>
-        <span id="node-note" class="hint"></span>
+      </div>
+      <div id="scan-progress" class="progress-line" hidden>
+        <span class="spinner" aria-hidden="true"></span>
+        <span id="scan-progress-text" role="status"></span>
+        <button type="button" id="scan-cancel">Stop waiting</button>
       </div>
 
       <section aria-labelledby="conns-h">
         <h2 id="conns-h">Connectors on this node</h2>
+        <div id="conn-tools" class="list-tools" hidden>
+          <label class="grow">Filter <input type="search" id="conn-filter" placeholder="topic prefix or device, e.g. vav-42" autocomplete="off" aria-describedby="conn-count" /></label>
+          <label class="check"><input type="checkbox" id="conn-failing" /> Only ones not OK</label>
+          <span id="conn-count" class="hint" aria-live="polite"></span>
+        </div>
         <div class="table-wrap">
           <table id="connections-table">
-            <thead><tr><th>Protocol</th><th>Device</th><th>Topic prefix</th><th>Points</th><th>Poll</th><th>Login</th><th></th></tr></thead>
-            <tbody></tbody>
+            <thead><tr><th>Protocol</th><th>Device</th><th>Equipment (topic prefix)</th><th>Points</th><th>Poll</th><th>Status</th><th>Login</th><th><span class="sr-only">Actions</span></th></tr></thead>
           </table>
         </div>
       </section>
@@ -72,76 +83,115 @@
         <h2 id="devices-h">Devices found <span class="hint">(by scans; pending ones aren't connected yet)</span></h2>
         <div class="table-wrap">
           <table id="devices-table">
-            <thead><tr><th>Protocol</th><th>Address</th><th>Vendor / product</th><th>Status</th><th>Last seen</th><th>Login</th><th></th></tr></thead>
+            <thead><tr><th>Protocol</th><th>Address</th><th>Vendor / product</th><th>Status</th><th>Last seen</th><th>Login</th><th><span class="sr-only">Actions</span></th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
       </section>
     </div>
 
-    <dialog id="connector-dialog" class="wide">
+    <dialog id="connector-dialog" class="wide" aria-labelledby="connector-title">
       <form id="connector-form" method="dialog">
-        <h2 id="connector-title">Add connector</h2>
-        <fieldset id="protocol-pick" class="inline">
-          <legend>Protocol</legend>
-          <label><input type="radio" name="protocol" value="bacnet" checked /> BACnet/IP</label>
-          <label><input type="radio" name="protocol" value="modbus" /> Modbus TCP</label>
-        </fieldset>
+        <div class="dialog-body">
+          <h2 id="connector-title">Add connector</h2>
+          <p class="field-help"><a href="/docs/connectors" target="_blank" rel="noopener">How to add a connector</a></p>
+          <fieldset id="protocol-pick" class="inline">
+            <legend>Protocol</legend>
+            <label><input type="radio" name="protocol" value="bacnet" checked /> BACnet/IP</label>
+            <label><input type="radio" name="protocol" value="modbus" /> Modbus TCP</label>
+          </fieldset>
 
-        <div id="bacnet-fields">
+          <div id="bacnet-fields">
+            <div class="row">
+              <label>Device address <input id="c-address" placeholder="192.168.1.20 or 192.168.1.20:47808" autocomplete="off" /></label>
+              <label>Device instance <input id="c-instance" type="number" min="0" max="4194303" placeholder="e.g. 10228" /></label>
+            </div>
+            <p class="field-help" id="bacnet-help">The controller's IP (and port, if not 47808) and its BACnet device instance number. Press Enter to read its point list.</p>
+            <div class="learn-row">
+              <button type="button" id="learn-btn">Read the point list from the device</button>
+              <button type="button" id="learn-cancel" hidden>Stop waiting</button>
+              <span id="learn-status" class="hint" role="status"></span>
+            </div>
+            <div id="bacnet-points-box" hidden>
+              <div class="points-tools">
+                <label class="grow">Search <input type="search" id="pt-search" placeholder="name, description, object…" autocomplete="off" /></label>
+                <label>Object type <select id="pt-type"><option value="">All types</option></select></label>
+                <button type="button" id="pt-none">Select none</button>
+              </div>
+              <p id="pt-count" class="pt-count" aria-live="polite"></p>
+              <div class="table-wrap points-wrap">
+                <table id="bacnet-points">
+                  <thead><tr>
+                    <th class="cb"><input type="checkbox" id="all-points" aria-label="Select all shown points" /></th>
+                    <th>Name in Baler</th><th class="wide-only">Object</th><th class="wide-only">Value</th>
+                  </tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <p class="field-help">Connectors read every point you pick. Commandable points (outputs and values that
+                aren't sensors) are also marked <i>writable</i>, so an operator can command them from Baler.</p>
+            </div>
+          </div>
+
+          <div id="modbus-fields" hidden>
+            <div class="row">
+              <label>Host <input id="c-host" placeholder="192.168.1.30" autocomplete="off" /></label>
+              <label class="narrow">Port <input id="c-port" type="number" min="1" max="65535" value="502" /></label>
+              <label class="narrow">Unit id <input id="c-unit" type="number" min="0" max="255" value="1" /></label>
+            </div>
+            <p class="field-help" id="modbus-help"></p>
+            <div class="table-wrap points-wrap">
+              <table id="modbus-points">
+                <thead><tr><th>Name in Baler</th><th>Function</th><th>Register</th><th>Type</th><th>Word order</th><th>Scale</th><th>Offset</th><th>Unit</th><th>Write</th><th><span class="sr-only">Remove</span></th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="learn-row">
+              <button type="button" id="add-register">+ Add register</button>
+              <button type="button" id="test-read">Test read</button>
+              <span id="test-read-status" class="hint" role="status"></span>
+            </div>
+          </div>
+
           <div class="row">
-            <label>Device address <input id="c-address" placeholder="192.168.1.20 or 192.168.1.20:47808" /></label>
-            <label>Device instance <input id="c-instance" type="number" min="0" max="4194303" placeholder="e.g. 10228" /></label>
+            <label>Topic prefix <input id="c-prefix" required placeholder="fbf/site/ahu-1" autocomplete="off" aria-describedby="prefix-help" /></label>
+            <label class="narrow">Poll every (s) <input id="c-poll" type="number" min="1" max="3600" step="1" value="5" /></label>
           </div>
-          <p class="field-help">The controller's IP (and port, if not 47808) and its BACnet device instance number.</p>
-          <button type="button" id="learn-btn">Read the point list from the device</button>
-          <span id="learn-status" class="hint"></span>
-          <div class="table-wrap points-wrap" id="bacnet-points-wrap" hidden>
-            <table id="bacnet-points">
-              <thead><tr><th><input type="checkbox" id="all-points" aria-label="Select all" checked /></th><th>Name in Baler</th><th>Object</th><th>Units</th></tr></thead>
-              <tbody></tbody>
-            </table>
-          </div>
+          <p class="field-help" id="prefix-help"></p>
+          <p id="connector-error" class="form-error" role="alert" hidden></p>
         </div>
-
-        <div id="modbus-fields" hidden>
-          <div class="row">
-            <label>Host <input id="c-host" placeholder="192.168.1.30" /></label>
-            <label>Port <input id="c-port" type="number" min="1" max="65535" value="502" /></label>
-            <label>Unit id <input id="c-unit" type="number" min="0" max="255" value="1" /></label>
-          </div>
-          <p class="field-help">Register numbers are 0-based protocol addresses: holding register 40001 is 0, input register 30010 is 9. 32-bit types use the register and the next one. Published value = raw × scale + offset. Writable points (holding registers and coils) can be commanded from Baler.</p>
-          <div class="table-wrap points-wrap">
-            <table id="modbus-points">
-              <thead><tr><th>Name in Baler</th><th>Function</th><th>Register</th><th>Type</th><th>Word order</th><th>Scale</th><th>Offset</th><th>Unit</th><th>Write</th><th></th></tr></thead>
-              <tbody></tbody>
-            </table>
-          </div>
-          <button type="button" id="add-register">+ Add register</button>
-        </div>
-
-        <div class="row">
-          <label>Topic prefix <input id="c-prefix" required placeholder="fbf/site/ahu-1" /></label>
-          <label>Poll every (s) <input id="c-poll" type="number" min="1" max="3600" step="1" value="5" /></label>
-        </div>
-        <p class="field-help" id="prefix-help">Becomes the equipment's id in Baler, e.g. <code>fbf/site/ahu-1</code>. One connector = one piece of equipment.</p>
-        <p id="connector-error" class="form-error" role="alert" hidden></p>
-        <menu>
+        <menu class="dialog-actions">
           <button type="button" id="connector-cancel">Cancel</button>
-          <button type="submit" id="connector-save" class="primary">Create connector</button>
+          <button type="submit" id="connector-save" class="primary">Add connector</button>
         </menu>
       </form>
     </dialog>
 
-    <dialog id="credential-dialog">
+    <dialog id="credential-dialog" aria-labelledby="credential-title">
       <form method="dialog" id="credential-form">
-        <h2>Device login</h2>
+        <h2 id="credential-title">Device login</h2>
         <p class="field-help">Stored encrypted on the edge node. Listings only ever show the username.</p>
         <label>Username <input type="text" id="credential-username" required autocomplete="off" /></label>
         <label>Password <input type="password" id="credential-password" required autocomplete="new-password" /></label>
+        <p id="credential-error" class="form-error" role="alert" hidden></p>
         <menu>
           <button type="button" id="credential-cancel">Cancel</button>
-          <button type="submit" class="primary">Save</button>
+          <button type="submit" id="credential-save" class="primary">Save login</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="scan-dialog" aria-labelledby="scan-title" aria-describedby="scan-desc">
+      <form method="dialog" id="scan-form">
+        <h2 id="scan-title">Sweep a subnet for Modbus devices</h2>
+        <p id="scan-desc" class="field-help">Probes TCP port 502 on every address in the subnet, from <span id="scan-node"></span>.
+          Only sweep networks you're allowed to; some controllers log or alarm on unexpected connections.</p>
+        <label>Subnet <input id="scan-cidr" placeholder="192.168.1.0/24" autocomplete="off" aria-describedby="scan-limit" /></label>
+        <p id="scan-limit" class="field-help">Up to /22 (1,024 addresses) starts straight away. /16 to /21 asks you to confirm. Larger is refused.</p>
+        <p id="scan-error" class="form-error" role="alert" hidden></p>
+        <menu>
+          <button type="button" id="scan-dialog-cancel">Cancel</button>
+          <button type="submit" id="scan-go" class="primary">Sweep</button>
         </menu>
       </form>
     </dialog>
