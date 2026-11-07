@@ -72,16 +72,18 @@ def sample(nominal, noise, rng):
 
 def readings(slug, n_ahu, start, end, defects, rng):
     """Backfilled readings from start..end (epoch s). `defects` maps a point key
-    suffix ('ahu-2/sat') to 'stuck' (constant 55.0), 'stale' (stops half way) or
-    'range' (reads 140)."""
+    suffix ('ahu-2/sat') to 'stuck' (constant 55.0; a fault rule catches it, so it
+    shows in Alarms), 'range' (reads 140; also Alarms) or 'stale' (reported only
+    BEFORE the window, so a Cx liveness check sees no reading in it: a point that
+    stopped reporting)."""
     out = []
     for key, _dis, _cls, points in equips(slug, n_ahu):
         for name, _c, nominal, noise in points:
             defect = defects.get(f"{key.rsplit('/', 1)[1]}/{name}")
-            ts = start
-            while ts <= end:
-                if defect == "stale" and ts > start + (end - start) / 2:
-                    break
+            ts, stop = start, end
+            if defect == "stale":
+                ts, stop = start - 48 * 3600, start - 30 * 3600
+            while ts <= stop:
                 value = {"stuck": 55.0, "range": 140.0}.get(defect) or sample(nominal, noise, rng)
                 out.append({"point": f"{key}/{name}", "value": value, "ts": ts})
                 ts += STEP

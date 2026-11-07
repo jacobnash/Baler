@@ -29,7 +29,7 @@ def test_planted_defects_show_up_in_the_data():
     rows = seed.readings("newbuild", 2, 0, 24 * 3600, {"ahu-2/sat": "stuck", "ahu-2/mat": "stale", "ahu-1/oat": "range"}, rng)
     by = lambda suffix: [r for r in rows if r["point"].endswith(suffix)]
     assert {r["value"] for r in by("ahu-2/sat")} == {55.0}                  # stuck: one value
-    assert max(r["ts"] for r in by("ahu-2/mat")) < 24 * 3600 * 0.6          # stale: stops early
+    assert max(r["ts"] for r in by("ahu-2/mat")) < 0                        # stale: nothing inside the window
     assert min(r["value"] for r in by("ahu-1/oat")) == 140.0                # out of range
     assert max(r["ts"] for r in by("ahu-2/rat")) == 24 * 3600               # healthy: runs to the end
 

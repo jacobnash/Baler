@@ -91,13 +91,19 @@ land at the end state.
    (AHUs and VAV boxes with their Brick classes) but nothing has a value yet.
 3. **Start-up.** First readings arrive. Open a point and its history chart
    starts to fill.
-4. **Functional testing.** A day of trends lands with three planted defects:
-   a supply-air sensor stuck at 55 degrees, a mixed-air sensor that stops
-   reporting, and an outside-air sensor reading 140. A run lists them as
-   failing liveness or responsiveness results; in the results table look for
-   `fbf/demo-cx/newbuild/ahu-2` and `ahu-1`. Open an issue from a failing result.
-5. **Acceptance.** Fresh, healthy readings replace the defects. A short-window
-   run passes the checks it failed, and the matching issues close.
+4. **Functional testing.** A day of trends lands with planted defects, and
+   the two tools catch different ones. The Commissioning run checks
+   *completeness and liveness*: the VAV boxes are missing the damper-position
+   and airflow points the template expects, and the mixed-air sensor on
+   `ahu-2` reported nothing inside the window (stale). Run verification and
+   read the failing rows under `fbf/demo-cx/newbuild`. A supply-air sensor
+   stuck at 55 degrees and an outside-air sensor reading 140 are *value*
+   problems, which the fault rules catch, so look for them in **Alarms**, not
+   in the run. Open an issue from a failing result.
+5. **Acceptance.** Fresh, healthy readings arrive. A short-window run passes
+   the liveness checks it failed; the missing VAV points still fail until
+   they are added, so add them (record editing) or accept the risk. An issue
+   opened from a result closes only when a later run passes that check.
 6. **Warranty.** Re-run over a longer window, as the 10-month review would,
    and record anything deferred.
 7. **Operations.** Fault rules and a derivation are active. Watch **Alarms**
@@ -122,8 +128,10 @@ queued and workers process them in the background.
 - The equipment tree shows `DEMO` AHUs and VAV boxes. They currently appear
   in their own "Air_Handling_Unit" and "Variable_Air_Volume_Box" groups, next
   to the older "AHU" and "VAV" groups (Baler#76).
-- A functional-phase run shows failures for the planted defects, and an
-  acceptance-phase run passes them.
+- A functional-phase run fails the VAV template and the stale mixed-air
+  sensor, and an acceptance-phase run passes liveness again. Run history is
+  recorded per phase, so reseed on clean data to see the defects: a run only
+  judges the data as of the moment it runs.
 - Alarms lists faults from the `demo-cx-*` rules (for example a stuck or
   out-of-range supply-air sensor), and `live` keeps values fresh.
 - `cleanup` removes the records, rules and projects, and `up` rebuilds them.
