@@ -17,6 +17,7 @@ const statusEl = $("status");
 
 const state = {
   nodes: [], node: null, devices: [], bacnet: [], modbus: [], loadedFor: null, loadedAt: null,
+  announced: null, // the node's announced devices, or null when it can't list them
   editing: null, // {kind, id} while editing a connector
   // The BACnet point picker's model, one entry per object, keyed by
   // object_identifier so a re-read keeps what the integrator did (Baler#112).
@@ -143,11 +144,21 @@ function button(text, opts) {
 
 // ------------------------------------------------------------- nodes
 
+// Device announce (Windrow): devices on the LAN say "I am here", and
+// connections with that device_name follow them to a new address.
+function announceMeta(n) {
+  if (typeof n.announced !== "number" || (!n.announced && !n.announce_rejected)) return "";
+  const parts = [];
+  if (n.announced) parts.push(`${n.announced_online ?? 0} of ${n.announced} announced online`);
+  if (n.announce_rejected) parts.push(`${n.announce_rejected} announcement${n.announce_rejected === 1 ? "" : "s"} refused`);
+  return `${parts.join(" · ")} · `;
+}
+
 function nodeMeta(n) {
   if (!n.online) return n.error ? `offline - ${n.error}` : `offline · last seen ${when(n.last_seen)}`;
   const where = n.kind === "local" ? "beside Baler" : (n.site_name ? `site ${n.site_name}` : "remote");
   const pending = n.pending_devices ? `${plural(n.pending_devices, "new device")} · ` : "";
-  return `${where} · ${pending}seen ${short(n.last_seen)}`;
+  return `${where} · ${pending}${announceMeta(n)}seen ${short(n.last_seen)}`;
 }
 
 // Updates the buttons in place rather than rebuilding them, so the 15 s
@@ -215,7 +226,7 @@ async function loadNode() {
   const n = state.node;
   const key = nodeKey(n);
   if (state.loadedFor !== key) {
-    state.devices = []; state.bacnet = []; state.modbus = []; state.loadedAt = null;
+    state.devices = []; state.bacnet = []; state.modbus = []; state.loadedAt = null; state.announced = null; state.announcedError = null;
   }
   renderToolbar();
   if (!n.online) {
@@ -226,11 +237,16 @@ async function loadNode() {
   }
   loading = true;
   try {
-    const [d, b, m] = await Promise.allSettled([act("list_devices"), act("list_connections"), act("modbus_list_connections")]);
+    const [d, b, m, a] = await Promise.allSettled([act("list_devices"), act("list_connections"), act("modbus_list_connections"),
+                                                   act("list_announced")]);
     if (!state.node || nodeKey(state.node) !== key) return; // switched nodes meanwhile
     if (d.status === "fulfilled") state.devices = d.value || [];
     if (b.status === "fulfilled") state.bacnet = b.value || [];
     if (m.status === "fulfilled") state.modbus = m.value || [];
+    // A Windrow without announce (or a remote one whose command channel
+    // doesn't take list_announced) can't list them: say so, don't fail the page.
+    state.announced = a.status === "fulfilled" ? (a.value || []) : null;
+    state.announcedError = a.status === "rejected" ? a.reason.message : null;
     const failed = [d, b, m].filter((r) => r.status === "rejected");
     if (failed.length < 3) { state.loadedFor = key; state.loadedAt = Date.now(); }
     renderAll();
@@ -243,7 +259,57 @@ async function loadNode() {
 }
 
 function renderAll() {
-  keepFocus(() => { renderConnections(); renderDevices(); });
+  keepFocus(() => { renderConnections(); renderDevices(); renderAnnounced(); });
+}
+
+function servicesText(services) {
+  return (services || []).map((sv) => {
+    const id = sv.kind === "bacnet" && sv.instance !== undefined ? ` instance ${sv.instance}`
+      : sv.kind === "modbus" && sv.unit !== undefined ? ` unit ${sv.unit}` : "";
+    return `${sv.kind === "bacnet" ? "BACnet" : sv.kind === "modbus" ? "Modbus" : sv.kind}${sv.port ? ` :${sv.port}` : ""}${id}`;
+  }).join(", ") || "—";
+}
+
+// The node's announced devices (GET /announced): which connections follow
+// each one (by device_name) and where it has moved.
+function renderAnnounced() {
+  const n = state.node;
+  const section = $("announced-section");
+  const counted = n && typeof n.announced === "number";
+  const list = state.announced;
+  section.hidden = !n || (!counted && !(list && list.length));
+  if (section.hidden) return;
+  const summary = $("announced-summary");
+  summary.textContent = counted
+    ? `${n.announced_online ?? 0} of ${plural(n.announced, "device")} online${n.announce_rejected ? ` · ${n.announce_rejected} announcement${n.announce_rejected === 1 ? "" : "s"} refused (outside the allowed subnet, unsigned or too old)` : ""}`
+    : "";
+  const tbody = $("announced-table").querySelector("tbody");
+  tbody.innerHTML = "";
+  const followers = {};
+  for (const r of connectorRows()) {
+    const name = (r.c.device_name || "").toLowerCase();
+    if (name) (followers[name] = followers[name] || []).push(r.c.topic_prefix);
+  }
+  for (const dv of list || []) {
+    const moved = (dv.history || []).slice(-1)[0];
+    const addr = el("td", { className: "mono" }, [dv.address || "—"]);
+    if (moved) addr.append(el("div", { className: "hint small", textContent: `moved from ${moved.from} ${short(moved.at)}` }));
+    const follows = followers[(dv.name || "").toLowerCase()] || [];
+    tbody.append(el("tr", {}, [
+      el("td", { className: "mono", textContent: dv.name }),
+      addr,
+      el("td", { textContent: servicesText(dv.services) }),
+      el("td", { textContent: when(dv.last_seen), title: dv.first_seen ? `first seen ${when(dv.first_seen)}` : "" }),
+      el("td", {}, [el("span", { className: `badge ${dv.online ? "poll-ok" : "poll-error"}`, textContent: dv.online ? "online" : "offline" })]),
+      el("td", { textContent: follows.length ? follows.join(", ") : "—" }),
+    ]));
+  }
+  if (!list || !list.length) {
+    const text = list === null
+      ? `Can't list the announced devices: ${state.announcedError || "this node doesn't report them"}.`
+      : "No device has announced itself to this node yet.";
+    tbody.append(el("tr", {}, [el("td", { colSpan: 6, className: "hint", textContent: text })]));
+  }
 }
 
 function renderToolbar() {
@@ -310,9 +376,9 @@ function equipLink(prefix) {
 
 function connectorRows() {
   return [
-    ...state.bacnet.map((c) => ({ kind: "bacnet", c, device: `${c.device_address} · instance ${c.device_instance}`,
+    ...state.bacnet.map((c) => ({ kind: "bacnet", c, device: `${c.device_name ? c.device_name + " · " : ""}${c.device_address} · instance ${c.device_instance}`,
                                   points: (c.points || []).map((p) => p.label) })),
-    ...state.modbus.map((c) => ({ kind: "modbus", c, device: `${c.host}:${c.port} · unit ${c.device_id ?? 1}`,
+    ...state.modbus.map((c) => ({ kind: "modbus", c, device: `${c.device_name ? c.device_name + " · " : ""}${c.host}:${c.port} · unit ${c.device_id ?? 1}`,
                                   points: Object.keys(c.points || {}) })),
   ];
 }
@@ -833,7 +899,7 @@ function setEditHints(kind, record, device) {
   const bh = $("bacnet-help");
   const mh = $("modbus-help");
   bh.textContent = record
-    ? "The address and instance can't change on an existing connector: to poll another device, add a new connector. Read the point list again to add points the device has gained; your names and picks are kept."
+    ? "The address can change (the device moved); the instance can't: to poll another device, add a new connector. Read the point list again to add points the device has gained; your names and picks are kept."
     : device
       ? "Address and instance come from the scan. Press Read to list the device's points."
       : "The controller's IP (and port, if not 47808) and its BACnet device instance number. Press Enter to read its point list.";
@@ -841,7 +907,7 @@ function setEditHints(kind, record, device) {
 }
 
 function openConnector({ kind, record = null, device = null }) {
-  state.editing = record ? { kind, id: record.id } : null;
+  state.editing = record ? { kind, id: record.id, deviceName: record.device_name || "", address: record.device_address || "" } : null;
   $("connector-error").hidden = true;
   $("connector-title").textContent = record ? `Edit connector · ${record.topic_prefix}` : device ? `Add connector for ${deviceLabel(device)}` : "Add connector";
   $("connector-save").textContent = record ? "Save changes" : "Add connector";
@@ -856,8 +922,11 @@ function openConnector({ kind, record = null, device = null }) {
   state.points = [];
   renderPoints();
   $("c-poll").value = record?.poll_interval ?? 5;
-  // BACnet can't move an existing connector to another device; Modbus can.
-  for (const id of ["c-address", "c-instance"]) $(id).disabled = !!(record || device);
+  // An existing BACnet connector can move to the device's new address, not
+  // to another device (instance); Modbus can change all of it.
+  $("c-address").disabled = !!(device && !record);
+  $("c-instance").disabled = !!(record || device);
+  $("c-device-name").value = record?.device_name || "";
   for (const id of ["c-host", "c-port", "c-unit"]) $(id).disabled = !!(device && !record);
   if (kind === "modbus") {
     $("c-host").value = record?.host || device?.host || "";
@@ -997,8 +1066,13 @@ async function saveConnector(ev) {
     const labels = points.map((p) => p.label);
     const dup = labels.find((l, i) => labels.indexOf(l) !== i);
     if (dup) return showError(`Two points are named "${dup}" - names must be unique.`);
+    const address = $("c-address").value.trim();
+    if (!address) return showError("Enter the device address.");
     body = { topic_prefix: prefix, poll_interval: poll, points };
-    if (!state.editing) Object.assign(body, { device_address: $("c-address").value.trim(), device_instance: Number($("c-instance").value) });
+    // Only what changed goes in an edit: a Windrow from before announce
+    // refuses device_address/device_name in a PATCH.
+    if (!state.editing || address !== state.editing.address) body.device_address = address;
+    if (!state.editing) body.device_instance = Number($("c-instance").value);
   } else {
     const points = {};
     const units = {};
@@ -1018,6 +1092,12 @@ async function saveConnector(ev) {
     const host = $("c-host").value.trim();
     if (!host) return showError("Enter the device's host or IP.");
     body = { topic_prefix: prefix, poll_interval: poll, points, units, host, port: Number($("c-port").value) || 502, device_id: Number($("c-unit").value) || 0 };
+  }
+  // device_name (Windrow device announce): on edit, an empty field clears it.
+  const deviceName = $("c-device-name").value.trim();
+  if (/\s/.test(deviceName)) return showError("The device name can't contain spaces: it's the name the device announces, or a DNS name.");
+  if (state.editing ? deviceName !== state.editing.deviceName.toLowerCase() && deviceName !== state.editing.deviceName : !!deviceName) {
+    body.device_name = deviceName || null;
   }
   $("connector-save").disabled = true;
   try {
