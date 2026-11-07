@@ -999,7 +999,12 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 return
             body = self.read_json_body()
             now = now_fn()
-            if body.get("seed") == "all":
+            if body.get("from_spec") is True:
+                specs = self._procedures_from_spec(p, claims, body.get("availability", {"min_pct": 99, "max_gap_minutes": 5}))
+                if not specs:
+                    raise ValueError("no accepted spec equipment with points matched in the field - import and accept "
+                                     "the spec, and confirm the equipment mappings first")
+            elif body.get("seed") == "all":
                 have = {x.get("template") for x in repo.list_procedures(pid)}
                 specs = [procedures.from_seed(t) for t in procedures.SEED_BY_ID if t not in have]
             elif body.get("template"):
@@ -1018,7 +1023,27 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 made.append(proc)
             self._event(pid, "procedure.create", claims, {"procedures": [{"id": x["id"], "name": x["name"]} for x in made]})
             out = [self._public_proc(x) for x in made]
-            respond_json(self, 201, out if body.get("seed") == "all" else out[0])
+            respond_json(self, 201, out if body.get("seed") == "all" or body.get("from_spec") is True else out[0])
+
+        def _procedures_from_spec(self, p: dict, claims: dict, availability) -> list[dict]:
+            """One PFC procedure per accepted spec equipment item that maps to
+            field equipment: present, in pfc range, in band, available (#86)."""
+            if availability is not None:
+                procedures._criterion({"availability": availability, "point_class": "x"}, "availability")
+            alignment, equips, items = self._alignment_for(p, claims)
+            by_uri = {e["id"]: e for e in equips}
+            by_id = {i["id"]: i for i in items}
+            point_items = [i for i in items if i["kind"] == "point"]
+            out = []
+            for m in alignment["mappings"]:
+                if not m.get("equip_uri") or m["equip_uri"] not in by_uri:
+                    continue
+                item = by_id[m["spec_item_id"]]
+                rows = spec.points_alignment(item, by_uri[m["equip_uri"]], point_items)
+                made = procedures.from_spec(by_uri[m["equip_uri"]], item, rows, {i["id"]: i for i in point_items}, availability)
+                if made:
+                    out.append({**procedures.normalize(made), "template": None})
+            return out
 
         def _get_procedure(self, span, claims, proc_id) -> None:
             hit = self._visible_procedure(proc_id, claims)

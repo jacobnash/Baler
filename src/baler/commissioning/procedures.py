@@ -251,6 +251,79 @@ def _criterion(c, where: str) -> dict:
     return dict(c)
 
 
+# Spec point-list columns that state acceptance criteria (Baler#86),
+# matched with punctuation and case squeezed out.
+_SPEC_LIMITS = {"pfcmin": ("pfc", "min"), "pfcmax": ("pfc", "max"), "bandmin": ("band", "min"), "bandmax": ("band", "max")}
+
+
+def _squeeze(k) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(k or "").lower())
+
+
+def spec_limits(props: dict | None) -> dict[str, dict[str, float]]:
+    """{"pfc": {"min": 40.0, "max": 110.0}, "band": {...}} from a spec
+    point's properties; columns that aren't numbers are ignored."""
+    out: dict[str, dict[str, float]] = {}
+    for k, v in (props or {}).items():
+        hit = _SPEC_LIMITS.get(_squeeze(k))
+        if hit is None or v in (None, ""):
+            continue
+        try:
+            out.setdefault(hit[0], {})[hit[1]] = float(str(v).strip())
+        except ValueError:
+            continue
+    return out
+
+
+def _unit_letter(units) -> str | None:
+    u = str(units or "").strip().lower().replace("°", "").replace("deg", "")
+    if u in ("f", "fahrenheit", "degreesfahrenheit"):
+        return "F"
+    if u in ("c", "celsius", "degreescelsius"):
+        return "C"
+    return None
+
+
+def from_spec(equip: dict, spec_equip_item: dict, rows: list[dict], point_items: dict[str, dict],
+              availability: dict | None) -> dict | None:
+    """A procedure seeded from accepted spec points (Baler#86): each spec
+    point becomes a PFC - present (strict exists), in its pfc range, in its
+    operating band, and available. `rows` is spec.points_alignment for the
+    equipment; `point_items` maps spec item id -> the spec point."""
+    steps = [_step("points-present", "Specified points are present and reporting",
+                   "Every point the specification lists reports after power-on.", EXISTS_STRICT)]
+    absent, avail_points = [], []
+    for r in rows:
+        if not r.get("spec_item_id"):
+            continue
+        item = point_items[r["spec_item_id"]]
+        if r["status"] != "present":
+            absent.append(item["name"])
+            continue
+        lim = spec_limits(item.get("properties"))
+        unit = _unit_letter((item.get("properties") or {}).get("units"))
+        slug = re.sub(r"[^a-z0-9]+", "-", str(item["name"]).lower()).strip("-")[:40] or "point"
+        for kind, title in (("pfc", "within its PFC range"), ("band", "within its operating band")):
+            if kind in lim and len(steps) < MAX_STEPS:
+                rng = {**lim[kind], **({"unit": unit} if unit else {})}
+                steps.append(_step(f"{kind}-{slug}"[:60], f"{item['name']} {title}",
+                                   f"Spec {kind}_min/{kind}_max for {item['name']}.", {"range": rng, "point": r["point_uri"]}))
+        avail_points.append(r["point_uri"])
+    if availability and avail_points and len(steps) < MAX_STEPS:
+        crit = [{"availability": dict(availability), "point": u} for u in avail_points[:MAX_CRITERIA]]
+        steps.append({"id": "available", "title": "Specified points are available",
+                      "instruction": f"Each reports at least every {availability['max_gap_minutes']:g} min for "
+                                     f"{availability['min_pct']:g}% of the window.", "criteria": crit})
+    if len(steps) == 1 and not absent:
+        return None
+    desc = f"Seeded from the specification for {spec_equip_item['tag']}."
+    if absent:
+        desc += f" Specified but not found in the field: {', '.join(absent)}."
+    return {"name": f"{spec_equip_item['tag']} spec acceptance (PFC)", "kind": "startup",
+            "equip_class": (equip.get("brickClasses") or [equip.get("brickClass") or "Equipment"])[0],
+            "equip_uris": [equip["id"]], "window_hours": DEFAULT_HOURS["startup"], "description": desc, "steps": steps}
+
+
 def normalize(body: dict, existing: dict | None = None) -> dict:
     """A client-supplied procedure (or a partial PATCH over `existing`)
     into the stored fields. Raises ValueError/TypeError."""

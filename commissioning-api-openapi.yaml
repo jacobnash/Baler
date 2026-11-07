@@ -817,7 +817,13 @@ paths:
         Body is a procedure (ProcedureSpec), or `{"template": "<id>"}` (with
         optional name, equip_uris, window_hours, schedule, status
         overrides), or `{"seed": "all"}` to add every seed the project
-        doesn't have yet (answers a list).
+        doesn't have yet (answers a list), or `{"from_spec": true}` to seed
+        one PFC procedure per accepted spec equipment item matched in the
+        field (answers a list): its spec points must be present (strict
+        exists), inside their pfc_min/pfc_max and band_min/band_max columns,
+        and available (`availability`, default {min_pct 99,
+        max_gap_minutes 5}; null leaves that step out). Specified points not
+        found in the field are named in the description, never invented.
       requestBody:
         required: true
         content:
@@ -831,9 +837,18 @@ paths:
                 - type: object
                   required: [seed]
                   properties: { seed: { type: string, enum: [all] } }
+                - type: object
+                  required: [from_spec]
+                  properties:
+                    from_spec: { type: boolean, enum: [true] }
+                    availability:
+                      type: [object, "null"]
+                      properties:
+                        min_pct: { type: number }
+                        max_gap_minutes: { type: number }
       responses:
         "201":
-          description: The procedure (or, for seed=all, the list added)
+          description: The procedure (or, for seed=all and from_spec, the list added)
           content:
             application/json:
               schema:
