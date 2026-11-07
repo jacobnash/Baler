@@ -151,3 +151,32 @@ def test_rules_only_run_on_mock_hospital_does_not_regress_against_the_baseline(v
 def test_cli_check_exits_zero_against_the_committed_baseline(capsys):
     assert mapping_eval.main(["--check", "--no-per-class"]) == 0
     assert "no regression" in capsys.readouterr().out
+
+
+def _inventing_model(tags, label, description, known):
+    """A stand-in for a model that glues a plausible class name out of the
+    label (CHW-SUP-TEM-7 -> Chw_Sup_Tem_Sensor), confidently."""
+    import re
+
+    words = [w.capitalize() for w in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])", (label or "").rsplit("/", 1)[-1])]
+    name = "_".join(words) or "Equipment"
+    if not name.endswith(("Sensor", "Status", "Command", "Setpoint", "Equipment")):
+        name += "_Sensor"
+    return ClassificationResult(name, 0.9, "glued from the label")
+
+
+def test_a_model_answer_that_is_not_a_brick_class_goes_to_review(vocab):
+    report = mapping_eval.evaluate(_tiny_corpus(), llm_classify=_inventing_model, vocab=vocab)
+    by_label = {r.uri.rsplit("/", 1)[1]: r for r in report.points}
+    assert (by_label["CHWS"].step, by_label["CHWS"].predicted) == ("review", None)  # "Chws_Sensor"
+    assert by_label["CHWS"].outcome == "fallback"  # keeps its PROJ class
+
+
+@needs_windrow
+def test_nothing_an_inventing_model_says_reaches_the_graph_unless_brick_has_it(vocab):
+    """#181, measured on the whole corpus: before the check, this stand-in
+    model's invented names were 30% of points, auto-accepted and wrong."""
+    report = mapping_eval.evaluate(mapping_eval.load_mock_hospital(), llm_classify=_inventing_model, vocab=vocab)
+    written = [r.predicted for r in report.points + report.equipment if r.step == "model"]
+    assert written and all(vocab.canonical_class(c) == c for c in written)
+    assert mapping_eval.summarize(report, vocab)["points"]["auto_accepted_wrong"] == 0
