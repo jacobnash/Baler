@@ -561,3 +561,12 @@ def test_positive_filters_start_from_their_leaf_sets_not_every_subject(graph):
     assert h.match_entities(graph, h.parse_query("not point").filter) == sorted(
         set(h.match_entities(graph, h.parse_query("equip or site or point or not point").filter))
         - set(h.match_entities(graph, h.parse_query("point").filter)))
+
+
+def test_compact_series_is_the_same_history_as_parallel_arrays():
+    result = {"series": [{"id": "a", "history": [{"ts": 1794009600.0, "value": 1.5}, {"ts": 1794009600.25, "value": None}]},
+                         {"id": "b", "history": []}]}
+    h.compact_series(result)
+    assert result["series"][0]["history"] == {"ts": [1794009600, 1794009600.25], "value": [1.5, None]}
+    assert isinstance(result["series"][0]["history"]["ts"][0], int)
+    assert result["series"][1]["history"] == {"ts": [], "value": []}

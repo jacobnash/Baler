@@ -16,18 +16,9 @@ a Brick tool and to a SkySpark user.
 from __future__ import annotations
 
 from baler import hisquery
-from baler.scope import Scope
+from baler.scope import Scope, entity_key
 
 BRICK_NS = "https://brickschema.org/schema/Brick#"
-
-
-def _filters(scopes: list[Scope], var: str) -> str:
-    out = []
-    for s in scopes:
-        expr = s.sparql(var)
-        if expr:
-            out.append(f"FILTER({expr})")
-    return "\n".join(out)
 
 
 def _split(value) -> list[str]:
@@ -45,24 +36,37 @@ def build(store, scopes: list[Scope]) -> list[dict]:
     """Equipment rows, sorted by id:
     {id, dis, brickClass, brickClasses, tags, spec, points: [...]}.
     A point row is hisquery.describe_points' shape plus `spec`."""
+    # Every equip and its points, unfiltered, then scoped here: equipment and
+    # points are keyed by topic prefix, and for those Scope.allows is exactly
+    # Scope.sparql. As SPARQL FILTERs on every row the scope tests were
+    # ~0.33 s of a 0.35 s query (#150). A point URI without a key (none are
+    # minted today) still gets the graph-aware SPARQL test.
     pairs = store.query(
         hisquery.PREFIXES
-        + f"""SELECT DISTINCT ?equip ?point WHERE {{
-            {{ ?equip a ?_t }} UNION {{ ?equip brick:hasPoint ?_p }}
+        + """SELECT DISTINCT ?equip ?point WHERE {
+            { ?equip a ?_t } UNION { ?equip brick:hasPoint ?_p }
             FILTER(STRSTARTS(STR(?equip), "urn:equip:"))
-            {_filters(scopes, "equip")}
-            OPTIONAL {{
-                ?equip brick:hasPoint ?point .
-                {_filters(scopes, "point")}
-            }}
-        }}"""
+            OPTIONAL { ?equip brick:hasPoint ?point }
+        }"""
     )
+
+    def allowed(uri: str) -> bool:
+        return all(s.allows(uri) for s in scopes)
+
+    unkeyed = sorted({str(r.point) for r in pairs if getattr(r, "point", None) is not None
+                      and entity_key(str(r.point)) is None})
+    visible_unkeyed = set(unkeyed)
+    for s in scopes:
+        visible_unkeyed &= set(hisquery.visible_uris(store, sorted(visible_unkeyed), s))
     points_of: dict[str, list[str]] = {}
     for row in pairs:
         equip = str(row.equip)
+        if not allowed(equip):
+            continue
         point = getattr(row, "point", None)
         points_of.setdefault(equip, [])
-        if point is not None:
+        if point is not None and (allowed(str(point)) if entity_key(str(point)) is not None
+                                  else str(point) in visible_unkeyed):
             points_of[equip].append(str(point))
     if not points_of:
         return []

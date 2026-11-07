@@ -222,6 +222,19 @@ def read_latest(conn: psycopg.Connection, point_uri: str):
     return None if row is None else _row_to_value(row)
 
 
+# "This point" for the per-point LATERAL probes, written as a range, and
+# their ORDER BY led by point_uri. With `point_uri = u.uri` the planner
+# drops point_uri from the sort, orders by ts alone and, costing LIMIT 1 on
+# a per-point average, often walks a chunk's ts index filtering for the
+# point: for a point with no rows in that chunk (new, retired, or simply
+# another site's) that is every row of the chunk, chunk after chunk - 10-17
+# s per point at 35M rows, timing a statement out. As a range the order is
+# (point_uri, ts), which only the primary key gives: one index probe per
+# chunk, sub-millisecond, whatever the history depth (#150/#107). Same
+# rows: for text, a >= b and a <= b is a = b (ties break bytewise).
+_ONE_POINT = "point_uri >= u.uri AND point_uri <= u.uri"
+
+
 def read_latest_many(
     conn: psycopg.Connection,
     point_uris: list[str],
@@ -240,7 +253,7 @@ def read_latest_many(
     empty rows doesn't walk its whole history."""
     if not point_uris:
         return {}
-    conds = ["point_uri = u.uri"]
+    conds = [_ONE_POINT]
     params: list = [point_uris]
     if before is not None:
         conds.append("ts <= %s")
@@ -258,7 +271,7 @@ def read_latest_many(
             -- one backward primary-key probe per point; DISTINCT ON sorted
             -- every row of every point's history (>60s at 20M rows)
             SELECT ts, value, value_text, value_bool FROM point_history
-            WHERE {" AND ".join(conds)} ORDER BY ts DESC LIMIT 1
+            WHERE {" AND ".join(conds)} ORDER BY point_uri DESC, ts DESC LIMIT 1
         ) h
         """,
         params,
@@ -298,8 +311,8 @@ def read_range_many(
         FROM unnest(%s::text[]) AS u(uri)
         CROSS JOIN LATERAL (
             SELECT ts, value, value_text, value_bool FROM point_history
-            WHERE point_uri = u.uri AND ts >= %s AND ts < %s
-            ORDER BY ts LIMIT %s
+            WHERE point_uri >= u.uri AND point_uri <= u.uri AND ts >= %s AND ts < %s
+            ORDER BY point_uri, ts LIMIT %s
         ) h
         """,
         (point_uris, start_ts, end_ts, limit + 1),
@@ -513,7 +526,7 @@ def _ts(us: int) -> datetime:
 
 
 def _read_rollup_planned(conn, parts: list[tuple], point_uris: list[str], start_ts: datetime,
-                         fold: str, interval_seconds: int) -> list[tuple]:
+                         fold: str, interval_seconds: int, epoch: bool = False) -> list[tuple]:
     """Fold the plan's pieces together into date_bin buckets aligned to
     start_ts: pre-summed (vsum, vcount, vmin, vmax) rows from the views,
     raw samples as one-sample parts. A view whose bucket IS the output
@@ -553,8 +566,14 @@ def _read_rollup_planned(conn, parts: list[tuple], point_uris: list[str], start_
             "FROM ({parts}) parts GROUP BY point_uri, 2 HAVING SUM(vcount) > 0"
         ).format(fold=sql.SQL(_PART_FOLD_SQL[fold]), parts=sql.SQL(" UNION ALL ").join(grouped)))
         params += [interval_seconds, start_ts, *grouped_params]
-    query = sql.SQL("SELECT * FROM ({}) r ORDER BY bucket").format(sql.SQL(" UNION ALL ").join(selects))
+    query = sql.SQL("SELECT point_uri, {}, agg FROM ({}) r ORDER BY bucket").format(
+        sql.SQL(_EPOCH_SQL if epoch else "bucket"), sql.SQL(" UNION ALL ").join(selects))
     return list(iter_rows(conn.cursor(binary=True).execute(query, params)))
+
+
+# A bucket's start as Unix seconds, the float datetime.timestamp() gives
+# (both are integer microseconds / 1e6). date_part, not EXTRACT: float8.
+_EPOCH_SQL = "date_part('epoch', bucket)"
 
 
 def read_rollup(
@@ -566,6 +585,7 @@ def read_rollup(
     interval_seconds: int | None,
     interval_months: int | None,
     tz: str,
+    epoch: bool = False,
 ) -> dict[str, list]:
     """Axon hisRollup(fold, interval), done in Postgres rather than
     shipping a month of raw samples to Python (or the browser) to fold
@@ -579,7 +599,11 @@ def read_rollup(
     Fixed intervals read the continuous aggregates where they are up to
     date and raw rows elsewhere (_rollup_plan), inside one REPEATABLE READ
     snapshot so the bookkeeping read and the data read agree - the answer
-    is the raw fold's as of that snapshot, never a stale one."""
+    is the raw fold's as of that snapshot, never a stale one.
+
+    `epoch`: buckets as Unix-seconds floats instead of datetimes - what
+    /his sends anyway; skips building ~100k datetimes only to convert them
+    back (Baler#107)."""
     if not point_uris:
         return {}
     if fold not in _FOLD_SQL:
@@ -592,7 +616,8 @@ def read_rollup(
             if outermost:  # inside a caller's transaction, its snapshot rules apply
                 conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             parts = _rollup_plan(conn, levels, start_ts, end_ts)
-            rows = _read_rollup_planned(conn, parts, point_uris, start_ts, fold, int(interval_seconds or 0)) if parts else None
+            rows = (_read_rollup_planned(conn, parts, point_uris, start_ts, fold, int(interval_seconds or 0), epoch)
+                    if parts else None)
         if rows is not None:
             for point_uri, bucket, agg in rows:
                 out[point_uri].append((bucket, float(agg) if agg is not None else None))
@@ -614,7 +639,7 @@ def read_rollup(
     # the client-side decode cost of text for ~100k rows.
     cur = conn.cursor(binary=True).execute(
         f"""
-        SELECT point_uri, bucket, {_FOLD_SQL[fold]} AS agg FROM (
+        SELECT point_uri, {_EPOCH_SQL if epoch else "bucket"}, {_FOLD_SQL[fold]} AS agg FROM (
             SELECT point_uri, {bucket_sql} AS bucket,
                    COALESCE(value, value_bool::int::float8) AS v
             FROM point_history

@@ -14,6 +14,7 @@ and its own org, and leaves them there.
   python scripts/seed_perf.py seed            # graph, history, faults, logins
   python scripts/seed_perf.py live            # keep ~live ingest flowing (Ctrl-C)
   python scripts/seed_perf.py cx              # a Cx project with a completed run (prints its id)
+  python scripts/seed_perf.py home            # a small site with months of 5 s history, and its Cx project
 
 Needs BALER_PG_DSN / OXIGRAPH_URL (defaults: the compose ports on
 localhost) and, for the logins and `cx`, the gateway (--url, default
@@ -70,18 +71,29 @@ def plan():
     return out
 
 
+# A small site with a deep history, like live's Home Edge Pilot (#150): one
+# AHU and four VAVs (27 points) sampled every 5 s for months.
+HOME_SITE = "perf-home"
+HOME_STEP_S = 5
+
+
+def home_plan():
+    return [(HOME_SITE, f"fbf/{HOME_SITE}/ahu-1", "ahu", AHU)] + [
+        (HOME_SITE, f"fbf/{HOME_SITE}/vav-{i}", "vav", VAV) for i in range(1, 5)]
+
+
 def point_keys():
     keys = [f"{key}/{p}" for _s, key, _m, pts in plan() for p, *_ in pts]
     keys += [f"fbf/{SITES[i % 2]}/loose-{i}" for i in range(EXTRA_POINTS)]
     return keys
 
 
-def seed_graph(store):
+def seed_graph(store, rows=None, sites=SITES, extra_points=EXTRA_POINTS):
     point_rules, equip_rules = mapping.load_rules(), mapping.load_rules("rules/haystack_equip_to_brick.yaml")
-    for site in SITES:
+    for site in sites:
         store.add_many([(site_uri(site), RDF.type, BRICK.Site), (site_uri(site), HAYSTACK.dis, Literal(site))])
     n_equips = n_points = 0
-    for site, key, markers, points in plan():
+    for site, key, markers, points in (plan() if rows is None else rows):
         equip = URIRef(f"urn:equip:{key}")
         triples = [(equip, HAYSTACK.hasTag, Literal(m)) for m in ["equip", *markers.split()]]
         triples += [(equip, HAYSTACK.dis, Literal(key.rsplit("/", 1)[1].upper())), (site_uri(site), BRICK.hasPart, equip)]
@@ -113,36 +125,42 @@ def seed_graph(store):
             mapping.classify_point(store, p, rules=point_rules)
         n_equips += 1
         n_points += len(uris)
-    for i in range(EXTRA_POINTS):
+    for i in range(extra_points):
         topic = f"fbf/{SITES[i % 2]}/loose-{i}"
         p = URIRef(f"urn:point:{topic}")
         store.add_many([(p, RDF.type, TD.RawPoint), (p, TD.sourceTopic, Literal(topic)),
                         (p, HAYSTACK.hasTag, Literal("point")), (p, HAYSTACK.hasTag, Literal("his"))])
         n_points += 1
-    print(f"graph: {len(SITES)} sites, {n_equips} equips, {n_points} points")
+    print(f"graph: {len(sites)} site(s), {n_equips} equips, {n_points} points")
 
 
-def seed_history(conn, days: float):
-    keys = [f"urn:point:{k}" for k in point_keys()]
+def seed_history(conn, days: float, keys=None, step: int = STEP_S):
+    keys = [f"urn:point:{k}" for k in point_keys()] if keys is None else keys
     bools = [k for k in keys if k.rsplit("/", 1)[1] in ("fan-status", "fan-cmd", "run", "cmd")]
     nums = [k for k in keys if k not in set(bools)]
     end = datetime.now(timezone.utc).replace(microsecond=0)
     start = end - timedelta(days=days)
     t = start
-    while t < end:  # an hour per statement keeps each transaction modest
-        nxt = min(t + timedelta(hours=1), end)
+    chunk = timedelta(hours=1 if len(keys) > 100 else 24)  # each statement a few M rows at most
+    # Rows go in in time order, every point's sample for one instant together,
+    # as live ingest writes them: a point's history is then spread over the
+    # heap, one row per page or so, which is what live reads pay for (#150).
+    while t < end:
+        nxt = min(t + chunk, end)
         conn.execute(
             """INSERT INTO point_history (point_uri, ts, value)
                SELECT u, ts, 50 + 20 * sin(extract(epoch FROM ts) / 3600.0 + length(u)) + random()
-               FROM unnest(%s::text[]) u, generate_series(%s::timestamptz, %s::timestamptz - interval '1 microsecond',
-                                                          make_interval(secs => %s)) ts
-               ON CONFLICT DO NOTHING""", (nums, t, nxt, STEP_S))
+               FROM generate_series(%s::timestamptz, %s::timestamptz - interval '1 microsecond', make_interval(secs => %s)) ts,
+                    unnest(%s::text[]) u
+               ORDER BY ts
+               ON CONFLICT DO NOTHING""", (t, nxt, step, nums))
         conn.execute(
             """INSERT INTO point_history (point_uri, ts, value_bool)
                SELECT u, ts, (extract(hour FROM ts)::int BETWEEN 6 AND 20)
-               FROM unnest(%s::text[]) u, generate_series(%s::timestamptz, %s::timestamptz - interval '1 microsecond',
-                                                          make_interval(secs => %s)) ts
-               ON CONFLICT DO NOTHING""", (bools, t, nxt, STEP_S))
+               FROM generate_series(%s::timestamptz, %s::timestamptz - interval '1 microsecond', make_interval(secs => %s)) ts,
+                    unnest(%s::text[]) u
+               ORDER BY ts
+               ON CONFLICT DO NOTHING""", (t, nxt, step, bools))
         t = nxt
         sys.stdout.write(f"\rhistory: up to {t:%Y-%m-%d %H:%M}")
         sys.stdout.flush()
@@ -183,7 +201,7 @@ def seed_logins(url: str):
     s.headers["Authorization"] = f"Bearer {tok}"
     have = {x["name"]: x for x in s.get(f"{url}/auth/sites").json()}
     site_ids = []
-    for site in SITES:
+    for site in (*SITES, HOME_SITE):
         x = have.get(site) or s.post(f"{url}/auth/sites", json={"name": site, "topic_prefixes": [f"fbf/{site}"]}).json()
         site_ids.append(x["id"])
     for email, role, sites in (("operator@perf.test", "operator", None), ("viewer@perf.test", "viewer", site_ids)):
@@ -194,23 +212,23 @@ def seed_logins(url: str):
     print("logins: admin@, operator@, viewer@perf.test")
 
 
-def seed_cx(url: str):
-    """A Cx project over perf-north (383 points) and a completed 24 h run,
-    whose failures become issues: what the project report reads."""
+def seed_cx(url: str, name: str = "perf north pilot", prefix: str = f"fbf/{SITES[0]}", window_hours: float = 24):
+    """A Cx project over `prefix` (perf-north: 383 points) and a completed
+    run over the last `window_hours`, whose failures become issues: what
+    the project report reads."""
     s = requests.Session()
     s.headers["Authorization"] = "Bearer " + s.post(f"{url}/auth/login", json={
         "email": "operator@perf.test", "password": PASSWORD}).json()["token"]
-    name = "perf north pilot"
     p = next((p for p in s.get(f"{url}/cx/projects").json() if p["name"] == name), None)
     if p is None:
         phases = [("design", "Design"), ("construction", "Construction"), ("startup", "Start-up"),
                   ("functional", "Functional testing"), ("acceptance", "Acceptance")]
-        p = s.post(f"{url}/cx/projects", json={"name": name, "phase": "functional", "settings": {"prefixes": [f"fbf/{SITES[0]}"]},
+        p = s.post(f"{url}/cx/projects", json={"name": name, "phase": "functional", "settings": {"prefixes": [prefix]},
                                                "phases": [{"key": k, "name": n} for k, n in phases]}).json()
-    r = s.post(f"{url}/cx/projects/{p['id']}/runs", json={"window_hours": 24})
+    r = s.post(f"{url}/cx/projects/{p['id']}/runs", json={"window_hours": window_hours})
     r.raise_for_status()
     run_id = r.json().get("id") or r.json().get("run_id")
-    for _ in range(300):
+    for _ in range(900):
         run = s.get(f"{url}/cx/runs/{run_id}").json()["run"]
         if run["status"] in ("completed", "failed"):
             break
@@ -233,15 +251,23 @@ def live(conn):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("cmd", choices=["seed", "live", "cx"])
+    ap.add_argument("cmd", choices=["seed", "live", "cx", "home"])
     ap.add_argument("--days", type=float, default=4.0, help="history span (4 days x 766 points x 10 s = ~26.5M rows)")
     ap.add_argument("--faults", type=int, default=14_000)
+    ap.add_argument("--home-days", type=float, default=90.0, help="home: history span at 5 s (27 points x 90 days = ~42M rows)")
+    ap.add_argument("--window-hours", type=float, default=24 * 7, help="home: the Cx run's window")
     ap.add_argument("--url", default="http://localhost:8080")
     args = ap.parse_args()
     if args.cmd == "cx":
         seed_cx(args.url)
         return
     conn = timeseries.connect()
+    if args.cmd == "home":
+        seed_graph(RemoteStore(), home_plan(), (HOME_SITE,), 0)
+        keys = [f"urn:point:{key}/{p}" for _s, key, _m, pts in home_plan() for p, *_ in pts]
+        seed_history(conn, args.home_days, keys, HOME_STEP_S)
+        seed_cx(args.url, "perf home pilot", f"fbf/{HOME_SITE}", args.window_hours)
+        return
     if args.cmd == "live":
         live(conn)
         return
