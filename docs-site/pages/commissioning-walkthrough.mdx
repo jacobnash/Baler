@@ -1,0 +1,225 @@
+---
+title: Commissioning Walkthrough
+---
+
+A guided tour of commissioning (Cx) in Baler, from a new building's design
+phase through warranty, operations and maintenance, plus a retrofit and a
+campus of many small projects. It uses demo data you can create and remove
+with one script, so you can watch the data come online while you click
+through the Commissioning tab, the equipment tree and Alarms.
+
+## What commissioning is
+
+Commissioning is a quality process, not a single test. ASHRAE Guideline 0
+describes it running from pre-design through occupancy and operation, to
+verify the building meets the owner's requirements. Three documents anchor it:
+
+- **OPR** (Owner's Project Requirements): measurable outcomes the owner wants.
+- **BOD** (Basis of Design): how the design meets each OPR item.
+- **Cx Plan**: written in pre-design, updated each phase.
+
+**New construction** adds design and submittal review, start-up checklists,
+**functional performance tests**, an issues log, training, a final report
+and a Systems Manual. **Warranty** brings a review at about month 10 of a
+12-month warranty, seasonal or deferred tests (peak summer, shoulder, peak
+winter) and an end-of-warranty report listing open deficiencies.
+
+**Retro-commissioning (RCx)** is for existing buildings that usually have no
+OPR on file: start from as-found discovery (trends, a walkthrough), fix the
+low-cost items, and re-check. Savings from a one-time RCx tend to fade
+(a Berkeley Lab study cites roughly 35%), which is why
+**monitoring-based commissioning** keeps analytics running afterwards. Cost
+and savings figures in vendor material vary widely, so treat them as rough.
+
+Sources: [ASHRAE Guideline 0 overview](https://cxplanner.com/commissioning-101/ashrae-guideline-0),
+[Newfoundland and Labrador commissioning guide](https://www.gov.nl.ca/ti/files/works-commissioning-guide.pdf),
+[Kentucky commissioning plan outline](https://finance.ky.gov/department-for-facilities-and-support-services/office-of-facility-development-and-efficiency/TechnicalGuidelines/01%2091%2013%20-5%20Sample%20Commissioning%20Plan%20Outline%206-22-13.pdf),
+[University of Maryland general commissioning requirements](https://www.umaryland.edu/media/umb/af/dc/documents/division-01/019113---General-Commissioning-Requirements-8-9-2020.pdf),
+[ASHRAE retro-commissioning two-pager](https://www.ashrae.org/file%20library/about/cebd/presidential-theme-retrocommissioning-and-decarb-two-pager_2026.pdf).
+
+## How Baler maps onto it
+
+| Cx activity | Baler |
+|---|---|
+| Project and phases | A Cx project with an editable phase list (default: design, construction, start-up, functional, acceptance, warranty, operations; the demo adds maintenance) |
+| Expected equipment and points | SHACL templates (`ontology/cx-expected-points.ttl`) checked against the Brick/Haystack model |
+| Is it installed, alive, responding | The verification ladder: existence, liveness (trend data), responsiveness |
+| Start-up and functional tests | Procedures (power-on, start-up, functional), including S1-S3 sequence criteria seeded from a spec's acceptance criteria |
+| Sequence checks | Optional ASHRAE Guideline 36 items (`gl36:*` results) |
+| Issues log | Cx issues opened from failing (or inconclusive) results. A passing run only *resolves* one (`ready_for_retest`, shown as "resolved, pending verification"); a later run over data from after the fix records the retest; only a person closes it, and the close cites that retest |
+| Waivers | An accepted risk on an issue (owner, reason, review-by date), so a known failure or an inconclusive result can be signed off |
+| Phase sign-off | Phase gates: moving into start-up, functional testing and acceptance (and later) checks the records first (`settings.phase_gates`: `warn`, `block` or `off`) |
+| Final report | The project Cx report, `GET /cx/projects/{id}/report?format=html`: phase history, spec vs installed, verdicts, procedure results, the issues log with who did what |
+| Ongoing commissioning | Fault rules and derivations running on live data, shown in Alarms and Derivations |
+
+What each gate checks, computed from the records rather than ticked:
+
+| Moving into | Needs |
+|---|---|
+| Start-up | a completed verification run; every point reporting in it |
+| Functional testing | the above, and every power-on / start-up procedure passing on its latest test run |
+| Acceptance, warranty, operations | the above, every procedure passing with nothing inconclusive, no issue that isn't closed (a resolved issue still needs a person), and no inconclusive result in the latest run unless it is waived |
+
+Moving back a phase is never gated. With `block`, an unmet gate answers 409
+unless the move is overridden with a note, which the phase history records.
+Preview a move with `GET /cx/projects/{id}/gate?to=acceptance`; the
+Commissioning tab shows the same preview before you move.
+
+Limits worth knowing:
+
+- Apart from the gates, the phase you are in is recorded with each run but
+  does not change what a run checks, and one run per project can be active
+  at a time.
+- The demo seeds no procedures and no spec, so its gates check runs and
+  issues only, and its report says sequences of operation were not
+  evaluated. Add a procedure (Procedures tab, or seed one from a spec) to
+  see that part.
+- Each demo project is scoped to its own equipment by topic prefix
+  (`settings.prefixes`, Baler#75), for example `fbf/demo-cx/newbuild`. A
+  project without a prefix covers the whole organization. On a server that
+  predates Baler#75 the prefix is saved but ignored, and every project
+  reports on all equipment.
+- The gateway rate-limits each signed-in user. The seed script paces itself
+  and stops at the first 429 instead of retrying, so it is safe to rerun
+  after a short pause.
+
+## Seed the demo
+
+Everything is created through the public gateway, so it needs only a login:
+
+```bash
+export BALER_URL=https://your-host BALER_EMAIL=you@example.com BALER_PASSWORD=...
+python -m scripts.seed_cx_demo up                # new build + retrofit + 24 campus projects
+python -m scripts.seed_cx_demo advance retrofit  # one phase forward (see below)
+python -m scripts.seed_cx_demo report newbuild   # save the project Cx report as HTML
+python -m scripts.seed_cx_demo live              # keep fresh readings flowing (Ctrl-C to stop)
+python -m scripts.seed_cx_demo scope             # scope existing projects to their own prefix
+python -m scripts.seed_cx_demo cleanup           # remove it all (admin login)
+```
+
+Equipment keys live under `fbf/demo-cx/...`, names say `DEMO`, and fault
+rules are called `demo-cx-*`. `up` is safe to run twice: each project
+carries on from the phase it is in. Same `--seed`, same data. An operator
+can run everything except `cleanup`, because deleting records and Cx
+projects is admin-only; point history is kept by design. `up` takes several
+minutes: it paces itself under the rate limit and waits about two minutes
+per project for the retest window (below). Run `cleanup` on a server that
+already has the demo before reseeding it: old point history stays and can
+hide the planted defects.
+
+The new build and the retrofit use blocking gates
+(`settings.phase_gates: "block"`), so the script can only move them when
+the records allow it, and it stops with the unmet rules if they don't. The
+campus projects keep the default (`warn`).
+
+## Walkthrough: the new build
+
+`up` takes Riverside Clinic to operations. Its phase history, issue events
+and report show every step below. To watch it happen screen by screen
+instead, run `python -m scripts.seed_cx_demo advance newbuild` between
+steps on a fresh project. `advance` never closes an issue for you.
+
+1. **Design.** The project exists and has no equipment. The plan is in
+   place and nothing is built.
+2. **Construction.** Equipment and points appear in the **equipment tree**
+   (AHUs and VAV boxes with their Brick classes) but nothing has a value yet.
+   The VAV boxes are installed without the damper-position and airflow
+   points the template expects.
+3. **Start-up.** First readings arrive (backdated a day) and a verification
+   run checks them. The **start-up gate** needs that run, with every point
+   reporting. The missing VAV points don't block it: they are a template
+   gap, not a point that has stopped reporting. Open a point and its history
+   chart starts to fill.
+4. **Functional testing.** A day of trends lands with planted defects, and
+   the 24-hour run fails 9 results under `fbf/demo-cx/newbuild`:
+   - the mixed-air sensor on `ahu-2` hasn't reported in the window (stale);
+   - the supply-air sensor on `ahu-2` reads a constant 55 and the
+     outside-air sensor on `ahu-1` a constant 140. Liveness catches both as
+     flat, and the equipment-level `ladder` result fails with them;
+   - each VAV box is missing its damper position and airflow points.
+
+   The script opens an issue for every failure (`POST /cx/runs/{id}/issues`).
+   A value that is merely out of range, rather than flat, is the fault
+   rules' job: `demo-cx-sat-range` and `demo-cx-oat-range` are `cur`-mode
+   rules, which judge readings as they arrive over MQTT. The seed posts its
+   readings over HTTP, so those two never fire on demo data; the `his`-mode
+   `demo-cx-stuck` and `demo-cx-stale` rules do (see the campus below).
+5. **Acceptance.** The issue rules (Baler#86) take three steps, and each
+   one is recorded on the issue:
+   1. **Resolve.** The contractor installs the missing VAV points and every
+      sensor reports healthy values. The next run passes those checks, which
+      moves each issue to **resolved, pending verification**
+      (`ready_for_retest`, event `resolve.evidence`). A passing run never
+      closes an issue.
+   2. **Retest.** A second run whose whole window starts after the fix, so
+      it rests only on new data, passes again (event `retest.passed`). A
+      pass judged on data from before the fix doesn't count. If the check
+      had failed instead, the issue would go back to open (`retest.failed`).
+   3. **Close.** A person closes each retested issue (Issues tab, or
+      `PATCH /cx/issues/{id}` with `{"status": "closed"}`), and the close
+      cites the retest. The API refuses to close a check-tied issue that
+      isn't resolved and retested. For the new build, the script closes them
+      as the logged-in user, with a note saying so.
+
+   Only then is the **acceptance gate** met: a clean latest run, no
+   inconclusive result without a waiver, and no issue left that isn't
+   closed. The script runs a final acceptance run and moves the project.
+6. **Warranty.** A 24-hour re-run, as the 10-month review would, and a
+   place to record anything deferred.
+7. **Operations.** The `demo-cx-*` fault rules keep running. Watch
+   **Alarms** for new faults (with `live` running, readings keep arriving).
+8. **Maintenance.** `advance newbuild` adds the extra phase that marks
+   steady-state work: acknowledge or snooze an alarm, and re-run on a
+   schedule.
+
+Then read the project report: `python -m scripts.seed_cx_demo report
+newbuild` saves `GET /cx/projects/{id}/report?format=html` as
+`cx-report-newbuild.html`. It is a printable page with scope and
+limitations, the phase history with each gate, spec vs installed, the
+equipment verdicts from the latest run, procedure results, and the issues
+log with every resolve, retest and close, who did it and when. The same
+data comes back as JSON without `?format=html`. The report needs the
+`Authorization` header, so a plain browser link won't open it; use the
+script, or `curl -H "Authorization: Bearer $TOKEN"`.
+
+## Walkthrough: the retrofit and the campus
+
+**Harbor Office (retrofit)** follows the same tools in a different order:
+start from what is already there, run to find the gaps (as-found), fix the
+records and sensors, then leave fault rules and derivations running as
+monitoring-based commissioning.
+
+`up` leaves the retrofit in functional testing with its 9 issues resolved
+and retested, waiting for a person to close them. That last step is yours:
+
+1. Preview the move (`GET /cx/projects/{id}/gate?to=acceptance`, or the
+   Commissioning tab). The gate lists `no_open_issues`: 9 issues not closed,
+   because a resolved issue still needs a person to close it.
+2. Try to move to acceptance. The blocking gate refuses with 409.
+3. Open each issue, read its retest, and close it.
+4. Run `python -m scripts.seed_cx_demo advance retrofit`. It runs the
+   acceptance run and the gate lets the project through.
+
+**Campus**: 24 small projects sit at mixed phases, some with a stuck or stale
+sensor, so you can see how the project list, filters and concurrent runs
+behave when one organisation manages many buildings at once. Runs are
+queued and workers process them in the background.
+
+## Check it worked
+
+- The equipment tree shows `DEMO` AHUs and VAV boxes. They currently appear
+  in their own "Air_Handling_Unit" and "Variable_Air_Volume_Box" groups, next
+  to the older "AHU" and "VAV" groups (Baler#76).
+- The new build's functional-phase run has 9 failures (the VAV template,
+  the stale mixed-air sensor, the two flat sensors and their ladder
+  results). Its 9 issues show resolve, retest and close events, and every
+  phase move in its history says the gate was met.
+- The retrofit sits in functional testing with 9 issues resolved and
+  retested, and its acceptance gate lists them until you close them.
+- `report newbuild` saves a report that shows 0 issues not closed and every
+  equipment passing.
+- Alarms lists open `demo-cx-stuck` and `demo-cx-stale` faults on the
+  campus buildings that were seeded with a stuck supply-air or stale
+  mixed-air sensor. The new build and retrofit were fixed before you look,
+  so they have none. `live` keeps values fresh.
+- `cleanup` removes the records, rules and projects, and `up` rebuilds them.
