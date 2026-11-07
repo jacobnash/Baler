@@ -158,6 +158,16 @@ services:
       # classic file-based grafana/provisioning/ YAML - disabling it falls
       # back to the classic provisioner, which works correctly.
       GF_FEATURE_TOGGLES_DISABLE: "provisioning"
+      # First boot on a fresh volume: grafana's startup modules contend for
+      # its SQLite file, give up after the default 5 transaction retries
+      # ("database is locked (5) (SQLITE_BUSY)") and the process exits -
+      # which with `compose up --wait` failed whole CI jobs (#77, #97). WAL
+      # lets readers and the writer coexist; more retries cover the rest,
+      # and a restart covers anything left.
+      GF_DATABASE_WAL: "true"
+      GF_DATABASE_TRANSACTION_RETRIES: "30"
+      GF_DATABASE_QUERY_RETRIES: "10"
+    restart: unless-stopped
     volumes:
       - grafana-data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
@@ -429,6 +439,34 @@ services:
       oxigraph:
         condition: service_started
 
+  # Baler Notebooks (#90): JupyterLab with pandas, phable and baler_fn,
+  # reaching Baler through the gateway with an API key like any other
+  # client - Baler never runs notebook code. Opt-in:
+  #   docker compose --profile notebook up -d          (stack + notebook)
+  #   docker compose --profile notebook up -d jupyter  (notebook only, e.g. BALER_NOTEBOOK_URL at a remote Baler)
+  # Refuses to start without BALER_JUPYTER_TOKEN (docker/notebook-start.sh).
+  # Published on loopback only. It does not bind-mount the checkout, so it
+  # can't leave root-owned files in it (#29): notebooks live in the
+  # `notebooks` volume, and baler_fn is baked into the image (rebuild with
+  # --build after changing src/baler_fn). See docs-site/pages/code/notebooks.mdx.
+  jupyter:
+    build:
+      context: .
+      dockerfile: docker/notebook.Dockerfile
+    # A fixed tag so a function project's image can build FROM it
+    # (templates/function-project/Dockerfile).
+    image: baler-notebook:local
+    profiles: ["notebook"]
+    ports:
+      - "127.0.0.1:${BALER_JUPYTER_PORT:-8888}:8888"
+    environment:
+      BALER_URL: ${BALER_NOTEBOOK_URL:-http://gateway}
+      BALER_API_KEY: ${BALER_NOTEBOOK_API_KEY:-}
+      BALER_PROJECT: ${BALER_NOTEBOOK_PROJECT:-demo}
+      JUPYTER_TOKEN: ${BALER_JUPYTER_TOKEN:-}
+    volumes:
+      - notebooks:/home/jovyan/work
+
   gateway:
     image: nginx:1.31.8-alpine
     ports:
@@ -497,5 +535,8 @@ volumes:
     name: ${BALER_VOLUME_PREFIX:-baler}_grafana-data
   mosquitto-data:
     name: ${BALER_VOLUME_PREFIX:-baler}_mosquitto-data
+  # The jupyter service's notebooks (profile "notebook").
+  notebooks:
+    name: ${BALER_VOLUME_PREFIX:-baler}_notebooks
   # ollama-models:  # the commented-out ollama service above
   #   name: ${BALER_VOLUME_PREFIX:-baler}_ollama-models

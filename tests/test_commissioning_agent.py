@@ -14,7 +14,7 @@ import requests
 import test_commissioning_openapi as api
 from conftest import assert_matches_schema, load_spec
 
-from baler.commissioning import agent, db, phases, runner
+from baler.commissioning import agent, db, gates, phases, runner
 from baler.commissioning_api import OPENAPI_SPEC_PATH
 
 RAT = fx.pt(fx.AHU, "RAT")
@@ -123,7 +123,9 @@ def test_accepting_runs_as_the_person():
 
     assert "issue_id" in agent.accept(repo, prop("issue", {"title": "Label AHU-1"}), project, op, fx.NOW)
     assert "procedure_id" in agent.accept(repo, prop("procedure", {"template": "ahu_power_on"}), project, op, fx.NOW)
-    assert agent.accept(repo, prop("phase", {"key": "functional"}), project, op, fx.NOW) == {"phase": "functional"}
+    moved = agent.accept(repo, prop("phase", {"key": "functional"}), project, op, fx.NOW)
+    # the default gate mode is "warn": it moves, and says what was unmet (no verification run yet)
+    assert moved["phase"] == "functional" and "verification_run" in moved["gate_unmet"]
     assert phases.current(repo.get_project("p1")["phases"]) == "functional"
     item = agent.accept(repo, prop("spec_item", {"kind": "equipment", "tag": "AHU-1", "name": "AHU", "brick_class": "AHU"}), project, op, fx.NOW)
     assert repo.get_row("cx_spec_items", item["spec_item_id"])["status"] == "accepted"
@@ -258,3 +260,77 @@ def test_agent_failure_is_recorded_and_rejects(served):
                                           "decided_by": None, "decided_at": None, "created_at": fx.NOW}])
     rej = requests.post(f"{base}/agent-proposals/x1/reject", json={"note": "not yet"}, headers=api.A).json()
     assert rej["status"] == "rejected" and rej["result"] == {"note": "not yet"}
+
+
+def _save_run(repo, results, run_id="r1"):
+    repo.save_run({"id": run_id, "project_id": "p1", "phase": "startup", "started_at": fx.NOW, "finished_at": fx.NOW,
+                   "summary": {}, "window_hours": 24}, results)
+
+
+def _result(status, subject=RAT, check="live"):
+    return {"check_id": check, "subject": subject, "equip_uri": fx.AHU, "status": status, "severity": "major",
+            "symptom": "no samples in the window" if status == "inconclusive" else None}
+
+
+def test_an_inconclusive_result_can_become_an_issue_to_waive():
+    """#96 lets a person open an issue from an inconclusive result (the only
+    way to waive it for the acceptance gate); the agent's from_result
+    proposal used to be refused for anything but a failure."""
+    repo = _repo()
+    ctx = _ctx(repo)
+    _save_run(repo, [_result("inconclusive"), _result("pass", check="exists")])
+    ref = {"run_id": "r1", "check_id": "live", "subject": RAT}
+    agent.IMPL["propose"](ctx, {"kind": "issue", "payload": {"from_result": ref}, "reason": "rung 3 can't be judged here"})
+    [prop] = repo.find_rows("cx_agent_proposals", project_id="p1")
+    out = agent.accept(repo, prop, repo.get_project("p1"), ctx.claims, fx.NOW)
+    [issue] = repo.list_issues("p1")
+    assert issue["id"] == out["issue_id"] and (issue["check_id"], issue["subject"]) == ("live", RAT)
+    # a passing result, a wrong run or another org's equipment is caught when proposed, not on accept
+    for bad in ({**ref, "check_id": "exists"}, {**ref, "run_id": "nope"}, {**ref, "subject": "urn:point:elsewhere"}):
+        text, err = agent.call_tool(ctx, "propose", {"kind": "issue", "payload": {"from_result": bad}, "reason": "r"})
+        assert err and "failing or inconclusive" in text, bad
+
+
+def test_accepting_a_phase_proposal_honours_a_blocking_gate():
+    """#86: POST .../phase refuses an unmet gate in "block" mode; accepting
+    the agent's phase proposal must not be a way around it."""
+    repo = _repo()
+    ctx = _ctx(repo)
+    repo.update_project("p1", fx.NOW, settings={"phase_gates": "block"})
+    project = repo.get_project("p1")
+    gate = agent.IMPL["phase_gate"](ctx, {"key": "functional"})
+    assert gate["mode"] == "block" and not gate["gate"]["met"]
+    _, err = agent.call_tool(ctx, "phase_gate", {"key": "nope"})
+    assert err
+    agent.IMPL["propose"](ctx, {"kind": "phase", "payload": {"key": "functional"}, "reason": "start-up looks done"})
+    [prop] = repo.find_rows("cx_agent_proposals", project_id="p1")
+    with pytest.raises(gates.GateNotMet) as exc:
+        agent.accept(repo, prop, project, ctx.claims, fx.NOW)
+    assert {u["rule"] for u in exc.value.gate["unmet"]} >= {"verification_run"}
+    assert phases.current(repo.get_project("p1")["phases"]) == "startup"
+    # moving back is never gated
+    assert agent.accept(repo, {**prop, "payload": {"key": "construction"}}, project, ctx.claims, fx.NOW) == {"phase": "construction"}
+
+
+def test_open_faults_are_the_projects_own():
+    repo = _repo()
+    ctx = _ctx(repo)
+    repo.open_fault("range-rat", RAT, fx.NOW, {"value": 140}, "major")
+    repo.open_fault("cx:live", RAT, fx.NOW, {"project_id": "p1"}, "major")
+    repo.open_fault("cx:exists", RAT, fx.NOW, {"project_id": "other-project"}, "major")
+    repo.open_fault("range-b", fx.pt(fx.AHU_B, "RAT"), fx.NOW, {}, "major")  # org B
+    rows = agent.IMPL["open_faults"](ctx, {})
+    assert {r["rule_id"] for r in rows} == {"range-rat", "cx:live"}
+    assert all(r["equip_uri"] == fx.AHU for r in rows)
+
+
+def test_agent_api_blocked_phase_proposal_stays_open(served):
+    base, repo, _ = served
+    p = api._project(base)
+    assert requests.patch(f"{base}/projects/{p['id']}", json={"settings": {"phase_gates": "block"}}, headers=api.A).status_code == 200
+    repo.put_rows("cx_agent_proposals", [{"id": "g1", "project_id": p["id"], "session_id": "s", "kind": "phase",
+                                          "payload": {"key": "acceptance"}, "reason": "", "status": "proposed", "result": None,
+                                          "decided_by": None, "decided_at": None, "created_at": fx.NOW}])
+    r = requests.post(f"{base}/agent-proposals/g1/accept", headers=api.A)
+    assert r.status_code == 409 and not r.json()["gate"]["met"], r.text
+    assert repo.get_row("cx_agent_proposals", "g1")["status"] == "proposed"

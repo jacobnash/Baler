@@ -1,0 +1,318 @@
+---
+title: Write and publish a function
+description: From an empty directory to a function package that is listed on the docs site and called from a notebook.
+---
+
+This guide takes a function from a notebook cell to a published package. You will:
+
+1. try the function in a notebook
+2. package it, with `pyproject.toml` and a `baler.toml` manifest
+3. check the manifest against the package
+4. run it in a container of your own, either a notebook or a scheduled worker
+5. tag a release that anyone can `pip install`
+6. list it in the [function index](/code/functions)
+
+You need a running notebook first: see [Notebooks](/code/notebooks).
+
+**Security.** A function package is ordinary Python, and whoever installs it runs it with their own
+API key. Install packages in your own notebook or container only, never on the shared Baler host.
+Baler never runs function code; it only answers the Haystack API calls your code makes.
+
+## 1. Try it in a notebook
+
+Start in a notebook cell. A Baler function is a plain Python function that takes the client as its
+first argument:
+
+```python
+import baler_fn
+
+client = baler_fn.connect()
+
+@baler_fn.baler_function(tags=["stats"])
+def daily_max(client, point_id, range="today"):
+    """Largest sample of a point over a Haystack range."""
+    return float(client.his_read_df(point_id, range)["val"].max())
+
+point_id = client.read("point", limit=1)[0]["id"]
+daily_max(client, point_id)
+baler_fn.describe(daily_max)   # name, signature, summary, tags
+```
+
+`baler_fn.list()` doesn't show `daily_max` yet, because it only lists functions from installed
+packages. Packaging it fixes that.
+
+## 2. Make it a package
+
+A function package is a normal pip-installable project with two additions:
+
+- entry points in the `baler.functions` group, in `pyproject.toml`
+- a `baler.toml` manifest, which the docs site reads
+
+The quickest start is to copy the template from a Baler checkout. It's the `baler-sample`
+package that ships in the notebook image:
+
+```bash
+cp -r templates/function-project ../my-fns    # run from the Baler checkout
+```
+
+Then rename `baler-sample`/`baler_sample` throughout. The rest of this section builds the same
+shape from an empty directory, so you can see each piece.
+
+```
+my-fns/
+├── pyproject.toml
+├── baler.toml
+├── Dockerfile
+├── compose.my-fns.yml
+└── src/my_fns/
+    ├── __init__.py
+    └── functions.py
+```
+
+`src/my_fns/__init__.py` can be empty. `src/my_fns/functions.py` holds the function from step 1:
+
+```python
+import baler_fn
+
+
+@baler_fn.baler_function(tags=["stats"])
+def daily_max(client, point_id, range="today"):
+    """Largest sample of a point over a Haystack range."""
+    return float(client.his_read_df(point_id, range)["val"].max())
+```
+
+`pyproject.toml`:
+
+```toml
+[project]
+name = "my-fns"
+version = "0.1.0"
+description = "My Baler functions"
+requires-python = ">=3.10"
+dependencies = ["pandas>=2.1"]
+
+[project.entry-points."baler.functions"]
+daily_max = "my_fns.functions:daily_max"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+```
+
+Each entry point is either `name = "module:function"` for one function, or `name = "module"` for
+every decorated function in that module.
+
+`baler_fn` is deliberately **not** listed in `dependencies`. The Baler notebook image provides it,
+the same way a SkySpark pod relies on the runtime it's installed into. To test outside the image,
+install Baler itself: `pip install --no-deps "baler @ git+https://github.com/jacobnash/Baler" && pip install requests pandas`.
+pip warns that Baler's server dependencies aren't installed. `baler_fn` doesn't need them, so you
+can ignore that warning.
+
+`baler.toml`:
+
+```toml
+manifest_version = 1
+
+[package]
+name = "my-fns"
+version = "0.1.0"
+description = "My Baler functions."
+author = "Your Name"
+repository = "https://github.com/you/my-fns"
+tags = ["stats"]
+license = "MIT"
+date = 2026-11-07
+
+[entry-points."baler.functions"]
+daily_max = "my_fns.functions:daily_max"
+
+[[functions]]
+name = "daily_max"
+signature = "(client, point_id, range='today')"
+summary = "Largest sample of a point over a Haystack range."
+tags = ["stats"]
+```
+
+The docs site never imports your code. Everything the index shows comes from `baler.toml`, so the
+`[[functions]]` entries must match the code. Step 3 checks that.
+
+### baler.toml reference
+
+| key | required | rules |
+|---|---|---|
+| `manifest_version` | yes | `1` |
+| `package.name` | yes | your pip distribution name, the same as `[project] name`. Letters, digits, `.`, `_`, `-`. |
+| `package.version` | yes | the same as `[project] version`, e.g. `"0.1.0"` |
+| `package.description` | yes | up to 500 characters |
+| `package.author` | yes | up to 200 characters |
+| `package.repository` | yes | an `https://` git URL that pip can clone |
+| `package.tags` | no | up to 20, each made of lowercase letters, digits and `-` |
+| `package.license` | no | e.g. `"MIT"` |
+| `package.docs` | no | an `https://` URL |
+| `package.date` | no | a TOML date, unquoted: `2026-11-07` |
+| `package.ref` | no | the git tag or branch the install line pins. Default `v<version>`. |
+| `package.subdirectory` | no | the package's path inside the repository, if it isn't the root |
+| `entry-points."baler.functions"` | yes | the same entries as `pyproject.toml` |
+| `[[functions]]` | yes, at least one | `name` (a Python identifier), `signature` (as `inspect.signature` prints it), `summary` (the docstring's first line), `tags` (optional) |
+
+No text field may contain backticks or control characters. An unknown key is an error, which
+catches typos. Every error names the file and the field, for example
+`baler.toml: package.repository: 'http://...' is not valid (an https:// git URL pip can clone)`.
+
+The install line built from the manifest is
+`pip install "git+<repository>@<ref>#subdirectory=<subdirectory>"`.
+
+## 3. Check the manifest
+
+Wherever the package is installed (step 4's container is the easy place), run:
+
+```bash
+python -m baler_fn check /path/to/baler.toml
+python -m baler_fn functions-toml my-fns       # prints [[functions]] entries to paste
+```
+
+`check` compares the manifest with the installed package: version, entry points, function names,
+signatures, docstring summaries and tags. It exits with status 1 and lists every difference. Run it
+again whenever you change a function.
+
+## 4. Run it in its own container
+
+Your project gets its own image, built from the Baler notebook image with your package installed.
+The same image can run a notebook or a scheduled worker.
+
+`Dockerfile`:
+
+```dockerfile
+FROM baler-notebook:local
+
+COPY --chown=${NB_UID}:${NB_GID} . /opt/baler-project
+RUN pip install --no-cache-dir /opt/baler-project
+```
+
+`compose.my-fns.yml`:
+
+```yaml
+services:
+  my_fns_notebook:
+    build:
+      context: ${MY_FNS_DIR:-../my-fns}
+      additional_contexts:
+        baler-notebook:local: service:jupyter   # build the base notebook image first
+    image: my-fns-notebook:local
+    profiles: ["my-fns"]
+    ports:
+      - "127.0.0.1:8889:8888"
+    environment:
+      BALER_URL: ${BALER_NOTEBOOK_URL:-http://gateway}
+      BALER_API_KEY: ${BALER_NOTEBOOK_API_KEY:-}
+      BALER_PROJECT: ${BALER_NOTEBOOK_PROJECT:-demo}
+      JUPYTER_TOKEN: ${BALER_JUPYTER_TOKEN:-}
+    volumes:
+      - notebooks:/home/jovyan/work
+```
+
+Start it from the **Baler checkout**. Compose resolves relative paths (`../my-fns`) against the
+first `-f` file's directory, so they're relative to the checkout, not to your project:
+
+```bash
+docker compose -f docker-compose.yml -f ../my-fns/compose.my-fns.yml --profile my-fns up -d --build my_fns_notebook
+```
+
+Naming the service builds only your image, plus the base notebook image it starts from, and leaves
+the rest of the stack alone. Your notebook mounts the same `notebooks` volume as the stock one, so
+both see the same files. To keep them apart, give your service a volume of its own.
+
+Open `http://localhost:8889/lab?token=<your BALER_JUPYTER_TOKEN>`. Your functions are listed there:
+
+```python
+import baler_fn
+client = baler_fn.connect()
+fns = baler_fn.list()
+fns["daily_max"](client, client.read("point", limit=1)[0]["id"])
+```
+
+Then check the manifest inside the container:
+
+```bash
+docker compose -f docker-compose.yml -f ../my-fns/compose.my-fns.yml \
+  exec my_fns_notebook python -m baler_fn check /opt/baler-project/baler.toml
+```
+
+After you change your code, run the same `up -d --build my_fns_notebook` command again.
+
+### A scheduled worker
+
+To run a function on a timer instead of interactively, add a second service to your compose file
+that uses the same image with a `command:`, under its own profile. The template's
+`compose.baler-sample.yml` and `src/baler_sample/worker.py` show the whole pattern:
+
+```yaml
+  my_fns_worker:
+    build:
+      context: ${MY_FNS_DIR:-../my-fns}
+      additional_contexts:
+        baler-notebook:local: service:jupyter
+    image: my-fns-notebook:local
+    profiles: ["my-fns-worker"]
+    command: ["python", "-m", "my_fns.worker"]
+    restart: unless-stopped
+    environment:
+      BALER_URL: ${BALER_NOTEBOOK_URL:-http://gateway}
+      BALER_API_KEY: ${BALER_NOTEBOOK_API_KEY:-}
+      BALER_PROJECT: ${BALER_NOTEBOOK_PROJECT:-demo}
+```
+
+`my_fns/worker.py` is a loop: `client = baler_fn.connect()`, call your function, `time.sleep(...)`.
+Start it with `--profile my-fns-worker up -d --build my_fns_worker` and read its output with
+`docker compose ... logs -f my_fns_worker`. A worker that writes results back with
+`client.his_write` needs an `operator` key.
+
+## 5. Release it
+
+Push the project to a git host, then tag the version that matches `baler.toml`:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+Anyone can now install it in their own notebook. In a notebook cell:
+
+```python
+%pip install "git+https://github.com/you/my-fns@v0.1.0"
+import baler_fn
+baler_fn.list()           # my-fns' functions appear, no kernel restart needed
+```
+
+Packages installed with `%pip` last until the container is recreated. Step 4's image is the way to
+keep them.
+
+## 6. List it on the docs site
+
+Open a PR against Baler that adds an entry pointing to your manifest to `docs-site/function-index.toml`. See
+[Publishing a package](/code/publishing). Once it's merged, the package and its functions appear in
+the [function index](/code/functions), with the `pip install` line from step 5.
+
+## The sample package
+
+`baler-sample` (`templates/function-project` in the Baler repo) is installed in the notebook image
+and listed in the index. Its functions make a good first test of a new setup:
+
+```python
+fns = baler_fn.list()
+fns["point_table"](client, "point")                   # DataFrame: id, dis, kind, unit, curVal
+fns["his_stats"](client, point_id, "today")           # count, mean, min, max, first, last
+fns["hourly_profile"](client, point_id, "today", tz="America/Chicago")
+```
+
+To run the sample's own containers, use its compose file. The worker needs
+`BALER_SAMPLE_POINT` in `.env`:
+
+```bash
+docker compose -f docker-compose.yml -f templates/function-project/compose.baler-sample.yml \
+  --profile baler-sample up -d --build baler_sample_notebook   # notebook on localhost:8889
+docker compose -f docker-compose.yml -f templates/function-project/compose.baler-sample.yml \
+  --profile baler-sample-worker up -d --build baler_sample_worker   # logs his_stats every hour
+```

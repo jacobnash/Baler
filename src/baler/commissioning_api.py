@@ -450,25 +450,8 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             respond_json(self, 200, out)
 
         def _gate_for(self, p: dict, key: str) -> dict | None:
-            """The gate for moving project `p` into `key`, or None when the
-            move isn't gated (backwards, sideways into an ungated phase, or
-            phase_gates "off")."""
-            if gates.mode(p.get("settings")) == "off":
-                return None
-            by_key = {ph["key"]: ph for ph in p["phases"]}
-            cur = by_key.get(phases.current(p["phases"]) or "")
-            if key not in by_key or not gates.rules_for(key) or (cur and by_key[key]["position"] <= cur["position"]):
-                return None
-            pid = p["id"]
-            run = next((r for r in repo.list_runs(pid, 20) if r.get("status") == "completed"), None)
-            results = repo.get_results(run["id"]) if run else []
-            procs = repo.list_procedures(pid)
-            latest = {pr["id"]: next((t for t in repo.list_test_runs(pr["id"], 20) if t["status"] == "completed"), None)
-                      for pr in procs}
-            runner.reconcile_issues(repo, pid, None, [], now_fn())  # an overdue waiver lapses first
-            active = repo.list_issues(pid, issues.ACTIVE)
-            risks = {r["issue_id"]: r for r in repo.list_risks(pid)}
-            return gates.evaluate(key, run, results, procs, latest, active, risks)
+            """The gate for moving project `p` into `key` (runner.phase_gate)."""
+            return runner.phase_gate(repo, p, key, now_fn())
 
         def _phase_gate(self, span, claims, pid) -> None:
             """Preview: what moving to ?to=<key> would require, without moving."""
@@ -1842,6 +1825,10 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 result = agent.accept(repo, prop, project, claims, now)
             except PermissionError as exc:
                 respond_error(self, 403, str(exc))
+                return
+            except gates.GateNotMet as exc:
+                # Not failed: it can be accepted once the gate is met (#86)
+                respond_json(self, 409, {"error": str(exc), "gate": exc.gate})
                 return
             except (ValueError, TypeError, KeyError, db.IssueExists) as exc:
                 repo.update_row("cx_agent_proposals", prop_id, {"status": "failed", "result": {"error": str(exc)},

@@ -253,6 +253,22 @@ forever instead of erroring. See
 [`docs-site/pages/haystack-puller.mdx`](docs-site/pages/haystack-puller.mdx)
 for the full picture.
 
+## Notebooks (optional)
+
+JupyterLab with pandas, [phable](https://pypi.org/project/phable/) and
+`baler_fn` (`connect()`, `@baler_function`, `baler_fn.list()`), talking to
+Baler through the gateway with an API key. Baler never runs notebook code.
+Opt-in, and it refuses to start without `BALER_JUPYTER_TOKEN` in `.env`:
+
+```bash
+docker compose --profile notebook up -d    # then http://localhost:8888/lab?token=<BALER_JUPYTER_TOKEN>
+```
+
+See [`docs-site/pages/code/notebooks.mdx`](docs-site/pages/code/notebooks.mdx)
+(API key, `.env` settings), [`write-a-function.mdx`](docs-site/pages/code/write-a-function.mdx)
+(function packages, `baler.toml`, `templates/function-project/`) and the
+generated function index (`docs-site/function-index.toml`).
+
 ## Real building data (optional)
 
 `scripts/load_bdg2_sample.py` loads a bounded slice of real hourly

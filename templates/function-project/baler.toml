@@ -1,0 +1,42 @@
+# Function package manifest (docs-site/pages/code/write-a-function.mdx).
+# The docs-site function index reads only this file; it never imports
+# your code. Keep it in step with pyproject.toml and the docstrings:
+#   python -m baler_fn check            (run where the package is installed)
+#   python -m baler_fn functions-toml baler-sample   (regenerates [[functions]])
+manifest_version = 1
+
+[package]
+name = "baler-sample"
+version = "0.1.0"
+description = "Sample Baler functions: a point table, history stats and an hourly profile. The starting point for your own package."
+author = "Baler maintainers"
+license = "AGPL-3.0-or-later"
+tags = ["sample", "stats"]
+repository = "https://github.com/jacobnash/Baler"
+subdirectory = "templates/function-project"
+ref = "main"
+docs = "https://docs.timberdoodle.nash.engineering/code/write-a-function"
+date = 2026-11-07
+
+[entry-points."baler.functions"]
+point_table = "baler_sample.functions:point_table"
+his_stats = "baler_sample.functions:his_stats"
+hourly_profile = "baler_sample.functions:hourly_profile"
+
+[[functions]]
+name = "point_table"
+signature = "(client, filter='point', limit=None)"
+summary = "Points matching a Haystack filter, one row each: id, dis, kind, unit, curVal."
+tags = ["inventory"]
+
+[[functions]]
+name = "his_stats"
+signature = "(client, point_id, range='today')"
+summary = "Count, mean, min, max, first and last sample of one point over a Haystack range."
+tags = ["history", "stats"]
+
+[[functions]]
+name = "hourly_profile"
+signature = "(client, point_id, range='today', tz='UTC')"
+summary = "Mean, min and max of a point for each hour of the day, in the timezone tz."
+tags = ["history", "stats"]

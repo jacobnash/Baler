@@ -1,0 +1,107 @@
+---
+title: "Notebooks: decisions"
+description: Decision record for the Code epic - the feature name and phable vs openhay in the notebook (issue 95). Recommendations awaiting the owner's confirmation.
+---
+
+> **Status: recommended, not yet confirmed.** These are the recommendations from the Code epic
+> (issues 90-95). The notebook image and `baler_fn` are built around them, but the final call is
+> the project owner's. If he picks differently, the [last section](#if-the-decision-goes-the-other-way)
+> lists what changes.
+
+## 1. Feature name: "Baler Notebooks"
+
+SkySpark calls the equivalent feature *Code*, with Shell for the REPL and Eggbox for packages.
+Reusing "Code" would be confusing in a product that people will put next to SkySpark. It would
+also clash with "code" in its everyday sense: source code, Axon code, fault-rule code.
+
+| user-facing name | what it is | SkySpark counterpart |
+|---|---|---|
+| **Baler Notebooks** | the opt-in JupyterLab service and the workflow around it | Code, Shell |
+| **function package** | a pip-installable repo with a `baler.toml` | pod / Eggbox package |
+| **function index** | the static docs page listing published packages | Eggbox |
+| `baler_fn` | the Python package (`connect`, `@baler_function`, `list`) | the Code app's function list |
+
+"Notebooks" says what the user actually opens, and it doesn't promise server-side execution, which
+Baler deliberately doesn't do. Internal names (the compose profile `notebook`, the service
+`jupyter`, the docs folder `pages/code/`) follow the issues and don't need to change if the name
+does.
+
+## 2. Notebook client library: phable (recommended)
+
+The question was which Haystack client the notebook ships for anything beyond `baler_fn`'s wrapper:
+[phable](https://pypi.org/project/phable/), or [openhay](https://github.com/jacobnash/openhay).
+openhay is ours, and `haystack_api.py` already uses it on the server side.
+
+Either way, `baler_fn.connect()` returns a client that wraps Baler's own
+`baler.haystack_client`, as issue 91 asks. That client gained API-key auth, Hayson decoding and
+`hisWrite` for this. So the choice decides what's preinstalled in the image, and what
+`client.phable()` (or an equivalent) hands back. It doesn't decide what `baler_fn` itself is built on.
+
+### The trial
+
+Both libraries were run against a live Baler stack (this branch, `docker compose`, the gateway at
+`/api/demo`) on 2026-11-07. Each one authenticated with an `operator` API key from
+`POST /auth/api-keys` and did the four things the issue asks for.
+
+- **phable** 0.1.29, from PyPI.
+- **openhay** at `main`, commit `eb89b9e`, built from git with maturin.
+
+| step | phable 0.1.29 | openhay `eb89b9e` |
+|---|---|---|
+| install | `pip install "phable[pandas,pyarrow]"`: pure Python, wheels on PyPI | not on PyPI. `pip install git+...` builds Rust with maturin: needs `cargo`, about 1.5 min cold |
+| auth with an API key | ✅ `phable.HaystackClient(url, api_key)` (sends `BEARER authToken=`) | ✅ `oh.Client(url, bearer=api_key)` |
+| `about` | ✅ | ✅ |
+| `read` | ✅ `read_all("point")` | ✅ `read("point")` |
+| `hisRead` to a DataFrame | ✅ through the batch form: `his_read_by_ids([...]).to_pandas()` gives a typed long-format DataFrame. ⚠️ The single-id `his_read_by_id(...).to_pandas()` fails, see below. | ⚠️ no DataFrame support: you build one from `Grid.rows` by hand |
+| `hisWrite` | ✅ `his_write_by_id(ref, [{"ts": ..., "val": Number(...)}])` | ✅ `his_write(ref, [(ts, Number(...))])` |
+| ops coverage | no `nav`, watches, `defs`/`libs` or `close`-and-reuse | everything Baler serves, including watches, `nav`, `defs`, the pointWrite array and `close` |
+| who maintains it | third party (an independent check on Baler's Haystack conformance) | us |
+
+Both clients also pass every Baler cell of the CI conformance matrix
+([Haystack conformance](/haystack-conformance)), with the gaps marked there.
+
+**The single-id phable gap.** Baler answers a single-point `hisRead` with the point's `id` in the
+*grid* meta, as the Haystack spec describes. phable's `Grid.to_pandas()` insists on an `id` in the
+`val` *column* meta, and raises `ValueError: Column 'val' must have metadata with a valid 'id' of
+type Ref`. The batch form carries column ids, so it works. `baler_fn`'s own `his_read_df()` doesn't
+depend on either. A later change could add the column meta in `haystack_api.py`. That's harmless to
+other clients, but it touches the conformance matrix, so it's left as a follow-up rather than done
+here.
+
+### Why phable
+
+- **It's made for this.** phable targets Jupyter, with pandas and Polars conversion built in.
+  openhay is a protocol library: complete and fast, but with no DataFrame layer.
+- **It's cheap to ship.** A notebook image, or a user's own environment, gets phable with one pip
+  line. openhay needs a Rust toolchain or a separately built wheel until it publishes wheels to
+  PyPI. The main `Dockerfile` already pays that cost with a Rust build stage. Repeating it in every
+  user's notebook and function-project image would make the user-facing path the slow one.
+- **It's independent.** It's a second implementation that Baler is already tested against, so
+  examples written with it show that Baler works with ordinary Haystack tooling.
+- **Its gaps don't matter much here.** Watches and `nav` are rarely what a report or statistics
+  notebook needs, and `baler_fn` covers read, history and writes on its own.
+
+openhay stays the server-side library, and remains the better choice for anyone who wants full op
+coverage. Once it ships wheels to PyPI, adding it to the image is one line in
+`docker/notebook.Dockerfile`, and it could then be revisited as the default.
+
+### If the decision goes the other way
+
+Choosing openhay for the notebook would mean:
+
+- `docker/notebook.Dockerfile`: replace the `phable[...]` pip line with a Rust stage that builds the
+  openhay wheel, the same as the main `Dockerfile`. Pin the same ref as `pyproject.toml` and
+  `OPENHAY_REF`.
+- `src/baler_fn/client.py`: replace `BalerClient.phable()` with an `openhay()` method returning
+  `oh.Client(base_url, bearer=api_key)`.
+- Docs: the notebook pages, and the starter notebook's last cell.
+
+Nothing else depends on the choice: `baler_fn`, the manifest, the template and the index are
+library-neutral.
+
+## 3. Later phase (not decided here): running functions inside Baler
+
+Promoting a published function to a server-side derivation or fault rule (through
+`derivation_api.py`) would mean Baler executing user code. `sandbox.py` states that it's not a hard
+security boundary. That phase needs its own design and security review before any work starts.
+Until then the rule stands: **Baler never executes notebook or package code.**

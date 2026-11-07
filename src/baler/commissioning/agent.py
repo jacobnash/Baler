@@ -6,7 +6,8 @@ Guardrails, by construction:
 
   - Reads and passive work are tools that act: inventory, runs and their
     results, templates and gaps, issues, procedures and test runs, spec
-    items and alignment, active-test status; starting a passive
+    items and alignment, active-test status, phase gates, open faults;
+    starting a passive
     verification run or a passive test procedure.
   - Every write is a *proposal* (cx_agent_proposals) a human accepts or
     rejects: an issue, a test procedure, a phase change, a spec item, a
@@ -15,6 +16,9 @@ Guardrails, by construction:
   - Active tests only through Cx 9's envelope: an accepted active-test
     proposal becomes a *planned* run, which an admin still confirms
     inside its window with BALER_CX_ALLOW_WRITES=1.
+  - Phase gates (#86) apply to an accepted phase proposal exactly as to
+    POST .../phase: a "block" gate refuses it (the proposal stays open),
+    a "warn" gate records what was unmet.
   - Per-project scope and token: every tool runs with the session
     starter's org/sites and the project's site scope - the same filters
     a person's request gets. The agent never sees raw SQL or SPARQL.
@@ -44,6 +48,7 @@ from baler.commissioning import (
     active,
     db,
     engine,
+    gates,
     inventory,
     issues,
     llm,
@@ -53,6 +58,7 @@ from baler.commissioning import (
     spec,
 )
 from baler.commissioning import templates as tpl
+from baler.commissioning.mirror import RULE_PREFIX as MIRROR_PREFIX
 
 log = logging.getLogger(__name__)
 
@@ -73,7 +79,11 @@ run passive verification, and propose what a commissioning authority would do ne
 How you work:
 - Start from the project's current phase. In start-up, look at power-on procedures and template gaps.
   In functional testing, procedures and GL36/90.1 sequence items. In warranty and operations,
-  scheduled re-runs and faults.
+  scheduled re-runs and open faults.
+- Before proposing a phase change, check its gate (phase_gate) and say what is unmet. A project can
+  block an unmet gate; then only a person can override it.
+- An inconclusive result that can't be settled here (e.g. a read-only controller) can still become an
+  issue (from_result) - a person accepting that issue as a risk is the explicit waiver the gate needs.
 - Base every statement on evidence a tool returned. Name the run, check and point you are citing.
   An inconclusive result means no evidence either way: never call it a pass.
 - Reads and passive runs you may do freely. Everything that changes the project - an issue, a test
@@ -126,9 +136,16 @@ TOOLS: list[dict] = [
      "input_schema": _obj({})},
     {"name": "active_status", "description": "Whether this deployment allows active tests, and recent active runs.",
      "input_schema": _obj({})},
+    {"name": "phase_gate", "description": "What moving the project to phase `key` requires (verification run, points "
+     "reporting, procedures passing, no open issues, no unwaived inconclusive results), what is unmet, and the "
+     "project's gate mode (warn, block or off). Check it before proposing a phase change.",
+     "input_schema": _obj({"key": _S}, ["key"])},
+    {"name": "open_faults", "description": "Open faults on this project's equipment: fault_detector rules and this "
+     "project's own mirrored Cx checks (rule ids cx:<check>). At most 200, newest first.",
+     "input_schema": _obj({})},
     {"name": "propose", "description": "Propose a change for a person to accept. kind and payload:\n"
      "- issue: {title, description?, equip_uri?, severity? (critical|major|minor|info), "
-     "from_result? {run_id, check_id, subject}}\n"
+     "from_result? {run_id, check_id, subject} (a failing or inconclusive result)}\n"
      "- procedure: {template} (a procedure_templates id) or a full procedure {name, kind, equip_class, steps}\n"
      "- phase: {key, note?}\n"
      "- spec_item: {kind (equipment|point|sequence), tag, name, brick_class?, equip_tag?, properties?}\n"
@@ -304,6 +321,40 @@ def t_active_status(ctx: Ctx, _):
             "recent": [{k: r.get(k) for k in ("id", "equip_uri", "status", "results", "error")} for r in runs]}
 
 
+def t_phase_gate(ctx: Ctx, a):
+    project = ctx.repo.get_project(ctx.project["id"])
+    if a["key"] not in {p["key"] for p in project["phases"]}:
+        raise ToolError("no such phase key in this project")
+    gate = runner.phase_gate(ctx.repo, project, a["key"], ctx.now())
+    return {"mode": gates.mode(project.get("settings")),
+            "gate": gate or {"target": a["key"], "rules": [], "met": True, "unmet": []}}
+
+
+def t_open_faults(ctx: Ctx, _):
+    equip_of = {p["id"]: e["id"] for e in ctx.equips() for p in e["points"]}
+    mine = set(ctx.repo.open_mirrored_faults(ctx.project["id"]))
+    rows = [f for f in ctx.repo.list_faults(True) if f["point_uri"] in equip_of and ctx.scope.allows(f["point_uri"])
+            # another project's cx: mirror is that project's business
+            and (not f["rule_id"].startswith(MIRROR_PREFIX) or (f["rule_id"], f["point_uri"]) in mine)]
+    rows.sort(key=lambda f: str(f.get("started_at") or ""), reverse=True)
+    return [{k: f.get(k) for k in ("id", "rule_id", "point_uri", "status", "severity", "started_at")}
+            | {"equip_uri": equip_of[f["point_uri"]], "detail": f.get("detail")} for f in rows[:200]]
+
+
+def _result_for_issue(repo, ref, project_id: str, scope) -> tuple[dict, dict]:
+    """(run, result) a from_result issue refers to: this project's run, a
+    failing or inconclusive result (inconclusive so it can be waived, #96),
+    in scope. Raises ValueError (TypeError for a malformed ref)."""
+    if not isinstance(ref, dict):
+        raise TypeError("from_result must be an object with run_id, check_id and subject")
+    run = repo.get_run(str(ref.get("run_id")))
+    res = next((r for r in repo.get_results(run["id"]) if r["check_id"] == ref.get("check_id")
+                and r["subject"] == ref.get("subject")), None) if run and run["project_id"] == project_id else None
+    if res is None or res["status"] not in ("fail", "inconclusive") or not scope.allows(res["equip_uri"]):
+        raise ValueError("that result isn't a failing or inconclusive result of this project's run")
+    return run, res
+
+
 def _check_proposal(ctx: Ctx, kind: str, payload: dict) -> None:
     """Catch what would certainly fail on acceptance, now, so the agent
     can correct it. Acceptance re-validates everything."""
@@ -311,6 +362,8 @@ def _check_proposal(ctx: Ctx, kind: str, payload: dict) -> None:
     if kind == "issue":
         if not payload.get("title") and not payload.get("from_result"):
             raise ToolError("an issue needs a title, or from_result")
+        if payload.get("from_result"):
+            _result_for_issue(ctx.repo, payload["from_result"], ctx.project["id"], ctx.scope)
         if payload.get("equip_uri") and payload["equip_uri"] not in equip_ids:
             raise ToolError("equip_uri isn't in this project's inventory")
         issues.check_severity(payload.get("severity"))
@@ -357,7 +410,8 @@ IMPL: dict[str, Callable[[Ctx, dict], object]] = {
     "template_gaps": t_template_gaps, "list_runs": t_list_runs, "run_results": t_run_results,
     "start_verification_run": t_start_verification_run, "list_issues": t_list_issues, "list_procedures": t_list_procedures,
     "procedure_templates": t_procedure_templates, "run_procedure": t_run_procedure, "get_test_run": t_get_test_run,
-    "spec_items": t_spec_items, "alignment": t_alignment, "active_status": t_active_status, "propose": t_propose,
+    "spec_items": t_spec_items, "alignment": t_alignment, "active_status": t_active_status, "phase_gate": t_phase_gate,
+    "open_faults": t_open_faults, "propose": t_propose,
 }
 assert set(IMPL) == {t["name"] for t in TOOLS}
 
@@ -558,12 +612,7 @@ def accept(repo, proposal: dict, project: dict, claims: dict, now: datetime) -> 
     scopes, _ = runner.project_scopes(repo, project, claims)
     if kind == "issue":
         if p.get("from_result"):
-            ref = p["from_result"]
-            run = repo.get_run(str(ref.get("run_id")))
-            res = next((r for r in repo.get_results(run["id"]) if r["check_id"] == ref.get("check_id")
-                        and r["subject"] == ref.get("subject")), None) if run and run["project_id"] == pid else None
-            if res is None or res["status"] != "fail" or not scopes[0].allows(res["equip_uri"]):
-                raise ValueError("that result isn't a failing result of this project's run")
+            run, res = _result_for_issue(repo, p["from_result"], pid, scopes[0])
             issue = issues.from_result(res, run["id"], pid, db.new_id, now, sub)
         else:
             issue = {"id": db.new_id(), "project_id": pid, "equip_uri": p.get("equip_uri"), "check_id": None, "subject": None,
@@ -581,10 +630,24 @@ def accept(repo, proposal: dict, project: dict, claims: dict, now: datetime) -> 
         repo.create_procedure(proc)
         return {"procedure_id": proc["id"]}
     if kind == "phase":
+        # The same gate POST .../phase applies (#86): accepting a proposal
+        # is not a way around a project's "block". An override stays a
+        # person's explicit move with a note, not a click on a proposal.
+        key = str(p["key"])
         before = phases.current(project["phases"])
-        repo.save_phases(pid, phases.set_current(project["phases"], str(p["key"]), now), now)
-        repo.add_event(pid, "phase.set", sub, None, {"from": before, "to": p["key"], "note": p.get("note"), "via": "agent proposal"}, now)
-        return {"phase": p["key"]}
+        gate = runner.phase_gate(repo, project, key, now)
+        mode = gates.mode(project.get("settings"))
+        if gate is not None and not gate["met"] and mode == "block":
+            raise gates.GateNotMet(gate)
+        repo.save_phases(pid, phases.set_current(project["phases"], key, now), now)
+        detail = {"from": before, "to": key, "note": p.get("note"), "via": "agent proposal"}
+        if gate is not None:
+            detail["gate"], detail["gate_mode"] = gates.summary(gate), mode
+        repo.add_event(pid, "phase.set", sub, None, detail, now)
+        out: dict = {"phase": key}
+        if gate is not None and not gate["met"]:
+            out["gate_unmet"] = ", ".join(u["rule"] for u in gate["unmet"])
+        return out
     if kind == "spec_item":
         cls = p.get("brick_class")
         if cls:

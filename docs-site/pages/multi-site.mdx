@@ -187,7 +187,9 @@ verifying against the system CA store (it's a public Let's Encrypt cert).
 as a site gateway (Windrow itself), a simulated BACnet or Modbus device, or a
 simulated weather station, each under systemd with the edge account's
 credentials in `/etc/windrow/edge.env`. See Windrow's
-[docs/edge-nodes.md](https://github.com/jacobnash/Windrow/blob/main/docs/edge-nodes.md).
+[docs/edge-nodes.md](https://github.com/jacobnash/Windrow/blob/main/docs/edge-nodes.md),
+and [Edge nodes](/edge-nodes) for the runbook: which topology to use,
+connecting the devices, and checking them end to end.
 
 How it fits with the existing accounts: `MOSQUITTO_USERS` (the `baler`
 backend account and any hand-added ones) stay in the password/ACL files.
