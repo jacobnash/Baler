@@ -308,15 +308,24 @@ function buildEquipNode(equip, label) {
   const equipDetails = document.createElement("details");
   equipDetails.dataset.equip = equip.uri;
   const equipSummary = document.createElement("summary");
-  equipSummary.textContent = `${label} `;
-  const dot = cxDot(equip.uri);
-  if (dot) equipSummary.appendChild(dot);
-  equipSummary.appendChild(hisLink(equip.uri));
-  if (canEditRecords()) {
-    equipSummary.appendChild(recordEditButton(equip, () => init()));
-    equipSummary.appendChild(recordNewButton("+ point", "point", equip, null, () => init()));
-  }
+  equipSummary.textContent = label;
   equipDetails.appendChild(equipSummary);
+  // The Cx dot, chart link and edit buttons sit beside the <summary>, not
+  // in it: a <summary> is itself the toggle control, and links/buttons
+  // nested inside it are unreachable or misannounced by screen readers
+  // (axe nested-interactive). style.css lays them over the summary's line.
+  const actions = document.createElement("span");
+  actions.className = "equip-actions";
+  const dot = cxDot(equip.uri);
+  if (dot) actions.appendChild(dot);
+  actions.appendChild(hisLink(equip.uri));
+  if (canEditRecords()) {
+    actions.appendChild(recordEditButton(equip, () => init()));
+    actions.appendChild(recordNewButton("+ point", "point", equip, null, () => init()));
+  }
+  const node = document.createElement("div");
+  node.className = "equip-node";
+  node.append(equipDetails, actions);
 
   const pointList = document.createElement("ul");
   equipDetails.appendChild(pointList);
@@ -350,7 +359,7 @@ function buildEquipNode(equip, label) {
     },
     { once: false },
   );
-  return equipDetails;
+  return node;
 }
 
 function renderTree(byType) {
@@ -482,6 +491,9 @@ async function selectPoint(point, btn) {
     }));
   }
   detailEl.appendChild(h2);
+  // Stacked layout (style.css, phone width): the detail sits below the
+  // tree, so bring it into view or the tap looks like it did nothing.
+  if (window.matchMedia("(max-width: 700px)").matches) detailEl.scrollIntoView({ block: "start" });
 
   if (point.brickClass) {
     const p = document.createElement("p");
