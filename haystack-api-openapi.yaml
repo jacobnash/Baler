@@ -32,11 +32,11 @@ info:
 
     **pointWrite** commands BACnet points through the owning Windrow
     instance (see docs-site/pages/haystack-api.mdx); without a `level` it
-    returns Baler's 16-level array.
+    returns Baler's 17-level array (17 = BACnet relinquish-default). A
+    level-8 write with a `duration` is a timed override.
 
-    **Not yet supported:** `invokeAction` (error grid),
-    `->` tag paths in filters, datetime `hisRead` ranges (dates and
-    `today`/`yesterday`/... work), `defs`/`libs`.
+    **Deliberately unsupported:** `invokeAction` answers with an error grid
+    (Baler records define no actions) and isn't listed by `ops`.
 servers:
   - url: http://localhost:8080
     description: through the gateway

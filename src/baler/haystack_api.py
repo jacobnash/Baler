@@ -16,8 +16,8 @@ BSD-3). This file is only the mapping onto Baler's storage:
     newest history sample.
   - Filters go through hisquery's parser and SPARQL compiler, so a filter
     matches Haystack markers, Brick classes and Brick tag words exactly as
-    `/ingest/his` does. `->` tag paths aren't supported there and are a
-    clear error here too.
+    `/ingest/his` does, including `->` tag paths (`equipRef->ahu`), units,
+    date/time/uri literals and `^symbol` terms.
   - Ref ids are the entity URIs with every character outside Haystack's
     ref alphabet escaped as `~XX` (reversible, see uri_to_ref).
   - Auth: Haystack clients log in with HELLO/SCRAM against the *existing*
@@ -32,8 +32,9 @@ Site scoping (scope.py): once any site owns a topic prefix, every read,
 history, nav and watch op only sees points/equipment under the caller's
 sites' prefixes; anything else reads as missing.
 
-Not here yet: pointWrite/invokeAction (needs Windrow BACnet write),
-Haystack 4 defs/libs ops.
+Deliberately unsupported: `invokeAction`. Baler records carry no
+`actions` grid and there is no Axon to run one, so it answers with an error
+grid saying so, and `ops` doesn't advertise it (docs-site haystack-api.mdx).
 """
 
 from __future__ import annotations
@@ -98,6 +99,12 @@ _SERVED_MIMES = ("text/zinc", "application/json", "text/trio", "text/csv", "text
 WRITE_OPS = {"hisWrite", "pointWrite", "invokeAction"}
 # Ops that return no point/equip data, so need no site scope lookup.
 _DATA_FREE_OPS = {"about", "ops", "formats", "close", "watchUnsub"} | DEFS_OPS
+
+
+INVOKE_ACTION_UNSUPPORTED = (
+    "invokeAction is not supported: Baler records define no actions (there is no "
+    "Axon to run them). Command a point with pointWrite instead."
+)
 
 
 class OpError(Exception):
@@ -880,7 +887,7 @@ def dispatch(backend: Backend, op: str, req: oh.Grid, scope: Scope = EVERYTHING,
     if op == "ops":
         # Like haxall: the `op` defs from the namespace (def ^op:about, doc,
         # is, lib, ...), limited to the ops this server actually serves.
-        served = {f"op:{n}" for n, _ in OPS} | {"op:pointWrite", "op:invokeAction"}
+        served = {f"op:{n}" for n, _ in OPS} | {"op:pointWrite"}
         limit = row.get("limit")
         defs = oh.defs("defs", str(row["filter"]) if row.get("filter") else None)
         rows = [r for r in defs.rows if str(getattr(r.get("def"), "val", "")) in served]
@@ -988,7 +995,8 @@ def dispatch(backend: Backend, op: str, req: oh.Grid, scope: Scope = EVERYTHING,
                             duration_s=_duration_secs(duration) if duration is not None else None)
         return oh.Grid()
     if op == "invokeAction":
-        raise OpError("invokeAction is not supported yet")
+        # Answered (not a 404) so a client gets an error grid it can show.
+        raise OpError(INVOKE_ACTION_UNSUPPORTED)
     raise OpError(f"unknown op: {op}")
 
 
