@@ -759,6 +759,8 @@ paths:
               properties:
                 reason: { type: string }
                 review_by: { type: string, format: date }
+                owner: { type: string, description: Who carries the open item }
+                retest_trigger: { type: string, description: "What retest lifts it, e.g. when real equipment is installed" }
       responses:
         "201":
           description: The risk
@@ -2335,6 +2337,8 @@ components:
         created_at: { type: string, format: date-time }
         revoked_at: { type: [string, "null"], format: date-time }
         revoked_by: { type: [string, "null"] }
+        owner: { type: [string, "null"], description: Who is responsible for the open item (not necessarily who accepted it) }
+        retest_trigger: { type: [string, "null"], description: "What retest lifts the waiver, e.g. first seasonal changeover" }
     EquipVerdict:
       type: object
       required: [status, counts]
