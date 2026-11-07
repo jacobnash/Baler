@@ -130,7 +130,8 @@ class Commander:
             elif isinstance(outcome, dict):
                 self._status[(parts[1], parts[2])] = {**outcome, "received_at": time.time()}
             return
-        waiter = self._pending.get(str(outcome.get("id")))
+        # request_id is the correlation id; older Windrows only echo `id`.
+        waiter = self._pending.get(str(outcome.get("request_id"))) or self._pending.get(str(outcome.get("id")))
         if waiter:
             waiter[1].update(outcome)
             waiter[0].set()
@@ -174,7 +175,12 @@ class Commander:
         try:
             client.publish(
                 f"cmd/{site}/{instance}/{suffix or action.replace('_', '-')}",
-                json.dumps({**(body or {}), "action": action, "id": command_id, "expires_at": time.time() + self.ttl}),
+                # A targeted action's `id` names the device/connection, so the
+                # correlation id travels as request_id; an action without a
+                # target also carries it as `id` for Windrows that predate
+                # request_id (point writes on a not-yet-updated site).
+                json.dumps({"id": command_id, **(body or {}), "action": action, "request_id": command_id,
+                            "expires_at": time.time() + self.ttl}),
                 qos=1,
             )
             if not event.wait(wait):
