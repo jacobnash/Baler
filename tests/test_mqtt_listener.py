@@ -134,3 +134,87 @@ def test_a_class_set_by_hand_is_kept_but_an_autotag_fallback_is_replaced():
     on_message(None, None, _Msg("fbf/home/b/zone_temp/tags", tags))
     assert _types(store, hand) == {str(BRICK.Temperature_Sensor)}
     assert _types(store, guessed) == {str(BRICK.Zone_Air_Temperature_Sensor)}
+
+
+# --- ReadingBatcher (Baler#190): readings in batches, acked only once stored
+
+
+class AckClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.acks = []
+
+    def ack(self, mid, qos):
+        self.acks.append((mid, qos))
+
+
+class _QMsg(_Msg):
+    def __init__(self, topic, payload, mid, qos=1):
+        super().__init__(topic, payload)
+        self.mid, self.qos = mid, qos
+
+
+def _batcher(monkeypatch, written):
+    from baler import mqtt_listener
+
+    monkeypatch.setattr(mqtt_listener, "ingest_readings", lambda store, conn, rows: written.append(list(rows)))
+    client = AckClient()
+    return client, mqtt_listener.ReadingBatcher(client, store=None, ts_conn=None, max_rows=3, max_wait=0.01)
+
+
+def test_readings_are_queued_and_acked_only_after_their_batch_is_stored(monkeypatch):
+    from baler.mqtt_listener import make_on_message
+
+    written: list = []
+    client, batcher = _batcher(monkeypatch, written)
+    on_message = make_on_message(None, None, batcher)
+    for mid, value in ((1, 70.5), (2, "active"), (3, 71.0)):
+        on_message(client, None, _QMsg(f"fbf/s/ahu/p{mid}", json.dumps({"point": "p", "value": value, "ts": 10.0 + mid}).encode(), mid))
+    assert client.acks == [] and written == []  # queued, nothing acknowledged yet
+    batcher.flush([batcher.queue.get_nowait() for _ in range(3)])
+    assert written == [[("fbf/s/ahu/p1", 70.5, 11.0), ("fbf/s/ahu/p2", True, 12.0), ("fbf/s/ahu/p3", 71.0, 13.0)]]
+    assert client.acks == [(1, 1), (2, 1), (3, 1)]
+
+
+def test_a_failed_write_acknowledges_nothing(monkeypatch):
+    from baler import mqtt_listener
+
+    client = AckClient()
+    batcher = mqtt_listener.ReadingBatcher(client, store=None, ts_conn=None)
+
+    def boom(*a):
+        raise RuntimeError("postgres down")
+
+    monkeypatch.setattr(mqtt_listener, "ingest_readings", boom)
+    batcher.put(_QMsg("fbf/s/a/p", b"", 7), "fbf/s/a/p", 1.0, 1.0)
+    with pytest.raises(RuntimeError):
+        batcher.flush([batcher.queue.get_nowait()])
+    assert client.acks == []  # the broker keeps it and redelivers after the restart
+
+
+def test_ids_from_before_a_reconnect_are_not_acked(monkeypatch):
+    """Message ids are per connection and get reused; the broker resends
+    whatever was unacknowledged when the connection dropped."""
+    written: list = []
+    client, batcher = _batcher(monkeypatch, written)
+    on_connect = make_on_connect("fbf/#", batcher)
+    on_connect(client, None, {}, 0, None)
+    batcher.put(_QMsg("fbf/s/a/p", b"", 5), "fbf/s/a/p", 1.0, 1.0)
+    on_connect(client, None, {}, 0, None)  # reconnect before the flush
+    batcher.flush([batcher.queue.get_nowait()])
+    assert written and client.acks == []
+
+
+def test_non_readings_are_handled_inline_and_acked(monkeypatch):
+    from baler import mqtt_listener
+
+    written: list = []
+    client, batcher = _batcher(monkeypatch, written)
+    tagged = []
+    monkeypatch.setattr(mqtt_listener, "ingest_tags", lambda store, topic, tags, ts: tagged.append(topic) or URIRef("urn:p"))
+    monkeypatch.setattr(mqtt_listener, "link_equip_ref", lambda *a: None)
+    monkeypatch.setattr(mqtt_listener, "_classify", lambda *a: None)
+    on_message = mqtt_listener.make_on_message(None, None, batcher)
+    on_message(client, None, _QMsg("fbf/s/a/p/tags", json.dumps({"value": json.dumps({"point": True})}).encode(), 9))
+    on_message(client, None, _QMsg("fbf/s/a/p", b"not json", 10))  # skipped, but acked: never redelivered forever
+    assert tagged == ["fbf/s/a/p"] and client.acks == [(9, 1), (10, 1)] and batcher.queue.empty()

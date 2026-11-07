@@ -241,10 +241,21 @@ login gate itself: exchange credentials for a token against
 gateway. See [Gateway Auth](/gateway-auth) for the full login flow and
 token shape.
 
-`mqtt_listener.py` and `ingest_api.py` are two front doors onto the exact
-same `ingest_reading()` code path — a source can push over HTTP or
-publish over MQTT and it behaves identically, because point identity is
-just the topic string (`urn:point:{topic}`).
+`mqtt_listener.py` and `ingest_api.py` are two front doors onto the same
+ingest code — a source can push over HTTP or publish over MQTT and it
+behaves identically, because point identity is just the topic string
+(`urn:point:{topic}`). The listener writes readings in batches
+(`ingest_readings()`, the batched form of `ingest_reading()`): `on_message`
+queues a reading, a writer thread commits up to 5,000 per transaction (a
+`COPY` into a staging table, then one upsert) at least every 250 ms, and
+only then acknowledges their MQTT messages. Nothing is acknowledged before
+it's durably committed, so a crash of the listener or Postgres leaves the
+unacknowledged readings with the broker, which redelivers them; the writes
+are idempotent on `(point, ts)`. Tags and equip messages are still handled
+one at a time, as they arrive. The queue is bounded: when it's full, the
+backlog waits at the broker (`max_inflight_messages`, `max_queued_messages`
+in `mosquitto/mosquitto.conf`). The [scale test](/scale-test) measures how
+far this goes.
 
 <Mermaid chart={`sequenceDiagram
     participant Src as Source (MQTT or push client)
@@ -256,7 +267,7 @@ just the topic string (`urn:point:{topic}`).
 
     alt over MQTT
         Src->>ML: publish fbf/# envelope
-        ML->>Ing: ingest_reading(envelope)
+        ML->>Ing: ingest_readings(batch), then ack the batch
     else over HTTP
         Src->>IA: POST /ingest
         IA->>Ing: ingest_reading(envelope)

@@ -11,6 +11,7 @@ from baler.timeseries import (
     read_latest_many,
     read_range,
     write_point_value,
+    write_point_values,
 )
 
 
@@ -115,3 +116,30 @@ def test_read_latest_many_as_of_and_with_value(conn):
     assert read_latest_many(conn, uris, before=t1) == {"urn:test-ts:a": (t1, 1.0)}
     assert read_latest_many(conn, uris, with_value=True) == {"urn:test-ts:a": (t2, 2.0)}
     assert read_latest_many(conn, uris, since=t3, with_value=True) == {}
+
+
+@pytest.mark.integration
+def test_batch_write_matches_row_by_row(conn):
+    """write_point_values (mqtt_listener's batches, hisWrite): typed columns,
+    last write wins within the batch and against what's stored, idempotent
+    on replay - what calling write_point_value per row does, in one commit."""
+    t1 = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 1, 1, 0, 0, 5, tzinfo=timezone.utc)
+    write_point_value(conn, "urn:test-ts:temp", 1.0, t1)  # overwritten by the batch
+    rows = [("urn:test-ts:temp", 70.0, t1), ("urn:test-ts:temp", 71.5, t1, "°F"), ("urn:test-ts:temp", 72.0, t2),
+            ("urn:test-ts:fan", True, t1), ("urn:test-ts:mode", "active", t1), ("urn:test-ts:missing", None, t1)]
+    assert write_point_values(conn, rows) == 5  # two rows share (temp, t1)
+    assert write_point_values(conn, rows) == 5  # replay (a broker redelivery) changes nothing
+    assert read_range(conn, "urn:test-ts:temp", t1, t2) == [(t1, 71.5), (t2, 72.0)]
+    assert conn.execute("SELECT unit FROM point_history WHERE point_uri = 'urn:test-ts:temp' AND ts = %s", (t1,)).fetchone()[0] == "°F"
+    assert read_latest(conn, "urn:test-ts:fan") is True
+    assert read_latest(conn, "urn:test-ts:mode") == "active"
+    assert read_latest(conn, "urn:test-ts:missing") is None
+    assert write_point_values(conn, []) == 0
+
+
+@pytest.mark.integration
+def test_ingest_connections_commit_durably(conn):
+    """Baler#190: a stored reading survives a Postgres crash - no session
+    turns synchronous_commit off (the batches make the fsync affordable)."""
+    assert conn.execute("SHOW synchronous_commit").fetchone()[0] == "on"
