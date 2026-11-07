@@ -34,7 +34,9 @@ from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from baler import docs_ui, gateway_auth, tracing
+import psycopg
+
+from baler import docs_ui, gateway_auth, hisquery, timeseries, tracing, warmup
 from baler.commissioning import (
     active,
     agent,
@@ -43,6 +45,7 @@ from baler.commissioning import (
     engine,
     gates,
     gl36,
+    history,
     inventory,
     issues,
     ladder,
@@ -1898,6 +1901,17 @@ def main() -> None:
     # well past the gateway's (it's the request that has 60 s, not the run).
     run_pool = connect_pool(min_size=1, max_size=runner.WORKERS + 1, statement_timeout=RUN_STATEMENT_TIMEOUT)
     repo = db.PgRepo(ts_pool, RemoteStore(), run_pool=run_pool)
+
+    def empty_rows_index():
+        # Lets report availability read the primary key alone (#150); in the
+        # background, since on a big install the build takes a while.
+        with psycopg.connect(timeseries.DEFAULT_DSN, autocommit=True) as conn:
+            print(f"empty-rows index: {history.ensure_empty_rows_index(conn)}", flush=True)
+
+    threading.Thread(target=lambda: warmup.run("empty-rows index", empty_rows_index, timeout=3600), daemon=True).start()
+    # The Brick/Xeto lookup tables the inventory's specs read, built before
+    # listening rather than in the first report after a deploy.
+    warmup.run("cx lookup tables", hisquery.warm_caches)
     now = datetime.now(timezone.utc)
     for r in repo.fail_interrupted_runs(now):
         repo.add_event(r["project_id"], "run.fail", None, None, {"run_id": r["id"], "error": db.INTERRUPTED}, now)

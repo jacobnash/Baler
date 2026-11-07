@@ -346,7 +346,7 @@ def test_a_point_shared_by_two_equipment_and_a_repeat_dont_abort_the_run(repo):
     assert sorted(r["equip_uri"] for r in stored) == ["urn:equip:cx-it/ahu-1", "urn:equip:cx-it/building"]
 
 
-def test_availability_on_postgres_is_availability_pct(repo):
+def test_availability_on_postgres_is_availability_pct(repo, monkeypatch):
     """repo.availability folds in Postgres what procedures.availability_pct
     folds in Python (Baler#150): same samples, same percentage - gaps longer
     than max_gap, a late first sample, empty rows, a point with nothing."""
@@ -368,8 +368,16 @@ def test_availability_on_postgres_is_availability_pct(repo):
         write_point_value(conn, "urn:point:test-cxint-avail/gappy", None, start + timedelta(minutes=35))  # no value: not a sample
         write_point_value(conn, "urn:point:test-cxint-avail/steady", 2.0, end)  # end is exclusive
     uris = [*series, "urn:point:test-cxint-avail/silent"]
-    got = repo.availability(uris, start, end, gap)
-    for uri in uris:
-        times = series.get(uri, [])
-        assert got[uri] == (len(times), availability_pct(times, start, end, gap)), uri
-    assert got["urn:point:test-cxint-avail/silent"] == (0, 0.0)
+    from baler.commissioning import history
+
+    with repo.pool.connection() as conn:
+        conn.autocommit = True
+        assert history.ensure_empty_rows_index(conn) in ("present", "built", "another process is building it")
+    # with the empty-rows index (index-only scans, the heap for `gappy`) and without it (heap only)
+    for valid_sql in (history._EMPTY_ROWS_VALID, "SELECT false"):
+        monkeypatch.setattr(history, "_EMPTY_ROWS_VALID", valid_sql)
+        got = repo.availability(uris, start, end, gap)
+        for uri in uris:
+            times = series.get(uri, [])
+            assert got[uri] == (len(times), availability_pct(times, start, end, gap)), (uri, valid_sql)
+        assert got["urn:point:test-cxint-avail/silent"] == (0, 0.0)
