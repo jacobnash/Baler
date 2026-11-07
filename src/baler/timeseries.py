@@ -222,6 +222,19 @@ def read_latest(conn: psycopg.Connection, point_uri: str):
     return None if row is None else _row_to_value(row)
 
 
+# "This point" for the per-point LATERAL probes, written as a range, and
+# their ORDER BY led by point_uri. With `point_uri = u.uri` the planner
+# drops point_uri from the sort, orders by ts alone and, costing LIMIT 1 on
+# a per-point average, often walks a chunk's ts index filtering for the
+# point: for a point with no rows in that chunk (new, retired, or simply
+# another site's) that is every row of the chunk, chunk after chunk - 10-17
+# s per point at 35M rows, timing a statement out. As a range the order is
+# (point_uri, ts), which only the primary key gives: one index probe per
+# chunk, sub-millisecond, whatever the history depth (#150/#107). Same
+# rows: for text, a >= b and a <= b is a = b (ties break bytewise).
+_ONE_POINT = "point_uri >= u.uri AND point_uri <= u.uri"
+
+
 def read_latest_many(
     conn: psycopg.Connection,
     point_uris: list[str],
@@ -240,7 +253,7 @@ def read_latest_many(
     empty rows doesn't walk its whole history."""
     if not point_uris:
         return {}
-    conds = ["point_uri = u.uri"]
+    conds = [_ONE_POINT]
     params: list = [point_uris]
     if before is not None:
         conds.append("ts <= %s")
@@ -258,7 +271,7 @@ def read_latest_many(
             -- one backward primary-key probe per point; DISTINCT ON sorted
             -- every row of every point's history (>60s at 20M rows)
             SELECT ts, value, value_text, value_bool FROM point_history
-            WHERE {" AND ".join(conds)} ORDER BY ts DESC LIMIT 1
+            WHERE {" AND ".join(conds)} ORDER BY point_uri DESC, ts DESC LIMIT 1
         ) h
         """,
         params,
@@ -298,8 +311,8 @@ def read_range_many(
         FROM unnest(%s::text[]) AS u(uri)
         CROSS JOIN LATERAL (
             SELECT ts, value, value_text, value_bool FROM point_history
-            WHERE point_uri = u.uri AND ts >= %s AND ts < %s
-            ORDER BY ts LIMIT %s
+            WHERE point_uri >= u.uri AND point_uri <= u.uri AND ts >= %s AND ts < %s
+            ORDER BY point_uri, ts LIMIT %s
         ) h
         """,
         (point_uris, start_ts, end_ts, limit + 1),
