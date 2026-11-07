@@ -295,14 +295,71 @@ function protocol() {
   return document.querySelector('input[name="protocol"]:checked').value;
 }
 
-function addRegisterRow(label = "", register = "") {
+// A Modbus point is a bare holding-register number (the original form) or
+// {register, function, type, word_order, byte_order, scale, offset, unit,
+// writable} (Baler#128). modbusSpec sends only what differs from the
+// defaults, so a plain holding/uint16 row stays a bare number and old
+// connectors round-trip unchanged; a unit on a bare row goes in the
+// connection's `units` map instead, which older Windrows understand too.
+const MB_FUNCTIONS = [["holding", "Holding reg"], ["input", "Input reg"], ["coil", "Coil"], ["discrete", "Discrete in"]];
+const MB_TYPES = ["uint16", "int16", "uint32", "int32", "float32"];
+const MB_BITS = ["coil", "discrete"];
+
+function modbusSpec(f) {
+  const bits = MB_BITS.includes(f.function);
+  const spec = { register: f.register };
+  if (f.function !== "holding") spec.function = f.function;
+  if (!bits) {
+    if (f.type !== "uint16") spec.type = f.type;
+    if (f.type.endsWith("32") && f.word_order !== "big") spec.word_order = f.word_order;
+    if (f.byte_order && f.byte_order !== "big") spec.byte_order = f.byte_order;
+    if (f.scale !== 1) spec.scale = f.scale;
+    if (f.offset !== 0) spec.offset = f.offset;
+  }
+  if (f.writable && (f.function === "holding" || f.function === "coil")) spec.writable = true;
+  if (Object.keys(spec).length === 1) return { spec: f.register, unit: f.unit || null };
+  if (f.unit) spec.unit = f.unit;
+  return { spec, unit: null };
+}
+
+function addRegisterRow(label = "", spec = "", unit = "") {
+  const p = typeof spec === "object" && spec ? spec : { register: spec };
   const tbody = $("modbus-points").querySelector("tbody");
   const del = el("button", { type: "button", textContent: "Remove", className: "danger" });
+  const select = (cls, options, value, aria) => {
+    const s = el("select", { className: cls, "aria-label": aria },
+      options.map(([v, t]) => el("option", { value: v, textContent: t })));
+    s.value = value;
+    return s;
+  };
+  const fn = select("reg-fn", MB_FUNCTIONS, p.function || "holding", "Function");
+  const type = select("reg-type", MB_TYPES.map((t) => [t, t]), p.type || "uint16", "Data type");
+  const word = select("reg-word", [["big", "high first"], ["little", "low first"]], p.word_order || "big", "Word order");
+  const scale = el("input", { type: "number", className: "reg-scale", value: p.scale ?? 1, step: "any", "aria-label": "Scale" });
+  const offset = el("input", { type: "number", className: "reg-offset", value: p.offset ?? 0, step: "any", "aria-label": "Offset" });
+  const write = el("input", { type: "checkbox", className: "reg-write", checked: !!p.writable, "aria-label": "Writable" });
+  const sync = () => {
+    const bits = MB_BITS.includes(fn.value);
+    type.disabled = scale.disabled = offset.disabled = bits;
+    word.disabled = bits || !type.value.endsWith("32");
+    write.disabled = fn.value === "input" || fn.value === "discrete";
+  };
+  fn.addEventListener("change", sync);
+  type.addEventListener("change", sync);
   const tr = el("tr", {}, [
     el("td", {}, [el("input", { type: "text", className: "reg-label", value: label, placeholder: "zone_temp", "aria-label": "Point name" })]),
-    el("td", {}, [el("input", { type: "number", className: "reg-num", value: register, min: 0, max: 65535, "aria-label": "Register" })]),
+    el("td", {}, [fn]),
+    el("td", {}, [el("input", { type: "number", className: "reg-num", value: p.register, min: 0, max: 65535, "aria-label": "Register" })]),
+    el("td", {}, [type]),
+    el("td", {}, [word]),
+    el("td", {}, [scale]),
+    el("td", {}, [offset]),
+    el("td", {}, [el("input", { type: "text", className: "reg-unit", value: p.unit || unit || "", placeholder: "°F", "aria-label": "Unit" })]),
+    el("td", {}, [write]),
     el("td", {}, [del]),
   ]);
+  tr.dataset.byteOrder = p.byte_order || "";  // no column for it; kept as loaded
+  sync();
   del.addEventListener("click", () => tr.remove());
   tbody.append(tr);
 }
@@ -342,7 +399,7 @@ function openConnector({ kind, record = null, device = null }) {
     $("c-port").value = record?.port || device?.port || 502;
     $("c-unit").value = record?.device_id ?? device?.device_id ?? 1;
     const pts = Object.entries(record?.points || {});
-    if (pts.length) pts.forEach(([l, r]) => addRegisterRow(l, r)); else addRegisterRow();
+    if (pts.length) pts.forEach(([l, r]) => addRegisterRow(l, r, record?.units?.[l])); else addRegisterRow();
   } else {
     $("c-address").value = record?.device_address || device?.address || "";
     $("c-instance").value = record?.device_instance ?? device?.device_instance ?? "";
@@ -417,16 +474,29 @@ async function saveConnector(ev) {
     if (!state.editing) Object.assign(body, { device_address: $("c-address").value.trim(), device_instance: Number($("c-instance").value) });
   } else {
     const points = {};
+    const units = {};
     for (const tr of $("modbus-points").querySelectorAll("tbody tr")) {
-      const label = tr.querySelector(".reg-label").value.trim();
-      const reg = tr.querySelector(".reg-num").value;
+      const q = (cls) => tr.querySelector(cls);
+      const label = q(".reg-label").value.trim();
+      const reg = q(".reg-num").value;
       if (!label && reg === "") continue;
-      if (!label || reg === "" || !(Number(reg) >= 0)) return showError("Each register row needs a name and a register number.");
+      if (!label || reg === "" || !Number.isInteger(Number(reg)) || Number(reg) < 0 || Number(reg) > 65535) {
+        return showError("Each register row needs a name and a register number 0-65535.");
+      }
       if (label in points) return showError(`"${label}" is used twice - names must be unique.`);
-      points[label] = Number(reg);
+      const scale = Number(q(".reg-scale").value || 1);
+      const offset = Number(q(".reg-offset").value || 0);
+      if (!Number.isFinite(scale) || scale === 0 || !Number.isFinite(offset)) return showError(`"${label}": scale must be a non-zero number, offset a number.`);
+      const out = modbusSpec({
+        register: Number(reg), function: q(".reg-fn").value, type: q(".reg-type").value,
+        word_order: q(".reg-word").value, byte_order: tr.dataset.byteOrder, scale, offset,
+        unit: q(".reg-unit").value.trim(), writable: q(".reg-write").checked,
+      });
+      points[label] = out.spec;
+      if (out.unit) units[label] = out.unit;
     }
     if (!Object.keys(points).length) return showError("Add at least one register.");
-    body = { topic_prefix: prefix, poll_interval: poll, points };
+    body = { topic_prefix: prefix, poll_interval: poll, points, units };
     if (!state.editing) {
       const host = $("c-host").value.trim();
       if (!host) return showError("Enter the device's host or IP.");
