@@ -123,6 +123,23 @@ def close_fault(conn: psycopg.Connection, rule_id: str, point_uri: str, ended_at
     return row[0] if row else None
 
 
+def update_open_fault(conn: psycopg.Connection, rule_id: str, point_uri: str, detail: dict, severity: str) -> bool:
+    """Refresh the detail/severity of the open fault for (rule_id,
+    point_uri), for a source whose fault changes while it stays open (a
+    BACnet alarm going high-limit -> low-limit). True if one was open and
+    anything changed."""
+    row = conn.execute(
+        """
+        UPDATE faults SET detail = %s, severity = %s
+        WHERE rule_id = %s AND point_uri = %s AND ended_at IS NULL
+          AND (detail IS DISTINCT FROM %s::jsonb OR severity IS DISTINCT FROM %s)
+        RETURNING id
+        """,
+        (json.dumps(detail), severity, rule_id, point_uri, json.dumps(detail), severity),
+    ).fetchone()
+    return row is not None
+
+
 def close_rule_faults(conn: psycopg.Connection, rule_id: str, ended_at: datetime) -> int:
     """Resolve every open fault a rule raised - for when the rule is
     deleted: nothing will ever evaluate it again, so they'd stay open

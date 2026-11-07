@@ -47,6 +47,26 @@ function truncatedCell(text) {
   return el("td", {}, [el("span", { className: "truncate", title: text, textContent: text })]);
 }
 
+// A controller's own alarm, forwarded by Windrow (rule_id "bacnet:alarm",
+// Baler#168): show what the controller said instead of a rule id and raw JSON.
+function faultSource(fault) {
+  return fault.rule_id === "bacnet:alarm" ? "BACnet alarm (controller)" : fault.rule_id;
+}
+
+function faultDetail(fault) {
+  const d = fault.detail;
+  if (!d) return "—";
+  if (fault.rule_id === "bacnet:alarm") {
+    const state = d.to_state || d.event_state || "?";
+    const parts = [d.event_type ? `${d.event_type}: ${state}` : state];
+    if (d.from_state) parts[0] = `${d.event_type || "event"}: ${d.from_state} → ${state}`;
+    if (d.message) parts.push(d.message);
+    if (d.object) parts.push(d.object);
+    return parts.join(" · ");
+  }
+  return JSON.stringify(d);
+}
+
 function renderFaults(faults) {
   tbodyEl.innerHTML = "";
   for (const fault of faults) {
@@ -76,11 +96,11 @@ function renderFaults(faults) {
     tbodyEl.appendChild(
       el("tr", { className: "fault-row" }, [
         el("td", {}, [el("span", { className: `badge severity-${fault.severity}`, textContent: fault.severity })]),
-        truncatedCell(fault.rule_id),
+        truncatedCell(faultSource(fault)),
         truncatedCell(fault.point_uri),
         el("td", {}, [el("span", { className: `badge fault-status-${fault.status}`, textContent: fault.status })]),
         el("td", { textContent: new Date(fault.started_at).toLocaleString() }),
-        el("td", { textContent: fault.detail ? JSON.stringify(fault.detail) : "—" }),
+        el("td", { textContent: faultDetail(fault), title: fault.detail ? JSON.stringify(fault.detail) : "" }),
         el("td", {}, [ackBtn]),
         el("td", {}, [snoozeBtn]),
       ]),
