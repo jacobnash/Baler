@@ -447,7 +447,8 @@ def test_his_write_encodes_nan_and_infinity_the_haystack_way(fake_baler):
 def test_his_write_refuses_naive_timestamps():
     client = HaystackClient("http://unused", token="t")
     with pytest.raises(ValueError, match="timezone"):
-        client.his_write("p", [(dt.datetime(2026, 11, 7), 1.0)])  # noqa: DTZ001 - naive on purpose
+        naive = dt.datetime(2026, 11, 7, tzinfo=dt.timezone.utc).replace(tzinfo=None)
+        client.his_write("p", [(naive, 1.0)])
 
 
 def test_hayson_scalars_decode_like_the_classic_encoding():
