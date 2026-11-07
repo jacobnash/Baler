@@ -188,11 +188,20 @@ def test_issues_and_risks_round_trip(repo):
     repo.update_issue(issue["id"], {"status": "risk_accepted"})
     assert repo.get_risk(rid)["review_by"] == date(2000, 1, 1)
     assert [r["id"] for r in repo.list_risks(pid)] == [rid]
-    # review_by long past: the risk lapses, then the passing result closes the issue
+    # review_by long past: the risk lapses, then the passing result resolves the issue (#86: never closes it)
     changes = runner.reconcile_issues(repo, pid, "r2", [{"check_id": "exists", "subject": "urn:point:cx-it/x", "status": "pass"}], now)
-    assert [c[2] for c in changes] == ["risk.expired", "close.evidence"]
-    assert repo.get_issue(issue["id"])["status"] == "closed" and repo.get_issue(issue["id"])["closed_run"] == "r2"
+    assert [c[2] for c in changes] == ["risk.expired", "resolve.evidence"]
+    got = repo.get_issue(issue["id"])
+    assert got["status"] == "ready_for_retest" and got["resolved_by"] == {"run_id": "r2"} and got["closed_run"] is None
     assert repo.list_risks(pid) == [] and repo.get_risk(rid)["revoked_at"] is not None
+    # a later run sees the point report after the fix: a retest, stored as JSONB
+    later = (now + timedelta(minutes=1)).isoformat()
+    changes = runner.reconcile_issues(repo, pid, "r3", [{"check_id": "exists", "subject": "urn:point:cx-it/x", "status": "pass",
+                                                        "evidence": {"last_ts": later}}], now)
+    assert [c[2] for c in changes] == ["retest.passed"]
+    assert repo.get_issue(issue["id"])["retest"]["run_id"] == "r3"
+    assert repo.list_issue_events(issue["id"])[0]["actor"] == "system"
+    repo.update_issue(issue["id"], {"status": "closed", "closed_at": now, "closed_run": "r3"})  # the person's close
     # closed: a new issue on the same check is allowed again
     repo.create_issue({**issue, "id": db.new_id()})
 

@@ -143,6 +143,11 @@ CREATE TABLE IF NOT EXISTS cx_issue_events (
     detail      JSONB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS cx_issue_events_issue ON cx_issue_events (issue_id, ts DESC);
+-- Baler#86: evidence resolves (ready_for_retest), a person closes citing a
+-- retest judged over a window that starts after resolved_at.
+ALTER TABLE cx_issues ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
+ALTER TABLE cx_issues ADD COLUMN IF NOT EXISTS resolved_by JSONB;
+ALTER TABLE cx_issues ADD COLUMN IF NOT EXISTS retest JSONB;
 
 -- Accepted risks: not faults, not closed issues. One standing risk per issue.
 CREATE TABLE IF NOT EXISTS cx_risks (
@@ -341,7 +346,8 @@ _JSON_COLS = {"equip_uris", "steps", "schedule", "scope", "procedure", "equipmen
 
 ISSUE_COLS = ("id", "project_id", "equip_uri", "check_id", "subject", "status", "title", "severity", "assignee",
               "detail", "source", "source_id", "opened_run", "last_seen_run", "closed_run", "created_by",
-              "created_at", "updated_at", "closed_at")
+              "created_at", "updated_at", "closed_at", "resolved_at", "resolved_by", "retest")
+_ISSUE_JSON = ("detail", "resolved_by", "retest")
 RISK_COLS = ("id", "issue_id", "accepted_by", "accepted_email", "reason", "review_by", "created_at", "revoked_at",
              "revoked_by")
 
@@ -508,7 +514,8 @@ class MemoryRepo:
 
     def list_events(self, project_id: str, limit: int = 100) -> list[dict]:
         rows = [e for e in self.events if e["project_id"] == project_id]
-        return [{k: _iso(v) for k, v in e.items() if k != "project_id"} for e in reversed(rows)][:limit]
+        return [{**{k: _iso(v) for k, v in e.items() if k != "project_id"}, "actor": "user" if e["user_sub"] else "system"}
+                for e in reversed(rows)][:limit]
 
     def save_run(self, run: dict, results: list[dict]) -> None:
         """A finished run in one go (tests, imports)."""
@@ -611,7 +618,8 @@ class MemoryRepo:
         with self._lock:
             self._issue_store()
             rows = [e for e in self.issue_events if e["issue_id"] == issue_id]
-        return [{k: _iso(v) for k, v in e.items() if k != "issue_id"} for e in reversed(rows)]
+        return [{**{k: _iso(v) for k, v in e.items() if k != "issue_id"}, "actor": "user" if e["user_sub"] else "system"}
+                for e in reversed(rows)]
 
     def create_risk(self, risk: dict) -> None:
         with self._lock:
@@ -883,7 +891,8 @@ class PgRepo:
             rows = conn.execute(
                 "SELECT id, ts, action, user_sub, user_email, detail FROM cx_events WHERE project_id = %s"
                 " ORDER BY ts DESC, id DESC LIMIT %s", (project_id, limit)).fetchall()
-        return [{"id": i, "ts": _iso(ts), "action": a, "user_sub": s, "user_email": e, "detail": d} for i, ts, a, s, e, d in rows]
+        return [{"id": i, "ts": _iso(ts), "action": a, "user_sub": s, "user_email": e, "detail": d,
+                 "actor": "user" if s else "system"} for i, ts, a, s, e, d in rows]
 
     _RUN_COLS = ("id, project_id, phase, status, started_at, finished_at, window_start, window_end, triggered_by,"
                  " scope, summary, progress, error")
@@ -991,7 +1000,9 @@ class PgRepo:
             with self.pool.connection() as conn:
                 conn.execute(
                     f"INSERT INTO cx_issues ({', '.join(ISSUE_COLS)}) VALUES ({', '.join(['%s'] * len(ISSUE_COLS))})",
-                    tuple(json.dumps(issue.get(c) or {}, default=str) if c == "detail" else issue.get(c) for c in ISSUE_COLS),
+                    tuple(json.dumps(issue.get(c) or {}, default=str) if c == "detail"
+                          else json.dumps(issue[c], default=str) if c in _ISSUE_JSON and issue.get(c) is not None
+                          else issue.get(c) for c in ISSUE_COLS),
                 )
         except psycopg.errors.UniqueViolation as exc:
             if "cx_issues_one_active" not in str(exc):
@@ -1023,7 +1034,8 @@ class PgRepo:
         cols = [c for c in changes if c in ISSUE_COLS and c not in ("id", "project_id")]
         if not cols:
             return
-        vals = [json.dumps(changes[c], default=str) if c == "detail" else changes[c] for c in cols]
+        vals = [json.dumps(changes[c], default=str) if c in _ISSUE_JSON and changes[c] is not None else changes[c]
+                for c in cols]
         with self.pool.connection() as conn:
             conn.execute(f"UPDATE cx_issues SET {', '.join(f'{c} = %s' for c in cols)} WHERE id = %s", (*vals, issue_id))
 
@@ -1037,7 +1049,8 @@ class PgRepo:
         with self.pool.connection() as conn:
             rows = conn.execute("SELECT id, ts, action, user_sub, user_email, detail FROM cx_issue_events"
                                 " WHERE issue_id = %s ORDER BY ts DESC, id DESC", (issue_id,)).fetchall()
-        return [{"id": i, "ts": _iso(ts), "action": a, "user_sub": s, "user_email": e, "detail": d} for i, ts, a, s, e, d in rows]
+        return [{"id": i, "ts": _iso(ts), "action": a, "user_sub": s, "user_email": e, "detail": d,
+                 "actor": "user" if s else "system"} for i, ts, a, s, e, d in rows]
 
     def create_risk(self, risk: dict) -> None:
         with self.pool.connection() as conn:

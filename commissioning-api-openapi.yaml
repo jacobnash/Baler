@@ -176,7 +176,11 @@ paths:
       summary: Make a phase current (operator)
       description: >-
         Moving forward completes the phase being left; moving back returns
-        it to pending.
+        it to pending. Moving forward into startup, functional, acceptance
+        (or later) checks that phase's gate (GET .../gate) and, per
+        settings.phase_gates, warns (the default), blocks, or doesn't check.
+        A blocked move goes ahead with override true and a note saying why,
+        recorded on the phase.set event.
       requestBody:
         required: true
         content:
@@ -187,12 +191,62 @@ paths:
               properties:
                 key: { type: string }
                 note: { type: string }
+                override: { type: boolean, description: Move past an unmet gate in block mode (needs a note) }
       responses:
         "200":
-          description: The updated project
+          description: The updated project, plus the gate that was checked (null when the move isn't gated)
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Project" }
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/Project" }
+                  - type: object
+                    properties:
+                      gate:
+                        oneOf:
+                          - { $ref: "#/components/schemas/PhaseGate" }
+                          - { type: "null" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The gate isn't met and the project blocks on unmet gates
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, gate]
+                properties:
+                  error: { type: string }
+                  gate: { $ref: "#/components/schemas/PhaseGate" }
+  /projects/{id}/gate:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Phases]
+      operationId: getCxPhaseGate
+      summary: What moving into a phase would require, without moving
+      description: >-
+        startup: a completed verification run, every point reporting.
+        functional: plus every power-on / start-up procedure's latest test
+        run with no failing step. acceptance and later: plus every
+        procedure's latest test run with no failing or inconclusive step,
+        no issue left open (a resolved issue still needs a person to close
+        it), and no inconclusive result in the latest run. An accepted risk
+        on the issue for a (check, subject) waives it. Computed from the
+        records each time.
+      parameters:
+        - { name: to, in: query, required: true, schema: { type: string }, description: The phase key }
+      responses:
+        "200":
+          description: The gate
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [mode, gate]
+                properties:
+                  mode: { type: string, enum: [warn, block, "off"] }
+                  gate: { $ref: "#/components/schemas/PhaseGate" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
   /projects/{id}/events:
@@ -631,11 +685,16 @@ paths:
       operationId: updateCxIssue
       summary: Change status, assignee, severity or title, or add a note (operator)
       description: >-
-        Status moves between open, in_progress and ready_for_retest freely.
-        `closed` is refused (409) for an issue tied to a check - that closes
-        only when a later run passes it - and allowed for manual and
-        imported issues. An issue under an accepted risk can't change
-        status until the risk is revoked.
+        Status moves between open, in_progress and ready_for_retest freely;
+        moving to ready_for_retest by hand claims the fix (event
+        fix.claimed, resolved_at = now). Evidence resolves, only a person
+        closes (#86): for an issue tied to a check, `closed` is refused
+        (409) until it is ready_for_retest *and* a retest has passed - a
+        later run or procedure test run resting on data from after
+        resolved_at (`retest`). The close cites that retest (closed_run,
+        event `close`). Manual and imported issues close by hand. An issue
+        under an accepted risk can't change status until the risk is
+        revoked.
       requestBody:
         content:
           application/json:
@@ -1690,6 +1749,13 @@ components:
             checks: { type: array, items: { type: string } }
             severity: { type: string, enum: [critical, warning, info] }
           additionalProperties: false
+        phase_gates:
+          type: string
+          enum: [warn, block, "off"]
+          description: >-
+            What an unmet phase gate does (#86): warn (default; the move goes
+            ahead and the phase.set event records what was unmet), block
+            (409 unless the request sets override with a note), or off.
         schedule:
           type: [object, "null"]
           description: A verification run this often, as the project's org on its site (Cx 6)
@@ -1785,6 +1851,7 @@ components:
         ts: { type: string, format: date-time }
         action: { type: string }
         user_sub: { type: [string, "null"] }
+        actor: { type: string, enum: [user, system], description: "system: runs and reconcile; user: a named person" }
         user_email: { type: [string, "null"] }
         detail: { type: object }
     InventoryPoint:
@@ -2143,7 +2210,19 @@ components:
         source_id: { type: [string, "null"] }
         opened_run: { type: [string, "null"] }
         last_seen_run: { type: [string, "null"] }
-        closed_run: { type: [string, "null"], description: The run whose passing result closed it }
+        closed_run: { type: [string, "null"], description: The retest (run or test run id) the person's close cited }
+        resolved_at:
+          type: [string, "null"]
+          format: date-time
+          description: When passing evidence (or a person claiming the fix) moved it to ready_for_retest
+        resolved_by:
+          type: [object, "null"]
+          description: "{run_id} or {test_run_id} whose pass resolved it, or {user_sub} who claimed the fix"
+        retest:
+          type: [object, "null"]
+          description: >-
+            The passing retest since resolved_at: {run_id | test_run_id, kind, at, judged_from}.
+            Required before a person can close a check-tied issue.
         created_by: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
@@ -2152,6 +2231,26 @@ components:
           oneOf:
             - { $ref: "#/components/schemas/Risk" }
             - { type: "null" }
+    PhaseGate:
+      type: object
+      required: [target, rules, met, unmet]
+      properties:
+        target: { type: string }
+        rules: { type: array, items: { type: string } }
+        met: { type: boolean }
+        unmet:
+          type: array
+          items:
+            type: object
+            required: [rule, message, count, items]
+            properties:
+              rule:
+                type: string
+                enum: [verification_run, points_reporting, early_procedures_pass, procedures_pass, no_open_issues,
+                       no_unwaived_inconclusive]
+              message: { type: string }
+              count: { type: integer }
+              items: { type: array, items: { type: object }, description: The first 50 offenders }
     Risk:
       type: object
       required: [id, issue_id, reason, review_by, created_at, revoked_at]

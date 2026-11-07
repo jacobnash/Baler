@@ -39,6 +39,7 @@ from baler.commissioning import (
     db,
     economizer,
     engine,
+    gates,
     gl36,
     inventory,
     issues,
@@ -64,7 +65,7 @@ PORT = 8009
 RUN_STATEMENT_TIMEOUT = "10min"
 
 _PROJECT = re.compile(r"/projects/([^/]+)")
-_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|agent/sessions|agent/proposals)")
+_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|gate|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|agent/sessions|agent/proposals)")
 _PROJECT_ISSUES = re.compile(r"/projects/([^/]+)/issues/(import|export)")
 _RUN_ISSUES = re.compile(r"/runs/([^/]+)/issues")
 _ISSUE = re.compile(r"/issues/([^/]+)")
@@ -121,6 +122,8 @@ def _check_settings(settings) -> dict:
         economizer.validate_settings(settings["economizer"])
     if "fault_mirroring" in settings:
         mirror.validate_settings(settings["fault_mirroring"])
+    if "phase_gates" in settings:
+        gates.validate_mode(settings["phase_gates"])
     if settings.get("schedule") is not None:
         sched = settings["schedule"]
         every = sched.get("every_hours") if isinstance(sched, dict) else None
@@ -201,6 +204,7 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 table = {
                     ("PUT", "phases"): ("put_phases", self._put_phases),
                     ("POST", "phase"): ("set_phase", self._set_phase),
+                    ("GET", "gate"): ("phase_gate", self._phase_gate),
                     ("GET", "events"): ("events", self._events),
                     ("GET", "inventory"): ("inventory", self._inventory),
                     ("POST", "runs"): ("create_run", self._create_run),
@@ -411,13 +415,63 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             if not isinstance(key, str):
                 raise TypeError("key is required")
             before = phases.current(p["phases"])
+            note = body["note"][:2000].strip() if isinstance(body.get("note"), str) else ""
+            gate = self._gate_for(p, key)
+            gate_mode = gates.mode(p.get("settings"))
+            override = body.get("override") is True
+            if gate is not None and not gate["met"] and gate_mode == "block" and not override:
+                respond_json(self, 409, {"error": f"the {key} gate isn't met - fix what it lists, or override with a note",
+                                         "gate": gate})
+                return
+            if override and gate is not None and not gate["met"] and not note:
+                raise ValueError("an override needs a note saying why")
             plist = phases.set_current(p["phases"], key, now_fn())
             repo.save_phases(pid, plist, now_fn())
             detail = {"from": before, "to": key}
-            if isinstance(body.get("note"), str):
-                detail["note"] = body["note"][:2000]
+            if note:
+                detail["note"] = note
+            if gate is not None:
+                detail["gate"] = gates.summary(gate)
+                detail["gate_mode"] = gate_mode
+                if override and not gate["met"]:
+                    detail["override"] = True
             self._event(pid, "phase.set", claims, detail)
-            respond_json(self, 200, db.public_project(repo.get_project(pid)))
+            out = db.public_project(repo.get_project(pid))
+            out["gate"] = gate
+            respond_json(self, 200, out)
+
+        def _gate_for(self, p: dict, key: str) -> dict | None:
+            """The gate for moving project `p` into `key`, or None when the
+            move isn't gated (backwards, sideways into an ungated phase, or
+            phase_gates "off")."""
+            if gates.mode(p.get("settings")) == "off":
+                return None
+            by_key = {ph["key"]: ph for ph in p["phases"]}
+            cur = by_key.get(phases.current(p["phases"]) or "")
+            if key not in by_key or not gates.rules_for(key) or (cur and by_key[key]["position"] <= cur["position"]):
+                return None
+            pid = p["id"]
+            run = next((r for r in repo.list_runs(pid, 20) if r.get("status") == "completed"), None)
+            results = repo.get_results(run["id"]) if run else []
+            procs = repo.list_procedures(pid)
+            latest = {pr["id"]: next((t for t in repo.list_test_runs(pr["id"], 20) if t["status"] == "completed"), None)
+                      for pr in procs}
+            runner.reconcile_issues(repo, pid, None, [], now_fn())  # an overdue waiver lapses first
+            active = repo.list_issues(pid, issues.ACTIVE)
+            risks = {r["issue_id"]: r for r in repo.list_risks(pid)}
+            return gates.evaluate(key, run, results, procs, latest, active, risks)
+
+        def _phase_gate(self, span, claims, pid) -> None:
+            """Preview: what moving to ?to=<key> would require, without moving."""
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            key = (parse_qs(urlparse(self.path).query).get("to") or [""])[0]
+            if key not in {ph["key"] for ph in p["phases"]}:
+                raise ValueError("?to= names one of this project's phases")
+            gate = self._gate_for(p, key)
+            respond_json(self, 200, {"mode": gates.mode(p.get("settings")),
+                                     "gate": gate or {"target": key, "rules": [], "met": True, "unmet": []}})
 
         def _events(self, span, claims, pid) -> None:
             if self._project(pid, claims) is not None:
@@ -694,10 +748,19 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 except issues.Conflict as exc:
                     respond_error(self, 409, str(exc))
                     return
-                changes["status"] = body["status"]
-                changes["closed_at"] = now if body["status"] == "closed" else None
-                if body["status"] != "closed":
+                target = body["status"]
+                changes["status"] = target
+                changes["closed_at"] = now if target == "closed" else None
+                if target == "closed" and issue.get("retest"):
+                    rt = issue["retest"]
+                    changes["closed_run"] = rt.get("test_run_id") or rt.get("run_id")
+                elif target != "closed":
                     changes["closed_run"] = None
+                if target == "ready_for_retest":
+                    # a person claims the fix: only a retest judged after now counts
+                    changes.update(resolved_at=now, resolved_by={"user_sub": claims.get("sub")}, retest=None)
+                elif target in ("open", "in_progress"):
+                    changes.update(resolved_at=None, resolved_by=None, retest=None)
             if "assignee" in body:
                 changes["assignee"] = issues._text(body["assignee"], 200)
             if "severity" in body:
@@ -712,12 +775,22 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 raise ValueError("nothing to change: status, assignee, severity, title or note")
             if changes:
                 repo.update_issue(iid, {**changes, "updated_at": now})
-            detail = {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in changes.items()}
+            detail = {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in changes.items()
+                      if k not in ("resolved_by", "retest")}
             if "status" in changes:
                 detail["from"] = issue["status"]
+                if changes["status"] == "closed" and issue.get("retest"):
+                    detail["retest"] = issue["retest"]
             if note:
                 detail["note"] = note
-            self._issue_event(iid, "update" if changes else "note", claims, detail)
+            action = "note"
+            if changes.get("status") == "closed":
+                action = "close"
+            elif changes.get("status") == "ready_for_retest":
+                action = "fix.claimed"
+            elif changes:
+                action = "update"
+            self._issue_event(iid, action, claims, detail)
             respond_json(self, 200, self._public_issue(repo.get_issue(iid) or issue))
 
         def _issue_events(self, span, claims, iid) -> None:

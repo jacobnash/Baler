@@ -52,8 +52,11 @@ def _issue(**kw):
 def test_transition_rules():
     issues.transition(_issue(), "in_progress")
     issues.transition(_issue(status="in_progress"), "ready_for_retest")
-    with pytest.raises(issues.Conflict, match="closes on evidence"):
+    with pytest.raises(issues.Conflict, match="ready_for_retest first"):
         issues.transition(_issue(), "closed")
+    with pytest.raises(issues.Conflict, match="no passing retest"):
+        issues.transition(_issue(status="ready_for_retest"), "closed")
+    issues.transition(_issue(status="ready_for_retest", retest={"run_id": "r3"}), "closed")  # a person, citing the retest
     issues.transition(_issue(check_id=None, subject=None), "closed")  # manual
     with pytest.raises(issues.Conflict):
         issues.transition(_issue(), "risk_accepted")
@@ -76,7 +79,9 @@ def test_reconcile():
               _issue(id="5", subject="e", status="risk_accepted"), _issue(id="6", check_id=None, subject=None)]
     risks = {"4": {"id": "k4", "review_by": today + timedelta(days=5)}, "5": {"id": "k5", "review_by": today - timedelta(days=1)}}
     got = {i: (c, a) for i, c, a, _ in issues.reconcile(active, risks, res, "r2", now, today)}
-    assert got["1"][1] == "close.evidence" and got["1"][0]["status"] == "closed" and got["1"][0]["closed_run"] == "r2"
+    # evidence resolves, never closes (#86)
+    assert got["1"][1] == "resolve.evidence" and got["1"][0]["status"] == "ready_for_retest"
+    assert got["1"][0]["resolved_by"] == {"run_id": "r2"} and "closed_run" not in got["1"][0]
     assert got["2"][1] == "retest.failed" and got["2"][0]["status"] == "open"
     assert "3" not in got  # inconclusive never closes
     assert got["4"][1] == "risk.covered" and "status" not in got["4"][0]
@@ -84,6 +89,24 @@ def test_reconcile():
     acts = [a for i, _, a, _ in issues.reconcile(active, risks, res, "r2", now, today) if i == "5"]
     assert acts == ["risk.expired", "still.failing"]
     assert "6" not in got
+
+
+def test_retest_must_rest_on_data_from_after_the_fix():
+    now = fx.NOW
+    fixed = now - timedelta(hours=1)
+    issue = _issue(id="1", subject="a", status="ready_for_retest", resolved_at=fixed)
+    old = {"check_id": "exists", "subject": "a", "status": "pass", "evidence": {"last_ts": (fixed - timedelta(minutes=5)).isoformat()}}
+    new = {**old, "evidence": {"last_ts": (fixed + timedelta(minutes=5)).isoformat()}}
+    # a 24 h verification window over data from before the fix: not a retest
+    assert issues.reconcile([issue], {}, [old], "r3", now, now.date(), now - timedelta(hours=24)) == []
+    # the point has reported since the fix: a retest
+    [(_, ch, act, _det)] = issues.reconcile([issue], {}, [new], "r3", now, now.date(), now - timedelta(hours=24))
+    assert act == "retest.passed" and ch["retest"]["run_id"] == "r3" and "status" not in ch
+    # a procedure test run whose window starts after the fix
+    [(_, ch, act, _)] = issues.reconcile([issue], {}, [old], "t1", now, now.date(), fixed + timedelta(minutes=1), "test_run")
+    assert act == "retest.passed" and ch["retest"] == {"test_run_id": "t1", "kind": "test_run", "at": now.isoformat(),
+                                                       "judged_from": (fixed + timedelta(minutes=1)).isoformat()}
+    assert "last_seen_run" not in ch  # test runs don't count as the verification run that last saw it
 
 
 def test_parse_import_csv_aliases_and_status():
@@ -149,22 +172,55 @@ def test_issue_from_result_closes_only_on_evidence(base, repo, spec):
     ok = next(r for r in requests.get(f"{base}/runs/{run['id']}", headers=A).json()["results"] if r["status"] == "pass")
     assert requests.post(f"{base}/projects/{p['id']}/issues", headers=A, json={"from_result": {
         "run_id": run["id"], "check_id": ok["check_id"], "subject": ok["subject"]}}).status_code == 400
-    # no closing by hand
+    # no closing by hand before it is resolved
     r = requests.patch(f"{base}/issues/{issue['id']}", json={"status": "closed"}, headers=A)
-    assert r.status_code == 409 and "evidence" in r.json()["error"]
-    r = requests.patch(f"{base}/issues/{issue['id']}", json={"status": "ready_for_retest", "note": "replaced sensor"}, headers=A)
-    assert r.status_code == 200 and r.json()["status"] == "ready_for_retest"
-    # the sensor reports again; the next run passes exists for RAT and closes it
+    assert r.status_code == 409 and "ready_for_retest first" in r.json()["error"]
+    # the sensor reports again; the next run passes exists for RAT: resolved, not closed (#86)
     repo._history.add(RAT, fx.NOW - timedelta(minutes=5), 70.0)
     run2 = requests.post(f"{base}/projects/{p['id']}/runs", json={}, headers=A).json()
     _wait(base, run2["id"])
+    got = requests.get(f"{base}/issues/{issue['id']}", headers=A).json()
+    assert got["status"] == "ready_for_retest" and got["resolved_by"] == {"run_id": run2["id"]} and got["closed_run"] is None
+    assert got["events"][0]["action"] == "resolve.evidence" and got["events"][0]["actor"] == "system"
+    # resolving isn't a retest: a person still can't close it
+    r = requests.patch(f"{base}/issues/{issue['id']}", json={"status": "closed"}, headers=A)
+    assert r.status_code == 409 and "no passing retest" in r.json()["error"]
+    # a later run sees the point report after the fix: the retest is recorded
+    repo._history.add(RAT, fx.NOW, 70.5)
+    run3 = requests.post(f"{base}/projects/{p['id']}/runs", json={}, headers=A).json()
+    _wait(base, run3["id"])
+    got = requests.get(f"{base}/issues/{issue['id']}", headers=A).json()
+    assert got["status"] == "ready_for_retest" and got["retest"]["run_id"] == run3["id"]
+    # only now can a named person close it, and the close cites the retest
+    r = requests.patch(f"{base}/issues/{issue['id']}", json={"status": "closed", "note": "verified on site"}, headers=A)
+    assert r.status_code == 200 and r.json()["status"] == "closed" and r.json()["closed_run"] == run3["id"]
     got = requests.get(f"{base}/issues/{issue['id']}", headers=A)
     assert_matches_schema(got.json(), _schema(spec, "/issues/{id}", "get", 200), spec)
-    assert got.json()["status"] == "closed" and got.json()["closed_run"] == run2["id"]
-    assert [e["action"] for e in got.json()["events"]][:3] == ["close.evidence", "update", "create"]
-    assert got.json()["events"][1]["detail"]["note"] == "replaced sensor"
+    ev = got.json()["events"]
+    assert [e["action"] for e in ev][:4] == ["close", "retest.passed", "resolve.evidence", "create"]
+    assert ev[0]["actor"] == "user" and ev[0]["detail"]["retest"]["run_id"] == run3["id"]
+    assert ev[0]["detail"]["note"] == "verified on site"
     proj_events = [e["action"] for e in requests.get(f"{base}/projects/{p['id']}/events", headers=A).json()]
     assert "issues.reconcile" in proj_events
+
+
+def test_claimed_fix_needs_a_retest_after_the_claim(base, repo):
+    p, run = _completed_run(base)
+    issue = _rat_issue(base, run)
+    r = requests.patch(f"{base}/issues/{issue['id']}", json={"status": "ready_for_retest", "note": "replaced sensor"}, headers=A)
+    assert r.status_code == 200 and r.json()["status"] == "ready_for_retest" and r.json()["resolved_at"]
+    ev = requests.get(f"{base}/issues/{issue['id']}", headers=A).json()["events"]
+    assert ev[0]["action"] == "fix.claimed" and ev[0]["detail"]["note"] == "replaced sensor" and ev[0]["actor"] == "user"
+    # a pass on data from before the claim is not a retest
+    repo._history.add(RAT, fx.NOW - timedelta(minutes=5), 70.0)
+    run2 = requests.post(f"{base}/projects/{p['id']}/runs", json={}, headers=A).json()
+    _wait(base, run2["id"])
+    assert requests.get(f"{base}/issues/{issue['id']}", headers=A).json()["retest"] is None
+    # once the point reports after the claim, it is
+    repo._history.add(RAT, fx.NOW, 70.5)
+    run3 = requests.post(f"{base}/projects/{p['id']}/runs", json={}, headers=A).json()
+    _wait(base, run3["id"])
+    assert requests.get(f"{base}/issues/{issue['id']}", headers=A).json()["retest"]["run_id"] == run3["id"]
 
 
 def test_retest_failure_reopens(base, repo):

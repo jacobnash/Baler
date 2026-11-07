@@ -84,7 +84,8 @@ def execute(repo, job: RunJob, clock: Callable[[], datetime], run_fn=engine.run,
         detail = {"run_id": job.run_id, "phase": job.phase, "by_status": summary["by_status"]}
         repo.add_event(job.project_id, "run.complete", job.user_sub, job.user_email, detail, clock())
         try:
-            reconcile_issues(repo, job.project_id, job.run_id, results, clock())
+            reconcile_issues(repo, job.project_id, job.run_id, results, clock(),
+                             judged_from=job.now - timedelta(hours=job.window_hours))
         except Exception:  # the run itself stands; the next run reconciles again
             log.exception("cx run %s: issue reconcile failed", job.run_id)
         try:
@@ -106,27 +107,32 @@ def execute(repo, job: RunJob, clock: Callable[[], datetime], run_fn=engine.run,
             log.exception("cx run %s: could not record the failure", job.run_id)
 
 
-def reconcile_issues(repo, project_id: str, run_id: str | None, results: list[dict], now: datetime) -> list[tuple]:
-    """Apply a completed run to the issues log (Cx 4): close on passing
-    evidence, reopen failed retests, expire overdue risks. With no run
-    (run_id None, no results) it only expires risks - the issues API
-    does that on read, so an overdue risk reopens without waiting for a run."""
+def reconcile_issues(repo, project_id: str, run_id: str | None, results: list[dict], now: datetime,
+                     judged_from: datetime | None = None, kind: str = "run") -> list[tuple]:
+    """Apply a completed run or test run to the issues log (Cx 4, #86):
+    passing evidence resolves (ready_for_retest) and records retests,
+    failures reopen failed retests, overdue risks expire. Nothing here
+    closes an issue - a person does. With no run (run_id None, no results)
+    it only expires risks - the issues API does that on read, so an
+    overdue risk reopens without waiting for a run."""
     active = repo.list_issues(project_id, issues.ACTIVE)
     if not active:
         return []
     risks = {r["issue_id"]: r for r in repo.list_risks(project_id)}
-    changes = issues.reconcile(active, risks, results, run_id or "", now, now.date())
+    changes = issues.reconcile(active, risks, results, run_id or "", now, now.date(), judged_from, kind)
     for issue_id, change, action, detail in changes:
         repo.update_issue(issue_id, change)
         if action == "risk.expired":
             repo.revoke_risk(detail["risk_id"], now, None)
         if action != "still.failing":
             repo.add_issue_event(issue_id, action, None, None, detail, now)
-    closed = [c[0] for c in changes if c[2] == "close.evidence"]
+    resolved = [c[0] for c in changes if c[2] == "resolve.evidence"]
+    retested = [c[0] for c in changes if c[2] == "retest.passed"]
     reopened = [c[0] for c in changes if c[2] in ("retest.failed", "risk.expired")]
-    if closed or reopened:
+    if resolved or retested or reopened:
         repo.add_event(project_id, "issues.reconcile", None, None,
-                       {"run_id": run_id, "closed": closed, "reopened": reopened}, now)
+                       {("test_run_id" if kind == "test_run" else "run_id"): run_id, "resolved": resolved,
+                        "retested": retested, "reopened": reopened}, now)
     return changes
 
 
@@ -243,8 +249,9 @@ def execute_test(repo, job: TestJob, clock: Callable[[], datetime], run_fn=engin
             _, results = run_fn(repo.store, hist, job.scopes, job.end, hours, equips=equips, site_equips=site,
                                 **job.engine_kwargs)
             ids = _range_points(job.procedure, site)
-            series = hist.window(ids, job.start, job.end + timedelta(seconds=1)) if ids else {}
-        per = procedures.evaluate(job.procedure, equips, results, series)
+            truncated: set[str] = set()
+            series = hist.window(ids, job.start, job.end + timedelta(seconds=1), truncated=truncated) if ids else {}
+        per = procedures.evaluate(job.procedure, equips, results, series, truncated)
         prev = next((r for r in repo.list_test_runs(job.procedure["id"], 20)
                      if r["id"] != job.run_id and r["status"] == "completed"), None)
         summary = procedures.summarize(per)
@@ -256,6 +263,11 @@ def execute_test(repo, job: TestJob, clock: Callable[[], datetime], run_fn=engin
         repo.add_event(job.project_id, "test_run.complete", job.user_sub, job.user_email,
                        {"test_run_id": job.run_id, "procedure": job.procedure["name"], "by_status": summary["by_status"],
                         "diff": delta["counts"]}, clock())
+        if not summary["partial"]:  # a window still open can't retest anything yet
+            try:
+                reconcile_issues(repo, job.project_id, job.run_id, results, clock(), judged_from=job.start, kind="test_run")
+            except Exception:  # the test run stands; the next run reconciles again
+                log.exception("cx test run %s: issue reconcile failed", job.run_id)
     except Exception as exc:  # noqa: BLE001 - recorded on the row, never fatal to the worker
         log.error("cx test run %s failed:\n%s", job.run_id, traceback.format_exc())
         try:
