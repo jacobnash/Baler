@@ -83,7 +83,8 @@ async function loadRisks() {
     for (const k of risks) {
       const tr = el("tr");
       tr.innerHTML = `<td>${esc(k.issue.title || k.issue_id)}</td><td>${esc(k.reason)}</td>
-        <td>${esc(k.accepted_email || k.accepted_by || "")}</td><td>${esc(k.review_by)}</td><td></td>`;
+        <td>${esc(k.accepted_email || k.accepted_by || "")}</td><td>${esc(k.owner || "")}</td>
+        <td>${esc(k.retest_trigger || "")}</td><td>${esc(k.review_by)}</td><td></td>`;
       if (can("admin")) {
         const rv = el("button", { type: "button", textContent: "Revoke" });
         rv.addEventListener("click", async () => {
@@ -139,7 +140,10 @@ async function openIssue(id) {
   if (d.symptom || d.description) lines.push(d.symptom || d.description);
   if (issue.source !== "baler") lines.push(`Imported from ${issue.source} (${issue.source_id})`);
   if (issue.closed_run) lines.push(`Closed citing retest ${issue.closed_run}`);
-  if (issue.risk) lines.push(`Risk accepted: ${issue.risk.reason} - review by ${issue.risk.review_by}`);
+  if (issue.risk) {
+    lines.push(`Risk accepted by ${issue.risk.accepted_email || issue.risk.accepted_by || "?"}: ${issue.risk.reason} - review by ${issue.risk.review_by}`
+      + (issue.risk.owner ? ` · owner ${issue.risk.owner}` : "") + (issue.risk.retest_trigger ? ` · retest when ${issue.risk.retest_trigger}` : ""));
+  }
   $("issue-detail").innerHTML = lines.map((l) => `<p>${esc(l)}</p>`).join("");
   $("issue-title").value = issue.title;
   const st = $("issue-status");
@@ -196,7 +200,8 @@ async function saveIssue(ev) {
 async function acceptRisk() {
   const i = issueState.current;
   try {
-    await cxApi("POST", `/issues/${i.id}/risk`, { reason: $("risk-reason").value.trim(), review_by: $("risk-review").value });
+    await cxApi("POST", `/issues/${i.id}/risk`, { reason: $("risk-reason").value.trim(), review_by: $("risk-review").value,
+      owner: $("risk-owner").value.trim() || undefined, retest_trigger: $("risk-retest").value.trim() || undefined });
     $("issue-dialog").close();
     await Promise.all([loadIssues(), loadRisks(), loadEvents()]);
   } catch (err) {

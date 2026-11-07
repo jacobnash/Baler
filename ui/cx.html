@@ -216,7 +216,7 @@
         <h2>Accepted risks</h2>
         <p class="hint">Kept apart from faults and closed issues on purpose. A risk lapses on its review date and its issue reopens.</p>
         <table>
-          <thead><tr><th>Issue</th><th>Reason</th><th>Accepted by</th><th>Review by</th><th></th></tr></thead>
+          <thead><tr><th>Issue</th><th>Reason</th><th>Accepted by</th><th>Owner</th><th>Retest trigger</th><th>Review by</th><th></th></tr></thead>
           <tbody id="risks-body"></tbody>
         </table>
       </section>
@@ -305,6 +305,8 @@
       <fieldset id="issue-risk" data-min-role="admin">
         <legend>Accept as a risk</legend>
         <label>Reason <input type="text" id="risk-reason" /></label>
+        <label>Owner / responsible <input type="text" id="risk-owner" placeholder="who carries the open item" /></label>
+        <label>Retest trigger <input type="text" id="risk-retest" placeholder="e.g. first seasonal changeover" /></label>
         <label>Review by <input type="date" id="risk-review" /></label>
         <button type="button" id="risk-accept-btn">Accept risk</button>
       </fieldset>

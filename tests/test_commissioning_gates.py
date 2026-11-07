@@ -154,7 +154,7 @@ def test_project_report_tells_the_whole_story(base, repo, spec):
     assert r.status_code == 200, r.text
     rep = r.json()
     assert rep["latest_run"]["run"]["id"] == run["id"]
-    assert any("Passive only" in x for x in rep["limitations"])
+    assert any("Passive only" in x["text"] for x in rep["limitations"])
     assert rep["phase_history"][0]["detail"]["to"] == "functional"
     [logged] = [i for i in rep["issues"] if i["id"] == issue["id"]]
     assert logged["events"][0]["action"] == "create" and logged["events"][0]["actor"] == "user"
@@ -201,3 +201,37 @@ def test_an_inconclusive_check_can_be_waived_for_acceptance(base, repo):
     after = requests.get(f"{base}/projects/{p['id']}/gate", params={"to": "acceptance"}, headers=A).json()["gate"]
     left = next((u["count"] for u in after["unmet"] if u["rule"] == "no_unwaived_inconclusive"), 0)
     assert left == unwaived - 1
+
+
+def test_report_round_two_waivers_sequences_and_criteria(base, repo):
+    """#99: waived is first-class (open vs waived; accepted-by, owner and
+    retest trigger as columns), sequences reported per criterion wherever
+    they ran, and an acceptance-criteria section built from the data."""
+    p, run = ti._completed_run(base)
+    inc = next(r for r in repo.get_results(run["id"]) if r["status"] == "inconclusive")
+    issue = requests.post(f"{base}/projects/{p['id']}/issues", headers=A,
+                          json={"from_result": {"run_id": run["id"], "check_id": inc["check_id"], "subject": inc["subject"]}}).json()
+    risk = requests.post(f"{base}/issues/{issue['id']}/risk", headers=ti.ADMIN,
+                         json={"reason": "read-only controller", "owner": "Controls Co",
+                               "retest_trigger": "when writes are enabled",
+                               "review_by": (fx.NOW.date() + timedelta(days=60)).isoformat()})
+    assert risk.status_code == 201 and risk.json()["owner"] == "Controls Co"
+    # a start-up procedure carrying an S3-style availability criterion
+    proc = requests.post(f"{base}/projects/{p['id']}/procedures", headers=A, json={
+        "name": "AHU start-up + S3", "kind": "startup", "equip_class": "Air_Handling_Unit",
+        "steps": [{"id": "s3", "title": "S3 availability",
+                   "criteria": [{"availability": {"min_pct": 95, "max_gap_minutes": 10},
+                                 "point_class": "Supply_Air_Temperature_Sensor"}]}]}).json()
+    rep = requests.get(f"{base}/projects/{p['id']}/report", headers=A).json()
+    assert rep["issue_counts"]["waived"] == 1
+    assert rep["inconclusive"]["waived"] >= 1
+    [sq] = [s for s in rep["sequences"] if s["procedure_id"] == proc["id"]]
+    assert sq["step"] == "S3 availability" and sq["status"] == "not_evaluated" and "never been run" in sq["reason"]
+    kinds = {x["kind"] for x in rep["limitations"]}
+    assert "sequence_not_evaluated" in kinds and "no_sequences" not in kinds
+    assert any("waived" in x["text"] for x in rep["limitations"] if x["kind"] == "inconclusive")
+    page = requests.get(f"{base}/projects/{p['id']}/report", params={"format": "html"}, headers=A).text
+    for want in ("Accepted by", "Owner / responsible", "Retest trigger", "Controls Co", "when writes are enabled",
+                 "Acceptance criteria and results", "available at least 95%", "Sequences of operation", "UTC",
+                 'id="waivers"', f'id="issue-{issue["id"]}"', "waived (risk accepted)"):
+        assert want in page, want

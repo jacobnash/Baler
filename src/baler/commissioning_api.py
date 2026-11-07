@@ -580,6 +580,17 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             self.end_headers()
             self.wfile.write(body)
 
+        def _report_equipment(self, p: dict, claims: dict) -> dict[str, dict]:
+            """uri -> {dis, brickClass, points}: names and types for the
+            report instead of raw URIs (#99)."""
+            try:
+                scopes, _ = self._scopes(p, claims)
+                return {e["id"]: {"dis": e.get("dis"), "brickClass": e.get("brickClass"), "points": e.get("points") or []}
+                        for e in inventory.build(repo.store, scopes)}
+            except Exception:  # the report stands without names
+                log.warning("cx report %s: inventory failed", p["id"], exc_info=True)
+                return {}
+
         def _project_report(self, span, claims, pid) -> None:
             """The Cx report for the whole project (#87), as JSON or a
             printable page: scope and limitations, phase history, spec vs
@@ -609,7 +620,9 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             rep = report.project_build(db.public_project(p), now_fn(), repo.user_email(claims.get("sub")) or claims.get("sub"),
                                        db.public_row(run) if run else None, results, procs,
                                        {k: (db.public_row(v) if v else None) for k, v in latest.items()},
-                                       iss, repo.list_events(pid, 500), alignment, docs, active_runs, active.writes_allowed())
+                                       iss, repo.list_events(pid, 500), alignment, docs, active_runs, active.writes_allowed(),
+                                       site=repo.get_site(p["site_id"]) if p.get("site_id") else None,
+                                       equipment=self._report_equipment(p, claims))
             if fmt == "json":
                 respond_json(self, 200, rep)
                 return
@@ -860,13 +873,16 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 respond_error(self, 409, f"issue is {issue['status']}")
                 return
             now = now_fn()
-            reason, review_by = issues.check_risk(self.read_json_body(), now.date())
+            body = self.read_json_body()
+            reason, review_by = issues.check_risk(body, now.date())
             sub = claims.get("sub")
             risk = {"id": db.new_id(), "issue_id": iid, "accepted_by": sub, "accepted_email": repo.user_email(sub),
-                    "reason": reason, "review_by": review_by, "created_at": now, "revoked_at": None, "revoked_by": None}
+                    "reason": reason, "review_by": review_by, "created_at": now, "revoked_at": None, "revoked_by": None,
+                    **issues.risk_extras(body)}
             repo.create_risk(risk)
             repo.update_issue(iid, {"status": "risk_accepted", "updated_at": now})
             self._issue_event(iid, "risk.accept", claims, {"risk_id": risk["id"], "reason": reason, "review_by": review_by.isoformat(),
+                                                          "owner": risk["owner"], "retest_trigger": risk["retest_trigger"],
                                                           "from": issue["status"]})
             self._event(project["id"], "risk.accept", claims, {"issue_id": iid, "risk_id": risk["id"]})
             respond_json(self, 201, db.public_row(risk))

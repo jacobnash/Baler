@@ -199,6 +199,9 @@ def _due(v) -> date:
 
 
 def check_risk(body: dict, today: date) -> tuple[str, date]:
+    """(reason, review_by). The optional structured fields - owner (who is
+    responsible for the open item) and retest_trigger (what retest lifts
+    it, e.g. "first seasonal changeover") - are read by risk_extras."""
     reason = _text(body.get("reason"))
     if not reason:
         raise ValueError("reason is required")
@@ -209,6 +212,10 @@ def check_risk(body: dict, today: date) -> tuple[str, date]:
     if review_by <= today:
         raise ValueError("review_by must be in the future")
     return reason, review_by
+
+
+def risk_extras(body: dict) -> dict:
+    return {"owner": _text(body.get("owner"), 200), "retest_trigger": _text(body.get("retest_trigger"), 500)}
 
 
 # ------------------------------------------------------------ import/export
