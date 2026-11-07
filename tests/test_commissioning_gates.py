@@ -179,3 +179,25 @@ def test_run_report_never_calls_incomplete_equipment_a_pass(base):
                 assert r["reason"]  # never an empty cell
     page = requests.get(f"{base}/runs/{run['id']}/report", params={"format": "html"}, headers=A).text
     assert "verification ladder" in page and " h)" in page  # ladder explained; window length in human units
+
+
+def test_an_inconclusive_check_can_be_waived_for_acceptance(base, repo):
+    """#96: rung 3 on read-only controllers can never pass; a waiver
+    (an accepted risk on an issue opened from the inconclusive result) has
+    to be possible, or the acceptance gate is unreachable."""
+    p, run = ti._completed_run(base)
+    inc = next(r for r in repo.get_results(run["id"]) if r["status"] == "inconclusive")
+    r = requests.post(f"{base}/projects/{p['id']}/issues", headers=A,
+                      json={"from_result": {"run_id": run["id"], "check_id": inc["check_id"], "subject": inc["subject"]}})
+    assert r.status_code == 201, r.text
+    bulk = requests.post(f"{base}/runs/{run['id']}/issues", headers=A, json={"include_inconclusive": True}).json()
+    assert bulk["already_tracked"] >= 1  # the one above
+    before = requests.get(f"{base}/projects/{p['id']}/gate", params={"to": "acceptance"}, headers=A).json()["gate"]
+    unwaived = next(u for u in before["unmet"] if u["rule"] == "no_unwaived_inconclusive")["count"]
+    risk = requests.post(f"{base}/issues/{r.json()['id']}/risk", headers=ti.ADMIN,
+                         json={"reason": "read-only controller; retest when writes are enabled",
+                               "review_by": (fx.NOW.date() + timedelta(days=90)).isoformat()})
+    assert risk.status_code in (200, 201), risk.text
+    after = requests.get(f"{base}/projects/{p['id']}/gate", params={"to": "acceptance"}, headers=A).json()["gate"]
+    left = next((u["count"] for u in after["unmet"] if u["rule"] == "no_unwaived_inconclusive"), 0)
+    assert left == unwaived - 1

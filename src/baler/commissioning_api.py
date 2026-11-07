@@ -711,8 +711,11 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                                if r["check_id"] == ref.get("check_id") and r["subject"] == ref.get("subject")), None)
                 if result is None or not repo.scope_for(claims).allows(result["equip_uri"]):
                     raise ValueError("no such result in that run")
-                if result["status"] != "fail":
-                    raise ValueError("only a failing result opens an issue")
+                if result["status"] not in ("fail", "inconclusive"):
+                    # inconclusive opens one too: it's how a check that can't
+                    # be judged here (rung 3 on read-only controllers) gets an
+                    # explicit waiver - accept the issue as a risk (#96)
+                    raise ValueError("only a failing or inconclusive result opens an issue")
                 issue = issues.from_result(result, run["id"], pid, db.new_id, now, claims.get("sub"))
             else:
                 title = issues._text(body.get("title"), issues.MAX_TITLE)
@@ -744,7 +747,9 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
         def _issues_from_run(self, span, claims, rid) -> None:
             """Open an issue for every failing result of a run that no
             active issue tracks yet. Optional filters: check_prefix,
-            equip_uri, severity (template severities)."""
+            equip_uri, severity (template severities); include_inconclusive
+            also opens one per inconclusive result, so each can be waived
+            (accepted as a risk) for the acceptance gate (#96)."""
             hit = self._visible_run(rid, claims)
             if hit is None:
                 return
@@ -753,11 +758,12 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             prefix = body.get("check_prefix") or ""
             equip = body.get("equip_uri")
             sev = body.get("severity")
+            wanted = ("fail", "inconclusive") if body.get("include_inconclusive") is True else ("fail",)
             scope = repo.scope_for(claims)
             now = now_fn()
             opened, skipped = [], 0
             for r in repo.get_results(rid):
-                if (r["status"] != "fail" or not r["check_id"].startswith(prefix) or not scope.allows(r["equip_uri"])
+                if (r["status"] not in wanted or not r["check_id"].startswith(prefix) or not scope.allows(r["equip_uri"])
                         or (equip and r["equip_uri"] != equip) or (sev and r.get("severity") != sev)):
                     continue
                 issue = issues.from_result(r, rid, project["id"], db.new_id, now, claims.get("sub"))

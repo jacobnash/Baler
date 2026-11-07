@@ -496,11 +496,14 @@ paths:
     post:
       tags: [Issues]
       operationId: createCxIssue
-      summary: Open an issue by hand, or from a failing result (operator)
+      summary: Open an issue by hand, or from a failing or inconclusive result (operator)
       description: >-
-        With `from_result`, the issue is tied to that check and subject and
-        closes only when a later run passes it. Without, it's a manual issue
-        that closes by hand.
+        With `from_result`, the issue is tied to that check and subject: a
+        later passing run resolves it, and a person closes it after a passing
+        retest. An inconclusive result can open one too, so a check that
+        can't be judged here (e.g. rung 3 on read-only controllers) can be
+        waived by accepting the issue as a risk, which the acceptance gate
+        honours. Without `from_result`, it's a manual issue that closes by hand.
       requestBody:
         content:
           application/json:
@@ -647,6 +650,9 @@ paths:
                 check_prefix: { type: string, description: "e.g. template: or pair:" }
                 equip_uri: { type: string }
                 severity: { type: string, enum: [required, expected, optional] }
+                include_inconclusive:
+                  type: boolean
+                  description: Also open one per inconclusive result, so each can be waived for the acceptance gate
       responses:
         "200":
           description: Opened issue ids, and how many failures already had one
