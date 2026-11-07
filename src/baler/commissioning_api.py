@@ -25,6 +25,7 @@ import argparse
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -39,10 +40,12 @@ from baler.commissioning import (
     db,
     economizer,
     engine,
+    gates,
     gl36,
     inventory,
     issues,
     ladder,
+    llm,
     mirror,
     phases,
     procedures,
@@ -63,7 +66,7 @@ PORT = 8009
 RUN_STATEMENT_TIMEOUT = "10min"
 
 _PROJECT = re.compile(r"/projects/([^/]+)")
-_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|agent/sessions|agent/proposals)")
+_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|gate|report|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|agent/sessions|agent/proposals)")
 _PROJECT_ISSUES = re.compile(r"/projects/([^/]+)/issues/(import|export)")
 _RUN_ISSUES = re.compile(r"/runs/([^/]+)/issues")
 _ISSUE = re.compile(r"/issues/([^/]+)")
@@ -120,6 +123,8 @@ def _check_settings(settings) -> dict:
         economizer.validate_settings(settings["economizer"])
     if "fault_mirroring" in settings:
         mirror.validate_settings(settings["fault_mirroring"])
+    if "phase_gates" in settings:
+        gates.validate_mode(settings["phase_gates"])
     if settings.get("schedule") is not None:
         sched = settings["schedule"]
         every = sched.get("every_hours") if isinstance(sched, dict) else None
@@ -130,6 +135,7 @@ def _check_settings(settings) -> dict:
 
 
 engine_kwargs = runner.engine_kwargs
+log = logging.getLogger(__name__)
 
 
 def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None):
@@ -200,6 +206,8 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 table = {
                     ("PUT", "phases"): ("put_phases", self._put_phases),
                     ("POST", "phase"): ("set_phase", self._set_phase),
+                    ("GET", "gate"): ("phase_gate", self._phase_gate),
+                    ("GET", "report"): ("project_report", self._project_report),
                     ("GET", "events"): ("events", self._events),
                     ("GET", "inventory"): ("inventory", self._inventory),
                     ("POST", "runs"): ("create_run", self._create_run),
@@ -410,13 +418,63 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             if not isinstance(key, str):
                 raise TypeError("key is required")
             before = phases.current(p["phases"])
+            note = body["note"][:2000].strip() if isinstance(body.get("note"), str) else ""
+            gate = self._gate_for(p, key)
+            gate_mode = gates.mode(p.get("settings"))
+            override = body.get("override") is True
+            if gate is not None and not gate["met"] and gate_mode == "block" and not override:
+                respond_json(self, 409, {"error": f"the {key} gate isn't met - fix what it lists, or override with a note",
+                                         "gate": gate})
+                return
+            if override and gate is not None and not gate["met"] and not note:
+                raise ValueError("an override needs a note saying why")
             plist = phases.set_current(p["phases"], key, now_fn())
             repo.save_phases(pid, plist, now_fn())
             detail = {"from": before, "to": key}
-            if isinstance(body.get("note"), str):
-                detail["note"] = body["note"][:2000]
+            if note:
+                detail["note"] = note
+            if gate is not None:
+                detail["gate"] = gates.summary(gate)
+                detail["gate_mode"] = gate_mode
+                if override and not gate["met"]:
+                    detail["override"] = True
             self._event(pid, "phase.set", claims, detail)
-            respond_json(self, 200, db.public_project(repo.get_project(pid)))
+            out = db.public_project(repo.get_project(pid))
+            out["gate"] = gate
+            respond_json(self, 200, out)
+
+        def _gate_for(self, p: dict, key: str) -> dict | None:
+            """The gate for moving project `p` into `key`, or None when the
+            move isn't gated (backwards, sideways into an ungated phase, or
+            phase_gates "off")."""
+            if gates.mode(p.get("settings")) == "off":
+                return None
+            by_key = {ph["key"]: ph for ph in p["phases"]}
+            cur = by_key.get(phases.current(p["phases"]) or "")
+            if key not in by_key or not gates.rules_for(key) or (cur and by_key[key]["position"] <= cur["position"]):
+                return None
+            pid = p["id"]
+            run = next((r for r in repo.list_runs(pid, 20) if r.get("status") == "completed"), None)
+            results = repo.get_results(run["id"]) if run else []
+            procs = repo.list_procedures(pid)
+            latest = {pr["id"]: next((t for t in repo.list_test_runs(pr["id"], 20) if t["status"] == "completed"), None)
+                      for pr in procs}
+            runner.reconcile_issues(repo, pid, None, [], now_fn())  # an overdue waiver lapses first
+            active = repo.list_issues(pid, issues.ACTIVE)
+            risks = {r["issue_id"]: r for r in repo.list_risks(pid)}
+            return gates.evaluate(key, run, results, procs, latest, active, risks)
+
+        def _phase_gate(self, span, claims, pid) -> None:
+            """Preview: what moving to ?to=<key> would require, without moving."""
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            key = (parse_qs(urlparse(self.path).query).get("to") or [""])[0]
+            if key not in {ph["key"] for ph in p["phases"]}:
+                raise ValueError("?to= names one of this project's phases")
+            gate = self._gate_for(p, key)
+            respond_json(self, 200, {"mode": gates.mode(p.get("settings")),
+                                     "gate": gate or {"target": key, "rules": [], "met": True, "unmet": []}})
 
         def _events(self, span, claims, pid) -> None:
             if self._project(pid, claims) is not None:
@@ -500,7 +558,20 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             if fmt == "json":
                 respond_json(self, 200, rep)
                 return
-            body = report.html(rep).encode("utf-8")
+            self._send_html(report.html(rep).encode("utf-8"))
+
+        def _report_issues(self, project_id: str) -> list[dict]:
+            """Every issue with its status history (actors and times) and
+            standing risk - the report's issues log and waivers (#87)."""
+            risks = {r["issue_id"]: r for r in repo.list_risks(project_id)}
+            out = []
+            for i in repo.list_issues(project_id):
+                row = self._public_issue(i, risks)
+                row["events"] = repo.list_issue_events(i["id"])
+                out.append(row)
+            return out
+
+        def _send_html(self, body: bytes) -> None:
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -509,8 +580,40 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             self.end_headers()
             self.wfile.write(body)
 
-        def _report_issues(self, project_id: str) -> list[dict]:
-            return [db.public_row(i) for i in repo.list_issues(project_id)]
+        def _project_report(self, span, claims, pid) -> None:
+            """The Cx report for the whole project (#87), as JSON or a
+            printable page: scope and limitations, phase history, spec vs
+            installed, latest verdicts, procedure results, issues log."""
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            fmt = parse_qs(urlparse(self.path).query).get("format", ["json"])[0]
+            if fmt not in ("json", "html"):
+                raise ValueError("format must be json or html")
+            scope = repo.scope_for(claims)
+            runner.reconcile_issues(repo, pid, None, [], now_fn())
+            run = next((r for r in repo.list_runs(pid, 20) if r.get("status") == "completed"), None)
+            results = [r for r in repo.get_results(run["id"]) if scope.allows(r["equip_uri"])] if run else []
+            procs = [x for x in repo.list_procedures(pid) if x["status"] != "archived"]
+            latest = {pr["id"]: next((t for t in repo.list_test_runs(pr["id"], 20) if t["status"] == "completed"), None)
+                      for pr in procs}
+            iss = [i for i in self._report_issues(pid) if not i.get("equip_uri") or scope.allows(i["equip_uri"])]
+            active_runs = [db.public_row(a) for a in repo.find_rows("cx_active_runs", project_id=pid)
+                           if a["status"] not in ("planned", "cancelled") and scope.allows(a["equip_uri"])]
+            try:
+                alignment, _, _ = self._alignment_for(p, claims)
+            except Exception:  # the report stands without the spec section
+                log.warning("cx report %s: spec alignment failed", pid, exc_info=True)
+                alignment = None
+            docs = [db.public_row(d) for d in repo.find_rows("cx_spec_documents", project_id=pid)]
+            rep = report.project_build(db.public_project(p), now_fn(), repo.user_email(claims.get("sub")) or claims.get("sub"),
+                                       db.public_row(run) if run else None, results, procs,
+                                       {k: (db.public_row(v) if v else None) for k, v in latest.items()},
+                                       iss, repo.list_events(pid, 500), alignment, docs, active_runs, active.writes_allowed())
+            if fmt == "json":
+                respond_json(self, 200, rep)
+                return
+            self._send_html(report.project_html(rep).encode("utf-8"))
 
         def _equipment_status(self, span, claims) -> None:
             """One verdict per equipment from each visible project's latest
@@ -608,8 +711,11 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                                if r["check_id"] == ref.get("check_id") and r["subject"] == ref.get("subject")), None)
                 if result is None or not repo.scope_for(claims).allows(result["equip_uri"]):
                     raise ValueError("no such result in that run")
-                if result["status"] != "fail":
-                    raise ValueError("only a failing result opens an issue")
+                if result["status"] not in ("fail", "inconclusive"):
+                    # inconclusive opens one too: it's how a check that can't
+                    # be judged here (rung 3 on read-only controllers) gets an
+                    # explicit waiver - accept the issue as a risk (#96)
+                    raise ValueError("only a failing or inconclusive result opens an issue")
                 issue = issues.from_result(result, run["id"], pid, db.new_id, now, claims.get("sub"))
             else:
                 title = issues._text(body.get("title"), issues.MAX_TITLE)
@@ -641,7 +747,9 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
         def _issues_from_run(self, span, claims, rid) -> None:
             """Open an issue for every failing result of a run that no
             active issue tracks yet. Optional filters: check_prefix,
-            equip_uri, severity (template severities)."""
+            equip_uri, severity (template severities); include_inconclusive
+            also opens one per inconclusive result, so each can be waived
+            (accepted as a risk) for the acceptance gate (#96)."""
             hit = self._visible_run(rid, claims)
             if hit is None:
                 return
@@ -650,11 +758,12 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             prefix = body.get("check_prefix") or ""
             equip = body.get("equip_uri")
             sev = body.get("severity")
+            wanted = ("fail", "inconclusive") if body.get("include_inconclusive") is True else ("fail",)
             scope = repo.scope_for(claims)
             now = now_fn()
             opened, skipped = [], 0
             for r in repo.get_results(rid):
-                if (r["status"] != "fail" or not r["check_id"].startswith(prefix) or not scope.allows(r["equip_uri"])
+                if (r["status"] not in wanted or not r["check_id"].startswith(prefix) or not scope.allows(r["equip_uri"])
                         or (equip and r["equip_uri"] != equip) or (sev and r.get("severity") != sev)):
                     continue
                 issue = issues.from_result(r, rid, project["id"], db.new_id, now, claims.get("sub"))
@@ -693,10 +802,19 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 except issues.Conflict as exc:
                     respond_error(self, 409, str(exc))
                     return
-                changes["status"] = body["status"]
-                changes["closed_at"] = now if body["status"] == "closed" else None
-                if body["status"] != "closed":
+                target = body["status"]
+                changes["status"] = target
+                changes["closed_at"] = now if target == "closed" else None
+                if target == "closed" and issue.get("retest"):
+                    rt = issue["retest"]
+                    changes["closed_run"] = rt.get("test_run_id") or rt.get("run_id")
+                elif target != "closed":
                     changes["closed_run"] = None
+                if target == "ready_for_retest":
+                    # a person claims the fix: only a retest judged after now counts
+                    changes.update(resolved_at=now, resolved_by={"user_sub": claims.get("sub")}, retest=None)
+                elif target in ("open", "in_progress"):
+                    changes.update(resolved_at=None, resolved_by=None, retest=None)
             if "assignee" in body:
                 changes["assignee"] = issues._text(body["assignee"], 200)
             if "severity" in body:
@@ -711,12 +829,22 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 raise ValueError("nothing to change: status, assignee, severity, title or note")
             if changes:
                 repo.update_issue(iid, {**changes, "updated_at": now})
-            detail = {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in changes.items()}
+            detail = {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in changes.items()
+                      if k not in ("resolved_by", "retest")}
             if "status" in changes:
                 detail["from"] = issue["status"]
+                if changes["status"] == "closed" and issue.get("retest"):
+                    detail["retest"] = issue["retest"]
             if note:
                 detail["note"] = note
-            self._issue_event(iid, "update" if changes else "note", claims, detail)
+            action = "note"
+            if changes.get("status") == "closed":
+                action = "close"
+            elif changes.get("status") == "ready_for_retest":
+                action = "fix.claimed"
+            elif changes:
+                action = "update"
+            self._issue_event(iid, action, claims, detail)
             respond_json(self, 200, self._public_issue(repo.get_issue(iid) or issue))
 
         def _issue_events(self, span, claims, iid) -> None:
@@ -871,7 +999,12 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 return
             body = self.read_json_body()
             now = now_fn()
-            if body.get("seed") == "all":
+            if body.get("from_spec") is True:
+                specs = self._procedures_from_spec(p, claims, body.get("availability", {"min_pct": 99, "max_gap_minutes": 5}))
+                if not specs:
+                    raise ValueError("no accepted spec equipment with points matched in the field - import and accept "
+                                     "the spec, and confirm the equipment mappings first")
+            elif body.get("seed") == "all":
                 have = {x.get("template") for x in repo.list_procedures(pid)}
                 specs = [procedures.from_seed(t) for t in procedures.SEED_BY_ID if t not in have]
             elif body.get("template"):
@@ -890,7 +1023,27 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 made.append(proc)
             self._event(pid, "procedure.create", claims, {"procedures": [{"id": x["id"], "name": x["name"]} for x in made]})
             out = [self._public_proc(x) for x in made]
-            respond_json(self, 201, out if body.get("seed") == "all" else out[0])
+            respond_json(self, 201, out if body.get("seed") == "all" or body.get("from_spec") is True else out[0])
+
+        def _procedures_from_spec(self, p: dict, claims: dict, availability) -> list[dict]:
+            """One PFC procedure per accepted spec equipment item that maps to
+            field equipment: present, in pfc range, in band, available (#86)."""
+            if availability is not None:
+                procedures._criterion({"availability": availability, "point_class": "x"}, "availability")
+            alignment, equips, items = self._alignment_for(p, claims)
+            by_uri = {e["id"]: e for e in equips}
+            by_id = {i["id"]: i for i in items}
+            point_items = [i for i in items if i["kind"] == "point"]
+            out = []
+            for m in alignment["mappings"]:
+                if not m.get("equip_uri") or m["equip_uri"] not in by_uri:
+                    continue
+                item = by_id[m["spec_item_id"]]
+                rows = spec.points_alignment(item, by_uri[m["equip_uri"]], point_items)
+                made = procedures.from_spec(by_uri[m["equip_uri"]], item, rows, {i["id"]: i for i in point_items}, availability)
+                if made:
+                    out.append({**procedures.normalize(made), "template": None})
+            return out
 
         def _get_procedure(self, span, claims, proc_id) -> None:
             hit = self._visible_procedure(proc_id, claims)
@@ -1064,15 +1217,15 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 raise ValueError("that isn't a PDF")
             if len(raw) > spec.MAX_PDF_BYTES:
                 raise ValueError(f"PDF is over {spec.MAX_PDF_BYTES // (1024 * 1024)} MB; split it")
+            method = "llm"
             if worker.extract_fn is None:
-                try:
-                    import anthropic  # noqa: F401
-                    import pydantic  # noqa: F401
-                except ImportError:
-                    respond_error(self, 501, "PDF extraction needs the llm extra (anthropic) installed on the server")
+                why = llm.unavailable_reason("extract")
+                if why:
+                    respond_error(self, 501, why)
                     return
+                method = "table" if llm.provider() == "none" else "llm"
             filename = str(body.get("filename") or "document.pdf")
-            doc = self._new_document(pid, claims, filename, "application/pdf", raw, "llm", "queued")
+            doc = self._new_document(pid, claims, filename, "application/pdf", raw, method, "queued")
             sub = claims.get("sub")
             self._event(pid, "spec.extract_start", claims, {"document_id": doc["id"], "filename": filename, "size": len(raw)})
             worker.submit(runner.ExtractJob(doc["id"], pid, filename, raw, sub, repo.user_email(sub)))
@@ -1496,10 +1649,9 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
         def _agent_available(self) -> bool:
             if agent_client is not None:
                 return True
-            try:
-                import anthropic  # noqa: F401
-            except ImportError:
-                respond_error(self, 501, "the commissioning agent needs the llm extra (anthropic) installed on the server")
+            why = llm.unavailable_reason("agent")
+            if why:
+                respond_error(self, 501, why)
                 return False
             return True
 
@@ -1507,8 +1659,11 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
         def _transcript(messages: list[dict]) -> list[dict]:
             """What a person reads: text, the tools the agent used, and
             their results' errors - not the raw API blocks."""
-            out = []
+            out: list[dict] = []
             for m in messages:
+                if agent.history_format([m]) == "openai":
+                    out += CommissioningHandler._openai_transcript(m)
+                    continue
                 for b in m.get("content") or []:
                     t = b.get("type")
                     if t == "text" and b.get("text"):
@@ -1517,6 +1672,28 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                         out.append({"role": "tool", "tool": b["name"], "input": b.get("input")})
                     elif t == "tool_result" and b.get("is_error"):
                         out.append({"role": "tool", "error": str(b.get("content"))[:500]})
+            return out
+
+        @staticmethod
+        def _openai_transcript(m: dict) -> list[dict]:
+            out: list[dict] = []
+            if m.get("role") == "tool":
+                try:
+                    res = json.loads(m.get("content") or "")
+                except ValueError:
+                    res = None
+                if isinstance(res, dict) and set(res) == {"error"}:
+                    out.append({"role": "tool", "error": str(res["error"])[:500]})
+                return out
+            if isinstance(m.get("content"), str) and m["content"]:
+                out.append({"role": m["role"], "text": m["content"]})
+            for c in m.get("tool_calls") or []:
+                fn = c.get("function") or {}
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except ValueError:
+                    args = fn.get("arguments")
+                out.append({"role": "tool", "tool": fn.get("name"), "input": args})
             return out
 
         def _public_session(self, sess: dict) -> dict:

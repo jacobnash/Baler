@@ -1,0 +1,113 @@
+---
+title: Commissioning models (Cx 7, Cx 10)
+---
+
+Two commissioning features use a language model: **spec extraction**
+(Cx 7, `POST /cx/projects/{id}/spec/extract`, which reads a design PDF into
+proposed equipment, point and sequence items) and the **commissioning
+agent** (Cx 10, a tool-use loop over the same Cx capabilities a person
+has). The model can be Claude, any OpenAI-compatible endpoint (including
+free ones), or no model at all.
+
+The guardrails don't change with the provider:
+
+- Every extracted spec item is `proposed` until a person accepts it, and
+  cites its document, page and the verbatim text it was read from.
+- The agent reads data and runs passive work itself. Everything else
+  (issues, procedures, phase changes, spec items, mappings, active tests)
+  is a proposal a person accepts. Every tool call it makes is a
+  `cx_events` row (`agent.<tool>`).
+
+## Choosing a provider
+
+`BALER_LLM_PROVIDER` on `commissioning_api`:
+
+| Provider | Spec PDFs | Agent | Needs |
+|---|---|---|---|
+| `anthropic` | Claude reads the PDF itself, page images included | yes | the `llm` extra, `ANTHROPIC_API_KEY`; model `BALER_CX_MODEL` |
+| `openai` | the PDF's text, page by page; quotes are checked | yes, if the model does function calling | `BALER_LLM_BASE_URL`, `BALER_LLM_MODEL`, `BALER_LLM_API_KEY` (blank for Ollama); the `cx-spec` extra |
+| `none` | tables only (equipment schedules, point lists) | no (501) | the `cx-spec` extra (pdfplumber) |
+
+If you leave it blank, the provider is `anthropic` when `ANTHROPIC_API_KEY`
+is set, otherwise `openai` when `BALER_LLM_BASE_URL` is set, otherwise
+`none`. `.env.example` documents every variable.
+
+## How a PDF is read
+
+1. **Tables, locally, for every provider.** pdfplumber finds each page's
+   tables. A table whose header row names a tag column (`Tag`, `Mark`,
+   `Unit`, ...) becomes equipment items, and one with equipment and
+   point-name columns becomes point items. A one-cell title row above the
+   header (`FAN SCHEDULE`) is the type hint. Each item cites its page and
+   the row's text. This step is offline and free, and it is the whole
+   extraction under `none`.
+2. **A model, for what the tables didn't cover.** The model is told which
+   items the tables already found. On `openai`, it only gets the text
+   outside those tables (sequences, prose, tables that weren't
+   recognised), in chunks of `BALER_LLM_MAX_CHARS` characters, each page
+   after a `=== PAGE n ===` marker. Baler asks for a JSON schema reply,
+   falls back to JSON mode and then to plain instructions if the endpoint
+   rejects that, and digs the JSON out of whatever comes back.
+3. **Quote check.** Weaker models invent quotes, so on `openai` every item's
+   quote must appear on the page it cites. Whitespace, case, curly quotes
+   and dashes are ignored, and `...` can stand for text between fragments.
+   If the quote is on a different page, Baler corrects the page and keeps
+   the cited one as `source.cited_page`. If the quote isn't in the PDF at
+   all, Baler drops the item and counts it in the document's
+   `info.dropped` and `info.notes`. On `anthropic`, Claude also reads page
+   images, so Baler only marks such items (`source.quote_verified: false`)
+   instead of dropping them.
+
+A scanned PDF with no text layer needs `anthropic`, or an OCR pass first.
+
+## Free options
+
+All of these use `BALER_LLM_PROVIDER=openai`. **Free hosted tiers may use
+what you send for training**, which is fine for demo data but not for
+confidential specs. For those, use Ollama (it runs locally) or a paid tier.
+
+```bash
+# Ollama, local. Uncomment the ollama service in docker-compose.yml, then:
+#   docker compose --profile llm-local up -d ollama
+#   docker compose exec ollama ollama pull qwen2.5:7b
+BALER_LLM_PROVIDER=openai
+BALER_LLM_BASE_URL=http://ollama:11434/v1
+BALER_LLM_MODEL=qwen2.5:7b
+
+# Groq, free tier
+BALER_LLM_PROVIDER=openai
+BALER_LLM_BASE_URL=https://api.groq.com/openai/v1
+BALER_LLM_API_KEY=gsk_...
+BALER_LLM_MODEL=llama-3.3-70b-versatile
+
+# Google Gemini, free tier
+BALER_LLM_PROVIDER=openai
+BALER_LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+BALER_LLM_API_KEY=AIza...
+BALER_LLM_MODEL=gemini-2.5-flash
+
+# OpenRouter, free models (ids end in :free)
+BALER_LLM_PROVIDER=openai
+BALER_LLM_BASE_URL=https://openrouter.ai/api/v1
+BALER_LLM_API_KEY=sk-or-...
+BALER_LLM_MODEL=meta-llama/llama-3.3-70b-instruct:free
+
+# No model at all: PDF tables only, offline
+BALER_LLM_PROVIDER=none
+```
+
+OpenAI itself and vLLM work the same way: point `BALER_LLM_BASE_URL` at
+their `/v1`.
+
+## The agent on an OpenAI-compatible endpoint
+
+The agent's tools are sent as OpenAI functions, and the loop and
+guardrails are the same as on Claude. If the model can't call tools, the
+session fails with an error that says so. That covers an endpoint
+rejecting `tools`, and a model writing a tool call as text instead of
+making one. In both cases, pick a model with function calling. Small
+local models (3B) often call tools badly. 7–8B instruct models such as
+`qwen2.5:7b` and `llama3.1:8b` are the practical floor.
+
+A conversation is stored in its provider's message format. If the
+provider changes, start a new conversation.

@@ -335,3 +335,39 @@ def test_failed_extraction_is_recorded(served):
         assert time.monotonic() < deadline
         time.sleep(0.02)
     assert doc["status"] == "failed" and "model declined" in doc["error"]
+
+
+POINTS_PFC = ("Equipment,Point Name,Units,PFC Min,PFC Max,Band Min,Band Max\n"
+              "AHU-1,Supply Air Temperature,degF,40,110,50,60\nAHU-1,Supply Fan Status,,,,,\nAHU-1,Mixed Air Damper,%,,,,\n")
+
+
+def test_spec_acceptance_criteria_seed_a_pfc_procedure(served):
+    """#86: pfc_min/pfc_max/band_min/band_max on spec point rows become
+    checks - present, in range, in band, available - instead of sitting in
+    properties doing nothing."""
+    base, _ = served
+    p = api._project(base)
+    requests.post(f"{base}/projects/{p['id']}/spec/import", json={"format": "csv", "data": SCHEDULE}, headers=api.A)
+    requests.post(f"{base}/projects/{p['id']}/spec/import", json={"format": "csv", "data": POINTS_PFC, "kind": "points"},
+                  headers=api.A)
+    r = requests.post(f"{base}/projects/{p['id']}/procedures", json={"from_spec": True}, headers=api.A)
+    assert r.status_code == 201, r.text
+    [proc] = [x for x in r.json() if x["name"].startswith("AHU-1")]
+    assert proc["equip_uris"] == [fx.AHU] and proc["kind"] == "startup"
+    steps = {s["id"]: s for s in proc["steps"]}
+    assert steps["points-present"]["criteria"] == [{"check": "exists", "strict": True}]
+    pfc = steps["pfc-supply-air-temperature"]["criteria"][0]
+    assert pfc["range"] == {"min": 40.0, "max": 110.0, "unit": "F"} and pfc["point"].startswith("urn:point:")
+    assert steps["band-supply-air-temperature"]["criteria"][0]["range"] == {"min": 50.0, "max": 60.0, "unit": "F"}
+    assert steps["available"]["criteria"][0]["availability"] == {"min_pct": 99, "max_gap_minutes": 5}
+    assert "Mixed Air Damper" in proc["description"]  # specified but not in the field: named, not invented
+    bad = requests.post(f"{base}/projects/{p['id']}/procedures", json={"from_spec": True, "availability": {"min_pct": 0}},
+                        headers=api.A)
+    assert bad.status_code == 400
+
+
+def test_from_spec_with_no_spec_says_what_to_do(served):
+    base, _ = served
+    p = api._project(base)
+    r = requests.post(f"{base}/projects/{p['id']}/procedures", json={"from_spec": True}, headers=api.A)
+    assert r.status_code == 400 and "spec" in r.json()["error"]

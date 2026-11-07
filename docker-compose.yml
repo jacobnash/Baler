@@ -301,11 +301,20 @@ services:
     restart: unless-stopped  # connects eagerly in main() - same first-boot DB race as fault_api
     environment:
       <<: *daemon-env
-      # Spec PDF extraction (Cx 7) and the commissioning agent (Cx 10)
-      # call the Claude API. Blank: those two answer an error, the rest of
-      # Cx works.
+      # Spec PDF extraction (Cx 7) and the commissioning agent (Cx 10):
+      # BALER_LLM_PROVIDER anthropic (Claude), openai (any OpenAI-compatible
+      # endpoint - Ollama, Groq, Gemini, OpenRouter) or none (PDF tables
+      # only, no agent). All blank: none; the rest of Cx works regardless.
+      # See .env.example for the free options.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       BALER_CX_MODEL: ${BALER_CX_MODEL:-}
+      BALER_LLM_PROVIDER: ${BALER_LLM_PROVIDER:-}
+      BALER_LLM_BASE_URL: ${BALER_LLM_BASE_URL:-}
+      BALER_LLM_API_KEY: ${BALER_LLM_API_KEY:-}
+      BALER_LLM_MODEL: ${BALER_LLM_MODEL:-}
+      BALER_LLM_TIMEOUT: ${BALER_LLM_TIMEOUT:-}
+      BALER_LLM_MAX_CHARS: ${BALER_LLM_MAX_CHARS:-}
+      BALER_LLM_MAX_TOKENS: ${BALER_LLM_MAX_TOKENS:-}
       # Active tests (Cx 9) command equipment through point_write only when
       # this is 1. Blank/unset: planning (the dry run) works, nothing is written.
       BALER_CX_ALLOW_WRITES: ${BALER_CX_ALLOW_WRITES:-}
@@ -452,6 +461,24 @@ services:
       commissioning_api:
         condition: service_healthy
 
+  # A local, free model for Cx 7/10 (BALER_LLM_PROVIDER=openai,
+  # BALER_LLM_BASE_URL=http://ollama:11434/v1). Commented out, and under the
+  # llm-local profile once uncommented, so it never starts by default. To use:
+  # uncomment it and its volume below, then
+  #   docker compose --profile llm-local up -d ollama
+  #   docker compose exec ollama ollama pull qwen2.5:7b   # ~4.7 GB; llama3.1:8b works too
+  # and set BALER_LLM_MODEL=qwen2.5:7b. CPU-only works but is slow (minutes per
+  # PDF chunk); 8 GB+ of free RAM for a 7-8B model. Ollama's default context is
+  # small - OLLAMA_CONTEXT_LENGTH below lets a page chunk and the tools fit.
+  # ollama:
+  #   image: ollama/ollama:latest  # pin a release tag for anything long-lived
+  #   profiles: ["llm-local"]
+  #   restart: unless-stopped
+  #   environment:
+  #     OLLAMA_CONTEXT_LENGTH: "16384"
+  #   volumes:
+  #     - ollama-models:/root/.ollama
+
 # Explicit names so a rename of the checkout directory (= compose project)
 # can't silently swap in fresh empty volumes. An install created as
 # Timberdoodle sets BALER_VOLUME_PREFIX=timberdoodle to keep its data.
@@ -468,3 +495,5 @@ volumes:
     name: ${BALER_VOLUME_PREFIX:-baler}_grafana-data
   mosquitto-data:
     name: ${BALER_VOLUME_PREFIX:-baler}_mosquitto-data
+  # ollama-models:  # the commented-out ollama service above
+  #   name: ${BALER_VOLUME_PREFIX:-baler}_ollama-models

@@ -16,7 +16,7 @@ async function loadSpecDocs() {
     const docs = await cxApi("GET", `/projects/${cx.project.id}/spec/documents`);
     list.innerHTML = "";
     for (const d of docs.slice(0, 20)) {
-      const how = d.method === "llm" ? "read by Claude" : "imported";
+      const how = d.method === "llm" ? "read by a model" : (d.media_type === "application/pdf" ? "tables read" : "imported");
       const st = d.status === "completed" ? `${d.items} items` : d.status === "failed" ? `failed: ${d.error}` : `${d.status}…`;
       list.append(el("li", { textContent: `${when(d.created_at)} · ${d.filename} (${how}) · ${st}${d.info && d.info.notes ? ` · note: ${d.info.notes}` : ""}` }));
       if (d.status === "queued" || d.status === "running") pollDoc(d.id);
@@ -126,7 +126,7 @@ async function uploadSpec(file) {
         $("spec-filter").value = "accepted";
       } else if (ext === "pdf") {
         const doc = await cxApi("POST", `/projects/${cx.project.id}/spec/extract`, { data: b64, filename: file.name });
-        flash($("spec-status"), `${file.name}: Claude is reading it - proposals appear here when it's done`);
+        flash($("spec-status"), `${file.name}: reading it - proposals appear here when it's done`);
         pollDoc(doc.id);
       } else {
         throw new Error("CSV, XLSX or PDF");

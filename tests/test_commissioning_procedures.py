@@ -35,8 +35,9 @@ def _evaluate(template, history=None, start=None, end=None):
     _, results = engine.run(hx.store(), hist, [Scope.everything()], end, (end - start).total_seconds() / 3600,
                             equips=equips, site_equips=site)
     ids = runner._range_points(proc, site)
-    series = hist.window(ids, start, end + timedelta(seconds=1))
-    return procedures.evaluate(proc, equips, results, series)
+    truncated: set[str] = set()
+    series = hist.window(ids, start, end + timedelta(seconds=1), truncated=truncated)
+    return procedures.evaluate(proc, equips, results, series, truncated)
 
 
 def _step(per, equip, step):
@@ -115,6 +116,53 @@ def test_a_past_window_is_judged_on_what_was_known_then():
     end = hx.NOW - timedelta(hours=6)
     per = _evaluate("boiler_power_on", h, start=end - timedelta(hours=2), end=end)
     assert _step(per, hx.BOILER, "points-appear")["status"] == "fail"
+
+
+def _limited(limit):
+    """The hospital history behind PostgresHistory's per-point read limit."""
+    h = hx.history()
+    return type(h)(h.series, per_point_limit=limit)
+
+
+def test_latest_is_the_newest_sample_even_past_the_read_limit():
+    """Baler#88: 24 h of 5-minute samples is 288 rows; with a 50-row read
+    limit, 'latest' read through a window was the 50th-oldest sample (20 h
+    stale) and every point failed 'every point appears'."""
+    per = _evaluate("boiler_power_on", _limited(50))
+    assert _step(per, hx.BOILER, "points-appear")["status"] == "pass"
+
+
+def test_a_truncated_window_cannot_pass_a_range_but_can_fail_it():
+    hw = _step(_evaluate("boiler_startup", _limited(50)), hx.BOILER, "hw-temp")
+    assert hw["status"] == "inconclusive"
+    assert "window truncated at 50 samples" in hw["criteria"][0]["failing"][0]["symptom"]
+
+    h = _limited(50)
+    h.add(hx.pt(hx.BOILER, "hw-sup-temp"), hx.NOW - timedelta(hours=23, minutes=59), -40.0)  # inside the read prefix
+    hw = _step(_evaluate("boiler_startup", h), hx.BOILER, "hw-temp")
+    assert hw["status"] == "fail" and "-40" in hw["criteria"][0]["failing"][0]["symptom"]
+
+
+def test_empty_readings_are_not_reporting():
+    """Baler#85: a bridge publishing null while the device is down must fail
+    'every point appears', not pass on the null rows."""
+    h = hx.history()
+    dead = hx.pt(hx.BOILER, "hw-ret-temp")
+    h.series[dead] = [(t, v) for t, v in h.series[dead] if t < hx.NOW - timedelta(hours=3)]
+    for m in range(0, 120, 5):
+        h.add(dead, hx.NOW - timedelta(minutes=m), None)
+    appear = _step(_evaluate("boiler_power_on", h), hx.BOILER, "points-appear")
+    assert appear["status"] == "fail"
+    [f] = appear["criteria"][0]["failing"]
+    assert f["subject"] == dead and "empty readings" in f["symptom"]
+
+
+def test_empty_readings_with_no_real_value_ever_say_so():
+    h = hx.history()
+    dead = hx.pt(hx.BOILER, "hw-ret-temp")
+    h.series[dead] = [(hx.NOW - timedelta(minutes=m), None) for m in range(0, 60, 5)]
+    [f] = _step(_evaluate("boiler_power_on", h), hx.BOILER, "points-appear")["criteria"][0]["failing"]
+    assert "no real value ever" in f["symptom"]
 
 
 def test_diff_states():
@@ -273,3 +321,100 @@ def test_schedule_tick_queues_due_procedures_and_projects(repo):
     later = runner.schedule_tick(repo, worker, now + timedelta(hours=7))
     worker.join()
     assert len(later) == 1  # the project run (6 h), not the procedure (24 h)
+
+
+# ------------------------------------------------- sequence rules S1-S3 (#86)
+
+
+def _run_proc(steps, equip_class, history=None, hours=24.0):
+    proc = procedures.normalize({"name": "seq", "kind": "functional", "equip_class": equip_class, "window_hours": hours,
+                                 "steps": [{"id": f"s{i}", "title": f"S{i}", "criteria": [c]} for i, c in enumerate(steps, 1)]})
+    end = hx.NOW
+    start = end - timedelta(hours=hours)
+    hist = procedures.ClippedHistory(history or hx.history(), end)
+    site = _equips()
+    equips = [e for e in site if procedures.applies(proc, e)]
+    _, results = engine.run(hx.store(), hist, [Scope.everything()], end, hours, equips=equips, site_equips=site)
+    ids = runner._range_points(proc, site)
+    series = hist.window(ids, start, end + timedelta(seconds=1))
+    return procedures.evaluate(proc, equips, results, series, set(), (start, end))
+
+
+S2 = {"range": {"min": 65, "max": 80, "unit": "F", "hours": {"from": 7, "to": 18, "days": [0, 1, 2, 3, 4]}},
+      "point_class": "Zone_Air_Temperature_Sensor"}
+
+
+def test_s2_band_is_judged_in_occupied_hours_only():
+    h = hx.history()
+    zone = hx.pt(hx.VAV2, "zone-air-temp")
+    h.add(zone, hx.NOW.replace(hour=3, minute=1), 90.0)  # unoccupied: not judged
+    [crit] = _step(_run_proc([S2], "Variable_Air_Volume_Box", h), hx.VAV2, "s1")["criteria"]
+    assert crit["status"] == "pass"
+    obs = next(o for o in crit["observed"] if o["subject"] == zone)
+    assert obs["max"] == 71.5 and obs["samples"] > 0  # evidence on a passing point too
+    h.add(zone, hx.NOW.replace(hour=10, minute=1), 90.0)  # occupied: judged
+    [crit] = _step(_run_proc([S2], "Variable_Air_Volume_Box", h), hx.VAV2, "s1")["criteria"]
+    assert crit["status"] == "fail" and "90" in crit["failing"][0]["symptom"]
+
+
+S3 = {"availability": {"min_pct": 99, "max_gap_minutes": 5}, "point_class": "Hot_Water_Supply_Temperature_Sensor"}
+
+
+def test_s3_availability():
+    [crit] = _step(_run_proc([S3], "Boiler"), hx.BOILER, "s1")["criteria"]
+    assert crit["status"] == "pass" and crit["observed"][0]["availability_pct"] >= 99
+    h = hx.history()
+    sup = hx.pt(hx.BOILER, "hw-sup-temp")
+    h.series[sup] = [(t, v) for t, v in h.series[sup] if not (hx.NOW - timedelta(hours=6) <= t < hx.NOW - timedelta(hours=4))]
+    [crit] = _step(_run_proc([S3], "Boiler", h), hx.BOILER, "s1")["criteria"]
+    assert crit["status"] == "fail" and 90 < crit["observed"][0]["availability_pct"] < 99
+    assert "available" in crit["failing"][0]["symptom"]
+
+
+def test_availability_pct_math():
+    t0 = hx.NOW - timedelta(hours=1)
+    every5 = [t0 + timedelta(minutes=5 * i) for i in range(12)]
+    assert procedures.availability_pct(every5, t0, hx.NOW, timedelta(minutes=5)) == 100.0
+    assert procedures.availability_pct([], t0, hx.NOW, timedelta(minutes=5)) == 0.0
+    half = every5[:6]  # silent for the last 30 min
+    assert procedures.availability_pct(half, t0, hx.NOW, timedelta(minutes=5)) == 50.0
+
+
+S1 = {"response": {"when": {"point_class": "Run_Status", "equals": "active"},
+                   "then": {"point_class": "Hot_Water_Supply_Temperature_Sensor", "changes_by": 0.5, "within_minutes": 60}}}
+
+
+def test_s1_response_after_start():
+    """The hospital boiler starts at 02:00. Make its supply temperature flat
+    (fails), then rise after the start (passes)."""
+    h = hx.history()
+    sup = hx.pt(hx.BOILER, "hw-sup-temp")
+    h.series[sup] = [(t, 150.0) for t, _ in h.series[sup]]
+    [crit] = _step(_run_proc([S1], "Boiler", h), hx.BOILER, "s1")["criteria"]
+    assert crit["status"] == "fail" and "moved 0" in crit["failing"][0]["symptom"]
+    start = hx.NOW.replace(hour=2, minute=0)
+    h.series[sup] = [(t, 150.0 + (min((t - start).total_seconds() / 600, 3) if t >= start else 0)) for t, _ in h.series[sup]]
+    [crit] = _step(_run_proc([S1], "Boiler", h), hx.BOILER, "s1")["criteria"]
+    assert crit["status"] == "pass" and crit["observed"][0]["moved"] >= 0.5
+
+
+def test_s1_never_exercised_is_inconclusive():
+    h = hx.history()
+    run = hx.pt(hx.BOILER, "boiler-run-status")
+    h.series[run] = [(t, "active") for t, _ in h.series[run]]
+    [crit] = _step(_run_proc([S1], "Boiler", h), hx.BOILER, "s1")["criteria"]
+    assert crit["status"] == "inconclusive" and "never started" in crit["failing"][0]["symptom"]
+
+
+@pytest.mark.parametrize("bad", [
+    {"availability": {"min_pct": 0, "max_gap_minutes": 5}, "point_class": "X"},
+    {"availability": {"min_pct": 99}, "point_class": "X"},
+    {"range": {"min": 1, "hours": {"from": 18, "to": 7}}, "point_class": "X"},
+    {"range": {"min": 1, "hours": {"tz": "Mars/Olympus"}}, "point_class": "X"},
+    {"response": {"when": {"point_class": "X"}, "then": {"point_class": "Y", "changes_by": 1, "within_minutes": 5}}},
+    {"response": {"when": {"point_class": "X", "equals": 1}, "then": {"point_class": "Y", "changes_by": 0, "within_minutes": 5}}},
+    {"range": {"min": 1}, "availability": {"min_pct": 9, "max_gap_minutes": 1}, "point_class": "X"},
+])
+def test_sequence_criteria_validation(bad):
+    with pytest.raises((ValueError, TypeError)):
+        procedures.normalize({"name": "x", "kind": "functional", "equip_class": "Boiler", "steps": [{"criteria": [bad]}]})

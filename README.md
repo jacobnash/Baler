@@ -70,7 +70,7 @@ CI/dev loop. `docker compose restart gateway` always fixes it.
 | `validate_api` | `POST /validate` — checks the live entity graph against Brick's own SHACL shapes (`pip install -e ".[validate]"`). | 8005 |
 | `auth_api` | Identity: `POST /login`, API-key issuance/revocation, org/site directory CRUD. See "Gateway auth" below. | 8006 |
 | `haystack_api` | The Project Haystack HTTP API at `/api/{project}/{op}`, so SkySpark, Haxall, nhaystack and pyhaystack clients can point here unchanged. It handles HELLO/SCRAM login with your normal email and password. See [`docs-site/pages/haystack-api.mdx`](docs-site/pages/haystack-api.mdx). | 8008 |
-| `commissioning_api` | Commissioning (Cx): projects with editable phases, a scoped Brick/Haystack inventory, SHACL expected-point templates (`ontology/cx-expected-points.ttl`), verification runs (ladder, GL36/90.1, economizer), an issues log with accepted risks, test procedures, spec ingestion and alignment, opt-in fault mirroring, active tests behind `BALER_CX_ALLOW_WRITES`, and a Claude-driven agent whose changes are proposals. UI: `ui/cx.html`. Plan: [`todo/commissioning-plan.md`](todo/commissioning-plan.md). | 8009 |
+| `commissioning_api` | Commissioning (Cx): projects with editable phases, a scoped Brick/Haystack inventory, SHACL expected-point templates (`ontology/cx-expected-points.ttl`), verification runs (ladder, GL36/90.1, economizer), an issues log with accepted risks, test procedures, spec ingestion and alignment (PDF schedules read from tables locally, the rest by a model), opt-in fault mirroring, active tests behind `BALER_CX_ALLOW_WRITES`, and an LLM agent whose changes are proposals. The model is `BALER_LLM_PROVIDER`: Claude, any OpenAI-compatible endpoint (free: Ollama, Groq, Gemini, OpenRouter), or none - see [`docs-site/pages/commissioning-llm.mdx`](docs-site/pages/commissioning-llm.mdx). UI: `ui/cx.html`. Plan: [`todo/commissioning-plan.md`](todo/commissioning-plan.md). | 8009 |
 
 None of the 8 HTTP APIs are exposed on the host directly — go through
 the gateway at `localhost:8080` instead, prefixed by API name
@@ -154,7 +154,7 @@ independently-versioned project).
 With `mqtt_listener.py` ingesting:
 
 ```bash
-pip install -e ".[llm]"                    # anthropic + pydantic, only needed for autotag
+pip install -e ".[llm]"                    # anthropic + pydantic: autotag, and Cx 7/10 on BALER_LLM_PROVIDER=anthropic
 ANTHROPIC_API_KEY=... python -m baler.autotag   # rule engine + LLM fallback for what it can't place
 BALER_ADMIN_EMAIL=<admin-email> BALER_ADMIN_PASSWORD=<admin-password> \
   python scripts/seed_derivations_and_faults.py         # Brick derivations + fault rules, writes through the gateway

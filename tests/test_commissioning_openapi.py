@@ -181,7 +181,9 @@ def test_phases_are_manageable_and_audited(base, spec):
     events = requests.get(f"{base}/projects/{p['id']}/events", headers=A).json()
     assert_matches_schema(events, _schema(spec, "/projects/{id}/events", "get", 200), spec)
     assert [e["action"] for e in events] == ["phase.set", "phases.update", "project.create"]
-    assert events[0]["detail"] == {"from": "startup", "to": "functional", "note": "AHU-1 started"}
+    d = events[0]["detail"]
+    assert (d["from"], d["to"], d["note"], d["gate_mode"]) == ("startup", "functional", "AHU-1 started", "warn")
+    assert d["gate"]["met"] is False and d["gate"]["unmet"][0]["rule"] == "verification_run"  # warned, not blocked
     assert events[0]["user_sub"] == "u-a" and events[0]["user_email"] == "a@example.com"
 
 
