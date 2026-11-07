@@ -172,15 +172,45 @@ function renderPhaseBar() {
   }
 }
 
+function gateText(gate) {
+  return gate.unmet.map((u) => {
+    const items = u.items.slice(0, 5).map((i) => `    - ${i.subject || i.procedure || i.title || i.check_id || ""}${i.status ? ` (${i.status})` : ""}`);
+    const more = u.count > 5 ? [`    ... and ${u.count - 5} more`] : [];
+    return [`• ${u.message}`, ...items, ...more].join("\n");
+  }).join("\n");
+}
+
 async function setPhase(ph) {
-  const note = prompt(`Make "${ph.name}" the current phase?\nOptional note for the activity log:`, "");
-  if (note === null) return;
+  // Phase gates (#86): show what the move requires before making it.
+  let preview = null;
   try {
-    cx.project = await cxApi("POST", `/projects/${cx.project.id}/phase`, { key: ph.key, note: note || undefined });
+    preview = await cxApi("GET", `/projects/${cx.project.id}/gate?to=${encodeURIComponent(ph.key)}`);
+  } catch {
+    preview = null; // the move itself still reports the gate
+  }
+  const unmet = preview && preview.gate && !preview.gate.met;
+  const blocked = unmet && preview.mode === "block";
+  let msg = `Make "${ph.name}" the current phase?`;
+  if (unmet) {
+    msg += `\n\nThe ${ph.name} gate isn't met:\n${gateText(preview.gate)}\n\n`;
+    msg += blocked ? "This project blocks on unmet gates. To move anyway, give the reason (required):"
+                   : "You can move anyway; the activity log records what was unmet. Optional note:";
+  } else {
+    msg += "\nOptional note for the activity log:";
+  }
+  const note = prompt(msg, "");
+  if (note === null) return;
+  if (blocked && !note.trim()) {
+    alert("Moving past an unmet gate needs a reason.");
+    return;
+  }
+  try {
+    cx.project = await cxApi("POST", `/projects/${cx.project.id}/phase`,
+      { key: ph.key, note: note || undefined, override: blocked || undefined });
     renderProject();
     await Promise.all([loadProjects(), loadEvents()]);
   } catch (err) {
-    alert(err.message);
+    alert(err.data && err.data.gate ? `${err.message}\n\n${gateText(err.data.gate)}` : err.message);
   }
 }
 
