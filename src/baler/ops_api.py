@@ -1,5 +1,7 @@
 """
-GET /status — building-engineer Ops status (Slice A).
+GET /status — building-engineer Ops status (Slice A). Also the read-only
+post-deploy verification signals (GET /freshness, GET /gateway-errors,
+Baler#178; see ops_freshness.py).
 
 Same shape as validate_api.py: stdlib http.server, own process/port,
 OTel span per request, OpenAPI served off disk. Aggregates platform /
@@ -10,13 +12,14 @@ import argparse
 import os
 import re
 from http.server import ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from baler import (
     auth,
     docs_ui,
     edges,
     gateway_auth,
+    ops_freshness,
     orphans,
     record_edit,
     sources,
@@ -187,6 +190,34 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
                 return
             respond_json(self, 200, {"result": result})
 
+        # --- post-deploy verification (Baler#178); read-only, policy.js rows
+
+        def _freshness_get(self, span) -> None:
+            query = parse_qs(urlparse(self.path).query)
+            try:
+                prefix = ops_freshness.check_prefix(query.get("prefix", [""])[0])
+            except ValueError as exc:
+                respond_error(self, 400, str(exc))
+                return
+            span.set_attribute("prefix", prefix)
+            with ts_pool.connection() as conn:
+                scope = scope_for(conn, claims_from_header(self.headers.get("Authorization")))
+                payload = ops_freshness.freshness(conn, prefix, scope)
+            span.set_attribute("count", len(payload["points"]))
+            respond_json(self, 200, payload)
+
+        def _gateway_errors_get(self, span) -> None:
+            query = parse_qs(urlparse(self.path).query)
+            try:
+                since = ops_freshness.parse_time(query.get("since", [None])[0], "since")
+                until = ops_freshness.parse_time(query.get("until", [None])[0], "until")
+            except ValueError as exc:
+                respond_error(self, 400, str(exc))
+                return
+            payload = ops_freshness.gateway_errors(since, until)
+            span.set_attribute("count", payload["count"])
+            respond_json(self, 200, payload)
+
         def do_POST(self):
             if not self._gateway():
                 return
@@ -244,6 +275,16 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
                 if not self._gateway():
                     return
                 self.handle_traced("ops_api.get_edges", self._edges_get)
+                return
+            if urlparse(self.path).path == "/freshness":
+                if not self._gateway():
+                    return
+                self.handle_traced("ops_api.get_freshness", self._freshness_get)
+                return
+            if urlparse(self.path).path == "/gateway-errors":
+                if not self._gateway():
+                    return
+                self.handle_traced("ops_api.get_gateway_errors", self._gateway_errors_get)
                 return
             if self.path == "/status":
                 if not gateway_auth.request_came_through_gateway(self):

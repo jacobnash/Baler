@@ -13,6 +13,11 @@ on:
   # re-running setup-runner.sh on the box to pick up a wrapper change,
   # without needing a throwaway commit just to trigger a fresh run.
   workflow_dispatch:
+    inputs:
+      verify_only:
+        description: "Skip the deploy; only run the post-deploy verification (verify job) against what is live now"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -31,8 +36,12 @@ jobs:
     # satisfy "workflow_run ... conclusion == success" and fire this job on
     # the self-hosted runner. workflow_dispatch is inherently safe - GitHub
     # only lets collaborators with write access trigger it.
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository)
+    if: (github.event_name == 'workflow_dispatch' && !inputs.verify_only) || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: [self-hosted, nash-srv, baler]
+    # The deploy window, for verify's "no 5xx during the deploy" check (#178).
+    outputs:
+      started_at: ${{ steps.started.outputs.at }}
+      finished_at: ${{ steps.finished.outputs.at }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,11 +56,19 @@ jobs:
           # full history, so the docs step can diff against the last build
           fetch-depth: 0
 
+      - name: Note the deploy start
+        id: started
+        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Deploy stack
         # The only command this runner user can run as root - see
         # deploy/nash-srv/setup-runner.sh. Rebuilds/recreates containers and
         # restarts gateway; postgres-data/oxigraph-data volumes are untouched.
         run: sudo /usr/local/sbin/baler-deploy.sh
+
+      - name: Note the deploy end
+        id: finished
+        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Seed demo account if needed
         # Exists -> nothing; missing -> create; auth_api not answering (5xx,
@@ -79,3 +96,94 @@ jobs:
           npm run build
           cp -r dist/. /var/www/timberdoodle-docs/
           git rev-parse HEAD > "$marker"
+
+  # Post-deploy verification (#178, docs-site/pages/post-deploy-verify.mdx):
+  # tools/live-check against the live install, read-only (only GETs, the
+  # login and named edge-node reads leave the runner). Report-only: it never
+  # rolls back or blocks anything, it turns its own job red and files,
+  # updates or closes `live-check` issues. Cold phase right after the deploy,
+  # warm phase 5 minutes later. It holds the deploy-nash-srv concurrency
+  # group (and the runner) for about 8 minutes, so a deploy queued meanwhile
+  # starts after it rather than being verified mid-flight.
+  verify:
+    needs: deploy
+    if: >-
+      always() && (needs.deploy.result == 'success' ||
+      (github.event_name == 'workflow_dispatch' && inputs.verify_only && needs.deploy.result == 'skipped'))
+    runs-on: [self-hosted, nash-srv, baler]
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+    env:
+      # The operator test account. Created by hand on nash-srv (needs sudo and
+      # a credential), outside the checkout: actions/checkout's git clean
+      # would delete it otherwise. Never printed.
+      BALER_TEST_ENV: /home/github-runner/.config/baler/live-check.env
+      GH_TOKEN: ${{ github.token }}
+      LIVE_CHECK_REPO: ${{ github.repository }}
+      LIVE_CHECK_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      DEPLOY_START: ${{ needs.deploy.outputs.started_at }}
+      DEPLOY_END: ${{ needs.deploy.outputs.finished_at }}
+    steps:
+      - name: Check the live-check credentials
+        id: creds
+        run: |
+          set -euo pipefail
+          f="$BALER_TEST_ENV"
+          if [ ! -r "$f" ]; then
+            echo "::error title=live-check credentials missing::$f is missing or unreadable for $(id -un). Create it on nash-srv (mode 600, owner github-runner) with BALER_TEST_URL, BALER_TEST_EMAIL and BALER_TEST_PASSWORD for the operator test account - see docs-site/pages/post-deploy-verify.mdx, 'One-time setup on nash-srv'."
+            exit 1
+          fi
+          for k in BALER_TEST_URL BALER_TEST_EMAIL BALER_TEST_PASSWORD; do
+            grep -q "^[[:space:]]*$k=." "$f" || { echo "::error title=live-check credentials incomplete::$f has no $k= line"; exit 1; }
+          done
+          if [ -n "$(find "$f" -perm /077)" ]; then
+            echo "::warning title=live-check credentials readable by others::$f should be mode 600 (chmod 600 $f)"
+          fi
+          echo "credentials file present: $f"
+
+      - uses: actions/checkout@v4
+        if: steps.creds.outcome == 'success'
+        with:
+          ref: ${{ env.LIVE_CHECK_SHA }}
+
+      - name: Install live-check
+        if: steps.creds.outcome == 'success'
+        working-directory: tools/live-check
+        run: |
+          npm ci
+          # Playwright's own Chromium, used only where the box has no Google
+          # Chrome (CHROME_PATH in the env file also overrides). Cached in the
+          # runner user's ~/.cache, so this is a no-op after the first run.
+          command -v google-chrome >/dev/null || npx --no-install playwright-core install chromium
+
+      - name: Verify (cold)
+        id: cold
+        if: steps.creds.outcome == 'success'
+        working-directory: tools/live-check
+        run: |
+          window=()
+          if [ -n "$DEPLOY_START" ] && [ -n "$DEPLOY_END" ]; then window=(--deploy-start "$DEPLOY_START" --deploy-end "$DEPLOY_END"); fi
+          node live-check.mjs --phase cold "${window[@]}"
+
+      - name: Let the install warm up
+        if: ${{ !cancelled() && steps.creds.outcome == 'success' }}
+        run: sleep 300
+
+      - name: Verify (warm)
+        id: warm
+        if: ${{ !cancelled() && steps.creds.outcome == 'success' }}
+        working-directory: tools/live-check
+        run: node live-check.mjs --phase warm
+
+      - name: Upload the verification artifact
+        if: ${{ !cancelled() && steps.creds.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-verify-${{ env.LIVE_CHECK_SHA }}
+          path: |
+            tools/live-check/out/live-verify-*.json
+            tools/live-check/out/summary-*.md
+            tools/live-check/out/*.png
+          retention-days: 30

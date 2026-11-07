@@ -1,7 +1,7 @@
 // node --test tools/live-check/
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fingerprint, issueBody, issueFp, merge, plan, route } from "./findings.mjs";
+import { fingerprint, issueBody, issueFp, issueScope, merge, plan, route } from "./findings.mjs";
 
 test("route hides ids and query values, so a re-created project keeps its fingerprint", () => {
   assert.equal(route("https://x/cx/projects/9ddf1d04-aa11-4b2c-9d3e-0123456789ab/report?format=html"), "/cx/projects/:id/report?format");
@@ -51,4 +51,45 @@ test("issueBody keeps First seen across updates and carries the fingerprint", ()
   assert.match(next, /\| First seen \| T1 \|/);
   assert.match(next, /\| Last seen \| T2 \|/);
   assert.equal(issueFp(next), f.fp);
+});
+
+test("plan: an issue closes only when the scope that owns it ran completely (#178)", () => {
+  const run = { at: "T", base: "b", role: "operator", slowMs: 1 };
+  const mk = (kind, key, scope) => merge([{ kind, key, title: key, scope }])[0];
+  const warm = mk("perf-budget", "warm|GET /fault/faults", "perf:warm");
+  const stale = mk("stale", "fbf/home/modbus", "dataflow");
+  const legacy = { fp: fingerprint("overflow", "Ops"), pages: [], viewports: [], details: [], kind: "overflow" };
+  const legacyBody = issueBody(legacy, run).replace(/ scope:\S+ -->/, " -->");  // filed before scopes existed
+  assert.equal(issueScope(legacyBody), null);
+  const issues = [{ number: 1, state: "OPEN", body: issueBody(warm, run) }, { number: 2, state: "OPEN", body: issueBody(stale, run) },
+                  { number: 3, state: "OPEN", body: legacyBody }];
+  const closes = (ran) => plan([], issues, { ran: new Set(ran) }).map((a) => a.number);
+  assert.deepEqual(closes(["perf:cold", "browser", "deploy"]), []);          // a cold run says nothing about warm or dataflow
+  assert.deepEqual(closes(["perf:warm", "dataflow", "edges"]), [1, 2]);
+  assert.deepEqual(closes(["browser"]), []);                                  // legacy needs both browser passes
+  assert.deepEqual(closes(["browser", "layout"]), [3]);
+  assert.equal(issueScope(issueBody(warm, run)), "perf:warm");
+});
+
+test("plan: closed as not planned is never reopened; live-check:ignore is never touched (#178 R9)", () => {
+  const run = { at: "T", base: "b", role: "operator", slowMs: 1 };
+  const [f, g] = merge([{ kind: "a11y", key: "x", title: "x" }, { kind: "a11y", key: "y", title: "y" }]);
+  const issues = [{ number: 10, state: "CLOSED", state_reason: "not_planned", labels: [], body: issueBody(f, run) },
+                  { number: 11, state: "OPEN", labels: ["live-check", "live-check:ignore"], body: issueBody(g, run) }];
+  assert.deepEqual(plan([f, g], issues, { complete: true }).map((a) => `${a.op}:${a.number}:${a.reason}`),
+    ["skip:10:closed as not planned", "skip:11:live-check:ignore"]);
+  // an ignored issue isn't closed when its finding goes away either
+  assert.deepEqual(plan([], issues, { complete: true }), []);
+  // closed as completed (what live-check itself does) still reopens
+  assert.equal(plan([f], [{ ...issues[0], state_reason: "completed" }], { complete: true })[0].op, "reopen");
+});
+
+test("issueBody carries the latest numbers, related issues and the reproduce command for its module", () => {
+  const [f] = merge([{ kind: "perf-budget", key: "cold|Cx", title: "t", scope: "perf:cold", refs: [150], rows: [["Median", "10.2 s"]] }]);
+  const body = issueBody(f, { at: "T", base: "b", role: "operator", slowMs: 1, sha: "abc123" });
+  assert.match(body, /\| Median \| 10\.2 s \|/);
+  assert.match(body, /\| Related \| #150 \|/);
+  assert.match(body, /\| Deployed commit \| abc123 \|/);
+  assert.match(body, /--only perf --phase cold/);
+  assert.match(body, /<!-- live-check fp:[0-9a-f]{12} scope:perf:cold -->/);
 });

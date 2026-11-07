@@ -65,6 +65,11 @@ const ROUTES = [
 
   // ops_api
   ["GET",    /^\/ops\/status$/,                      "ops", "viewer"],
+  // Post-deploy verification (Baler#178, tools/live-check): read-only.
+  // Freshness is site-scoped by ops_api like /ops/status; the gateway's
+  // own 5xx log spans every org and site, so it is whole-org and operator.
+  ["GET",    /^\/ops\/freshness$/,                   "ops", "viewer"],
+  ["GET",    /^\/ops\/gateway-errors$/,              "gateway", "operator"],
   // source registry (Baler#20): settings include credentials - admin only
   ["GET",    /^\/ops\/sources$/,                     "ops", "admin"],
   ["GET",    /^\/ops\/sources\/kinds$/,               "ops", "admin"],
@@ -310,7 +315,7 @@ function jtiRevoked(claims, cached) {
 
 // Resources a site-restricted token can't reach at all: they span the
 // whole org and have no per-site filter to apply.
-const WHOLE_ORG = { devices: true };
+const WHOLE_ORG = { devices: true, gateway: true };
 
 /*
  * Whether these claims may reach a resource: site-restricted tokens

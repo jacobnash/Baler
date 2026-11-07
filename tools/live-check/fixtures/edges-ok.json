@@ -1,0 +1,5 @@
+[
+  { "site_id": "local", "instance_id": "local", "kind": "local", "online": true, "last_seen": "2026-11-07T22:40:00+00:00", "version": "0.9", "error": null },
+  { "site_id": "home-gateway", "instance_id": "modbus", "kind": "remote", "online": true, "last_seen": "2026-11-07T22:39:30+00:00", "version": "0.9", "error": null },
+  { "site_id": "home-gateway", "instance_id": "bacnet", "kind": "remote", "online": false, "last_seen": "2026-11-01T00:00:00+00:00", "error": null }
+]

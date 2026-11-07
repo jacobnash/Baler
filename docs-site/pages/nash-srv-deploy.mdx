@@ -72,6 +72,10 @@ friends generate survives every redeploy.
    from GitHub's secret UI (write-only, so re-set rather than "view") if
    you need a reminder, or rotate them there directly.
 
+After the deploy, the workflow's `verify` job checks the live install (read-only) and files or
+closes `live-check` issues. It needs a credentials file on the runner, created once by hand: see
+[Post-deploy verification](/post-deploy-verify#one-time-setup-on-nash-srv).
+
 ## Demo data (mock hospital)
 
 Without this, the demo is just an empty app past login. `deploy/nash-srv/docker-compose.windrow.yml`

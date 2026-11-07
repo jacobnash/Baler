@@ -1,21 +1,49 @@
 #!/usr/bin/env node
-// Read-only check of a live Baler install in a real browser. It hands what it
-// finds to the GitHub issue log (label live-check), deduplicated by
-// fingerprint. See docs-site/pages/live-check.mdx.
+// Read-only check of a live Baler install: the browser pass over every page
+// (R3) plus, since #178, performance budgets (perf), data flow (dataflow),
+// edge nodes (edges), phone layout (layout) and gateway 5xx during the deploy
+// (deploy). What it finds goes into the GitHub issue log (label live-check),
+// deduplicated by fingerprint. See docs-site/pages/post-deploy-verify.mdx
+// (and live-check.mdx).
 //
-//   node tools/live-check/live-check.mjs --dry-run   # report only
-//   node tools/live-check/live-check.mjs             # report and sync issues
+//   node tools/live-check/live-check.mjs --dry-run                 # everything, report only
+//   node tools/live-check/live-check.mjs --phase cold              # right after a deploy
+//   node tools/live-check/live-check.mjs --phase warm              # five minutes later
+//   node tools/live-check/live-check.mjs --dry-run --only perf,edges
+//
+// Options: --dry-run, --phase cold|warm, --only <modules>,
+// --deploy-start <iso> --deploy-end <iso> (the deploy module's window).
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { chromium } from "playwright-core";
-import { LABEL, issueBody, merge, plan, route } from "./findings.mjs";
+import { parseArgs } from "node:util";
+import { LABEL, issueBody, merge, plan } from "./findings.mjs";
+import { Guard } from "./guard.mjs";
+import { summaryMarkdown, writeArtifact } from "./report.mjs";
 
-const require = createRequire(import.meta.url);
-const DRY = process.argv.includes("--dry-run");
+const MODULES = ["perf", "browser", "layout", "dataflow", "edges", "deploy"];
+const PHASE_MODULES = { cold: ["perf", "browser", "layout", "deploy"], warm: ["perf", "dataflow", "edges"], all: MODULES };
+
+const { values: opt } = parseArgs({ options: {
+  "dry-run": { type: "boolean", default: false }, phase: { type: "string" }, only: { type: "string" },
+  "deploy-start": { type: "string" }, "deploy-end": { type: "string" }, help: { type: "boolean", default: false },
+} });
+if (opt.help) {
+  console.log(readFileSync(new URL(import.meta.url), "utf8").split("\n").filter((l) => l.startsWith("//")).slice(0, 17).map((l) => l.slice(3)).join("\n"));
+  process.exit(0);
+}
+const DRY = opt["dry-run"];
+if (opt.phase && !["cold", "warm"].includes(opt.phase)) { console.error("--phase is cold or warm"); process.exit(2); }
+const only = opt.only ? opt.only.split(",").map((s) => s.trim()).filter(Boolean) : null;
+const bad = (only || []).filter((m) => !MODULES.includes(m));
+if (bad.length) { console.error(`unknown module(s) ${bad.join(", ")}; one of ${MODULES.join(", ")}`); process.exit(2); }
+// The order modules run in: perf first, before the browser warms anything up.
+const modules = ["perf", "browser", "layout", "deploy", "dataflow", "edges"].filter((m) => (only || PHASE_MODULES[opt.phase || "all"]).includes(m));
+// A run without --phase is judged against the warm budgets: it isn't right after a deploy.
+const PERF_PHASE = opt.phase || "warm";
+
 const ENV_FILE = process.env.BALER_TEST_ENV || path.join(os.homedir(), ".config/baler-tests/baler.env");
 try {
   for (const line of readFileSync(ENV_FILE, "utf8").split("\n")) {
@@ -25,22 +53,24 @@ try {
 } catch { /* env vars may come from the environment instead */ }
 
 const BASE = (process.env.BALER_TEST_URL || "").replace(/\/$/, "");
-const SLOW_MS = Number(process.env.LIVE_CHECK_SLOW_MS || 2000);
-const SETTLE_MS = Number(process.env.LIVE_CHECK_SETTLE_MS || 5000);
-const PROJECT = process.env.LIVE_CHECK_PROJECT || "Home Edge Pilot";
-const OUT = path.join(import.meta.dirname, "out");
-const PAGES = { index: "Equipment", his: "Query", alarms: "Alarms", derivations: "Derivations",
-                cx: "Commissioning", connectors: "Connectors", ops: "Ops" };
-const VIEWPORTS = { desktop: { width: 1440, height: 900 }, phone: { width: 390, height: 844 } };
-const A11Y_TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"];
-if (!BASE || !process.env.BALER_TEST_EMAIL) {
+const HERE = import.meta.dirname;
+const OUT = process.env.LIVE_CHECK_OUT || path.join(HERE, "out");
+if (!BASE || !process.env.BALER_TEST_EMAIL || !process.env.BALER_TEST_PASSWORD) {
   console.error(`Set BALER_TEST_URL, BALER_TEST_EMAIL and BALER_TEST_PASSWORD, or put them in ${ENV_FILE}.`);
   process.exit(2);
 }
+const loadJson = (envVar, file) => JSON.parse(readFileSync(process.env[envVar] || path.join(HERE, file), "utf8"));
+const budgets = loadJson("LIVE_CHECK_BUDGETS", "budgets.json");
+const expected = loadJson("LIVE_CHECK_EXPECTED_EDGES", "expected-edges.json");
 
+function gitSha() {
+  if (process.env.LIVE_CHECK_SHA) return process.env.LIVE_CHECK_SHA;
+  try { return execFileSync("git", ["rev-parse", "HEAD"], { cwd: HERE, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); } catch { return "local"; }
+}
+
+const guard = new Guard(BASE);
+guard.installFetch();
 const raw = [];
-const blocked = new Set();
-const firstLine = (s) => String(s).split("\n")[0].slice(0, 160);
 
 async function login() {
   const res = await fetch(`${BASE}/auth/login`, { method: "POST", headers: { "content-type": "application/json" },
@@ -51,110 +81,35 @@ async function login() {
   return { token, role: claims.role || "unknown" };
 }
 
-// Every non-GET request is aborted: the operator account this uses can write,
-// and a check must never change the install it checks. The one exception is
-// the Connectors page's edge-node reads, which are POSTs by design (they
-// travel the same action channel as writes); only those named reads pass.
-const READ_POSTS = /^\/ops\/edges\/[^/]+\/[^/]+\/actions\/(list_devices|list_connections|modbus_list_connections)$/;
-async function readOnly(ctx) {
-  await ctx.route("**/*", (r) => {
-    const req = r.request();
-    if (["GET", "HEAD", "OPTIONS"].includes(req.method())) return r.continue();
-    if (req.method() === "POST" && req.url().startsWith(BASE) && READ_POSTS.test(new URL(req.url()).pathname)) return r.continue();
-    blocked.add(`${req.method()} ${req.url().startsWith(BASE) ? route(req.url()) : req.url()}`);
-    return r.abort("blockedbyclient");
-  });
-}
-
-async function checkPage(ctx, url, page, viewport, { a11y }) {
-  const p = await ctx.newPage();
-  const pending = [];
-  const add = (r) => raw.push({ page, viewport, ...r });
-  p.on("pageerror", (e) => add({ kind: "page-error", key: `${page}|${firstLine(e.message)}`,
-    title: `${page}: uncaught error: ${firstLine(e.message)}`, detail: (e.stack || e.message).split("\n").slice(0, 5).join("\n") }));
-  p.on("console", (m) => {
-    const t = m.text();
-    if (m.type() !== "error" || t.startsWith("Failed to load resource")) return;  // HTTP errors are reported with their URL below
-    add({ kind: "console-error", key: `${page}|${t.slice(0, 120)}`, title: `${page}: console error: ${t.slice(0, 90)}`, detail: t.slice(0, 600) });
-  });
-  p.on("requestfailed", (req) => {
-    const err = req.failure()?.errorText || "";
-    if (!req.url().startsWith(BASE) || err.includes("BLOCKED_BY_CLIENT") || err.includes("ERR_ABORTED")) return;
-    const r = `${req.method()} ${route(req.url())}`;
-    add({ kind: "request-failed", key: r, title: `${r} fails: ${err}`, detail: `${r} -> ${err}` });
-  });
-  p.on("requestfinished", (req) => pending.push((async () => {
-    if (!req.url().startsWith(BASE)) return;
-    const res = await req.response();
-    const status = res ? res.status() : 0;
-    const ms = Math.round(req.timing().responseEnd);
-    const r = `${req.method()} ${route(req.url())}`;
-    if (status === 403) {
-      add({ kind: "forbidden-call", key: r, title: `Pages call ${r} and get 403 for this role`,
-            detail: `${r} -> 403 on ${page}. The page should not call it for this role, or should say why the data is missing.` });
-    } else if (status >= 400 && !r.endsWith("/favicon.ico")) {
-      add({ kind: "http-error", key: `${status}|${r}`, title: `${r} returns ${status}`, detail: `${r} -> ${status} on ${page}` });
-    }
-    if (ms > SLOW_MS && !route(req.url()).startsWith("/ui/")) {
-      add({ kind: "slow", key: r, ms, title: `${r} takes over ${SLOW_MS} ms (${ms} ms seen)`, detail: `${r} -> ${status} in ${ms} ms on ${page}` });
-    }
-  })()));
-
-  let loaded = true;
-  try {
-    await p.goto(url, { waitUntil: "load", timeout: 45000 });
-    await p.waitForTimeout(SETTLE_MS);
-  } catch (e) {
-    loaded = false;
-    add({ kind: "request-failed", key: `navigate|${page}`, title: `${page}: page doesn't load`, detail: firstLine(e.message) });
-  }
-  if (loaded) {
-    if (await p.evaluate(() => { const g = document.getElementById("login-gate"); return !!g && getComputedStyle(g).display !== "none"; })) {
-      add({ kind: "signed-out", key: page, title: `${page}: shows the sign-in screen with a valid token`, detail: url });
-    }
-    if (viewport === "phone" && await p.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)) {
-      const w = await p.evaluate(() => document.documentElement.scrollWidth);
-      add({ kind: "overflow", key: page, title: `${page}: scrolls sideways at phone width (390 px)`, detail: `content is ${w} px wide at a 390 px viewport` });
-    }
-    if (a11y) {
+// The API surface the modules get: GETs and the named edge reads only (the
+// guard refuses anything else anyway).
+function makeApi(token) {
+  const h = { Authorization: `Bearer ${token}`, Accept: "application/json" };
+  const get = (p) => fetch(`${BASE}${p}`, { headers: h });
+  return {
+    get,
+    async json(p) {
+      const res = await get(p);
+      if (!res.ok) throw new Error(`GET ${p.split("?")[0]} answered ${res.status}: ${(await res.text()).slice(0, 160)}`);
+      return res.json();
+    },
+    async time(p) {
+      const t0 = performance.now();
       try {
-        await p.addScriptTag({ path: require.resolve("axe-core/axe.min.js") });
-        const v = await p.evaluate((tags) => window.axe.run(document, { runOnly: { type: "tag", values: tags }, resultTypes: ["violations"] }), A11Y_TAGS);
-        for (const x of v.violations.filter((x) => ["serious", "critical"].includes(x.impact))) {
-          add({ kind: "a11y", key: `${page}|${x.id}`, title: `${page}: ${x.help} (${x.id}, ${x.impact})`,
-                detail: `${x.help} - ${x.helpUrl}\n${x.nodes.length} element(s), e.g.:\n${x.nodes.slice(0, 3).map((n) => n.html.slice(0, 200)).join("\n")}` });
-        }
+        const res = await fetch(`${BASE}${p}`, { headers: { Authorization: h.Authorization } });
+        const body = await res.arrayBuffer();
+        return { ms: performance.now() - t0, bytes: body.byteLength, status: res.status };
       } catch (e) {
-        loaded = false;  // the run didn't check everything, so it mustn't close anything
-        console.error(`axe failed on ${page}: ${firstLine(e.message)}`);
+        return { ms: performance.now() - t0, bytes: 0, status: 0, error: e.message };
       }
-    }
-    await p.screenshot({ path: path.join(OUT, `${page.replace(/\W+/g, "_")}-${viewport}.png`), fullPage: true });
-  }
-  await Promise.all(pending);
-  await p.close();
-  return loaded;
-}
-
-// The Cx reports are served HTML, not ui/ pages: open them with the token
-// as a header, in a context of their own.
-async function cxReports(browser, token) {
-  const h = { Authorization: `Bearer ${token}` };
-  const list = await (await fetch(`${BASE}/cx/projects`, { headers: h })).json();
-  const projects = (Array.isArray(list) ? list : list.projects || []).filter((p) => !p.archived_at && p.status !== "archived");
-  const proj = projects.find((p) => p.name === PROJECT) || projects[0];
-  if (!proj) return [];
-  const urls = [[`Cx project report (${proj.name})`, `${BASE}/cx/projects/${proj.id}/report?format=html`]];
-  const rep = await (await fetch(`${BASE}/cx/projects/${proj.id}/report?format=json`, { headers: h })).json().catch(() => ({}));
-  const rid = rep?.latest_run?.run?.id;
-  if (rid) urls.push([`Cx run report (${proj.name})`, `${BASE}/cx/runs/${rid}/report?format=html`]);
-  // bypassCSP: the reports send default-src 'none' (good), which would also block axe.
-  const ctx = await browser.newContext({ viewport: VIEWPORTS.desktop, extraHTTPHeaders: h, bypassCSP: true });
-  await readOnly(ctx);
-  const ok = [];
-  for (const [name, url] of urls) ok.push(await checkPage(ctx, url, name, "desktop", { a11y: true }));
-  await ctx.close();
-  return ok;
+    },
+    async action(site, inst, name) {
+      const p = `/ops/edges/${encodeURIComponent(site)}/${encodeURIComponent(inst)}/actions/${name}`;
+      const res = await fetch(`${BASE}${p}`, { method: "POST", headers: { ...h, "content-type": "application/json" }, body: "{}" });
+      if (!res.ok) throw new Error(`${name} on ${site}/${inst} answered ${res.status}: ${(await res.text()).slice(0, 160)}`);
+      return (await res.json()).result;
+    },
+  };
 }
 
 function gh(args, input) {
@@ -162,8 +117,8 @@ function gh(args, input) {
   return execFileSync("gh", [...args, ...repo], { input, encoding: "utf8", stdio: ["pipe", "pipe", "inherit"] });
 }
 
-function sync(findings, complete, run) {
-  if (DRY) return console.log("\n--dry-run: no issues changed.");
+// The only writes the tool makes: GitHub issues (never the install).
+function sync(findings, ran, run) {
   execFileSync("gh", ["label", "create", LABEL, "--color", "5319e7", "--force",
     "--description", "Found by tools/live-check against the live install",
     ...(process.env.LIVE_CHECK_REPO ? ["-R", process.env.LIVE_CHECK_REPO] : [])], { stdio: "ignore" });
@@ -171,52 +126,89 @@ function sync(findings, complete, run) {
   // which lags minutes behind, so a quick second run filed duplicates.
   const repo = process.env.LIVE_CHECK_REPO || "{owner}/{repo}";
   const issues = execFileSync("gh", ["api", "--paginate", `repos/${repo}/issues?labels=${LABEL}&state=all&per_page=100`,
-    "-q", ".[] | {number, state: (.state | ascii_upcase), body}"], { encoding: "utf8" })
+    "-q", ".[] | select(.pull_request | not) | {number, state: (.state | ascii_upcase), state_reason, labels: [.labels[].name], body}"], { encoding: "utf8" })
     .split("\n").filter(Boolean).map((l) => JSON.parse(l));
-  for (const a of plan(findings, issues, { complete })) {
+  const actions = plan(findings, issues, { ran });
+  for (const a of actions) {
     if (a.op === "create") {
-      const url = gh(["issue", "create", "--title", `[live-check] ${a.f.title}`, "--label", a.f.label, "--label", LABEL, "--body-file", "-"],
+      a.url = gh(["issue", "create", "--title", `[live-check] ${a.f.title}`, "--label", a.f.label, "--label", LABEL, "--body-file", "-"],
         issueBody(a.f, run)).trim();
-      console.log(`created ${url}`);
+      console.log(`created ${a.url}`);
     } else if (a.op === "close") {
-      gh(["issue", "close", String(a.number), "--comment", `Not seen by live-check at ${run.at} (a complete run as a ${run.role}). Closing; it reopens if it comes back.`]);
+      gh(["issue", "close", String(a.number), "--reason", "completed", "--comment", `Not seen by live-check at ${run.at} (a complete run of its check, as a ${run.role}). Closing; it reopens if it comes back.`]);
       console.log(`closed #${a.number}`);
+    } else if (a.op === "skip") {
+      console.log(`left #${a.number} alone (${a.reason})`);
     } else {
       if (a.op === "reopen") gh(["issue", "reopen", String(a.number), "--comment", `Seen again by live-check at ${run.at}.`]);
       gh(["issue", "edit", String(a.number), "--body-file", "-"], issueBody(a.f, run, a.body));
       console.log(`${a.op === "reopen" ? "reopened" : "updated"} #${a.number}`);
     }
   }
+  return actions;
 }
 
 mkdirSync(OUT, { recursive: true });
-const run = { at: new Date().toISOString().replace(/\.\d+Z$/, "Z"), base: BASE, role: "?", slowMs: SLOW_MS };
-const auth = await login();
-let complete = false;
+const run = { at: new Date().toISOString().replace(/\.\d+Z$/, "Z"), base: BASE, role: "?", sha: gitSha(), phase: opt.phase || null,
+              modules, slowMs: Number(process.env.LIVE_CHECK_SLOW_MS || 2000) };
+const checks = [];
+const ran = new Set();
+const auth = await login().catch((e) => ({ error: e.message }));
+let browser = null;
 if (auth.error) {
-  raw.push({ kind: "login", key: String(auth.error), title: `can't sign in: POST /auth/login returns ${auth.error}`, page: "login", detail: `POST ${BASE}/auth/login -> ${auth.error}` });
+  raw.push({ kind: "login", key: String(auth.error), title: `can't sign in: POST /auth/login returns ${auth.error}`, page: "login", scope: "login",
+             detail: `POST ${BASE}/auth/login -> ${auth.error}` });
+  checks.push({ module: "login", name: "POST /auth/login", status: "error", detail: String(auth.error) });
 } else {
   run.role = auth.role;
-  const browser = await chromium.launch(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" });
-  const ok = [];
-  for (const [vp, size] of Object.entries(VIEWPORTS)) {
-    const ctx = await browser.newContext({ viewport: size });
-    await ctx.addInitScript((t) => localStorage.setItem("td_token", t), auth.token);
-    await readOnly(ctx);
-    for (const [file, name] of Object.entries(PAGES)) {
-      ok.push(await checkPage(ctx, `${BASE}/ui/${file}.html`, `${name} (${file}.html)`, vp, { a11y: vp === "desktop" }));
+  ran.add("login");
+  const ctx = {
+    base: BASE, token: auth.token, guard, raw, budgets, expected, out: OUT, api: makeApi(auth.token),
+    settleMs: Number(process.env.LIVE_CHECK_SETTLE_MS || 5000), slowMs: run.slowMs,
+    project: process.env.LIVE_CHECK_PROJECT || "Home Edge Pilot", phase: PERF_PHASE,
+    window: opt["deploy-start"] || process.env.LIVE_CHECK_DEPLOY_START
+      ? { start: opt["deploy-start"] || process.env.LIVE_CHECK_DEPLOY_START, end: opt["deploy-end"] || process.env.LIVE_CHECK_DEPLOY_END } : null,
+    async browser() {
+      if (!browser) browser = await (await import("./browser.mjs")).launch();
+      return browser;
+    },
+  };
+  const impl = { perf: "./perf.mjs", browser: "./browser.mjs", layout: "./layout.mjs", dataflow: "./dataflow.mjs", edges: "./edges.mjs", deploy: "./deploywin.mjs" };
+  for (const m of modules) {
+    const t0 = Date.now();
+    let res;
+    try {
+      res = await (await import(impl[m])).run(ctx);
+    } catch (e) {
+      res = { scope: m, complete: false, raw: [], checks: [{ module: m, name: m, status: "error", detail: String(e.message).split("\n")[0] }] };
     }
-    await ctx.close();
+    checks.push(...res.checks);
+    raw.push(...res.raw);
+    if (res.complete) ran.add(res.scope);
+    console.log(`${m}: ${res.checks.length} check(s), ${res.complete ? "complete" : "INCOMPLETE"} (${Math.round((Date.now() - t0) / 1000)} s)`);
   }
-  ok.push(...await cxReports(browser, auth.token));
-  await browser.close();
-  complete = ok.length > 0 && ok.every(Boolean);
+  if (browser) await browser.close();
 }
 
 const findings = merge(raw);
-writeFileSync(path.join(OUT, "findings.json"), JSON.stringify({ run, complete, blocked: [...blocked], findings }, null, 2));
-console.log(`live-check ${run.at} against ${BASE} as ${run.role}: ${findings.length} finding(s)${complete ? "" : " (incomplete run: nothing will be closed)"}`);
-for (const f of findings) console.log(`  [${f.label}] ${f.title}  (${f.pages.join(", ")})`);
-if (blocked.size) console.log(`blocked writes (read-only guard): ${[...blocked].join(", ")}`);
-sync(findings, complete, run);
-process.exitCode = findings.length ? 1 : 0;
+let actions = [];
+if (DRY) console.log("\n--dry-run: no issues changed.");
+else actions = sync(findings, ran, run);
+
+const active = findings.filter((f) => !actions.some((a) => a.op === "skip" && a.f?.fp === f.fp));
+const errors = checks.filter((c) => c.status === "error");
+const data = { run, ran: [...ran].sort(), checks, findings, actions: actions.map(({ f, body, ...a }) => ({ ...a, fp: f?.fp })),
+               requests: guard.summary(), only_reads: guard.onlyReads(), blocked: [...guard.blocked] };
+const artifact = path.join(OUT, `live-verify-${run.sha.slice(0, 12)}.json`);
+writeArtifact(artifact, opt.phase || "manual", data);
+writeFileSync(path.join(OUT, "findings.json"), JSON.stringify({ run, complete: ran.size === modules.length, blocked: data.blocked, findings }, null, 2));
+const md = summaryMarkdown({ ...data, findings, actions, ran, dry: DRY });
+writeFileSync(path.join(OUT, `summary-${opt.phase || "manual"}.md`), md);
+if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${md}\n`);
+
+console.log(`live-check ${run.at} against ${BASE} as ${run.role} (${modules.join(", ")}): ${findings.length} finding(s), ${errors.length} check error(s)`);
+for (const c of checks.filter((x) => x.status !== "pass")) console.log(`  ${c.status.toUpperCase()} ${c.module}${c.phase ? `/${c.phase}` : ""}: ${c.name} - ${c.detail || ""}`);
+for (const f of findings) console.log(`  [${f.label}] ${f.title}`);
+if (guard.blocked.size) console.log(`blocked writes (read-only guard): ${[...guard.blocked].join(", ")}`);
+console.log(`artifact: ${artifact}`);
+process.exitCode = active.length || errors.length ? 1 : 0;

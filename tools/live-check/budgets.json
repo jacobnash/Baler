@@ -1,0 +1,29 @@
+{
+  "_comment": "Post-deploy budgets (Baler#178). Times in seconds, sizes in bytes (uncompressed body). Change a number here and the next run judges against it: a route back under budget closes its issue. See docs-site/pages/post-deploy-verify.mdx.",
+  "runs": 5,
+  "routes": [
+    { "name": "GET /api/read?filter=equip", "path": "/api/read?filter=equip",
+      "warm": { "median_s": 0.5 }, "cold": { "median_s": 1.5 }, "refs": [107] },
+    { "name": "GET /api/read?filter=point", "path": "/api/read?filter=point",
+      "warm": { "median_s": 1.5 }, "cold": { "median_s": 3 }, "refs": [107] },
+    { "name": "GET /fault/faults", "path": "/fault/faults",
+      "warm": { "median_s": 0.5, "max_bytes": 500000 }, "cold": { "median_s": 1 }, "refs": [107] },
+    { "name": "GET /ops/status", "path": "/ops/status",
+      "warm": { "median_s": 1 }, "cold": { "median_s": 2 }, "refs": [106] },
+    { "name": "his readAll(equip)", "path": "/ingest/his?expr=readAll(equip)",
+      "warm": { "median_s": 2 }, "cold": { "median_s": 5 }, "refs": [107] },
+    { "name": "Cx project report ({project})", "cx_report": "Home Edge Pilot",
+      "warm": { "median_s": 2 }, "cold": { "median_s": 5 }, "refs": [150] }
+  ],
+  "dataflow": {
+    "rows_last_60s_min": 2900,
+    "stale_factor": 3,
+    "min_stale_s": 30,
+    "default_poll_s": 60,
+    "prefixes": [
+      { "prefix": "fbf/home", "min_points": 1, "expect_groups": [] }
+    ]
+  },
+  "layout": { "min_detail_px": 300 },
+  "deploy": { "max_5xx": 0 }
+}
