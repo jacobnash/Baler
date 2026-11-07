@@ -3,7 +3,7 @@
 // project is selected) and cxResultActions (buttons on an evidence card).
 
 const ISSUE_STATUS_LABEL = {
-  open: "open", in_progress: "in progress", ready_for_retest: "ready for retest", closed: "closed", risk_accepted: "risk accepted",
+  open: "open", in_progress: "in progress", ready_for_retest: "resolved, pending verification", closed: "closed", risk_accepted: "risk accepted",
 };
 const issueState = { list: [], current: null };
 
@@ -123,17 +123,30 @@ async function openIssue(id) {
   const d = issue.detail || {};
   const lines = [];
   if (issue.equip_uri) lines.push(`Equipment: ${issue.equip_uri}`);
-  if (issue.check_id) lines.push(`Check: ${issue.check_id} on ${issue.subject} - closes when a later run passes it`);
+  if (issue.check_id) {
+    lines.push(`Check: ${issue.check_id} on ${issue.subject}. A passing run resolves it; you close it after a passing retest.`);
+    if (issue.resolved_by) {
+      const by = issue.resolved_by;
+      const src = by.user_sub ? "fix claimed by a person" : by.test_run_id ? `test run ${by.test_run_id}` : `run ${by.run_id}`;
+      lines.push(`Resolved ${issue.resolved_at || ""} (${src})`);
+    }
+    if (issue.status === "ready_for_retest") {
+      lines.push(issue.retest
+        ? `Retest passed: ${issue.retest.test_run_id ? "test run " + issue.retest.test_run_id : "run " + issue.retest.run_id} at ${issue.retest.at}. Ready to close.`
+        : "Waiting for a retest: run the procedure or a verification run on data from after the fix.");
+    }
+  }
   if (d.symptom || d.description) lines.push(d.symptom || d.description);
   if (issue.source !== "baler") lines.push(`Imported from ${issue.source} (${issue.source_id})`);
-  if (issue.closed_run) lines.push(`Closed by run ${issue.closed_run}`);
+  if (issue.closed_run) lines.push(`Closed citing retest ${issue.closed_run}`);
   if (issue.risk) lines.push(`Risk accepted: ${issue.risk.reason} - review by ${issue.risk.review_by}`);
   $("issue-detail").innerHTML = lines.map((l) => `<p>${esc(l)}</p>`).join("");
   $("issue-title").value = issue.title;
   const st = $("issue-status");
   st.innerHTML = "";
   const targets = issue.status === "risk_accepted" ? ["risk_accepted"]
-    : ["open", "in_progress", "ready_for_retest", ...(issue.check_id && issue.status !== "closed" ? [] : ["closed"])];
+    : ["open", "in_progress", "ready_for_retest",
+       ...(!issue.check_id || issue.status === "closed" || (issue.status === "ready_for_retest" && issue.retest) ? ["closed"] : [])];
   for (const s of targets) st.append(el("option", { value: s, textContent: ISSUE_STATUS_LABEL[s], selected: s === issue.status }));
   st.disabled = issue.status === "risk_accepted";
   $("issue-severity").value = issue.severity || "";

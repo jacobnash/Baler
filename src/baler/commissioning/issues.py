@@ -3,13 +3,18 @@ The commissioning issues log and accepted risks (Cx 4, Baler#40).
 
 Rules (todo/commissioning-plan.md §6.1):
 
-  - An issue tied to a check (check_id + subject) closes only on
-    evidence: a later completed run where that same check passes for that
-    same subject. An inconclusive result never closes one, and no one can
-    close it by hand. Issues with no check (manual, imported) close by
-    hand, with an event.
+  - Evidence resolves, only a person closes (the CxA's independence rule,
+    Baler#86). When a later completed run passes the issue's check for its
+    subject, the system moves it to ready_for_retest ("resolved, pending
+    verification") - never to closed. An inconclusive result moves nothing.
+  - A retest is a later run or procedure test run whose judged window
+    starts at or after the moment the issue was resolved (or a person
+    claimed the fix by moving it to ready_for_retest). A passing retest is
+    recorded on the issue (`retest`, event retest.passed). Only then can a
+    named person close a check-tied issue, and the close cites that retest.
   - When the check fails again on an issue marked ready_for_retest, it
-    goes back to open: the retest failed.
+    goes back to open: the retest failed. Issues with no check (manual,
+    imported) close by hand, with an event.
   - An accepted risk is not a fault and not a closed issue: it has an
     owner, a reason and a review_by date. While it stands, the check
     failing again is recorded against the risk ("covered"), not reopened.
@@ -66,8 +71,17 @@ def transition(issue: dict, target: str) -> None:
     if issue["status"] == "risk_accepted":
         raise Conflict("this issue is under an accepted risk - revoke the risk (DELETE /risks/{id}) first")
     if target == "closed" and issue.get("check_id"):
-        raise Conflict("an issue tied to a check closes on evidence: a later run where "
-                       f"{issue['check_id']} passes for {issue['subject']}")
+        if issue["status"] != "ready_for_retest":
+            raise Conflict("an issue tied to a check is closed by a person after it is resolved: it must be "
+                           "ready_for_retest first (a passing run moves it there, or claim the fix)")
+        if not issue.get("retest"):
+            raise Conflict(f"no passing retest yet: run the procedure or a verification run that judges "
+                           f"{issue['check_id']} for {issue['subject']} over a window starting after it was resolved")
+
+
+def actor(user_sub) -> str:
+    """Who made a change: a named person, or the system (runs, reconcile)."""
+    return "user" if user_sub else "system"
 
 
 def title_for(result: dict) -> str:
@@ -85,16 +99,21 @@ def from_result(result: dict, run_id: str, project_id: str, new_id, now: datetim
         "detail": {"symptom": result.get("symptom"), "candidates": result.get("candidates") or [],
                    "evidence": result.get("evidence") or {}},
         "opened_run": run_id, "last_seen_run": run_id, "closed_run": None, "created_by": user_sub,
+        "resolved_at": None, "resolved_by": None, "retest": None,
         "created_at": now, "updated_at": now, "closed_at": None,
     }
 
 
 def reconcile(issues: list[dict], risks: dict[str, dict], results: list[dict], run_id: str, now: datetime,
-              today: date) -> list[tuple[str, dict, str, dict]]:
+              today: date, judged_from: datetime | None = None, kind: str = "run") -> list[tuple[str, dict, str, dict]]:
     """What a completed run changes in the log: [(issue_id, changes,
     event_action, event_detail)]. `issues` are the project's active
     issues, `risks` maps issue id -> its standing risk. Only issues whose
-    (check_id, subject) the run judged are touched."""
+    (check_id, subject) the run judged are touched. `kind` is "run" or
+    "test_run"; `judged_from` is the start of the window the run judged -
+    a pass only counts as a retest if that window starts after the issue
+    was resolved."""
+    ref = {"test_run_id": run_id} if kind == "test_run" else {"run_id": run_id}
     by_key = {(r["check_id"], r["subject"]): r for r in results}
     out: list[tuple[str, dict, str, dict]] = []
     for issue in issues:
@@ -109,19 +128,52 @@ def reconcile(issues: list[dict], risks: dict[str, dict], results: list[dict], r
         r = by_key.get((issue["check_id"], issue["subject"]))
         if r is None:
             continue
+        seen = {"last_seen_run": run_id} if kind == "run" else {}
         if r["status"] == "pass":
-            out.append((issue["id"], {"status": "closed", "closed_run": run_id, "closed_at": now, "last_seen_run": run_id,
-                                      "updated_at": now}, "close.evidence", {"run_id": run_id}))
+            if issue["status"] in ("open", "in_progress"):
+                out.append((issue["id"], {"status": "ready_for_retest", "resolved_at": now, "resolved_by": ref,
+                                          "retest": None, **seen, "updated_at": now},
+                            "resolve.evidence", {**ref, "evidence": r.get("evidence") or {}}))
+            elif issue["status"] == "ready_for_retest" and _is_retest(issue, judged_from, r.get("evidence")):
+                retest = {**ref, "kind": kind, "at": now.isoformat(),
+                          "judged_from": judged_from.isoformat() if judged_from else None}
+                out.append((issue["id"], {"retest": retest, **seen, "updated_at": now}, "retest.passed",
+                            {**ref, "judged_from": retest["judged_from"], "evidence": r.get("evidence") or {}}))
         elif r["status"] == "fail":
-            changes: dict = {"last_seen_run": run_id, "updated_at": now}
+            changes: dict = {**seen, "updated_at": now}
             if issue["status"] == "risk_accepted":
-                out.append((issue["id"], changes, "risk.covered", {"run_id": run_id, "risk_id": risk["id"] if risk else None}))
+                out.append((issue["id"], changes, "risk.covered", {**ref, "risk_id": risk["id"] if risk else None}))
             elif issue["status"] == "ready_for_retest":
-                out.append((issue["id"], {**changes, "status": "open"}, "retest.failed",
-                            {"run_id": run_id, "symptom": r.get("symptom")}))
+                out.append((issue["id"], {**changes, "status": "open", "resolved_at": None, "resolved_by": None,
+                                          "retest": None}, "retest.failed",
+                            {**ref, "symptom": r.get("symptom")}))
             else:
-                out.append((issue["id"], changes, "still.failing", {"run_id": run_id}))
+                out.append((issue["id"], changes, "still.failing", ref))
     return out
+
+
+def _when(v) -> datetime | None:
+    if v is None or isinstance(v, datetime):
+        return v
+    try:
+        return datetime.fromisoformat(str(v))
+    except ValueError:
+        return None
+
+
+def _is_retest(issue: dict, judged_from: datetime | None, evidence: dict | None = None) -> bool:
+    """A pass is a retest only if it rests on data from after the fix: the
+    judged window starts after resolved_at (a procedure test run started
+    after the corrective action), or the evidence's own newest sample is
+    after it (a verification run's exists check seeing the point report
+    again since)."""
+    resolved = _when(issue.get("resolved_at"))
+    if resolved is None:
+        return False
+    if judged_from is not None and judged_from >= resolved:
+        return True
+    last = _when((evidence or {}).get("last_ts"))
+    return last is not None and last >= resolved
 
 
 def _due(v) -> date:

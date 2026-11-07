@@ -694,10 +694,19 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 except issues.Conflict as exc:
                     respond_error(self, 409, str(exc))
                     return
-                changes["status"] = body["status"]
-                changes["closed_at"] = now if body["status"] == "closed" else None
-                if body["status"] != "closed":
+                target = body["status"]
+                changes["status"] = target
+                changes["closed_at"] = now if target == "closed" else None
+                if target == "closed" and issue.get("retest"):
+                    rt = issue["retest"]
+                    changes["closed_run"] = rt.get("test_run_id") or rt.get("run_id")
+                elif target != "closed":
                     changes["closed_run"] = None
+                if target == "ready_for_retest":
+                    # a person claims the fix: only a retest judged after now counts
+                    changes.update(resolved_at=now, resolved_by={"user_sub": claims.get("sub")}, retest=None)
+                elif target in ("open", "in_progress"):
+                    changes.update(resolved_at=None, resolved_by=None, retest=None)
             if "assignee" in body:
                 changes["assignee"] = issues._text(body["assignee"], 200)
             if "severity" in body:
@@ -712,12 +721,22 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 raise ValueError("nothing to change: status, assignee, severity, title or note")
             if changes:
                 repo.update_issue(iid, {**changes, "updated_at": now})
-            detail = {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in changes.items()}
+            detail = {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in changes.items()
+                      if k not in ("resolved_by", "retest")}
             if "status" in changes:
                 detail["from"] = issue["status"]
+                if changes["status"] == "closed" and issue.get("retest"):
+                    detail["retest"] = issue["retest"]
             if note:
                 detail["note"] = note
-            self._issue_event(iid, "update" if changes else "note", claims, detail)
+            action = "note"
+            if changes.get("status") == "closed":
+                action = "close"
+            elif changes.get("status") == "ready_for_retest":
+                action = "fix.claimed"
+            elif changes:
+                action = "update"
+            self._issue_event(iid, action, claims, detail)
             respond_json(self, 200, self._public_issue(repo.get_issue(iid) or issue))
 
         def _issue_events(self, span, claims, iid) -> None:

@@ -631,11 +631,16 @@ paths:
       operationId: updateCxIssue
       summary: Change status, assignee, severity or title, or add a note (operator)
       description: >-
-        Status moves between open, in_progress and ready_for_retest freely.
-        `closed` is refused (409) for an issue tied to a check - that closes
-        only when a later run passes it - and allowed for manual and
-        imported issues. An issue under an accepted risk can't change
-        status until the risk is revoked.
+        Status moves between open, in_progress and ready_for_retest freely;
+        moving to ready_for_retest by hand claims the fix (event
+        fix.claimed, resolved_at = now). Evidence resolves, only a person
+        closes (#86): for an issue tied to a check, `closed` is refused
+        (409) until it is ready_for_retest *and* a retest has passed - a
+        later run or procedure test run resting on data from after
+        resolved_at (`retest`). The close cites that retest (closed_run,
+        event `close`). Manual and imported issues close by hand. An issue
+        under an accepted risk can't change status until the risk is
+        revoked.
       requestBody:
         content:
           application/json:
@@ -1785,6 +1790,7 @@ components:
         ts: { type: string, format: date-time }
         action: { type: string }
         user_sub: { type: [string, "null"] }
+        actor: { type: string, enum: [user, system], description: "system: runs and reconcile; user: a named person" }
         user_email: { type: [string, "null"] }
         detail: { type: object }
     InventoryPoint:
@@ -2143,7 +2149,19 @@ components:
         source_id: { type: [string, "null"] }
         opened_run: { type: [string, "null"] }
         last_seen_run: { type: [string, "null"] }
-        closed_run: { type: [string, "null"], description: The run whose passing result closed it }
+        closed_run: { type: [string, "null"], description: The retest (run or test run id) the person's close cited }
+        resolved_at:
+          type: [string, "null"]
+          format: date-time
+          description: When passing evidence (or a person claiming the fix) moved it to ready_for_retest
+        resolved_by:
+          type: [object, "null"]
+          description: "{run_id} or {test_run_id} whose pass resolved it, or {user_sub} who claimed the fix"
+        retest:
+          type: [object, "null"]
+          description: >-
+            The passing retest since resolved_at: {run_id | test_run_id, kind, at, judged_from}.
+            Required before a person can close a check-tied issue.
         created_by: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
