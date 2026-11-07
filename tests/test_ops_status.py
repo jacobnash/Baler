@@ -167,3 +167,56 @@ def test_building_counts_only_what_the_caller_may_see():
     conn = _RowsConn(rows)
     assert _count_visible(conn, "SELECT point_uri FROM faults", Scope.everything()) == 4
     assert conn.sql.startswith("SELECT COUNT(*)")  # unscoped: counted in SQL, no rows shipped
+
+
+def _fake_probe(comp, building, platform_states):
+    return {"id": comp["id"], "label": comp["label"], "layer": comp["layer"], "service": comp["service"],
+            "state": "ok", "detail": None}
+
+
+def test_a_hung_probe_is_down_after_the_deadline_not_waited_for():
+    """Name resolution has no timeout: right after a deploy one lookup hung
+    /ops/status for 8.8 s on nash-srv (Baler#106)."""
+    import threading
+    import time
+
+    release = threading.Event()
+
+    def probe(comp, building, platform_states):
+        if comp["id"] == "data_api":
+            release.wait(10)
+        return _fake_probe(comp, building, platform_states)
+
+    direct = [c for c in ops_status.COMPONENTS if not c["probe"].startswith("inferred_")]
+    with patch("baler.ops_status._probe_one", side_effect=probe):
+        t0 = time.monotonic()
+        results = ops_status._run_probes(direct, deadline=0.2)
+        elapsed = time.monotonic() - t0
+    release.set()
+    assert elapsed < 1
+    assert results["data_api"]["state"] == "down" and "no answer" in results["data_api"]["detail"]
+    assert results["sign_in"]["state"] == "ok"
+    assert set(results) == {c["id"] for c in direct}
+
+
+@patch("baler.ops_status._building_signals")
+def test_collect_status_answers_from_the_background_round(mock_building):
+    mock_building.return_value = {"last_ingest_at": None, "points_seen_last_hour": 0, "open_faults": 0,
+                                  "disabled_derivation_targets": 0, "org_count": 1}
+    cache = ops_status._ProbeCache()
+    with patch("baler.ops_status._probe_one", side_effect=_fake_probe):
+        cache.refresh()
+    with patch("baler.ops_status._probes", cache), patch("baler.ops_status._probe_one", side_effect=_fake_probe) as probe:
+        doc = ops_status.collect_status()
+    # only the inferred (no I/O) components were judged per request
+    assert {c[0][0]["id"] for c in probe.call_args_list} == {"ingest_listener", "fault_detector", "derivation_engine"}
+    assert {c["id"] for c in doc["platform"]} >= {"historian", "data_api"}
+
+
+def test_a_stale_background_round_is_not_used():
+    cache = ops_status._ProbeCache()
+    with patch("baler.ops_status._probe_one", side_effect=_fake_probe):
+        cache.refresh()
+    assert cache.latest() is not None
+    cache._at -= 4 * cache._interval
+    assert cache.latest() is None

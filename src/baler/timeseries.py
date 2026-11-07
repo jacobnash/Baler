@@ -74,6 +74,16 @@ ROLLUP_DDL = (
 )
 
 
+# Everything SCHEMA, create_hypertable and LABELS_INDEX make, present.
+# (Without TimescaleDB this errors, as create_hypertable always has.)
+_READY_SQL = """
+SELECT to_regclass('point_history') IS NOT NULL
+   AND to_regclass('point_history_labelled') IS NOT NULL
+   AND EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')
+   AND EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'point_history')
+"""
+
+
 def _ensure_rollup_views(conn: psycopg.Connection) -> None:
     """Only on TimescaleDB, and only until they exist (a cheap catalog check
     on every other connection)."""
@@ -101,8 +111,16 @@ def _setup(conn: psycopg.Connection, statement_timeout: str | None = None) -> No
     # that already exist under the plain-table schema; idempotent like
     # the CREATE TABLE. Under ddl's lock: every service runs this on
     # every new connection.
-    ddl.run(conn, SCHEMA, "SELECT create_hypertable('point_history', 'ts', if_not_exists => TRUE, migrate_data => TRUE)",
-            LABELS_INDEX)
+    # Only when something is missing, though: the IF NOT EXISTS forms still
+    # lock before they check - CREATE INDEX takes a SHARE lock on
+    # point_history and every chunk, which waits for in-flight ingest and
+    # blocks new ingest meanwhile, and the advisory lock queues every
+    # service's new connections one behind another after a deploy
+    # (Baler#107). One catalog read answers "all there" instead.
+    row = conn.execute(_READY_SQL).fetchone()
+    if not (row and row[0]):
+        ddl.run(conn, SCHEMA, "SELECT create_hypertable('point_history', 'ts', if_not_exists => TRUE, migrate_data => TRUE)",
+                LABELS_INDEX)
     _ensure_rollup_views(conn)
     # Real tradeoff, taken deliberately: every INSERT otherwise waits on a
     # full WAL fsync before returning. Scoped to this connection only (a

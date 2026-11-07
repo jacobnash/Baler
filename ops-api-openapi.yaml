@@ -10,6 +10,11 @@ paths:
     get:
       operationId: getOpsStatus
       summary: Aggregated Ops status
+      description: >-
+        Service states come from a background probe round every 10 s (a probe that
+        hasn't answered within 2.5 s counts as down), so this answers without
+        waiting on any probe. The Building counts are read per request, for the
+        caller's sites.
       responses:
         "200":
           description: Status document

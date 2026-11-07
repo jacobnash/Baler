@@ -114,6 +114,12 @@ genuinely faulted keeps its `status: open` and still fires
 `fault.resolved` normally if it clears. See [`POST
 /faults/{id}/ack`](/api/fault) for the full field reference.
 
+`GET /fault/faults` lists faults newest first, one page at a time: 500 by
+default, up to 5000 with `?limit=`. It's still a bare JSON array; the
+`X-Total-Count` header says how many match in all, and `X-Next-Before`
+(absent on the last page) is the `?before=` for the next page. `?since=`
+(ISO 8601 with an offset) narrows to faults that started after a time.
+
 There's a small browser UI over all of this at `/ui/alarms.html` (through
 the gateway: `localhost:8080/ui/alarms.html`) — a live-polling table of
 faults with Ack/Snooze buttons, filterable by status, plus a "New rule"

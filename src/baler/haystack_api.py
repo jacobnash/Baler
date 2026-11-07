@@ -43,6 +43,7 @@ import argparse
 import os
 import threading
 import time as _time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, time, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from urllib.parse import parse_qsl, urlsplit
@@ -205,28 +206,51 @@ def _literal(value, datatype: str | None = None):
     return str(value)
 
 
-def build_records(store, ts_conn, uris: list[str], values_only: bool = False) -> dict[str, dict]:
-    """One SPARQL round trip for every triple of every requested entity,
-    plus one SQL round trip for the newest sample of every point."""
-    if not uris:
-        return {}
-    values = " ".join(f"<{hisquery._uri(u)}>" for u in uris)
-    rows = store.query(
-        f"""SELECT ?s ?p ?o (isIRI(?o) AS ?iri) (DATATYPE(?o) AS ?dt) WHERE {{
-            VALUES ?s {{ {values} }}
-            ?s ?p ?o .
-        }}"""
-    )
+def _triples_of(store, values: str):
+    """(subject, predicate, object, object is an IRI, object's datatype) for
+    every triple of the VALUES-listed subjects, in one round trip. Against
+    Oxigraph the raw JSON bindings already say what kind of term each object
+    is and its datatype; projecting isIRI()/DATATYPE() as extra columns
+    nearly doubled the result (7.5 MB vs 4 MB for 800 points) and its parse,
+    Baler#107. Objects decode as RemoteStore's SparqlRow does (numbers to
+    int/float, everything else its lexical form)."""
+    if hasattr(store, "select"):
+        for b in store.select(f"SELECT ?s ?p ?o WHERE {{ VALUES ?s {{ {values} }} ?s ?p ?o . }}"):
+            o = b["o"]
+            v, dt = o["value"], o.get("datatype")
+            if dt and o["type"] == "literal":
+                if dt.endswith(("integer", "int")):
+                    v = int(v)
+                elif dt.endswith(("double", "float", "decimal")):
+                    v = float(v)
+            yield b["s"]["value"], b["p"]["value"], v, o["type"] == "uri", dt
+        return
+    rows = store.query(f"SELECT ?s ?p ?o (isIRI(?o) AS ?iri) (DATATYPE(?o) AS ?dt) WHERE {{ VALUES ?s {{ {values} }} ?s ?p ?o . }}")
+    for row in rows:
+        is_iri = getattr(row, "iri", False)
+        is_iri = is_iri if isinstance(is_iri, bool) else str(is_iri).lower() in ("true", "1")
+        yield str(row.s), str(row.p), row.o, is_iri, getattr(row, "dt", None)
+
+
+def _history_facts(ts_conn, point_uris: list[str]):
+    """(latest sample, first sample time, latest unit/label) per point with
+    history, for build_records."""
+    latest = read_latest_many(ts_conn, point_uris) if ts_conn is not None and point_uris else {}
+    first = read_first_ts_many(ts_conn, list(latest)) if latest else {}
+    labels = timeseries.read_point_labels(ts_conn, list(latest)) if latest else {}
+    return latest, first, labels
+
+
+def _graph_records(store, values: str) -> tuple[dict[str, dict], dict[str, list[str]], dict[str, object]]:
+    """build_records' graph half: every entity's stored tags, typed; plus
+    its classes and any stored siteRef."""
     recs: dict[str, dict] = {}
     classes: dict[str, list[str]] = {}
     stored_site: dict[str, object] = {}  # a siteRef tag (Haystack imports), used when the graph has none
     units: dict[str, dict[str, str]] = {}
     tzs: dict[str, dict[str, str]] = {}
     dicts: dict[str, dict[str, str]] = {}  # entity -> tag -> nested Dict node
-    for row in rows:
-        s, p, o = str(row.s), str(row.p), row.o
-        is_iri = getattr(row, "iri", False)
-        is_iri = is_iri if isinstance(is_iri, bool) else str(is_iri).lower() in ("true", "1")
+    for s, p, o, is_iri, dt in _triples_of(store, values):
         rec = recs.setdefault(s, {})
         if p.startswith(HUNIT_NS):
             units.setdefault(s, {})[p[len(HUNIT_NS):]] = str(o)
@@ -239,9 +263,9 @@ def build_records(store, ts_conn, uris: list[str], values_only: bool = False) ->
         elif p.startswith(HAYSTACK_NS) and not is_iri:
             tag = p[len(HAYSTACK_NS):]
             if tag == "siteRef":
-                stored_site[s] = _literal(o, getattr(row, "dt", None))
+                stored_site[s] = _literal(o, dt)
             if tag not in _RECOMPUTED_TAGS:
-                val = _literal(o, getattr(row, "dt", None))
+                val = _literal(o, dt)
                 if tag in rec and isinstance(val, oh.Ref):
                     # a Ref list is stored one triple per Ref
                     prev = rec[tag]
@@ -278,14 +302,31 @@ def build_records(store, ts_conn, uris: list[str], values_only: bool = False) ->
         for s, by_tag in dicts.items():
             for tag, node in by_tag.items():
                 recs.setdefault(s, {})[tag] = nested.get(node, {})
+    return recs, classes, stored_site
+
+
+def build_records(store, ts_conn, uris: list[str], values_only: bool = False) -> dict[str, dict]:
+    """One SPARQL round trip for every triple of every requested entity,
+    plus one SQL round trip for the newest sample of every point."""
+    if not uris:
+        return {}
+    values = " ".join(f"<{hisquery._uri(u)}>" for u in uris)
+    # The site lookup (Oxigraph) and the history lookups (Postgres) don't
+    # depend on the triples: they run alongside the main query, not after it.
+    side = None
+    if not values_only:
+        side = ThreadPoolExecutor(max_workers=2)
+        sites_f = side.submit(_site_of, store, uris)
+        history_f = side.submit(_history_facts, ts_conn, [u for u in uris if _kind_of(u) == "point"])
+    try:
+        recs, classes, stored_site = _graph_records(store, values)
+    finally:
+        if side is not None:
+            side.shutdown(wait=True)
     if values_only:
         return recs
-    sites = _site_of(store, uris)
-
-    point_uris = [u for u in uris if _kind_of(u) == "point"]
-    latest = read_latest_many(ts_conn, point_uris) if ts_conn is not None else {}
-    first = read_first_ts_many(ts_conn, list(latest)) if latest else {}
-    labels = timeseries.read_point_labels(ts_conn, list(latest)) if latest else {}
+    sites = sites_f.result()
+    latest, first, labels = history_f.result()
     out = {}
     for uri in uris:
         if uri not in recs and uri not in latest:
@@ -482,10 +523,13 @@ class Backend:
             raise OpError("read takes a plain Haystack filter, not a hisRead/hisRollup expression")
         node = _decode_refs(q.filter)
         if not _live(node):
-            uris = hisquery.match_entities(self.store, node, scope=scope)
+            with tracer.start_as_current_span("haystack.read.match_entities") as span:
+                uris = hisquery.match_entities(self.store, node, scope=scope)
+                span.set_attribute("matched", len(uris))
             if limit is not None:
                 uris = uris[:limit]
-            with self._conn() as conn:
+            with self._conn() as conn, tracer.start_as_current_span("haystack.read.build_records") as span:
+                span.set_attribute("records", len(uris))
                 recs = build_records(self.store, conn, uris)
             return [recs[u] for u in uris if u in recs]
         # `his`/`curVal`/`curStatus` come from point_history, not the graph,
@@ -1223,6 +1267,7 @@ def main() -> None:
         pw.ensure_schema(conn)
     login = ScramLogin(ts_pool) if os.environ.get("BALER_JWT_SECRET") else None
     backend = Backend(RemoteStore(), ts_pool)
+    hisquery.warm_caches()
 
     def expire_loop():
         while True:

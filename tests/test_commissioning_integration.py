@@ -344,3 +344,32 @@ def test_a_point_shared_by_two_equipment_and_a_repeat_dont_abort_the_run(repo):
                    "scope": {"caller": {"prefixes": None, "exclude": []}, "site_prefixes": []}, "summary": {}}, results)
     stored = repo.get_results(rid)
     assert sorted(r["equip_uri"] for r in stored) == ["urn:equip:cx-it/ahu-1", "urn:equip:cx-it/building"]
+
+
+def test_availability_on_postgres_is_availability_pct(repo):
+    """repo.availability folds in Postgres what procedures.availability_pct
+    folds in Python (Baler#150): same samples, same percentage - gaps longer
+    than max_gap, a late first sample, empty rows, a point with nothing."""
+    from baler.commissioning.procedures import availability_pct
+
+    start = datetime(2026, 3, 2, 8, 0, tzinfo=timezone.utc)
+    end = start + timedelta(hours=1)
+    gap = timedelta(minutes=5)
+    series = {
+        "urn:point:test-cxint-avail/steady": [start + timedelta(seconds=30 * i) for i in range(120)],
+        "urn:point:test-cxint-avail/gappy": [start + timedelta(minutes=m) for m in (3, 4, 20, 21, 22, 50, 59.5)],
+        "urn:point:test-cxint-avail/late": [start + timedelta(minutes=40, seconds=7)],
+    }
+    with repo.pool.connection() as conn:
+        conn.execute("DELETE FROM point_history WHERE point_uri LIKE 'urn:point:test-cxint-avail/%'")
+        for uri, times in series.items():
+            for t in times:
+                write_point_value(conn, uri, 1.5, t)
+        write_point_value(conn, "urn:point:test-cxint-avail/gappy", None, start + timedelta(minutes=35))  # no value: not a sample
+        write_point_value(conn, "urn:point:test-cxint-avail/steady", 2.0, end)  # end is exclusive
+    uris = [*series, "urn:point:test-cxint-avail/silent"]
+    got = repo.availability(uris, start, end, gap)
+    for uri in uris:
+        times = series.get(uri, [])
+        assert got[uri] == (len(times), availability_pct(times, start, end, gap)), uri
+    assert got["urn:point:test-cxint-avail/silent"] == (0, 0.0)

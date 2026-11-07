@@ -23,7 +23,7 @@ from baler import (
     tracing,
 )
 from baler.http_handler_base import BaseAPIHandler, respond_error, respond_json
-from baler.ops_status import collect_status
+from baler.ops_status import collect_status, start_background_probes
 from baler.scope import claims_from_header, scope_for
 from baler.timeseries import connect_pool
 
@@ -280,6 +280,7 @@ def main() -> None:
     with ts_pool.connection() as conn:
         sources.ensure_schema(conn)
         record_edit.ensure_schema(conn)
+    start_background_probes()  # /status answers from the latest round (Baler#106)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(ts_pool))
     print(f"ops API listening on {args.host}:{args.port}")
     server.serve_forever()
