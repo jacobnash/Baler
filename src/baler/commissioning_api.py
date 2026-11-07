@@ -25,6 +25,7 @@ import argparse
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -65,7 +66,7 @@ PORT = 8009
 RUN_STATEMENT_TIMEOUT = "10min"
 
 _PROJECT = re.compile(r"/projects/([^/]+)")
-_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|gate|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|agent/sessions|agent/proposals)")
+_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|gate|report|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|agent/sessions|agent/proposals)")
 _PROJECT_ISSUES = re.compile(r"/projects/([^/]+)/issues/(import|export)")
 _RUN_ISSUES = re.compile(r"/runs/([^/]+)/issues")
 _ISSUE = re.compile(r"/issues/([^/]+)")
@@ -134,6 +135,7 @@ def _check_settings(settings) -> dict:
 
 
 engine_kwargs = runner.engine_kwargs
+log = logging.getLogger(__name__)
 
 
 def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None):
@@ -205,6 +207,7 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                     ("PUT", "phases"): ("put_phases", self._put_phases),
                     ("POST", "phase"): ("set_phase", self._set_phase),
                     ("GET", "gate"): ("phase_gate", self._phase_gate),
+                    ("GET", "report"): ("project_report", self._project_report),
                     ("GET", "events"): ("events", self._events),
                     ("GET", "inventory"): ("inventory", self._inventory),
                     ("POST", "runs"): ("create_run", self._create_run),
@@ -555,7 +558,20 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             if fmt == "json":
                 respond_json(self, 200, rep)
                 return
-            body = report.html(rep).encode("utf-8")
+            self._send_html(report.html(rep).encode("utf-8"))
+
+        def _report_issues(self, project_id: str) -> list[dict]:
+            """Every issue with its status history (actors and times) and
+            standing risk - the report's issues log and waivers (#87)."""
+            risks = {r["issue_id"]: r for r in repo.list_risks(project_id)}
+            out = []
+            for i in repo.list_issues(project_id):
+                row = self._public_issue(i, risks)
+                row["events"] = repo.list_issue_events(i["id"])
+                out.append(row)
+            return out
+
+        def _send_html(self, body: bytes) -> None:
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -564,8 +580,40 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             self.end_headers()
             self.wfile.write(body)
 
-        def _report_issues(self, project_id: str) -> list[dict]:
-            return [db.public_row(i) for i in repo.list_issues(project_id)]
+        def _project_report(self, span, claims, pid) -> None:
+            """The Cx report for the whole project (#87), as JSON or a
+            printable page: scope and limitations, phase history, spec vs
+            installed, latest verdicts, procedure results, issues log."""
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            fmt = parse_qs(urlparse(self.path).query).get("format", ["json"])[0]
+            if fmt not in ("json", "html"):
+                raise ValueError("format must be json or html")
+            scope = repo.scope_for(claims)
+            runner.reconcile_issues(repo, pid, None, [], now_fn())
+            run = next((r for r in repo.list_runs(pid, 20) if r.get("status") == "completed"), None)
+            results = [r for r in repo.get_results(run["id"]) if scope.allows(r["equip_uri"])] if run else []
+            procs = [x for x in repo.list_procedures(pid) if x["status"] != "archived"]
+            latest = {pr["id"]: next((t for t in repo.list_test_runs(pr["id"], 20) if t["status"] == "completed"), None)
+                      for pr in procs}
+            iss = [i for i in self._report_issues(pid) if not i.get("equip_uri") or scope.allows(i["equip_uri"])]
+            active_runs = [db.public_row(a) for a in repo.find_rows("cx_active_runs", project_id=pid)
+                           if a["status"] not in ("planned", "cancelled") and scope.allows(a["equip_uri"])]
+            try:
+                alignment, _, _ = self._alignment_for(p, claims)
+            except Exception:  # the report stands without the spec section
+                log.warning("cx report %s: spec alignment failed", pid, exc_info=True)
+                alignment = None
+            docs = [db.public_row(d) for d in repo.find_rows("cx_spec_documents", project_id=pid)]
+            rep = report.project_build(db.public_project(p), now_fn(), repo.user_email(claims.get("sub")) or claims.get("sub"),
+                                       db.public_row(run) if run else None, results, procs,
+                                       {k: (db.public_row(v) if v else None) for k, v in latest.items()},
+                                       iss, repo.list_events(pid, 500), alignment, docs, active_runs, active.writes_allowed())
+            if fmt == "json":
+                respond_json(self, 200, rep)
+                return
+            self._send_html(report.project_html(rep).encode("utf-8"))
 
         def _equipment_status(self, span, claims) -> None:
             """One verdict per equipment from each visible project's latest

@@ -85,6 +85,7 @@ const ROUTES = [
   ["PUT",    /^\/cx\/projects\/[^/]+\/phases$/,                "commissioning", "operator"],
   ["POST",   /^\/cx\/projects\/[^/]+\/phase$/,                 "commissioning", "operator"],
   ["GET",    /^\/cx\/projects\/[^/]+\/gate$/,                  "commissioning", "viewer"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/report$/,                "commissioning", "viewer"],
   ["GET",    /^\/cx\/projects\/[^/]+\/events$/,                "commissioning", "viewer"],
   ["GET",    /^\/cx\/projects\/[^/]+\/inventory$/,             "commissioning", "viewer"],
   ["GET",    /^\/cx\/projects\/[^/]+\/runs$/,                  "commissioning", "viewer"],

@@ -140,3 +140,42 @@ def test_a_clean_project_passes_the_startup_gate(base, repo):
 def test_gate_preview_validates_target(base):
     p = ti._project(base)
     assert requests.get(f"{base}/projects/{p['id']}/gate", params={"to": "nope"}, headers=A).status_code == 400
+
+
+# ------------------------------------------------------------- Cx report (#87)
+
+
+def test_project_report_tells_the_whole_story(base, repo, spec):
+    p, run = ti._completed_run(base)
+    issue = ti._rat_issue(base, run)
+    assert issue["severity"] == "major" and issue["title"].startswith(ti.RAT.replace("urn:point:", "", 1))
+    requests.post(f"{base}/projects/{p['id']}/phase", headers=A, json={"key": "functional", "note": "started"})
+    r = requests.get(f"{base}/projects/{p['id']}/report", headers=A)
+    assert r.status_code == 200, r.text
+    rep = r.json()
+    assert rep["latest_run"]["run"]["id"] == run["id"]
+    assert any("Passive only" in x for x in rep["limitations"])
+    assert rep["phase_history"][0]["detail"]["to"] == "functional"
+    [logged] = [i for i in rep["issues"] if i["id"] == issue["id"]]
+    assert logged["events"][0]["action"] == "create" and logged["events"][0]["actor"] == "user"
+    page = requests.get(f"{base}/projects/{p['id']}/report", params={"format": "html"}, headers=A)
+    assert page.status_code == 200 and page.headers["Content-Type"].startswith("text/html")
+    body = page.text
+    for section in ("Scope and limitations", "Phase history", "Specification vs installed", "Procedure / functional test results",
+                    "Issues log", "Sign-off", "his.html?expr="):
+        assert section in body, section
+    assert "<script" not in body
+
+
+def test_run_report_never_calls_incomplete_equipment_a_pass(base):
+    _p, run = ti._completed_run(base)
+    rep = requests.get(f"{base}/runs/{run['id']}/report", headers=A).json()
+    for e in rep["equipment"]:
+        if e["counts"].get("inconclusive") and not e["counts"].get("fail"):
+            assert e["status"] == "inconclusive" and e["verdict"] == "incomplete"
+    for e in rep["equipment"]:
+        for r in e["results"]:
+            if r["status"] == "inconclusive":
+                assert r["reason"]  # never an empty cell
+    page = requests.get(f"{base}/runs/{run['id']}/report", params={"format": "html"}, headers=A).text
+    assert "verification ladder" in page and " h)" in page  # ladder explained; window length in human units
