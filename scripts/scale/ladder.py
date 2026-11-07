@@ -528,6 +528,7 @@ class LiveSafety:
     live-safety, which is never reported as a Baler ceiling."""
 
     def __init__(self, url: str | None, load_factor: float, latency_factor: float, enabled: bool = True):
+        self.enabled = enabled
         self.url = url if enabled else None
         self.nproc = os.cpu_count() or 1
         self.load_factor, self.latency_factor = load_factor, latency_factor
@@ -558,6 +559,8 @@ class LiveSafety:
     def check(self) -> tuple[bool, dict]:
         load = os.getloadavg()[0] / self.nproc
         sample = {"load_per_cpu": round(load, 2)}
+        if not self.enabled:
+            return False, sample
         bad = load > max(2.0, self.baseline_load * self.load_factor)
         if self.url and self.baseline_latency is not None:
             lat = self._probe() or 0.0
@@ -567,7 +570,7 @@ class LiveSafety:
         return self.strikes >= 3, sample
 
     def describe(self) -> dict:
-        return {"live_url": self.url, "baseline_latency_s": self.baseline_latency,
+        return {"enabled": self.enabled, "live_url": self.url, "baseline_latency_s": self.baseline_latency,
                 "baseline_load_per_cpu": round(self.baseline_load, 2), "load_factor": self.load_factor,
                 "latency_factor": self.latency_factor, "note": self.note}
 
@@ -627,7 +630,12 @@ def evaluate(step: dict) -> tuple[str, list[str]]:
         if rate_ratio is not None and rate_ratio < MIN_STORED_RATIO:
             reasons.append(f"stored rate {ing['stored_rps']:.0f}/s is {rate_ratio:.1%} of offered {ing['offered_rps']:.0f}/s")
         if (ing.get("broker_dropped_delta") or 0) > 0:
-            reasons.append(f"broker dropped {ing['broker_dropped_delta']} messages (listener queue overflow)")
+            # Broker-wide: with stored == acked these are QoS 0 deliveries to
+            # the other full-telemetry subscribers (fault_detector, derivation_
+            # engine) - history is intact, but Cur-mode rules and derivations
+            # silently missed readings: not graceful, not visible.
+            reasons.append(f"broker dropped {ing['broker_dropped_delta']} deliveries (a subscriber can't keep up: "
+                           "the listener if readings are missing, else fault_detector/derivation_engine missed readings)")
     lag = step.get("lag", {})
     if lag:
         if lag.get("lost"):
@@ -983,7 +991,7 @@ def main(argv=None) -> None:
     p.add_argument("--no-up", action="store_true", help="the stack is already up")
     p.add_argument("--no-build", action="store_true", help="up without rebuilding the images")
     p.add_argument("--live-url", default="http://127.0.0.1:8080/ui/", help="the live gateway, probed read-only for live-safety")
-    p.add_argument("--no-live-check", action="store_true", help="no live install on this host")
+    p.add_argument("--no-live-check", action="store_true", help="no live install on this host: no live latency or host-load watch")
     p.add_argument("--live-load-factor", type=float, default=1.5)
     p.add_argument("--live-latency-factor", type=float, default=3.0)
     p = sub.choices["crash"]

@@ -132,7 +132,7 @@ So a 1-CPU run and a 12-CPU run are never compared without saying so.
 | `ingest.acked` / `stored` / `stored_ratio` | PUBACKs per second of payload `ts` vs. `point_history` rows with `ts` in the same seconds | **Data loss.** Must be ≥ 99%. |
 | `ingest.stored_rps`, `stored_rate_ratio` | delta of `pg_stat_user_tables` inserts+updates on `point_history`'s chunks over the soak | Sustained write rate, independent of row timestamps. |
 | `ingest.stored_rps_per_host_cpu` | `stored_rps / nproc` | Comparable across machines. |
-| `ingest.broker_dropped_delta` | `$SYS/broker/publish/messages/dropped` | Messages mosquitto dropped because the listener's queue (`max_queued_messages 10000`) was full. Must be 0. |
+| `ingest.broker_dropped_delta` | `$SYS/broker/publish/messages/dropped` | Deliveries mosquitto dropped because a subscriber's queue was full. It's broker-wide: if readings are missing it was the listener (data loss); if stored = acked, it was a QoS 0 subscriber (fault_detector, derivation_engine) whose Cur-mode rules or derivations silently missed readings. Must be 0. |
 | `lag.p50_s` / `p95_s` / `max_s` | canary reading every 2 s on `fbf/scale/canary/lag`, polled in `point_history` | **End-to-end lag**, publish to row stored, behind the same queue as the load. p95 must be < 30 s. |
 | `lag.first_third_median_s` → `last_third_median_s` | same | **Backlog growth.** Rising by more than 10 s over the soak fails the step. |
 | `lag.lost` | canaries never stored within 300 s | Lost data. |
@@ -140,7 +140,7 @@ So a 1-CPU run and a 12-CPU run are never compared without saying so.
 | `resources.<service>` | `docker stats` every sample | CPU % (100 = one core), memory against the cap, block I/O. |
 | `containers.<service>` | `docker inspect` | Restarts during the step, OOM kills, exit status. Any restart fails the step. |
 | `samples[].pg_roundtrip_s` | `SELECT 1` timed | Postgres responsiveness under load. |
-| `db.*` | `hypertable_detailed_size`, `approximate_row_count`, `timescaledb_information` | Chunks and chunk interval, table/index bytes, **bytes per row**, compression and retention (on or off), database size. |
+| `db.*` | `hypertable_detailed_size`, `approximate_row_count`, `timescaledb_information` | Chunks and chunk interval, table/index bytes, **bytes per row**, database size. Once a compression policy exists (#192), also `db.compression`: bytes before and after compression and the number of compressed chunks, so compressed and uncompressed bytes per row sit side by side. Raw history is never downsampled: compression only. |
 | `db.bytes_per_day_raw_at_this_rate`, `ingest.rows_per_day_at_this_rate` | bytes/row × stored rows/s × 86,400 | **Disk-growth math** at the rate measured. |
 | `graph.ingest_s`, `tags_per_s` | Oxigraph count of `scale` points after publishing a step's tags | How long the graph takes to absorb new equipment. |
 | `graph.triples`, `count_*_s` | SPARQL `COUNT` timed | Graph size and the time of a full scan. |
@@ -181,9 +181,8 @@ Fill this in from `ladder.py table`. Always note nproc, because a 1-CPU nash-srv
 
 At 1M points every 5 s, that's 200,000 rows/s, or 17.3 billion rows/day. Bytes per row comes
 from `db.bytes_per_row` in each result (table plus index, uncompressed). On the first local
-run it was about 246 B/row. That works out to about **4.2 TB/day raw**, which is why native
-compression, a narrow row and retention are on the #190 list. Fill in compressed bytes per row
-once compression lands.
+run it was about 246 B/row. That works out to about **4.2 TB/day raw**, which is why
+native compression ([#192](https://github.com/jacobnash/Baler/issues/192), under [#221](https://github.com/jacobnash/Baler/issues/221)) and a narrower row matter. Raw rows are kept, never downsampled. Fill in compressed bytes per row from `db.compression` once #192 lands.
 
 ### Baler vs Haxall
 

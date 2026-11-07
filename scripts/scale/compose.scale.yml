@@ -96,7 +96,7 @@ services:
     cpuset: "${SCALE_CPUSET:-}"
     logging: *scale-logging
   derivation_engine:
-    cpus: ${SCALE_CPUS_DERIVATION_ENGINE:-0.5}
+    cpus: ${SCALE_CPUS_DERIVATION_ENGINE:-1.0}
     mem_limit: ${SCALE_MEM_DERIVATION_ENGINE:-1g}
     cpuset: "${SCALE_CPUSET:-}"
     logging: *scale-logging
