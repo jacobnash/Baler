@@ -131,6 +131,32 @@ fields; Raw JSON is the same underlying CodeMirror-edited object for
 hand-writing or pasting a whole rule. It's a thin client over the same
 API above, nothing it does isn't also reachable by curl.
 
+## Controller alarms from BACnet (Windrow `forward_alarms`)
+
+A Windrow connection with `forward_alarms` set registers Windrow as a recipient of the controller's
+own intrinsic-reporting alarms: limits, alarm states and faults the controller itself detects. It
+publishes them, retained, on `{topic_prefix}/{label}/alarm`, or on
+`{topic_prefix}/alarms/{type}-{instance}` for an object no connection polls. `fault_detector` turns
+each one into a fault. No rule is needed.
+
+- **One fault per object.** Its rule id is `bacnet:alarm`, and its point is the polled point (or the
+  `alarms/...` topic). The `bacnet:` namespace means the sweep that resolves faults of deleted rules
+  leaves these alone.
+- **Opening and resolving.** A transition to any non-normal state (or, after a Windrow restart, an
+  active alarm in Windrow's startup summary) opens the fault. If the fault is already open, its
+  detail and severity are updated instead, for example when it goes from high-limit to low-limit.
+  A transition back to `normal` resolves it.
+- **Webhooks.** `fault.opened` and `fault.resolved` fire as for any rule.
+- **Severity.**
+  - A `fault` state is `critical`.
+  - `notify_type` `event` is `info`.
+  - Otherwise, BACnet priority 0-63 is `critical`, and anything higher is `warning`.
+- **Alarms page.** The Rule column shows "BACnet alarm (controller)". The Detail column shows the
+  transition, the controller's message text and the object.
+- **Not readings.** These messages aren't stored as readings; `mqtt_listener` skips them.
+- **Ack is Baler-only.** Acking in Baler doesn't acknowledge the alarm on the controller (Windrow
+  has no AcknowledgeAlarm yet).
+
 ## Fault lifecycle — transitions only
 
 Opening a fault that's already open is a no-op (no new row, no webhook).

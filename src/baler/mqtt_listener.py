@@ -9,7 +9,7 @@ import json
 import os
 from functools import lru_cache
 
-from baler import mapping, mqtt_util, tracing
+from baler import bacnet_alarms, mapping, mqtt_util, tracing
 from baler.ingest import (
     ingest_equip_tags,
     ingest_haystack_equip_tags,
@@ -160,6 +160,12 @@ def make_on_message(store, ts_conn):
                 # should still get linked).
                 link_equip_ref(store, point_uri)
                 _classify(store, point_uri, mapping.DEFAULT_RULES_PATH)
+                return
+
+            # A controller alarm forwarded by Windrow (Baler#168) is not a
+            # reading: fault_detector raises/clears it as a fault. Storing it
+            # here would invent a `<label>/alarm` point with dicts for history.
+            if bacnet_alarms.is_alarm(msg.topic, value):
                 return
 
             ingest_reading(store, ts_conn, msg.topic, binary_state(value), ts)
