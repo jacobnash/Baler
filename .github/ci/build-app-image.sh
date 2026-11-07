@@ -28,10 +28,28 @@ if [ "${1:-}" = "--write-cache" ]; then
   cache_to=(--cache-to "type=gha,scope=baler-app,mode=max,ignore-error=true")
 fi
 
-docker compose pull --quiet --ignore-buildable &
+# Docker Hub sometimes answers a manifest HEAD with an error for a few
+# seconds (it failed main's integration (2) on 4880f5a resolving
+# rust:1-slim-bookworm, which skipped that commit's deploy). Retry a few
+# times with backoff; a real breakage still fails after the last attempt.
+retry() {
+  local attempt=1 max=4 delay=5
+  until "$@"; do
+    if [ "$attempt" -ge "$max" ]; then
+      echo "::error::failed after $max attempts: $*"
+      return 1
+    fi
+    echo "::warning::attempt $attempt failed, retrying in ${delay}s: $*"
+    sleep "$delay"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+  done
+}
+
+retry docker compose pull --quiet --ignore-buildable &
 pull=$!
 
-docker buildx build --load --provenance=false -t baler-app:ci \
+retry docker buildx build --load --provenance=false -t baler-app:ci \
   --cache-from type=gha,scope=baler-app "${cache_to[@]}" .
 
 wait "$pull"
