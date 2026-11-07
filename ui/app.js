@@ -19,24 +19,61 @@ const STRUCTURAL_TAGS = new Set(["id", "dis", "brickClass", "brickHasPart", "bri
 // Brick location classes: shown in the Site tree, not as equipment classes.
 const LOCATION_CLASSES = new Set(["Site", "Building", "Floor", "Zone", "Room", "Space"]);
 
+// Brick's own short names for equipment classes (brick:aliasOf in
+// ontology/Brick-only.ttl) -> the class they name. Hand-made records pick
+// either spelling, and grouping by the raw class split one kind of
+// equipment into "AHU" and "Air_Handling_Unit" (Baler#76).
+// tests/test_ui_equip_classes.py checks this against the ontology.
+const EQUIP_CLASS_ALIASES = {
+  AED: "Automated_External_Defibrillator",
+  AHU: "Air_Handling_Unit",
+  Air_Handler_Unit: "Air_Handling_Unit",
+  CAV: "Constant_Air_Volume_Box",
+  CRAC: "Computer_Room_Air_Conditioning",
+  CRAH: "Computer_Room_Air_Handler",
+  DDAHU: "Dual_Duct_Air_Handling_Unit",
+  DOAS: "Dedicated_Outdoor_Air_System_Unit",
+  Discharge_Air_Plenum: "Supply_Air_Plenum",
+  Discharge_Fan: "Supply_Fan",
+  Disconnect_Switch: "Isolation_Switch",
+  ESS_Panel: "Embedded_Surface_System_Panel",
+  FCU: "Fan_Coil_Unit",
+  HX: "Heat_Exchanger",
+  Horizontal_Fan_Coil_Unit: "Duct_Fan_Coil_Unit",
+  MAU: "Makeup_Air_Unit",
+  NVR: "Network_Video_Recorder",
+  RC_Panel: "Radiant_Ceiling_Panel",
+  RTU: "Rooftop_Unit",
+  RVAV: "Variable_Air_Volume_Box_With_Reheat",
+  TABS_Panel: "Thermally_Activated_Building_System_Panel",
+  VAV: "Variable_Air_Volume_Box",
+  VFD: "Variable_Frequency_Drive",
+};
+
 // Haystack equipment-type markers, most specific first, for grouping equips
 // that carry Haystack tags but no Brick class (e.g. a Windrow/Haystack
-// import that was never Brick-classified).
+// import that was never Brick-classified) - into the same group as the
+// Brick class they mean, not a group of their own.
 const EQUIP_KIND_TAGS = [
-  ["ahu", "AHU"], ["rtu", "RTU"], ["mau", "MAU"], ["doas", "DOAS"], ["fcu", "FCU"], ["vav", "VAV"],
-  ["chiller", "Chiller"], ["boiler", "Boiler"], ["coolingTower", "Cooling Tower"],
-  ["heatExchanger", "Heat Exchanger"], ["pump", "Pump"], ["fan", "Fan"], ["meter", "Meter"],
-  ["tank", "Tank"], ["valve", "Valve"], ["damper", "Damper"], ["vfd", "VFD"],
+  ["ahu", "Air_Handling_Unit"], ["rtu", "Rooftop_Unit"], ["mau", "Makeup_Air_Unit"],
+  ["doas", "Dedicated_Outdoor_Air_System_Unit"], ["fcu", "Fan_Coil_Unit"], ["vav", "Variable_Air_Volume_Box"],
+  ["chiller", "Chiller"], ["boiler", "Boiler"], ["coolingTower", "Cooling_Tower"],
+  ["heatExchanger", "Heat_Exchanger"], ["pump", "Pump"], ["fan", "Fan"], ["meter", "Meter"],
+  ["tank", "Tank"], ["valve", "Valve"], ["damper", "Damper"], ["vfd", "Variable_Frequency_Drive"],
 ];
 
 const isMarker = (v) => v && v._kind === "marker";
 
-// Brick class if the graph has one, else the Haystack equip-type marker.
+// The canonical Brick class: the record's own class with Brick's alias
+// folded in, else the class its Haystack equip-type marker means.
 function equipKind(rec) {
-  if (typeof rec.brickClass === "string") return rec.brickClass;
+  if (typeof rec.brickClass === "string") return EQUIP_CLASS_ALIASES[rec.brickClass] || rec.brickClass;
   const hit = EQUIP_KIND_TAGS.find(([tag]) => isMarker(rec[tag]));
   return hit ? hit[1] : null;
 }
+
+// One readable label per class: "Air Handling Unit", not Air_Handling_Unit.
+const classLabel = (cls) => cls.replace(/_/g, " ");
 
 class SessionExpired extends Error {}
 
@@ -100,7 +137,8 @@ async function loadEquipment() {
   const byType = new Map();
   for (const e of equips) {
     if (LOCATION_CLASSES.has(e.brickClass)) continue;
-    const label = equipKind(e.rec) || "Unclassified";
+    const kind = equipKind(e.rec);
+    const label = kind ? classLabel(kind) : "Unclassified";
     if (!byType.has(label)) byType.set(label, []);
     byType.get(label).push(e);
   }
@@ -366,12 +404,12 @@ async function renderLocationSection(equips) {
           const ahus = fedBy.get(child.id) || [];
           const floorNode = node(`${child.dis} (fed by ${ahus.map((e) => e.dis).join(", ") || "?"})`);
           const floorList = document.createElement("ul");
-          for (const ahu of ahus) floorList.appendChild(li(buildEquipNode(ahu, `${ahu.dis} (${equipKind(ahu.rec) || "AHU"})`)));
+          for (const ahu of ahus) floorList.appendChild(li(buildEquipNode(ahu, `${ahu.dis} (${classLabel(equipKind(ahu.rec) || "AHU")})`)));
           for (const zone of parts(child, "Zone")) {
             const zoneNode = node(zone.dis);
             const zoneList = document.createElement("ul");
             for (const vav of fedBy.get(zone.id) || []) {
-              zoneList.appendChild(li(buildEquipNode(vav, `${vav.dis} (${equipKind(vav.rec) || "VAV"})`)));
+              zoneList.appendChild(li(buildEquipNode(vav, `${vav.dis} (${classLabel(equipKind(vav.rec) || "VAV")})`)));
             }
             zoneNode.appendChild(zoneList);
             floorList.appendChild(li(zoneNode));
@@ -380,7 +418,7 @@ async function renderLocationSection(equips) {
           buildingList.appendChild(li(floorNode));
         } else if (child.rec.equip) {
           const kind = equipKind(child.rec);
-          const label = kind ? `${child.dis} (${kind})` : child.dis;
+          const label = kind ? `${child.dis} (${classLabel(kind)})` : child.dis;
           buildingList.appendChild(li(buildEquipNode(child, label)));
         }
       }
