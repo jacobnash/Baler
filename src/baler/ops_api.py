@@ -123,8 +123,36 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
             except edges.EdgeError as exc:
                 respond_error(self, exc.status, str(exc))
                 return
+            self._attach_site_prefixes(nodes)
             span.set_attribute("count", len(nodes))
             respond_json(self, 200, nodes)
+
+        def _attach_site_prefixes(self, nodes: list[dict]) -> None:
+            """A remote node's site_id is its broker account's username, not
+            a Baler site id: the account (broker_accounts) names the site
+            whose topic_prefixes the broker holds it to. The Connectors page
+            checks a new connector's prefix against these (Baler#111)."""
+            remote = [n for n in nodes if n.get("kind") == "remote"]
+            if ts_pool is None or not remote:
+                return
+            claims = claims_from_header(self.headers.get("Authorization")) or {}
+            try:
+                with ts_pool.connection() as conn:
+                    rows = conn.execute(
+                        "SELECT b.username, b.org_id, s.name, s.topic_prefixes FROM broker_accounts b "
+                        "JOIN sites s ON s.id = b.site_id WHERE b.username = ANY(%s)",
+                        ([n["site_id"] for n in remote],),
+                    ).fetchall()
+            except Exception as exc:  # noqa: BLE001 - no auth schema yet: the page still works, unchecked
+                print(f"edge site prefixes unavailable: {exc!r}")
+                return
+            org = claims.get("org_id")
+            by_user = {r[0]: r for r in rows if not org or r[1] == org}
+            for n in remote:
+                row = by_user.get(n["site_id"])
+                if row:
+                    n["site_name"] = row[2]
+                    n["allowed_prefixes"] = list(row[3] or [])
 
         def _edge_action(self, site: str, instance: str, action: str, span) -> None:
             span.set_attribute("edge", f"{site}/{instance}")
