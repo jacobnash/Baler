@@ -85,6 +85,26 @@ A replay answers from the recording, keyed by each call's label and tags. A
 change downstream of the model, such as the Brick-class check, can be
 measured again without paying again.
 
+## The model step only writes real Brick classes
+
+A model will name a class Brick doesn't have, such as
+`Chilled_Water_Supply_Temp_Sensor` for `Chilled_Water_Supply_Temperature_Sensor`.
+`classify_point_with_fallback` checks every answer with
+`brick_vocab.canonical_class` against the vendored ontology (#181). A real
+class is written in Brick's own spelling. Anything else is discarded, and
+the point keeps what the rules gave it, a `PROJ:` class or
+`TD:UnmappedPoint`, so it lands in review. The answer isn't mapped to a
+near match, because that would be a second guess nobody confirmed.
+
+To measure the check without a key, the harness was run with a simulated
+model that glues a class name out of each label (`CHW-SUP-TEM-7` becomes
+`Chw_Sup_Tem_Sensor`) at confidence 0.9. Before the check, 148 of its 240
+answers named no Brick class and were written: 30.1% of points were
+auto-accepted but wrong. With the check, none were written. Those 148
+points went to review, and auto-accepted but wrong was 0%. A real model
+invents far fewer names than this stand-in. The point is that what it does
+invent can no longer reach the graph.
+
 ## The baseline
 
 `tests/fixtures/mapping_eval_baseline.json` is the rules-only summary from

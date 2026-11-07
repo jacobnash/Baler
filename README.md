@@ -214,7 +214,8 @@ The old `ui/devices.html` redirects there.
 
 `autotag.py` sweeps every point/equip with tags but no direct Brick match,
 runs `mapping.classify_point_with_fallback` on each (rule engine first,
-Claude Haiku fallback second), and appends high-confidence guesses that
+Claude Haiku fallback second; a guess naming a class the vendored Brick
+ontology doesn't have is discarded, never written), and appends high-confidence guesses that
 reuse an existing Brick class to `rules/haystack_to_brick.yaml`/
 `rules/haystack_equip_to_brick.yaml` as commented-out proposals for a
 human to review and promote - it never edits the live rule set itself.

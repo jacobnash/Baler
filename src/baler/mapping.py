@@ -11,7 +11,7 @@ import os
 import yaml
 from rdflib import RDF, RDFS, SKOS, Literal, URIRef
 
-from baler import tracing
+from baler import brick_vocab, tracing
 from baler.schemas import MappingRule
 from baler.store import BRICK, PROJ, TD
 
@@ -137,7 +137,10 @@ def classify_point_with_fallback(store, point_uri, rules: list[MappingRule] | No
     hard dependency on the LLM classifier module or the `anthropic`
     package. A low-confidence LLM guess is never applied: whatever
     classify_point already produced (a PROJ fallback class, or
-    TD.UnmappedPoint) is left untouched rather than silently overwritten."""
+    TD.UnmappedPoint) is left untouched rather than silently overwritten,
+    and so is one naming a class the vendored Brick ontology doesn't have
+    (brick_vocab.canonical_class; an empty vocab, if the ontology file is
+    missing, rejects every answer rather than write one unchecked)."""
     with tracer.start_as_current_span("mapping.classify_point_with_fallback") as span:
         outcome, brick_class = classify_point(store, point_uri, rules)
         span.set_attribute("rule_outcome", outcome)
@@ -158,10 +161,23 @@ def classify_point_with_fallback(store, point_uri, rules: list[MappingRule] | No
             span.set_attribute("outcome", outcome)
             return outcome, brick_class
 
-        store.add_entity(point_uri, BRICK[result.brick_class])
+        # A model will happily name a class Brick doesn't have
+        # (Chilled_Water_Supply_Temp_Sensor), and BRICK[...] would make it a
+        # real rdf:type that SHACL, his queries and Cx then can't place
+        # (Baler#181). Only a real class is written, in Brick's own
+        # spelling - the same check commissioning_api applies to hand
+        # edits. Not mapped to a near match: that would be a second guess
+        # nobody confirmed. The point keeps what classify_point gave it.
+        canonical = brick_vocab.load().canonical_class(str(result.brick_class))
+        if canonical is None:
+            span.set_attribute("llm_rejected", "not a Brick class")
+            span.set_attribute("outcome", outcome)
+            return outcome, brick_class
+
+        store.add_entity(point_uri, BRICK[canonical])
         store.add_relationship(point_uri, SKOS.definition, Literal(f"llm-classified: {result.reasoning}"))
         span.set_attribute("outcome", "llm")
-        return "llm", result.brick_class
+        return "llm", canonical
 
 
 def reclassify(store, uri, rules: list[MappingRule] | None = None) -> tuple[str, str | None]:
