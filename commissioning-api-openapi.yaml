@@ -990,15 +990,20 @@ paths:
     post:
       tags: [Spec]
       operationId: extractCxSpec
-      summary: Read a PDF (schedules, point lists, sequences) into proposed spec items with Claude (operator)
+      summary: Read a PDF (schedules, point lists, sequences) into proposed spec items (operator)
       description: >-
         Asynchronous: 202 with the document, then poll GET
         /spec-documents/{id}. Every extracted item is `proposed` and cites
         its page and the verbatim text it was read from; nothing is used
         (alignment ignores proposals) until a person accepts it. The PDF
-        is held in memory for the extraction only and never stored. Needs
-        the server's llm extra and ANTHROPIC_API_KEY (501 without the
-        extra); the model is BALER_CX_MODEL. Up to 30 MB.
+        is held in memory for the extraction only and never stored. Tables
+        (equipment schedules, point lists) are read locally first; the
+        rest goes to the model BALER_LLM_PROVIDER names - anthropic (the
+        llm extra, ANTHROPIC_API_KEY, BALER_CX_MODEL), openai (any
+        OpenAI-compatible endpoint, BALER_LLM_BASE_URL/BALER_LLM_MODEL; it
+        gets the PDF's text, and items whose quote isn't on the cited page
+        are dropped), or none (tables only, document method `table`). 501
+        when the configured provider can't run on this server. Up to 30 MB.
       requestBody:
         required: true
         content:
@@ -1450,14 +1455,17 @@ paths:
       operationId: startCxAgentSession
       summary: Start a conversation with the commissioning agent (operator)
       description: >-
-        A Claude tool-use loop over the Cx capabilities (inventory, runs,
+        A tool-use loop over the Cx capabilities (inventory, runs,
         templates and gaps, issues, procedures and test runs, spec items
         and alignment, active-test status). It reads and runs passive work
         itself; everything else it proposes (GET .../agent/proposals) for a
         person to accept. It works with the starter's org and sites only.
         Asynchronous: 202, then poll GET /agent-sessions/{id} until status
-        isn't `working`. Needs the llm extra and ANTHROPIC_API_KEY (501
-        without the extra); the model is BALER_CX_MODEL.
+        isn't `working`. Needs a model: BALER_LLM_PROVIDER=anthropic (the
+        llm extra, ANTHROPIC_API_KEY, BALER_CX_MODEL) or openai (an
+        OpenAI-compatible endpoint whose model supports function calling;
+        a model that can't call tools fails the session with that error).
+        501 with provider none or an incomplete configuration.
       requestBody:
         required: true
         content:
@@ -2000,7 +2008,7 @@ components:
         properties: { type: object }
         source:
           type: object
-          description: document, page, quote (extraction) or row (import), method, corrected_from
+          description: document, page, quote (extraction) or row (import), method, model, quote_verified (the quote was found in the PDF text), cited_page (when the quote was on another page), corrected_from
         confidence: { type: [number, "null"] }
         status: { type: string, enum: [proposed, accepted, rejected] }
         created_by: { type: [string, "null"] }
@@ -2020,7 +2028,7 @@ components:
         method: { type: string, enum: [llm, table] }
         status: { type: string, enum: [queued, running, completed, failed] }
         items: { type: integer }
-        info: { type: [object, "null"], description: "model, notes, token usage" }
+        info: { type: [object, "null"], description: "model, provider, notes, token usage, dropped (items whose quote wasn't in the PDF)" }
         error: { type: [string, "null"] }
         created_by: { type: [string, "null"] }
         created_at: { type: string, format: date-time }

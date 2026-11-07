@@ -21,16 +21,22 @@ Guardrails, by construction:
   - Every agent action lands in cx_events as `agent.<tool>`, so "what did
     the agent do on this project" is one query.
 
+The model is llm.provider()'s (BALER_LLM_PROVIDER): the Claude API, or
+any OpenAI-compatible endpoint with function calling (Ollama, Groq,
+Gemini, OpenRouter, ...). Same tools, same loop, same guardrails; a model
+that can't call tools is an error, never a conversation without them.
+
 The conversation is stored on the session (cx_agent_sessions.messages)
 exactly as the API returned it, thinking blocks included, and replayed
-unchanged on the next turn.
+unchanged on the next turn - in that provider's message format, so a
+session continues only on the provider it started on.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
+import re
 from collections.abc import Callable
 from datetime import datetime, timedelta
 
@@ -40,6 +46,7 @@ from baler.commissioning import (
     engine,
     inventory,
     issues,
+    llm,
     phases,
     procedures,
     runner,
@@ -49,14 +56,14 @@ from baler.commissioning import templates as tpl
 
 log = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "claude-opus-5-5"
+DEFAULT_MODEL = llm.DEFAULT_ANTHROPIC_MODEL
 MAX_TOOL_ROUNDS = 16
 MAX_RESULT_CHARS = 30000
 PROPOSAL_KINDS = ("issue", "procedure", "phase", "spec_item", "mapping", "active_test")
 
 
 def model_name() -> str:
-    return os.environ.get("BALER_CX_MODEL") or DEFAULT_MODEL
+    return llm.anthropic_model()
 
 
 SYSTEM = """You are the commissioning (Cx) agent for one project in Baler, a building data platform.
@@ -379,10 +386,35 @@ def _block_dict(block) -> dict:
     return block.model_dump(exclude_none=True) if hasattr(block, "model_dump") else dict(block)
 
 
+def history_format(messages: list[dict]) -> str | None:
+    """'anthropic' (content is a list of blocks), 'openai' (string content,
+    tool_calls, role "tool") or None for an empty conversation."""
+    for m in messages:
+        if m.get("role") == "tool" or "tool_calls" in m or isinstance(m.get("content"), str):
+            return "openai"
+        if isinstance(m.get("content"), list):
+            return "anthropic"
+    return None
+
+
 def run_turn(ctx: Ctx, messages: list[dict], user_text: str, client=None) -> tuple[list[dict], str]:
     """One user turn: append it, loop the model through tools until it
     stops, return (messages, final text). `messages` are API-shaped dicts
-    stored on the session and replayed unchanged."""
+    stored on the session and replayed unchanged. `client` (tests): an
+    anthropic.Anthropic-like object, or an llm.OpenAIChat-like one."""
+    kind = getattr(client, "kind", "anthropic") if client is not None else llm.provider()
+    if kind == "none":
+        raise llm.LLMError(llm.unavailable_reason("agent") or "no model configured")
+    before = history_format(messages)
+    if before is not None and before != kind:
+        raise llm.LLMError(f"this conversation was started on the {before} provider and BALER_LLM_PROVIDER is now {kind}: "
+                           "start a new conversation")
+    if kind == "openai":
+        return _run_turn_openai(ctx, messages, user_text, client)
+    return _run_turn_anthropic(ctx, messages, user_text, client)
+
+
+def _run_turn_anthropic(ctx: Ctx, messages: list[dict], user_text: str, client=None) -> tuple[list[dict], str]:
     if client is None:
         import anthropic
 
@@ -412,6 +444,97 @@ def run_turn(ctx: Ctx, messages: list[dict], user_text: str, client=None) -> tup
             text, err = call_tool(ctx, u["name"], u.get("input"))
             results.append({"type": "tool_result", "tool_use_id": u["id"], "content": text, **({"is_error": True} if err else {})})
         messages.append({"role": "user", "content": results})
+    else:
+        final = (final + "\n\n" if final else "") + "(stopped: too many tool calls in one turn - ask me to continue)"
+    return messages, final
+
+
+def _strip_schema(schema):
+    """JSON schema without additionalProperties, which some OpenAI-compatible
+    endpoints (Gemini's) reject in function parameters."""
+    if isinstance(schema, dict):
+        return {k: _strip_schema(v) for k, v in schema.items() if k != "additionalProperties"}
+    if isinstance(schema, list):
+        return [_strip_schema(v) for v in schema]
+    return schema
+
+
+def openai_tools() -> list[dict]:
+    """TOOLS in OpenAI function-calling format."""
+    return [{"type": "function", "function": {"name": t["name"], "description": t["description"],
+                                              "parameters": _strip_schema(t["input_schema"])}} for t in TOOLS]
+
+
+def _unsupported(model: str, detail: str) -> llm.ToolCallsUnsupported:
+    return llm.ToolCallsUnsupported(
+        f"the configured model ({model}) can't call tools, which the commissioning agent needs: {detail}. "
+        "Pick a model with function calling (e.g. Ollama llama3.1:8b or qwen2.5:7b, Groq llama-3.3-70b-versatile, "
+        "Gemini gemini-2.5-flash) in BALER_LLM_MODEL.")
+
+
+def _looks_like_tool_call(text: str) -> bool:
+    """A model without function calling often writes the call as JSON text."""
+    m = re.search(r"\{.*\}", text or "", re.DOTALL)
+    if not m:
+        return False
+    try:
+        obj = json.loads(m.group(0))
+    except ValueError:
+        return False
+    if not isinstance(obj, dict):
+        return False
+    fn = obj.get("function")
+    name = obj.get("name") or obj.get("tool") or (fn.get("name") if isinstance(fn, dict) else fn)
+    return isinstance(name, str) and name in IMPL
+
+
+def _run_turn_openai(ctx: Ctx, messages: list[dict], user_text: str, client=None) -> tuple[list[dict], str]:
+    if client is None:
+        client = llm.OpenAIChat()
+    model = getattr(client, "model", "?")
+    tools = openai_tools()
+    messages = [*messages, {"role": "user", "content": user_text[:20000]}]
+    final = ""
+    for _ in range(MAX_TOOL_ROUNDS):
+        try:
+            response = client.chat([{"role": "system", "content": SYSTEM}, *messages], tools=tools, tool_choice="auto")
+        except llm.LLMError as exc:
+            status = getattr(exc, "status", None)
+            if status in (400, 404, 422) and re.search(r"tool|function", str(exc), re.IGNORECASE):
+                raise _unsupported(model, str(exc)[:300]) from exc
+            raise
+        choice = response["choices"][0]
+        msg = choice.get("message") or {}
+        calls = [c for c in msg.get("tool_calls") or [] if isinstance(c, dict)]
+        text: str = msg["content"] if isinstance(msg.get("content"), str) else ""
+        stored: dict = {"role": "assistant", "content": text or None}
+        if calls:
+            stored["tool_calls"] = [{"id": c.get("id") or f"call_{i}", "type": "function",
+                                     "function": {"name": (c.get("function") or {}).get("name", ""),
+                                                  "arguments": (c.get("function") or {}).get("arguments") or "{}"}}
+                                    for i, c in enumerate(calls)]
+        elif not text:
+            stored["content"] = ""
+        if not calls and _looks_like_tool_call(text):
+            raise _unsupported(model, "it wrote a tool call as text instead of calling the tool")
+        messages.append(stored)
+        if text:
+            final = text
+        if choice.get("finish_reason") == "content_filter":
+            final = final or "The model declined this request."
+            break
+        if not calls:
+            break
+        for c in stored["tool_calls"]:
+            raw = c["function"]["arguments"]
+            try:
+                args = json.loads(raw) if isinstance(raw, str) else raw
+            except ValueError:
+                args = None
+            if args is None and raw in ("", "null"):
+                args = {}
+            out, _err = call_tool(ctx, c["function"]["name"], args)
+            messages.append({"role": "tool", "tool_call_id": c["id"], "content": out})
     else:
         final = (final + "\n\n" if final else "") + "(stopped: too many tool calls in one turn - ask me to continue)"
     return messages, final

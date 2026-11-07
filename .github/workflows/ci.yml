@@ -33,8 +33,9 @@ jobs:
       # Not the `haystack` extra: that's openhay alone, already installed from
       # the cached wheel, and pip would rebuild it from git (a different URL).
       # Without openhay tests/test_haystack_api.py skips; without the
-      # cx-gl36 extra (pandas) tests/test_commissioning_gl36.py does.
-      - run: pip install -e ".[dev,validate,cx-gl36]"
+      # cx-gl36 extra (pandas) tests/test_commissioning_gl36.py does, and
+      # without cx-spec (pdfplumber) the PDF tests in test_commissioning_llm.py.
+      - run: pip install -e ".[dev,validate,cx-gl36,cx-spec]"
       # parallel across the runner's cores: ~3 min serial (#27)
       - run: pytest -m "not integration" -n auto
       - run: openapi-spec-validator openapi.yaml fault-api-openapi.yaml derivation-api-openapi.yaml validate-api-openapi.yaml auth-api-openapi.yaml haystack-api-openapi.yaml commissioning-api-openapi.yaml

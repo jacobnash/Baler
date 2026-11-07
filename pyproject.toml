@@ -19,15 +19,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0", "phable>=0.1.29", "openapi-spec-validator>=0.7.0", "jsonschema>=4.0.0", "ruff>=0.16.0", "mypy>=2.0.0", "radon>=6.0.0", "pytest-cov>=7.0.0", "pyoxigraph>=0.5.0", "pytest-xdist>=3.5.0"]
+dev = ["pytest>=8.0.0", "phable>=0.1.29", "openapi-spec-validator>=0.7.0", "jsonschema>=4.0.0", "ruff>=0.16.0", "mypy>=2.0.0", "radon>=6.0.0", "pytest-cov>=7.0.0", "pyoxigraph>=0.5.0", "pytest-xdist>=3.5.0", "reportlab>=4.0"]
 llm = ["anthropic>=0.69.0", "pydantic>=2.0.0"]
 validate = ["pyshacl>=0.30.0"]
 # Cx 3 (#39): ConStrain sequence items over history (commissioning.gl36).
 # ConStrain itself is vendored, not a dependency - it pins rdflib 6 via
 # brickschema==0.7.1; see todo/cx3-constrain-gl36-spike.md.
 cx-gl36 = ["pandas>=2.1"]
-# Cx 7 (#43): XLSX equipment schedules and point lists (commissioning.spec).
-cx-spec = ["openpyxl>=3.1"]
+# Cx 7 (#43): XLSX equipment schedules and point lists (commissioning.spec),
+# and PDF tables/text read locally (commissioning.spec_pdf): the no-model
+# path and the text OpenAI-compatible models get. The OpenAI-compatible
+# client itself is plain requests, so there is no llm-openai extra.
+cx-spec = ["openpyxl>=3.1", "pdfplumber>=0.11"]
 # haystack_api.py (Project Haystack HTTP API). Built from source with
 # maturin until openhay ships wheels to PyPI - needs a Rust toolchain.
 haystack = ["openhay @ git+https://github.com/jacobnash/openhay@main#subdirectory=crates/openhay-py"]

@@ -43,6 +43,7 @@ from baler.commissioning import (
     inventory,
     issues,
     ladder,
+    llm,
     mirror,
     phases,
     procedures,
@@ -1064,15 +1065,15 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 raise ValueError("that isn't a PDF")
             if len(raw) > spec.MAX_PDF_BYTES:
                 raise ValueError(f"PDF is over {spec.MAX_PDF_BYTES // (1024 * 1024)} MB; split it")
+            method = "llm"
             if worker.extract_fn is None:
-                try:
-                    import anthropic  # noqa: F401
-                    import pydantic  # noqa: F401
-                except ImportError:
-                    respond_error(self, 501, "PDF extraction needs the llm extra (anthropic) installed on the server")
+                why = llm.unavailable_reason("extract")
+                if why:
+                    respond_error(self, 501, why)
                     return
+                method = "table" if llm.provider() == "none" else "llm"
             filename = str(body.get("filename") or "document.pdf")
-            doc = self._new_document(pid, claims, filename, "application/pdf", raw, "llm", "queued")
+            doc = self._new_document(pid, claims, filename, "application/pdf", raw, method, "queued")
             sub = claims.get("sub")
             self._event(pid, "spec.extract_start", claims, {"document_id": doc["id"], "filename": filename, "size": len(raw)})
             worker.submit(runner.ExtractJob(doc["id"], pid, filename, raw, sub, repo.user_email(sub)))
@@ -1496,10 +1497,9 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
         def _agent_available(self) -> bool:
             if agent_client is not None:
                 return True
-            try:
-                import anthropic  # noqa: F401
-            except ImportError:
-                respond_error(self, 501, "the commissioning agent needs the llm extra (anthropic) installed on the server")
+            why = llm.unavailable_reason("agent")
+            if why:
+                respond_error(self, 501, why)
                 return False
             return True
 
@@ -1507,8 +1507,11 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
         def _transcript(messages: list[dict]) -> list[dict]:
             """What a person reads: text, the tools the agent used, and
             their results' errors - not the raw API blocks."""
-            out = []
+            out: list[dict] = []
             for m in messages:
+                if agent.history_format([m]) == "openai":
+                    out += CommissioningHandler._openai_transcript(m)
+                    continue
                 for b in m.get("content") or []:
                     t = b.get("type")
                     if t == "text" and b.get("text"):
@@ -1517,6 +1520,28 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                         out.append({"role": "tool", "tool": b["name"], "input": b.get("input")})
                     elif t == "tool_result" and b.get("is_error"):
                         out.append({"role": "tool", "error": str(b.get("content"))[:500]})
+            return out
+
+        @staticmethod
+        def _openai_transcript(m: dict) -> list[dict]:
+            out: list[dict] = []
+            if m.get("role") == "tool":
+                try:
+                    res = json.loads(m.get("content") or "")
+                except ValueError:
+                    res = None
+                if isinstance(res, dict) and set(res) == {"error"}:
+                    out.append({"role": "tool", "error": str(res["error"])[:500]})
+                return out
+            if isinstance(m.get("content"), str) and m["content"]:
+                out.append({"role": m["role"], "text": m["content"]})
+            for c in m.get("tool_calls") or []:
+                fn = c.get("function") or {}
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except ValueError:
+                    args = fn.get("arguments")
+                out.append({"role": "tool", "tool": fn.get("name"), "input": args})
             return out
 
         def _public_session(self, sess: dict) -> dict:
