@@ -10,3 +10,4 @@ gateway/*.htpasswd
 docs-site/node_modules/
 docs-site/dist/
 backups/
+docs-site/pages/code/functions.mdx

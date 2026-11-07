@@ -4,7 +4,9 @@
   "type": "module",
   "private": true,
   "scripts": {
+    "predev": "python3 ../scripts/gen_function_index.py",
     "dev": "zudoku dev",
+    "prebuild": "python3 ../scripts/gen_function_index.py",
     "build": "zudoku build",
     "preview": "zudoku preview",
     "lint": "eslint"
