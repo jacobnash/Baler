@@ -2,12 +2,20 @@
   color-scheme: light dark;
   --border: #d0d0d0;
   --muted: #666;
+  /* --accent is a fill (buttons, the selected tree row) under white text;
+     --accent-text is the same blue used as text (links, nav). One value
+     can't do both in dark mode, so text uses its own token. */
   --accent: #2b6cb0;
+  --accent-text: var(--accent);
   --radius-sm: 4px;
   --radius-pill: 999px;
-  --color-critical: #c53030;
-  --color-warning: #b7791f;
-  --color-success: #2f855a;
+  /* Each is used as badge text on a 15% tint of itself (.badge below) and
+     as plain text on the page, so each must clear WCAG AA (4.5:1) on that
+     tint: 5.1, 5.1 and 5.4. The previous #c53030/#b7791f/#2f855a gave
+     4.3/3.1/3.8 (Baler#144, #148, #149). */
+  --color-critical: #b02a2a;
+  --color-warning: #8a5300;
+  --color-success: #276749;
 }
 
 * { box-sizing: border-box; }
@@ -24,6 +32,8 @@ body {
   :root {
     --border: #3a3a3a;
     --muted: #999;
+    /* #2b6cb0 as text on #111 is 3.5:1; this is 8.3:1. */
+    --accent-text: #63b3ed;
     /* Brighter/more saturated than the light-mode values - the originals
        were never checked against a #111 background and read as muddy. */
     --color-critical: #f56565;
@@ -75,7 +85,7 @@ main {
    his.html, sitting inside each equipment <summary>. */
 #tree summary .his-link { text-decoration: none; font-size: 0.8rem; opacity: 0.55; }
 #tree summary .his-link:hover { opacity: 1; }
-#detail .his-link { color: var(--accent); }
+#detail .his-link { color: var(--accent-text); }
 #tree button.selected { background: var(--accent); color: #fff; }
 
 #detail { padding: 1rem; overflow-y: auto; }
@@ -121,7 +131,7 @@ canvas { border: 1px solid var(--border); border-radius: var(--radius-sm); max-w
 .login-gate #login-error { color: #c0392b; }
 
 .top-nav { margin-left: auto; font-size: 0.85rem; display: flex; gap: 0.75rem; }
-.top-nav a { color: var(--accent); }
+.top-nav a { color: var(--accent-text); }
 /* Set by auth.js's highlightCurrentNavLink() on whichever link matches the
    current page - shown as inert location text instead of a link, so
    "where am I" doesn't rely on inferring it from the *absence* of a link. */

@@ -39,7 +39,7 @@
   color: inherit;
   cursor: pointer;
 }
-.chips button[data-span]:hover { border-color: var(--accent); color: var(--accent); }
+.chips button[data-span]:hover { border-color: var(--accent); color: var(--accent-text); }
 .chips button[data-span].active { background: var(--accent); border-color: var(--accent); color: #fff; }
 .view-tabs { display: inline-flex; }
 .view-tabs button { border-radius: 0; margin-left: -1px; }
@@ -48,7 +48,7 @@
 .live-toggle { margin-left: auto; font-size: 0.8rem; color: var(--muted); display: flex; gap: 0.3rem; align-items: center; }
 
 .examples { font-size: 0.8rem; margin: 0.5rem 0 0; line-height: 1.5; }
-.examples a { color: var(--accent); }
+.examples a { color: var(--accent-text); }
 .examples code { font-size: 0.78rem; }
 
 .summary { font-size: 0.85rem; color: var(--muted); margin-bottom: 1rem; display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; align-items: baseline; }
@@ -78,7 +78,7 @@
 .legend .stats { color: var(--muted); font-variant-numeric: tabular-nums; }
 .legend .last { font-weight: 600; font-variant-numeric: tabular-nums; }
 .legend li:hover .name { text-decoration: underline dotted; }
-.legend .open-one { color: var(--accent); text-decoration: none; opacity: 0.6; }
+.legend .open-one { color: var(--accent-text); text-decoration: none; opacity: 0.6; }
 .legend .open-one:hover { opacity: 1; }
 
 .tooltip {
