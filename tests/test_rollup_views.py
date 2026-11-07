@@ -205,3 +205,16 @@ def test_plan_covers_the_span_exactly_once(monkeypatch, dirty_5m, dirty_1h):
             assert all(b <= da or a >= db for da, db in dirty[view])
     if not dirty_5m:
         assert [p[2] for p in plan if p[0] == "view"] == ["h1", "m5"]  # 1h up to 13:00, 5m to 13:45
+
+
+@pytest.mark.integration
+def test_works_inside_a_callers_transaction(conn, monkeypatch):
+    hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    start = hour - timedelta(hours=2)
+    _seed(conn, start, 2)
+    uris = [f"{PREFIX}p{p}" for p in range(3)]
+    args = (uris, start, hour, "avg", 300, None, "UTC")
+    with conn.transaction():
+        conn.execute("SELECT 1")
+        fast = timeseries.read_rollup(conn, *args)
+    _assert_same(fast, _raw(conn, monkeypatch, *args), uris, "nested")

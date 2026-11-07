@@ -568,8 +568,10 @@ def read_rollup(
     out: dict[str, list] = {uri: [] for uri in point_uris}
     levels = _rollup_levels(start_ts, interval_seconds) if interval_months is None and end_ts > start_ts else []
     if levels:
+        outermost = conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
         with conn.transaction():
-            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            if outermost:  # inside a caller's transaction, its snapshot rules apply
+                conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             parts = _rollup_plan(conn, levels, start_ts, end_ts)
             rows = _read_rollup_planned(conn, parts, point_uris, start_ts, fold, int(interval_seconds or 0)) if parts else None
         if rows is not None:
