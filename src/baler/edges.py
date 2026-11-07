@@ -64,7 +64,7 @@ def _local_route(action: str, body: dict) -> tuple[str, str, dict | None]:
         return "POST", f"/devices/{oid}/recheck-credentials", {}
     if action == "set_credential":
         prefix = {"device": "/devices", "connection": "/connections", "modbus_connection": "/modbus/connections"}.get(
-            body.get("target"))
+            str(body.get("target")))
         if prefix is None:
             raise EdgeError("set_credential target is device, connection or modbus_connection", 400)
         return "PATCH", f"{prefix}/{oid}/credential", body.get("credential") or {}

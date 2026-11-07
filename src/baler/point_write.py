@@ -196,8 +196,9 @@ class Commander:
 
     def point_write(self, site: str, instance: str, topic: str, value, priority: int) -> dict:
         try:
-            return self.command(site, instance, "point_write", {"topic": topic, "value": value, "priority": priority},
-                                suffix="point-write") or {}
+            result = self.command(site, instance, "point_write", {"topic": topic, "value": value, "priority": priority},
+                                  suffix="point-write")
+            return result if isinstance(result, dict) else {}
         except CommandError as exc:
             msg = str(exc).replace("site refused point_write:", "site refused the write:")
             raise CommandError(msg.replace("didn't answer", "didn't confirm")) from None
