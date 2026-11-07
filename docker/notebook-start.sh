@@ -7,7 +7,7 @@
 # everyone who never uses the notebook profile.)
 set -euo pipefail
 if [ -z "${JUPYTER_TOKEN:-}" ]; then
-    echo "jupyter: BALER_JUPYTER_TOKEN is not set - add one to .env (e.g. BALER_JUPYTER_TOKEN=\$(openssl rand -hex 24)) and run docker compose --profile notebook up -d again" >&2
+    echo "jupyter: BALER_JUPYTER_TOKEN is not set - add one to .env (e.g. BALER_JUPYTER_TOKEN=\$(openssl rand -hex 24)) and start this container again" >&2
     exit 1
 fi
 exec start-notebook.py "$@"

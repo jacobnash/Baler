@@ -12,7 +12,9 @@ description: Reference for baler_fn - connect(), BalerClient, @baler_function, b
 It comes preinstalled in the notebook image. Outside the image, install it from a Baler checkout
 with `pip install -e .`, which also installs the rest of Baler. For a light install, run
 `pip install --no-deps -e . && pip install requests pandas`: `baler_fn` itself needs only
-`requests`, plus `pandas` for the `*_df` methods.
+`requests`, plus `pandas` for the `*_df` methods. pip then prints an
+`ERROR: pip's dependency resolver ...` message listing Baler's server dependencies (psycopg, rdflib,
+...). That message is expected and harmless: `baler_fn` doesn't use them.
 
 `baler_fn` runs in your own Python process. Baler never imports or runs it.
 

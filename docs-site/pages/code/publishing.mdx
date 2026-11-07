@@ -8,7 +8,7 @@ lists published function packages with their version, author, date, description,
 and install line. It's a static page, generated when the docs site is built. There's no registry
 service, and nothing to log in to.
 
-**To publish a package, open a pull request that adds its manifest to `docs-site/function-index.toml`.**
+**To publish a package, open a pull request that adds an entry pointing to its manifest to `docs-site/function-index.toml`.**
 
 ## Before you open the PR
 
@@ -26,12 +26,13 @@ Add one `[[package]]` table to `docs-site/function-index.toml`:
 ```toml
 [[package]]
 manifest = "https://raw.githubusercontent.com/you/my-fns/v0.1.0/baler.toml"
-sha256 = "<output of: sha256sum baler.toml>"
+sha256 = "<output of: sha256sum baler.toml | cut -d' ' -f1>"
 ```
 
 - `manifest` is an `https://` URL of the raw `baler.toml`, or a path relative to the index file for
   a package inside the Baler repo (the sample package uses
-  `../templates/function-project/baler.toml`). Plain `http://` is rejected.
+  `../templates/function-project/baler.toml`; it lives in the Baler repo, so its install line
+  follows Baler's `main` instead of a tag). Plain `http://` is rejected.
 - Pin the URL to your release tag or a commit, not a branch, so the listing doesn't change under
   the reviewer.
 - `sha256` is optional, but you should set it for any URL outside the Baler repo. The build fails
@@ -52,7 +53,10 @@ entry and the reason, if:
 - a `sha256` doesn't match
 - two entries declare the same package name
 
-You can run it yourself before opening the PR:
+You can run it yourself before opening the PR, and before you tag. A local path works for
+testing: point `manifest` at your working copy (for example `manifest = "../../my-fns/baler.toml"`,
+relative to `docs-site/`), run the generator, look at `docs-site/pages/code/functions.mdx`, then
+change the entry to the tagged URL:
 
 ```bash
 python3 scripts/gen_function_index.py     # from the Baler checkout; needs Python 3.11+

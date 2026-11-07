@@ -76,8 +76,10 @@ The gateway stops accepting it within about 30 seconds.
 
 ## 2. Configure the notebook in `.env`
 
-Add these two lines to `.env`. The first sets the password for opening JupyterLab, the second
-holds the API key from step 1:
+Set two values in `.env`. `BALER_JUPYTER_TOKEN` is the password for opening JupyterLab, and
+`BALER_NOTEBOOK_API_KEY` holds the API key from step 1. Both lines are already in `.env`, blank,
+because it was copied from `.env.example`. Fill them in with an editor, or append new lines (the
+last value of a key wins):
 
 ```bash
 echo "BALER_JUPYTER_TOKEN=$(openssl rand -hex 24)" >> .env
@@ -112,7 +114,7 @@ This starts the stack plus the `jupyter` service. The first run builds the image
 Open `http://localhost:8888/lab?token=<your BALER_JUPYTER_TOKEN>`. Your token is in `.env`:
 
 ```bash
-grep ^BALER_JUPYTER_TOKEN .env
+grep '^BALER_JUPYTER_TOKEN=' .env | tail -1
 ```
 
 To start only the notebook against a Baler that's already running (or a remote one set in
@@ -124,7 +126,7 @@ docker compose --profile notebook up -d jupyter
 
 ## 4. Run the starter notebook
 
-Open `getting-started.ipynb` in the file browser and run all cells. It does the following:
+In JupyterLab's file browser, open `work/getting-started.ipynb` and run all cells. It does the following:
 
 ```python
 import baler_fn
@@ -139,11 +141,13 @@ baler_fn.list()["his_stats"](client, points["id"].iloc[0], "today")
 
 On a brand-new install there are no points yet, so `read_df("point")` comes back empty and the
 next cell fails. You can push a few test readings with your session `TOKEN` from step 1. Each call
-creates the point the first time, then adds a sample:
+creates the point the first time, then adds a sample. Each call prints `204` on success. In a
+new shell, run step 1's `TOKEN=...` line again first, because session tokens expire.
 
 ```bash
 for v in 70 71 72; do
-  curl -s -X POST localhost:8080/ingest/ingest -H "Authorization: Bearer $TOKEN" \
+  curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/ingest/ingest \
+    -H "Authorization: Bearer $TOKEN" \
     -d "{\"point\": \"fbf/demo-ahu-1/analogValue,1\", \"value\": $v}"
   sleep 1
 done

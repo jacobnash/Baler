@@ -100,7 +100,8 @@ def main(argv: list[str] | None = None) -> int:
     for p in problems:
         print(f"{args.manifest}: {p}", file=sys.stderr)
     if not problems:
-        print(f"{args.manifest}: ok ({manifest.name} {manifest.version}, {len(manifest.functions)} functions)")
+        n = len(manifest.functions)
+        print(f"{args.manifest}: ok ({manifest.name} {manifest.version}, {n} function{'' if n == 1 else 's'})")
     return 1 if problems else 0
 
 

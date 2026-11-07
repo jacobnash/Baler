@@ -107,7 +107,9 @@ every decorated function in that module.
 
 `baler_fn` is deliberately **not** listed in `dependencies`. The Baler notebook image provides it,
 the same way a SkySpark pod relies on the runtime it's installed into. To test outside the image,
-install Baler itself: `pip install --no-deps "baler @ git+https://github.com/jacobnash/Baler" && pip install requests`.
+install Baler itself: `pip install --no-deps "baler @ git+https://github.com/jacobnash/Baler" && pip install requests pandas`.
+pip warns that Baler's server dependencies aren't installed. `baler_fn` doesn't need them, so you
+can ignore that warning.
 
 `baler.toml`:
 
@@ -216,8 +218,12 @@ Start it from the **Baler checkout**. Compose resolves relative paths (`../my-fn
 first `-f` file's directory, so they're relative to the checkout, not to your project:
 
 ```bash
-docker compose -f docker-compose.yml -f ../my-fns/compose.my-fns.yml --profile my-fns up -d --build
+docker compose -f docker-compose.yml -f ../my-fns/compose.my-fns.yml --profile my-fns up -d --build my_fns_notebook
 ```
+
+Naming the service builds only your image, plus the base notebook image it starts from, and leaves
+the rest of the stack alone. Your notebook mounts the same `notebooks` volume as the stock one, so
+both see the same files. To keep them apart, give your service a volume of its own.
 
 Open `http://localhost:8889/lab?token=<your BALER_JUPYTER_TOKEN>`. Your functions are listed there:
 
@@ -235,7 +241,7 @@ docker compose -f docker-compose.yml -f ../my-fns/compose.my-fns.yml \
   exec my_fns_notebook python -m baler_fn check /opt/baler-project/baler.toml
 ```
 
-After you change your code, run the same `up -d --build` command again.
+After you change your code, run the same `up -d --build my_fns_notebook` command again.
 
 ### A scheduled worker
 
@@ -260,7 +266,7 @@ that uses the same image with a `command:`, under its own profile. The template'
 ```
 
 `my_fns/worker.py` is a loop: `client = baler_fn.connect()`, call your function, `time.sleep(...)`.
-Start it with `--profile my-fns-worker up -d --build` and read its output with
+Start it with `--profile my-fns-worker up -d --build my_fns_worker` and read its output with
 `docker compose ... logs -f my_fns_worker`. A worker that writes results back with
 `client.his_write` needs an `operator` key.
 
@@ -285,7 +291,7 @@ keep them.
 
 ## 6. List it on the docs site
 
-Open a PR against Baler that adds your manifest to `docs-site/function-index.toml`. See
+Open a PR against Baler that adds an entry pointing to your manifest to `docs-site/function-index.toml`. See
 [Publishing a package](/code/publishing). Once it's merged, the package and its functions appear in
 the [function index](/code/functions), with the `pip install` line from step 5.
 
@@ -306,7 +312,7 @@ To run the sample's own containers, use its compose file. The worker needs
 
 ```bash
 docker compose -f docker-compose.yml -f templates/function-project/compose.baler-sample.yml \
-  --profile baler-sample up -d --build                      # notebook on localhost:8889
+  --profile baler-sample up -d --build baler_sample_notebook   # notebook on localhost:8889
 docker compose -f docker-compose.yml -f templates/function-project/compose.baler-sample.yml \
-  --profile baler-sample-worker up -d --build                # logs his_stats every hour
+  --profile baler-sample-worker up -d --build baler_sample_worker   # logs his_stats every hour
 ```
