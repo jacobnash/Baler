@@ -186,7 +186,7 @@ def _criterion(c, where: str) -> dict:
     if not isinstance(c, dict):
         raise TypeError(f"{where}: a criterion is an object")
     allowed = {"check", "strict", "severity", "required", "pair_kind", "point_class", "range", "point",
-               "availability", "response"}
+               "availability", "response", "sequence"}
     extra = set(c) - allowed
     if extra:
         raise ValueError(f"{where}: unknown criterion keys {sorted(extra)}")
@@ -243,6 +243,8 @@ def _criterion(c, where: str) -> dict:
         if set(r["when"]) - {"point", "point_class", "equals"} or set(then) - {"point", "point_class", "changes_by", "within_minutes"}:
             raise ValueError(f"{where}: response.when is {{point|point_class, equals}}, then is "
                              "{point|point_class, changes_by, within_minutes}")
+    if "sequence" in c and (not isinstance(c["sequence"], str) or not c["sequence"].strip() or len(c["sequence"]) > 40):
+        raise ValueError(f"{where}: sequence is a short label for the sequence of operation it tests, e.g. S1")
     for flag in ("strict", "required"):
         if flag in c and not isinstance(c[flag], bool):
             raise ValueError(f"{where}: {flag} is true or false")

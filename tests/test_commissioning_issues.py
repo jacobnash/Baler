@@ -267,7 +267,7 @@ def test_risk_accept_cover_expire_revoke(base, repo, spec):
     today = fx.NOW.date()
     for bad in ({"reason": "", "review_by": "2027-01-01"}, {"reason": "x", "review_by": str(today)}, {"reason": "x", "review_by": "soon"}):
         assert requests.post(f"{base}/issues/{issue['id']}/risk", json=bad, headers=ADMIN).status_code == 400
-    r = requests.post(f"{base}/issues/{issue['id']}/risk", json={"reason": "sensor replacement on order",
+    r = requests.post(f"{base}/issues/{issue['id']}/risk", json={"owner": "Controls Co", "retest_trigger": "sensor replaced", "reason": "sensor replacement on order",
                                                                 "review_by": str(today + timedelta(days=30))}, headers=ADMIN)
     assert r.status_code == 201, r.text
     assert_matches_schema(r.json(), _schema(spec, "/issues/{id}/risk", "post", 201), spec)
@@ -288,7 +288,7 @@ def test_risk_accept_cover_expire_revoke(base, repo, spec):
     assert listed[0]["status"] == "open" and listed[0]["risk"] is None
     assert requests.get(f"{base}/projects/{p['id']}/risks", headers=A).json() == []
     # accept again, then revoke by hand
-    r = requests.post(f"{base}/issues/{issue['id']}/risk", json={"reason": "again", "review_by": "2027-06-01"}, headers=ADMIN).json()
+    r = requests.post(f"{base}/issues/{issue['id']}/risk", json={"owner": "Controls Co", "retest_trigger": "sensor replaced", "reason": "again", "review_by": "2027-06-01"}, headers=ADMIN).json()
     assert requests.delete(f"{base}/risks/{r['id']}", headers=B).status_code == 404
     assert requests.delete(f"{base}/risks/{r['id']}", headers=ADMIN).status_code == 204
     got = requests.get(f"{base}/issues/{issue['id']}", headers=A).json()
