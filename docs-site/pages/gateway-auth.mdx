@@ -13,8 +13,9 @@ endpoint list.
 
 ## Org / site / user / role model
 
-Four Postgres tables (`auth.SCHEMA` in `src/baler/auth.py`, created
-on `auth_api.py` startup via `auth.ensure_schema`):
+Four Postgres tables (created by migration 0001,
+`src/baler/migrations/v0001_baseline.py`; see
+[Schema migrations](/schema-migrations)):
 
 - **`orgs`** — the top-level tenant. Everything else hangs off an
   `org_id`.

@@ -26,7 +26,7 @@ x-daemon-env: &daemon-env
   BALER_GATEWAY_SECRET: ${BALER_GATEWAY_SECRET:-${TIMBERDOODLE_GATEWAY_SECRET:-}}
   BALER_SOURCES_KEY: ${BALER_SOURCES_KEY:-}
   # Blank-safe (blank = 7 days): when point_history chunks get compressed.
-  # Every service that opens a history connection keeps the policy in step.
+  # The migrate service and every process keep the policy in step at start.
   BALER_HISTORY_COMPRESS_AFTER: ${BALER_HISTORY_COMPRESS_AFTER:-}
   # Blank-safe: only ops_api reads it (the Connectors page's local Windrow).
   WINDROW_API_URL: ${WINDROW_API_URL:-}
@@ -46,8 +46,9 @@ x-daemon-depends-on: &daemon-depends-on
     condition: service_started
   mosquitto:
     condition: service_started
-  # One-shot data migration (baler.migrate) - every daemon waits for it to
-  # finish, so a deploy never runs new code against old-named graph data.
+  # One-shot migrations (baler.migrate) - every daemon waits for them to
+  # finish, so a deploy never runs new code against an old schema or
+  # old-named graph data.
   migrate:
     condition: service_completed_successfully
 
@@ -60,8 +61,9 @@ x-host-gateway: &host-gateway
   - "host.docker.internal:host-gateway"
 
 services:
-  # Idempotent: rewrites urn:baler: IRIs to urn:baler: once, then
-  # finds nothing to do on every later `up`. See src/baler/migrate.py.
+  # Idempotent: applies pending Postgres schema migrations (baler.schema,
+  # #194), and rewrites urn:timberdoodle: IRIs to urn:baler: once; on every
+  # later `up` both find nothing to do. See src/baler/migrate.py.
   migrate:
     build: .
     command: python -m baler.migrate
@@ -69,6 +71,8 @@ services:
     volumes:
       - .:/app
     depends_on:
+      postgres:
+        condition: service_healthy
       oxigraph:
         condition: service_started
     restart: "no"

@@ -31,6 +31,8 @@ cx-gl36 = ["pandas>=2.1"]
 # path and the text OpenAI-compatible models get. The OpenAI-compatible
 # client itself is plain requests, so there is no llm-openai extra.
 cx-spec = ["openpyxl>=3.1", "pdfplumber>=0.11"]
+# Building export (#193, baler.export): history as Parquet.
+export = ["pyarrow>=15"]
 # haystack_api.py (Project Haystack HTTP API). Built from source with
 # maturin until openhay ships wheels to PyPI - needs a Rust toolchain.
 haystack = ["openhay @ git+https://github.com/jacobnash/openhay@main#subdirectory=crates/openhay-py"]

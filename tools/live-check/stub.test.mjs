@@ -4,7 +4,7 @@
 // the summary, the artifact, and that the stub saw nothing but reads.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -36,13 +36,13 @@ function stub({ freshness, slowFaults = 0 }) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({ server, seen, base: `http://127.0.0.1:${server.address().port}` })));
 }
 
-function liveCheck(base, args, extraEnv = {}) {
+function liveCheck(base, args, extraEnv = {}, { dry = true } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "live-check-"));
   const envFile = path.join(dir, "test.env");
   writeFileSync(envFile, `BALER_TEST_URL=${base}\nBALER_TEST_EMAIL=op@example.test\nBALER_TEST_PASSWORD=not-a-real-secret\n`);
   const env = { ...process.env, BALER_TEST_ENV: envFile, LIVE_CHECK_OUT: dir, LIVE_CHECK_SHA: "0123456789abcdef", GITHUB_STEP_SUMMARY: path.join(dir, "summary.md"), ...extraEnv };
   for (const k of ["BALER_TEST_URL", "BALER_TEST_EMAIL", "BALER_TEST_PASSWORD"]) delete env[k];
-  return new Promise((resolve) => execFile(process.execPath, [path.join(import.meta.dirname, "live-check.mjs"), "--dry-run", ...args], { env },
+  return new Promise((resolve) => execFile(process.execPath, [path.join(import.meta.dirname, "live-check.mjs"), ...(dry ? ["--dry-run"] : []), ...args], { env },
     (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr, dir })));
 }
 
@@ -94,4 +94,31 @@ test("missing credentials: exits 2 naming the env file", async () => {
   const r = await liveCheck("", [], {});
   assert.equal(r.code, 2);
   assert.match(r.stderr, /BALER_TEST_URL.*test\.env/s);
+});
+
+test("superseded (#260): a newer deploy's marker stops a real run cleanly, with no gh call and the phase kept in the artifact", async () => {
+  const { server, base } = await stub({ freshness: "freshness-modbus-stopped.json", slowFaults: 650 });
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "live-check-sup-"));
+  // Any gh call would leave this file behind: a superseded run makes none.
+  const ghLog = path.join(tmp, "gh-called");
+  writeFileSync(path.join(tmp, "gh"), `#!/bin/sh\necho "$@" >> ${ghLog}\nexit 1\n`);
+  chmodSync(path.join(tmp, "gh"), 0o755);
+  writeFileSync(path.join(tmp, "marker"), "fedcba9876543210\n");
+  writeFileSync(path.join(tmp, "prev.json"), JSON.stringify({ phases: {} }));
+  try {
+    const env = { LIVE_CHECK_BUDGETS: "", LIVE_CHECK_MARKER: path.join(tmp, "marker"), LIVE_CHECK_PREVIOUS: path.join(tmp, "prev.json"),
+                  PATH: `${tmp}:${process.env.PATH}`, GITHUB_RUN_ID: "", LIVE_CHECK_REPO: "", GITHUB_OUTPUT: path.join(tmp, "out") };
+    const r = await liveCheck(base, ["--phase", "warm", "--only", "perf,dataflow"], env, { dry: false });
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /superseded: nash-srv now runs fedcba9, not 0123456 .*No issues changed/);
+    assert.ok(!existsSync(ghLog), existsSync(ghLog) ? readFileSync(ghLog, "utf8") : "");
+    assert.match(readFileSync(path.join(tmp, "out"), "utf8"), /^superseded=true$/m);
+    const art = JSON.parse(readFileSync(path.join(r.dir, "live-verify-0123456789ab.json"), "utf8"));
+    assert.match(art.phases.warm.run.superseded, /fedcba9/);
+    assert.ok(art.phases.warm.findings.length > 0, "the findings are kept, just not filed");
+    assert.deepEqual(art.phases.warm.actions, []);
+    assert.match(readFileSync(path.join(r.dir, "summary.md"), "utf8"), /\*\*Superseded:\*\*.*superseded, no issue changed/s);
+  } finally {
+    server.close();
+  }
 });

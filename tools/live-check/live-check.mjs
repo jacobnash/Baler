@@ -24,6 +24,7 @@ import { Guard } from "./guard.mjs";
 import { fetchPrevious } from "./previous.mjs";
 import { loadText } from "./perf.mjs";
 import { summaryMarkdown, writeArtifact } from "./report.mjs";
+import { check as supersedeCheck } from "./supersede.mjs";
 
 const MODULES = ["perf", "browser", "layout", "dataflow", "edges", "deploy"];
 const PHASE_MODULES = { cold: ["perf", "browser", "layout", "deploy"], warm: ["perf", "dataflow", "edges"], all: MODULES };
@@ -218,9 +219,20 @@ for (const f of findings) {
   const r = perfPrevious && f.kind === "perf-budget" && f.scope === perfPrevious.scope && perfPrevious.routes[String(f.key).split("|").slice(1).join("|")];
   if (r) f.rows = [...f.rows, ["Previous complete run", `${r.status}, median ${r.median_s} s, max ${r.max_s} s (${perfPrevious.at})`]];
 }
+// Superseded (#260, supersede.mjs): a newer deploy started or finished
+// while this phase ran, so what it saw is not this commit's install. No
+// issue changes, and previousPhase() won't take it for perf damping.
 let actions = [];
+run.superseded = null;
+if (!DRY) {
+  const s = await supersedeCheck();
+  if (s.error) console.log(`supersede check: couldn't read the run history (${s.error}); checked the deployed-commit marker only`);
+  if (s.superseded) run.superseded = s.reason;
+}
 if (DRY) console.log("\n--dry-run: no issues changed.");
+else if (run.superseded) console.log(`\nsuperseded: ${run.superseded}. No issues changed.`);
 else actions = sync(findings, ran, run, prev);
+if (!DRY && process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `superseded=${!!run.superseded}\nreason=${run.superseded || ""}\n`);
 
 const active = findings.filter((f) => !actions.some((a) => a.op === "skip" && a.f?.fp === f.fp));
 const errors = checks.filter((c) => c.status === "error");
@@ -241,5 +253,7 @@ for (const c of checks.filter((x) => x.status !== "pass")) console.log(`  ${c.st
 for (const f of findings) console.log(`  [${f.label}] ${f.title}`);
 if (perfHost) console.log(`perf (${perfHost.phase}) runner host ${perfHost.before.host}: ${loadText(perfHost.before)} before, ${loadText(perfHost.after)} after`);
 if (guard.blocked.size) console.log(`blocked writes (read-only guard): ${[...guard.blocked].join(", ")}`);
+if (run.superseded) console.log(`::notice title=verify superseded::${run.superseded}. This phase changed no issue and doesn't count for perf damping.`);
 console.log(`artifact: ${artifact}`);
-process.exitCode = active.length || errors.length ? 1 : 0;
+// A superseded phase ends cleanly: its findings describe a stale or in-flight install.
+process.exitCode = !run.superseded && (active.length || errors.length) ? 1 : 0;

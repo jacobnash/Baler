@@ -12,23 +12,15 @@ human clears it via enable_target().
 
 import psycopg
 
-from baler import ddl
+from baler import schema
 from baler.schemas import TargetHealth
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS derivation_target_health (
-    derivation_id         TEXT NOT NULL,
-    target_uri            TEXT NOT NULL,
-    consecutive_failures  INT NOT NULL DEFAULT 0,
-    disabled              BOOLEAN NOT NULL DEFAULT FALSE,
-    last_error            TEXT,
-    PRIMARY KEY (derivation_id, target_uri)
-);
-"""
+# Schema (derivation_target_health): baler/migrations/, from 0001 (#194).
+# Change it with a new migration there, not here.
 
 
 def ensure_schema(conn: psycopg.Connection) -> None:
-    ddl.run(conn, SCHEMA)
+    schema.ensure(conn)
 
 
 def record_target_failure(conn: psycopg.Connection, derivation_id: str, target_uri: str, error: str, disable_threshold: int = 5) -> bool:

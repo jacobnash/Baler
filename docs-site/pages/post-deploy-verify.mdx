@@ -16,15 +16,15 @@ edge-node reads (below). Its only writes are GitHub issues, the job summary and 
 | Step | What | Modules |
 |---|---|---|
 | `Verify (cold)` | right after the deploy finishes | `perf` (cold budgets), `browser`, `layout`, `deploy` |
-| `Let the install warm up` | `sleep 300` | |
+| `Let the install warm up` | five minutes, checking every 15 s that no newer deploy has started | |
 | `Verify (warm)` | five minutes later | `perf` (warm budgets), `dataflow`, `edges` |
 
 `perf` runs first in each phase, before the browser warms any cache. Data flow and edge nodes run in
 the warm phase: a deploy restarts the listener and reconnects nodes, and five minutes later the
 install should be settled.
 
-The job holds the `deploy-nash-srv` concurrency group (and the runner) for about eight minutes. A
-deploy queued meanwhile starts once it's done, so verification never measures a deploy in flight.
+The job runs in its own queue, so a deploy merged meanwhile doesn't wait for it; if that newer deploy
+starts, this verification stops as *superseded* (below) rather than measuring a deploy in flight.
 
 Each phase writes a table of every check (pass/fail and its numbers) to the job summary, and both
 phases go into the artifact `live-verify-<sha>` (`live-verify-<sha>.json`, the summaries and the
@@ -32,6 +32,66 @@ screenshots), kept 30 days, for comparing deploys.
 
 To run it by hand: Actions, Deploy, Run workflow. Tick **verify_only** to check what's live without
 deploying (there's no deploy window then, so the `deploy` check is skipped).
+
+## The deploy and verify queues
+
+The Deploy workflow has two concurrency groups, one per job (#260):
+
+| Job | Group | Queue rule |
+|---|---|---|
+| `deploy` | `deploy-nash-srv` | one at a time; a burst of merges deploys the running one and then only the newest waiting one (`cancel-in-progress: false`) |
+| `verify` | `verify-nash-srv` | one at a time (`cancel-in-progress: true`, as a backstop) |
+
+So a new deploy waits only for the previous **deploy** job, never for a verification (which used to
+hold the deploy queue for its whole run, sleep included: 12-18 minutes per deploy). Two deploys never
+run at once, and neither do two verifications.
+
+**Superseded.** A verification checks, before the cold phase, every 15 s during the five-minute wait,
+and again inside live-check right before it would touch issues, that it is still verifying the newest
+deploy (`tools/live-check/supersede.mjs`). It is superseded when
+
+- the marker the deploy wrapper writes at the end of every deploy, `/var/lib/baler/deployed-commit`
+  (root-owned, world-readable), names another commit than the one this run verifies, or
+- a newer Deploy run has a `deploy` job that is queued, running or finished successfully (a queued one
+  must still be queued on a second look 15 s later: a run whose deploy is skipped because CI failed
+  shows as queued for a moment). Newer runs whose deploy was skipped, failed or was dropped from the
+  queue don't count.
+
+A superseded verification stops cleanly (the job is green, with a step *Superseded by a newer deploy*
+and a notice saying why). It files, updates and closes **no** issue. A phase it finished stays in the
+`live-verify-<sha>` artifact, marked `phases.<phase>.run.superseded`, and perf damping skips it: it
+counts neither for nor against the two-consecutive-breaches rule. The newest deploy of a burst is
+never superseded, so it always gets the complete cold and warm verification. If the run history can't
+be read (GitHub API down), the check falls back to the marker alone and says so in a warning, so a
+hiccup can't suppress the last deploy's verification. A `verify_only` run verifies whatever the
+marker says is live when it starts.
+
+**Runners.** Both jobs run on nash-srv's self-hosted runners, and a runner runs one job at a time. The
+repo variable `BALER_VERIFY_RUNNER` names the label the verify job asks for:
+
+- **Unset (default): one shared runner** (`nash-srv-baler`, label `baler`). A verification still
+  occupies the only runner, but it gives it up as soon as a newer deploy is queued: the wait polls
+  every 15 s (a queued deploy is confirmed by a second look), so the deploy starts within about 30-45 s, except while a cold phase is running (about
+  2.5 minutes), which finishes first.
+- **`baler-verify`: a second runner instance** (`nash-srv-baler-verify`, label `baler-verify` and not
+  `baler`, so deploys never land on it). Verification runs beside the deploy runner, so a deploy
+  never waits on it at all, and the supersede check stops a verification as soon as the newer deploy
+  starts. It runs as the same `github-runner` user with its own workspace. That adds no new
+  privilege, but it isn't less privileged either: that user has no docker access, and its existing
+  NOPASSWD sudoers rules (the deploy wrapper, and any others on the host) apply to jobs on this
+  runner too. Treat it with the same trust as the deploy runner.
+
+To set up the second runner, once, on nash-srv (needs sudo and a registration token from the repo's
+Settings, Actions, Runners, New self-hosted runner, valid about an hour):
+
+```bash
+sudo bash ~github-runner/actions-runner-baler/_work/Baler/Baler/deploy/nash-srv/setup-runner.sh <RUNNER_REGISTRATION_TOKEN>
+gh variable set BALER_VERIFY_RUNNER --body baler-verify -R jacobnash/Baler   # anywhere with gh
+```
+
+The script is idempotent: everything already installed is skipped, and step 8 adds only the verify
+runner. Set the variable only after the runner shows as online, or verify jobs queue with no runner to
+take them. To go back to one runner, delete the variable.
 
 ## The checks, what a failure means, and what to do
 
@@ -266,6 +326,9 @@ previous run of the perf phase is read from the repo's newest `live-verify-*` ar
 | `LIVE_CHECK_EXPECTED_EDGES` | `expected-edges.json` | an alternative expected-edges file |
 | `LIVE_CHECK_OUT` | `tools/live-check/out` | where the artifact, summaries and screenshots go |
 | `LIVE_CHECK_SHA` | `git rev-parse HEAD` | the commit named in the artifact and issues |
+| `LIVE_CHECK_EXPECT_SHA` | `LIVE_CHECK_SHA` | the commit the deployed-commit marker must name, else the run is superseded (#260) |
+| `LIVE_CHECK_MARKER` | `/var/lib/baler/deployed-commit` | the deployed-commit marker; a missing file skips that half of the supersede check |
+| `GITHUB_RUN_ID` + `LIVE_CHECK_REPO` | set in Actions | the run-history half of the supersede check (skipped without them, so a local run is never superseded) |
 | `LIVE_CHECK_PREVIOUS` | the newest `live-verify-*` artifact | a `live-verify-<sha>.json` to use as the previous run for perf damping (also read in a dry run) |
 | `LIVE_CHECK_DEPLOY_START` / `_END` | none | the deploy window, like `--deploy-start` / `--deploy-end` |
 | `LIVE_CHECK_SLOW_MS`, `LIVE_CHECK_SETTLE_MS`, `LIVE_CHECK_PROJECT`, `LIVE_CHECK_REPO`, `CHROME_PATH` | | see [Live check](/live-check) |

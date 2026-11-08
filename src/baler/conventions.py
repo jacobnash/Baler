@@ -46,7 +46,7 @@ from datetime import datetime, timezone
 
 from rdflib import RDF, SKOS, Literal, URIRef
 
-from baler import brick_vocab, ddl
+from baler import brick_vocab, schema
 from baler.store import BRICK, PROJ, TD
 
 ROLES = ("equip_type", "equip_id", "point", "ignore")
@@ -58,19 +58,8 @@ _ROLE_RE = {
 }
 _FIELD = re.compile(r"\{(\w+):([^{}]*)\}")
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS naming_conventions (
-    id           TEXT PRIMARY KEY,
-    name         TEXT NOT NULL,
-    scope_prefix TEXT NOT NULL,          -- the topic prefix it applies under ('' = everywhere visible)
-    templates    JSONB NOT NULL,         -- annotation strings, tried in order
-    point_codes  JSONB NOT NULL,         -- {code: Brick class}
-    equip_codes  JSONB NOT NULL,
-    created_by   TEXT,
-    created_at   TIMESTAMPTZ NOT NULL,
-    updated_at   TIMESTAMPTZ NOT NULL
-);
-"""
+# Schema (naming_conventions): baler/migrations/, from 0001 (#194). Change it
+# with a new migration there, not here.
 
 
 class ConventionError(ValueError):
@@ -300,7 +289,7 @@ def brick_typed(store) -> set[str]:
 
 
 def ensure_schema(conn) -> None:
-    ddl.run(conn, SCHEMA)
+    schema.ensure(conn)
 
 
 def save(conn, conv: Convention, by: str | None) -> Convention:

@@ -40,29 +40,14 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from baler import brick_vocab, ddl
+from baler import brick_vocab, schema
 
 K = 5
 MIN_SIMILARITY = 0.6  # chosen by a sweep on the mock hospital (0.5/0.6/0.7): see docs-site/pages/memory.mdx
 MIN_AGREE = 2
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS mapping_examples (
-    id          BIGSERIAL PRIMARY KEY,
-    org_id      TEXT,                 -- NULL on a single-tenant install (no site prefixes)
-    site_id     TEXT,
-    entity_uri  TEXT NOT NULL,
-    kind        TEXT NOT NULL,        -- point | equip
-    tokens      TEXT[] NOT NULL,
-    evidence    JSONB NOT NULL,
-    brick_class TEXT NOT NULL,
-    source      TEXT NOT NULL,        -- review (a person in the queue)
-    created_by  TEXT,
-    created_at  TIMESTAMPTZ NOT NULL
-);
-CREATE INDEX IF NOT EXISTS mapping_examples_org ON mapping_examples (org_id, kind);
-CREATE UNIQUE INDEX IF NOT EXISTS mapping_examples_entity ON mapping_examples (entity_uri, source);
-"""
+# Schema (mapping_examples): baler/migrations/, from 0001 (#194). Change it
+# with a new migration there, not here.
 
 _SPLIT = re.compile(r"[^A-Za-z0-9]+")
 _WORDS = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
@@ -189,7 +174,7 @@ class Memory:
 
 
 def ensure_schema(conn) -> None:
-    ddl.run(conn, SCHEMA)
+    schema.ensure(conn)
 
 
 def add_examples(conn, rows: list[dict], brick_class: str, by: str | None) -> int:

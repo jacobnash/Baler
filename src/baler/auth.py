@@ -19,58 +19,11 @@ from datetime import datetime, timezone
 import jwt as pyjwt
 import psycopg
 
-from baler import ddl, json_store, scope
+from baler import json_store, schema, scope
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS orgs (
-    id         TEXT PRIMARY KEY,
-    name       TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL
-);
-CREATE TABLE IF NOT EXISTS sites (
-    id         TEXT PRIMARY KEY,
-    org_id     TEXT NOT NULL REFERENCES orgs(id),
-    name       TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL
-);
-CREATE TABLE IF NOT EXISTS users (
-    id            TEXT PRIMARY KEY,
-    org_id        TEXT NOT NULL REFERENCES orgs(id),
-    email         TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    role          TEXT NOT NULL,   -- admin | operator | viewer
-    created_at    TIMESTAMPTZ NOT NULL
-);
-CREATE TABLE IF NOT EXISTS user_sites (
-    user_id TEXT NOT NULL REFERENCES users(id),
-    site_id TEXT NOT NULL REFERENCES sites(id),
-    PRIMARY KEY (user_id, site_id)
-);
-CREATE TABLE IF NOT EXISTS api_keys (
-    id            TEXT PRIMARY KEY,
-    org_id        TEXT NOT NULL REFERENCES orgs(id),
-    site_ids      TEXT[],          -- NULL/empty = whole org
-    role          TEXT NOT NULL,   -- admin | operator | viewer | service
-    jti           TEXT NOT NULL UNIQUE,
-    expires_at    TIMESTAMPTZ,
-    revoked_at    TIMESTAMPTZ,
-    created_at    TIMESTAMPTZ NOT NULL,
-    last_used_at  TIMESTAMPTZ
-);
-CREATE TABLE IF NOT EXISTS revoked_tokens (
-    jti        TEXT PRIMARY KEY,
-    revoked_at TIMESTAMPTZ NOT NULL
-);
--- Set for revoked *session* tokens (Haystack close), so the denylist can
--- drop them once they'd have expired anyway. NULL = keep (API keys).
-ALTER TABLE revoked_tokens ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
--- Set while a user is disabled (Baler#17): they can't log in, by password
--- or Haystack SCRAM, until an admin enables them again.
-ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ;
--- Baler#121: how the person signs ("Jacob Nash"), e.g. on a Cx waiver;
--- NULL when unset (the email stands in).
-ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT;
-"""
+# Schema (orgs, sites, users, user_sites, api_keys, revoked_tokens):
+# baler/migrations/, from 0001 (#194). Change it with a new migration there,
+# not here.
 
 SESSION_TTL_SECONDS = 12 * 3600
 
@@ -81,7 +34,7 @@ _PBKDF2_ITERATIONS = 600_000
 
 
 def ensure_schema(conn: psycopg.Connection) -> None:
-    ddl.run(conn, SCHEMA, scope.SCHEMA)
+    schema.ensure(conn)
 
 
 # --- passwords ---

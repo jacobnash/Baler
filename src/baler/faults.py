@@ -13,44 +13,15 @@ from datetime import datetime
 
 import psycopg
 
-from baler import ddl
+from baler import schema
 from baler.schemas import WebhookHealth
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS faults (
-    id          BIGSERIAL PRIMARY KEY,
-    rule_id     TEXT NOT NULL,
-    point_uri   TEXT NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'open',
-    started_at  TIMESTAMPTZ NOT NULL,
-    ended_at    TIMESTAMPTZ,
-    detail      JSONB
-);
-CREATE UNIQUE INDEX IF NOT EXISTS faults_open_unique
-    ON faults (rule_id, point_uri) WHERE ended_at IS NULL;
-
--- Alarm-console fields (ack/snooze/severity), added after the table
--- above already shipped - ADD COLUMN IF NOT EXISTS instead of a separate
--- migration file/framework, same idempotent-DDL style as every other
--- ensure_schema() in this repo.
-ALTER TABLE faults ADD COLUMN IF NOT EXISTS severity TEXT NOT NULL DEFAULT 'warning';
-ALTER TABLE faults ADD COLUMN IF NOT EXISTS acked_at TIMESTAMPTZ;
-ALTER TABLE faults ADD COLUMN IF NOT EXISTS acked_by TEXT;
-ALTER TABLE faults ADD COLUMN IF NOT EXISTS snoozed_until TIMESTAMPTZ;
--- GET /faults' order (newest first), which it pages through.
-CREATE INDEX IF NOT EXISTS faults_started ON faults (started_at DESC, id DESC);
-
-CREATE TABLE IF NOT EXISTS webhook_health (
-    webhook_id            TEXT PRIMARY KEY,
-    consecutive_failures  INT NOT NULL DEFAULT 0,
-    disabled              BOOLEAN NOT NULL DEFAULT FALSE,
-    last_error            TEXT
-);
-"""
+# Schema (faults, webhook_health): baler/migrations/, from 0001 (#194). Change
+# it with a new migration there, not here.
 
 
 def ensure_schema(conn: psycopg.Connection) -> None:
-    ddl.run(conn, SCHEMA)
+    schema.ensure(conn)
 
 
 def open_fault(

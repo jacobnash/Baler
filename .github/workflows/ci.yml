@@ -37,7 +37,7 @@ jobs:
       # Without openhay tests/test_haystack_api.py skips; without the
       # cx-gl36 extra (pandas) tests/test_commissioning_gl36.py does, and
       # without cx-spec (pdfplumber) the PDF tests in test_commissioning_llm.py.
-      - run: pip install -e ".[dev,validate,cx-gl36,cx-spec]"
+      - run: pip install -e ".[dev,validate,cx-gl36,cx-spec,export]"
       # parallel across the runner's cores: ~3 min serial (#27)
       - run: pytest -m "not integration" -n auto
       # Mapping eval (#180): rules only, no model key, a few seconds. Prints
@@ -69,7 +69,7 @@ jobs:
       - if: steps.openhay-wheel.outputs.cache-hit != 'true'
         run: pip wheel --no-deps -w openhay-wheel "openhay @ git+https://github.com/jacobnash/openhay@${{ steps.openhay.outputs.sha }}#subdirectory=crates/openhay-py"
       - run: pip install openhay-wheel/openhay-*.whl
-      - run: pip install -e ".[dev,validate,cx-gl36,cx-spec]"
+      - run: pip install -e ".[dev,validate,cx-gl36,cx-spec,export]"
       - run: openapi-spec-validator openapi.yaml fault-api-openapi.yaml derivation-api-openapi.yaml validate-api-openapi.yaml auth-api-openapi.yaml haystack-api-openapi.yaml commissioning-api-openapi.yaml
       # Both blocking (PLAN.md Guardrails): ruff went 63 -> 0 and mypy
       # 19 -> 0 against the rule sets in ruff.toml/pyproject.toml, see
@@ -132,12 +132,17 @@ jobs:
       BALER_ALLOW_PRIVATE_WEBHOOKS: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history and tags: tests/test_schema_upgrade.py builds a
+          # database with each release's own code (git archive <tag>) and
+          # upgrades it to this commit (#194).
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
-      - run: pip install -e ".[dev,validate]"
+      - run: pip install -e ".[dev,validate,export]"
       # docker-container builder + Actions cache token: the type=gha layer
       # cache in .github/ci/build-app-image.sh needs both (#27)
       - uses: docker/setup-buildx-action@v3

@@ -40,7 +40,7 @@ import statistics
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 
-from baler import ddl
+from baler import schema
 
 FLAGS = ("ok", "fault", "overridden", "out_of_service", "out_of_range", "spike", "unit_suspect")
 DEVICE_FLAGS = ("fault", "overridden", "out_of_service")
@@ -48,20 +48,8 @@ DEVICE_FLAGS = ("fault", "overridden", "out_of_service")
 # A sample that consumers treat as good. NULL is the stored form of ok.
 GOOD_SQL = "(quality IS NULL OR quality = 'ok')"
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS quality_suggestions (
-    id         BIGSERIAL PRIMARY KEY,
-    point_uri  TEXT NOT NULL,
-    kind       TEXT NOT NULL,            -- unit
-    current    TEXT,
-    suggested  TEXT NOT NULL,
-    evidence   JSONB NOT NULL,
-    status     TEXT NOT NULL,            -- open | accepted | dismissed
-    created_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL
-);
-CREATE UNIQUE INDEX IF NOT EXISTS quality_suggestions_open ON quality_suggestions (point_uri, kind) WHERE status = 'open';
-"""
+# Schema (quality_suggestions): baler/migrations/, from 0001 (#194). Change it
+# with a new migration there, not here.
 
 
 def is_good(flag: str | None) -> bool:
@@ -213,7 +201,7 @@ LOOKBACK = timedelta(hours=1)
 
 
 def ensure_schema(conn) -> None:
-    ddl.run(conn, SCHEMA)
+    schema.ensure(conn)
 
 
 def point_meta(store) -> dict[str, tuple[str, str]]:

@@ -22,12 +22,11 @@ on:
 permissions:
   contents: read
 
-# One deploy at a time, and only the newest waiting one: a burst of pushes
-# deploys once (the running deploy finishes; older queued ones are dropped
-# in favour of the latest), instead of one full deploy per commit (#23).
-concurrency:
-  group: deploy-nash-srv
-  cancel-in-progress: false
+# Two queues, one per job (#260): `deploy-nash-srv` for the deploy job and
+# `verify-nash-srv` for the verify job, so a new deploy waits only on the
+# previous *deploy*, never on a previous verify (which sleeps 5 minutes before
+# its warm phase). See docs-site/pages/post-deploy-verify.mdx, "The deploy
+# and verify queues".
 
 jobs:
   deploy:
@@ -38,6 +37,12 @@ jobs:
     # only lets collaborators with write access trigger it.
     if: (github.event_name == 'workflow_dispatch' && !inputs.verify_only) || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: [self-hosted, nash-srv, baler]
+    # One deploy at a time, and only the newest waiting one: a burst of pushes
+    # deploys once (the running deploy finishes; older queued ones are dropped
+    # in favour of the latest), instead of one full deploy per commit (#23).
+    concurrency:
+      group: deploy-nash-srv
+      cancel-in-progress: false
     # The deploy window, for verify's "no 5xx during the deploy" check (#178).
     outputs:
       started_at: ${{ steps.started.outputs.at }}
@@ -102,15 +107,32 @@ jobs:
   # login and named edge-node reads leave the runner). Report-only: it never
   # rolls back or blocks anything, it turns its own job red and files,
   # updates or closes `live-check` issues. Cold phase right after the deploy,
-  # warm phase 5 minutes later. It holds the deploy-nash-srv concurrency
-  # group (and the runner) for about 8 minutes, so a deploy queued meanwhile
-  # starts after it rather than being verified mid-flight.
+  # warm phase 5 minutes later.
+  #
+  # Its own queue (#260): verify-nash-srv, so it never holds up the next
+  # deploy. A newer deploy that is queued, running or done *supersedes* it
+  # (tools/live-check/supersede.mjs): it stops cleanly, files or closes no
+  # issue, keeps the phase it finished in the artifact, and doesn't count for
+  # perf damping. The newest deploy of a burst is never superseded, so it
+  # always gets the complete cold + warm verification. cancel-in-progress is
+  # only a backstop (the supersede check normally stops it first): a newer
+  # verify can't start until its own deploy has finished, and by then this
+  # one has seen that deploy.
+  #
+  # Runner: the repo variable BALER_VERIFY_RUNNER names the runner label to
+  # use. Set to baler-verify once the second runner instance is installed
+  # (deploy/nash-srv/setup-runner.sh, step 8), verify runs beside the
+  # deploy runner. Unset, it shares the deploy runner, and a superseded
+  # verify gives the runner up as soon as the newer deploy is queued.
   verify:
     needs: deploy
     if: >-
       always() && (needs.deploy.result == 'success' ||
       (github.event_name == 'workflow_dispatch' && inputs.verify_only && needs.deploy.result == 'skipped'))
-    runs-on: [self-hosted, nash-srv, baler]
+    runs-on: ${{ fromJSON(format('["self-hosted","nash-srv","{0}"]', vars.BALER_VERIFY_RUNNER || 'baler')) }}
+    concurrency:
+      group: verify-nash-srv
+      cancel-in-progress: true
     timeout-minutes: 30
     permissions:
       contents: read
@@ -128,6 +150,9 @@ jobs:
       LIVE_CHECK_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
       DEPLOY_START: ${{ needs.deploy.outputs.started_at }}
       DEPLOY_END: ${{ needs.deploy.outputs.finished_at }}
+      # This run's deploy commit; empty for verify_only.
+      DEPLOYED_SHA: ${{ github.event.workflow_run.head_sha || (!inputs.verify_only && github.sha) || '' }}
+      LIVE_CHECK_MARKER: /var/lib/baler/deployed-commit
     steps:
       # Chrome needs writable config/cache dirs. ~github-runner/.config is
       # root-owned on nash-srv (it holds the credentials file above), so
@@ -156,13 +181,30 @@ jobs:
           fi
           echo "credentials file present: $f"
 
+      # The commit this run verifies, for the supersede check
+      # (supersede.mjs): this run's deploy, or for verify_only whatever is
+      # live when it starts. The marker is written by the deploy wrapper,
+      # root-owned but world-readable.
+      - name: Note the commit this run verifies
+        run: |
+          expect="$DEPLOYED_SHA"
+          [ -n "$expect" ] || expect=$(cat "$LIVE_CHECK_MARKER" 2>/dev/null || true)
+          echo "verifying ${expect:-whatever is live (no $LIVE_CHECK_MARKER)}"
+          echo "LIVE_CHECK_EXPECT_SHA=$expect" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
         if: steps.creds.outcome == 'success'
         with:
           ref: ${{ env.LIVE_CHECK_SHA }}
 
-      - name: Install live-check
+      # A newer deploy already queued, running or done: stop before measuring.
+      - name: Check this is still the newest deploy
+        id: pre
         if: steps.creds.outcome == 'success'
+        run: node tools/live-check/supersede.mjs
+
+      - name: Install live-check
+        if: steps.creds.outcome == 'success' && steps.pre.outputs.superseded != 'true'
         working-directory: tools/live-check
         run: |
           npm ci
@@ -171,27 +213,41 @@ jobs:
           # runner user's ~/.cache, so this is a no-op after the first run.
           command -v google-chrome >/dev/null || npx --no-install playwright-core install chromium
 
+      # live-check checks again before touching issues (step output superseded).
       - name: Verify (cold)
         id: cold
-        if: steps.creds.outcome == 'success'
+        if: steps.creds.outcome == 'success' && steps.pre.outputs.superseded != 'true'
         working-directory: tools/live-check
         run: |
           window=()
           if [ -n "$DEPLOY_START" ] && [ -n "$DEPLOY_END" ]; then window=(--deploy-start "$DEPLOY_START" --deploy-end "$DEPLOY_END"); fi
           node live-check.mjs --phase cold "${window[@]}"
 
+      # Five minutes, polling every 15 s: stops early (superseded) as soon as a
+      # newer deploy is queued or running, which also frees a shared runner.
       - name: Let the install warm up
-        if: ${{ !cancelled() && steps.creds.outcome == 'success' }}
-        run: sleep 300
+        id: wait
+        if: ${{ !cancelled() && steps.creds.outcome == 'success' && steps.pre.outputs.superseded != 'true' && steps.cold.outputs.superseded != 'true' }}
+        run: node tools/live-check/supersede.mjs --wait 300 --interval 15
 
       - name: Verify (warm)
         id: warm
-        if: ${{ !cancelled() && steps.creds.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.creds.outcome == 'success' && steps.pre.outputs.superseded != 'true' && steps.cold.outputs.superseded != 'true' && steps.wait.outputs.superseded != 'true' }}
         working-directory: tools/live-check
         run: node live-check.mjs --phase warm
 
+      # A visible step, so the run's step list says why it stopped early.
+      - name: Superseded by a newer deploy
+        if: ${{ steps.pre.outputs.superseded == 'true' || steps.cold.outputs.superseded == 'true' || steps.wait.outputs.superseded == 'true' || steps.warm.outputs.superseded == 'true' }}
+        env:
+          REASON: ${{ steps.pre.outputs.reason || steps.cold.outputs.reason || steps.wait.outputs.reason || steps.warm.outputs.reason }}
+        run: |
+          echo "Superseded: $REASON."
+          echo "No issue was filed or closed, and this run doesn't count for perf damping. Any phase it finished is in the artifact."
+
+      # always(): a cold result is kept even if a newer verify cancels this one.
       - name: Upload the verification artifact
-        if: ${{ !cancelled() && steps.creds.outcome == 'success' }}
+        if: ${{ always() && steps.creds.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: live-verify-${{ env.LIVE_CHECK_SHA }}
@@ -200,3 +256,5 @@ jobs:
             tools/live-check/out/summary-*.md
             tools/live-check/out/*.png
           retention-days: 30
+          # Superseded before the cold phase: nothing to upload.
+          if-no-files-found: ignore

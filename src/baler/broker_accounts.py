@@ -29,19 +29,10 @@ import threading
 import uuid
 from datetime import datetime, timezone
 
-from baler import ddl, json_store
+from baler import json_store, schema
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS broker_accounts (
-    id          TEXT PRIMARY KEY,
-    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    site_id     TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
-    username    TEXT NOT NULL UNIQUE,
-    description TEXT,
-    created_at  TIMESTAMPTZ NOT NULL,
-    rotated_at  TIMESTAMPTZ
-);
-"""
+# Schema (broker_accounts): baler/migrations/, from 0001 (#194). Change it
+# with a new migration there, not here.
 
 CONTROL_TOPIC = "$CONTROL/dynamic-security/v1"
 # password_file accounts (MOSQUITTO_USERS) and dynsec init's unused admin
@@ -51,7 +42,7 @@ _USERNAME = re.compile(r"[a-z0-9][a-z0-9._-]{2,62}")
 
 
 def ensure_schema(conn) -> None:
-    ddl.run(conn, SCHEMA)
+    schema.ensure(conn)
 
 
 class BrokerError(RuntimeError):

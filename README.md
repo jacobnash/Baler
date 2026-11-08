@@ -346,6 +346,21 @@ usage or clean the directory out yourself if that becomes a problem. See
 [`docs-site/pages/backups.mdx`](docs-site/pages/backups.mdx) for the full
 picture.
 
+### Building export
+
+A backup is for restoring Baler. `python -m baler.export` is for leaving it,
+archiving, or handing a building over: one building or site as Parquet history
+(one file per point-month), the graph as Turtle, Cx records and faults as
+JSON/CSV, a documents manifest by sha256, and a README that explains it
+without Baler (#193). `verify` checks it, `import` loads it into a fresh
+install. Needs the `export` extra (pyarrow). See
+[`docs-site/pages/building-export.mdx`](docs-site/pages/building-export.mdx).
+
+```bash
+python -m baler.export export /srv/exports/building-a --site <site id>
+python -m baler.export verify /srv/exports/building-a --against-source
+```
+
 ## Tests
 
 ```bash
