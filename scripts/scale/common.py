@@ -24,9 +24,13 @@ REPO = HERE.parent.parent
 
 # ---------------------------------------------------------------- the stack
 
-PROJECT = "scale"
-VOLUME_PREFIX = "scale"
-ENV_FILE = HERE / "scale.env"
+# SCALE_PROJECT runs a second, separately named scale stack beside another
+# (two agents or two branches on one host): its project, volume prefix and
+# env file (scripts/scale/<project>.env) all follow it. It must still
+# contain "scale" (the guard).
+PROJECT = os.environ.get("SCALE_PROJECT", "").strip() or "scale"
+VOLUME_PREFIX = PROJECT
+ENV_FILE = HERE / f"{PROJECT}.env"
 OVERRIDE = HERE / "compose.scale.yml"
 RESULTS = HERE / "results"
 

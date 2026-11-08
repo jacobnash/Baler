@@ -162,6 +162,79 @@ from firing, so a fault storm doesn't distort the run.
 the number of readings the broker acknowledged that never reached `point_history`. Batching
 and group commit are fine; losing acknowledged readings is not.
 
+## Long soak: disk and compression (#245)
+
+The ladder's steps are 15 minutes long, too short for a compression cycle. `ladder.py soak` holds
+one point count for hours and answers [#245](https://github.com/jacobnash/Baler/issues/245)'s
+question: once compression keeps up, does `point_history`'s disk stop growing at the raw rate, and
+do lag, reads, the continuous aggregates and late writes stay fine through compression cycles?
+
+Set the chunking under test in the scale env file **before** `up`, so every service agrees on it
+(each keeps the policy in step with its own environment at start, see
+[History compression](/history-compression#chunk-interval-and-compress_after-at-high-ingest-rates)):
+
+```sh
+# scripts/scale/scale.env (or <SCALE_PROJECT>.env)
+BALER_HISTORY_CHUNK_INTERVAL=1 hour
+BALER_HISTORY_COMPRESS_AFTER=3 hours
+```
+
+`soak` refuses to run on 7-day chunks unless `--allow-default-chunks` is given. It then runs the
+generator at `--points` for `--duration` seconds (default 6 h) and records:
+
+| Every | What | From |
+|---|---|---|
+| `--sample-every` (30 s) | disk: `point_history` total, **hot** (uncompressed chunks) and compressed bytes and chunk counts, before/after compression bytes, WAL, database | `chunks_detailed_size`, `hypertable_compression_stats`, `pg_ls_waldir` |
+| | the oldest uncompressed chunk's age past its end, and the **backlog** (chunks old enough to compress that aren't yet) | `timescaledb_information.chunks` |
+| | each compression run: duration, chunks, rows (the chunks' inserts while hot), **rows/s** | `job_stats`, `pg_stat_user_tables` |
+| | whether a compression run is in progress (polled every 2 s) | `pg_stat_activity` |
+| | the 5m/1h aggregates' watermark age; canary lag; restarts | catalog, canary, `docker inspect` |
+| `--probe-every` (600 s) | every read probe in `budgets.json` plus its `soak_probes`: history over the last hour and across the hot/compressed boundary, `hisRead(pastWeek)` for 100 and 1,000 points. Rounds that overlapped a compression run are marked | gateway |
+| `--late-every` (1800 s) | late data into the newest compressed chunk, over MQTT at the soak's own rate: every point's reading there **replayed** (same ts, new value: a spool or retained replay) and a new reading **backfilled** 1.23 s after it (Windrow's trend backfill). Then each must be stored exactly once, with the new value | generator account |
+
+At the end it compares stored with acknowledged readings over the soak (minus its own backfill),
+checks `point_history_5m` against the raw fold over the newest compressed hour, and writes
+`results/<run>-soak.json`. `summary` holds the numbers; `status`/`reasons` the verdict.
+
+**Pass** needs all of these (`soak.evaluate_soak`, tested in `tests/test_scale_soak.py`). The
+steady phase starts after `compress_after` + 2 chunks + one schedule:
+
+- **Hot window bounded:** hot bytes in the second half of the steady phase at most 1.25× the
+  first half's; no chunk uncompressed longer past its end than `compress_after` + chunk + 2 ×
+  schedule + the longest run; the backlog not growing.
+- **Disk grows at the compressed rate:** total bytes per stored row, between two samples a whole
+  number of chunk intervals apart (the same point of the hot sawtooth), at most 2× the measured
+  compressed bytes per row.
+- **Compression keeps up:** no failed run. `compression_margin` reports median compression rows/s
+  over ingest rows/s (one background worker).
+- **Ingest:** ≥ 99% stored, no lost canaries, p95 lag under 30 s overall and in the samples taken
+  during compression, no growing backlog, no restarts.
+- **Reads:** every probe round in budget, and at least one round during a compression run
+  (otherwise `inconclusive`).
+- **Aggregates:** the 5-minute aggregate equals the raw fold over a compressed hour; watermarks no
+  further behind than their offset plus two schedules (20 min for 5m, 2 h 10 min for 1h).
+- **Late data:** at least one late round, every replay and backfill stored once.
+- At least 2 chunk intervals and 2 compression cycles in the steady phase, or the verdict is
+  `inconclusive: soak too short`.
+
+On nash-srv, the real one (6 h at 100k points, after `init`):
+
+```sh
+cd ~/baler-scale && git pull
+PY=~/.venv-scale/bin/python
+$PY -m baler.history_chunks recommend --points 100000 --pg-memory 6g   # the scale stack's postgres cap
+printf 'BALER_HISTORY_CHUNK_INTERVAL=1 hour\nBALER_HISTORY_COMPRESS_AFTER=3 hours\n' >> scripts/scale/scale.env
+$PY scripts/scale/ladder.py down && $PY scripts/scale/ladder.py up
+nohup $PY scripts/scale/ladder.py soak --no-up --points 100000 --duration 21600 --procs 4 \
+  --sample-every 60 --probe-every 900 --late-every 3600 > ~/scale-soak.log 2>&1 &
+tail -f ~/scale-soak.log
+```
+
+Disk at 100k: about 18 GB raw per 1-hour chunk and a hot window up to about 80 GB, plus about
+9 GB/day compressed at 5 B/row. Keep `--min-free-gb` (default 5) where it is; the soak stops
+(`inconclusive`) rather than fill the disk. Raise `SCALE_MEM_POSTGRES` if the box has the
+memory: the sizing rule wants a chunk in 25% of it.
+
 ## Results
 
 Fill this in from `ladder.py table`. Always note nproc, because a 1-CPU nash-srv run and a
