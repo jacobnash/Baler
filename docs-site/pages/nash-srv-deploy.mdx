@@ -15,22 +15,30 @@ runner runs as a dedicated `github-runner` OS user that is **not** in the
 `docker` group (docker-group membership is root-equivalent host access, and
 this box runs unrelated projects for other people) - it can only touch
 baler at all via one root-owned, no-argument wrapper script it's
-allowed to `sudo` through a sudoers rule scoped to exactly that script:
+allowed to `sudo` through a sudoers rule scoped to exactly that script
+(the same user may hold rules for other projects' wrappers on this shared
+box; Baler's own rule is just this one):
 
 ```
 github-runner ALL=(root) NOPASSWD: /usr/local/sbin/baler-deploy.sh
 ```
 
-That wrapper does `docker compose -f docker-compose.yml -f
-deploy/nash-srv/docker-compose.override.yml --env-file
-~/.config/baler/nash-srv.env {pull,up -d --build,restart gateway}` -
-the override file rebinds every port the base compose file publishes
+That wrapper (written by `deploy/nash-srv/setup-runner.sh`) runs `docker
+compose -f docker-compose.yml -f deploy/nash-srv/docker-compose.override.yml
+--env-file ~/.config/baler/nash-srv.env` as a **rolling deploy** (#166): it
+builds first, then replaces the HTTP APIs one at a time, each with `up -d
+--no-deps --wait`, so every route keeps answering while its backend is
+swapped. The rest of the stack (infra, `migrate`, daemons) comes up after,
+and the gateway is never restarted for a backend change; it is only
+reloaded (`nginx -t && nginx -s reload`) when `gateway/` itself changed. The
+override file rebinds every port the base compose file publishes
 (`postgres`, `oxigraph`, `mosquitto`, `jaeger`, `grafana`, `gateway`) to
 `127.0.0.1`, matching how every other project on this box is bound. Caddy is
 the only thing listening on `0.0.0.0:80`/`:443`; nothing else is reachable
-from outside the box except SSH. The `restart gateway` step exists because
-gateway caches upstream addresses at its own startup - see the main
-CLAUDE.md gotcha.
+from outside the box except SSH. No gateway restart is needed because its
+upstreams re-resolve at runtime (#108, see the main CLAUDE.md gotcha). The
+first deploy on this wrapper (2d863dd, #258) saw no gateway 5xx during the
+deploy window (#229).
 
 `postgres-data`/`oxigraph-data` are named Docker volumes the deploy never
 touches (no `down -v` anywhere in the pipeline), so the demo/e2e data your
