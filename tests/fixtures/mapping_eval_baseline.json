@@ -60,6 +60,8 @@
     },
     "review": 88,
     "review_pct": 100.0,
+    "review_truth_in_top1": 0.773,
+    "review_truth_in_top3": 0.773,
     "steps": {
       "model": {
         "accuracy": null,
@@ -90,6 +92,7 @@
   },
   "llm_calls": 0,
   "mode": "rules only",
+  "patterns": 75,
   "points": {
     "accuracy": 0.484,
     "auto_accepted": 340,
@@ -270,6 +273,8 @@
     },
     "review": 152,
     "review_pct": 30.9,
+    "review_truth_in_top1": 0.307,
+    "review_truth_in_top3": 0.827,
     "steps": {
       "model": {
         "accuracy": null,

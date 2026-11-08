@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 
 import pytest
 from rdflib import RDF, RDFS, SKOS, Graph, Literal, Namespace
@@ -188,122 +187,10 @@ def test_classify_point_prefers_most_specific_rule_when_multiple_subsets_match()
     assert (outcome, matched) == ("direct", "Zone_Air_Temperature_Sensor")
 
 
-@dataclass
-class _FakeLLMResult:
-    brick_class: str
-    confidence: float
-    reasoning: str
-
-
-def test_classify_point_with_fallback_never_calls_llm_on_a_direct_match():
-    store = Store()
-    point_uri = ingest_tags(store, "test-mapping:fallback-direct", {"zone": True, "air": True, "temp": True, "sensor": True})
-
-    def explode(*args, **kwargs):
-        raise AssertionError("llm_classify must not be called on a direct rule match")
-
-    outcome, matched = classify_point_with_fallback(store, point_uri, rules=RULES, llm_classify=explode)
-
-    assert (outcome, matched) == ("direct", "Zone_Air_Temperature_Sensor")
-
-
-def test_classify_point_with_fallback_none_llm_classify_behaves_like_classify_point():
+def test_classify_point_with_fallback_is_classify_point_now():
+    """The LLM hook moved to model_step (#182); pullers still call this name."""
     store = Store()
     point_uri = ingest_tags(store, "test-mapping:fallback-none", {"someRandomTag": True})
 
-    outcome, matched = classify_point_with_fallback(store, point_uri, rules=RULES, llm_classify=None)
-
-    assert (outcome, matched) == ("miss", None)
-
-
-def test_classify_point_with_fallback_applies_high_confidence_llm_guess_on_miss():
-    store = Store()
-    point_uri = ingest_tags(store, "test-mapping:fallback-llm-applied", {"someRandomTag": True})
-
-    def fake_llm_classify(tags, label, description, existing_brick_classes):
-        return _FakeLLMResult(brick_class="Chiller", confidence=0.9, reasoning="chw points nearby")
-
-    outcome, matched = classify_point_with_fallback(store, point_uri, rules=RULES, llm_classify=fake_llm_classify)
-
-    assert (outcome, matched) == ("llm", "Chiller")
-    assert (point_uri, RDF.type, BRICK.Chiller) in store.graph
-    assert (point_uri, SKOS.definition, Literal("llm-classified: chw points nearby")) in store.graph
-
-
-def test_classify_point_with_fallback_discards_low_confidence_llm_guess():
-    store = Store()
-    point_uri = ingest_tags(store, "test-mapping:fallback-llm-discarded", {"someRandomTag": True})
-
-    def fake_llm_classify(tags, label, description, existing_brick_classes):
-        return _FakeLLMResult(brick_class="Chiller", confidence=0.3, reasoning="not sure")
-
-    outcome, matched = classify_point_with_fallback(store, point_uri, rules=RULES, llm_classify=fake_llm_classify)
-
-    assert (outcome, matched) == ("miss", None)
-    assert (point_uri, RDF.type, BRICK.Chiller) not in store.graph
+    assert classify_point_with_fallback(store, point_uri, rules=RULES) == ("miss", None)
     assert (point_uri, RDF.type, TD.UnmappedPoint) in store.graph
-
-
-def test_classify_point_with_fallback_applies_llm_guess_on_partial_overlap_fallback():
-    store = Store()
-    point_uri = ingest_tags(
-        store, "test-mapping:fallback-llm-on-fallback",
-        {"zone": True, "air": True, "sensor": True, "tvoc": True},
-    )
-
-    def fake_llm_classify(tags, label, description, existing_brick_classes):
-        assert "tvoc" in tags
-        # Air_Quality_Sensor, not the Zone_Air_Quality_Sensor this test used
-        # to fake: Brick has no such class, which is #181.
-        return _FakeLLMResult(brick_class="Air_Quality_Sensor", confidence=0.8, reasoning="tvoc reading")
-
-    outcome, matched = classify_point_with_fallback(store, point_uri, rules=RULES, llm_classify=fake_llm_classify)
-
-    assert (outcome, matched) == ("llm", "Air_Quality_Sensor")
-    assert (point_uri, RDF.type, BRICK.Air_Quality_Sensor) in store.graph
-
-
-def test_classify_point_with_fallback_never_writes_a_class_brick_does_not_have():
-    """#181: a confident, plausible, invented class name from the model
-    must not become an rdf:type. The point keeps the rule engine's result."""
-    store = Store()
-    point_uri = ingest_tags(store, "test-mapping:fallback-llm-bogus", {"someRandomTag": True})
-
-    def fake_llm_classify(tags, label, description, existing_brick_classes):
-        return _FakeLLMResult(brick_class="Chilled_Water_Supply_Temp_Sensor", confidence=0.95, reasoning="chw supply temp")
-
-    outcome, matched = classify_point_with_fallback(store, point_uri, rules=RULES, llm_classify=fake_llm_classify)
-
-    assert (outcome, matched) == ("miss", None)
-    assert (point_uri, RDF.type, BRICK.Chilled_Water_Supply_Temp_Sensor) not in store.graph
-    assert not [o for o in store.graph.objects(point_uri, RDF.type) if str(o).startswith(str(BRICK))]
-    assert (point_uri, RDF.type, TD.UnmappedPoint) in store.graph
-    assert not list(store.graph.objects(point_uri, SKOS.definition))
-
-
-def test_classify_point_with_fallback_keeps_the_proj_class_when_the_model_invents_one():
-    store = Store()
-    point_uri = ingest_tags(store, "test-mapping:fallback-llm-bogus-proj", {"zone": True, "air": True, "sensor": True, "tvoc": True})
-
-    def fake_llm_classify(tags, label, description, existing_brick_classes):
-        return _FakeLLMResult(brick_class="Zone_Air_Quality_Sensor", confidence=0.9, reasoning="tvoc reading")
-
-    outcome, matched = classify_point_with_fallback(store, point_uri, rules=RULES, llm_classify=fake_llm_classify)
-
-    assert (outcome, matched) == ("fallback", "Zone_Air_Temperature_Sensor")
-    assert (point_uri, RDF.type, BRICK.Zone_Air_Quality_Sensor) not in store.graph
-    assert [o for o in store.graph.objects(point_uri, RDF.type) if str(o).startswith(str(PROJ))]
-
-
-def test_classify_point_with_fallback_writes_brick_s_own_spelling_of_a_real_class():
-    store = Store()
-    point_uri = ingest_tags(store, "test-mapping:fallback-llm-case", {"someRandomTag": True})
-
-    def fake_llm_classify(tags, label, description, existing_brick_classes):
-        return _FakeLLMResult(brick_class="chilled_water_supply_temperature_sensor", confidence=0.9, reasoning="chw")
-
-    outcome, matched = classify_point_with_fallback(store, point_uri, rules=RULES, llm_classify=fake_llm_classify)
-
-    assert (outcome, matched) == ("llm", "Chilled_Water_Supply_Temperature_Sensor")
-    assert (point_uri, RDF.type, BRICK.Chilled_Water_Supply_Temperature_Sensor) in store.graph
-    assert (point_uri, RDF.type, BRICK.chilled_water_supply_temperature_sensor) not in store.graph

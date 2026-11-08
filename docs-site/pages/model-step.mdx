@@ -1,0 +1,164 @@
+---
+title: The model step
+---
+
+The tagging ladder places a point the rules can't in one of two ways. If
+both of the model's answers agree and pass the veto, it writes a Brick
+class. Otherwise it leaves a **mapping proposal** for a person. Its code is
+`model_step.py`, and `python -m baler.autotag` runs it after the rules.
+
+```
+rules (mapping.py) -> model step -> auto-accept, or a mapping proposal -> a person
+```
+
+## What the model is asked
+
+The step asks **once per naming pattern, not once per point**.
+`CHW-SUP-TEM-12` on chiller 1 and `CHW-SUP-TEM-31` on chiller 3 share a
+pattern, so they share one question: the digits become `{n}`, and the
+marker tags and unit must match. On the mock hospital the 240 entities the
+rules leave form 75 patterns.
+
+Each question carries the evidence the graph has:
+
+- the label, with up to three examples of the pattern;
+- every Haystack tag: markers, plus valued tags such as `unit`, `dis`,
+  `enum` and `kind`;
+- value stats from `point_history` over the last 7 days: samples, minimum,
+  maximum, mean, the number of distinct values, and whether every value
+  was on/off;
+- the other points on the same equipment, with their classes if they
+  have one. For an equipment entity, its own points.
+- up to 20 **candidate Brick classes**. A deterministic ranker picks them
+  by matching class-name words against the markers, the unit's quantity
+  (°F means temperature, cfm means flow) and the label's tokens (`tem`
+  matches temperature, `airflow` splits into air and flow). Brick's own
+  aliases count for equipment (`vav` is Variable_Air_Volume_Box).
+
+Windrow doesn't send a BACnet point's description or object type to Baler
+yet (Windrow#19). Once it publishes them as tags, they reach the prompt
+with no change here.
+
+The model answers with its **top 3** Brick classes, each with a reason,
+and one confidence. Every class is checked against the vendored Brick
+ontology (`brick_vocab.canonical_class`, #181). A name Brick doesn't have
+is dropped and recorded on the proposal, and it's never written.
+
+## When it writes a class
+
+A model's self-reported confidence is poorly calibrated, so it counts for
+little here. A class is auto-accepted only when all of these hold:
+
+1. The pattern is asked **twice**: the second time with reworded
+   instructions and the candidates in reverse order. Both top answers name
+   the same class or a Brick equivalent. A model that just repeats whatever
+   is listed first fails this check.
+2. Both asks give confidence of at least 0.5. This is a weak floor;
+   agreement does the real work.
+3. **No veto** applies to that entity:
+   - the unit's quantity doesn't contradict the class (°F on a humidity
+     sensor, or kW on a status);
+   - on/off values don't sit on a class that measures a quantity;
+   - analog values don't sit on an on/off status or command.
+
+   The range, spike and stuck checks are #183's.
+
+When memory (#185) exists, it becomes another voice that has to agree.
+
+An auto-accepted class is written with a `skos:definition` that gives the
+model's reason. Everything else becomes a proposal.
+
+## Mapping proposals
+
+Proposals are rows in Postgres (`mapping_proposals`), one open row per
+entity. Re-running autotag refreshes the open row, and a row a person has
+decided stays as it is. Each row holds:
+
+- up to 3 candidates with reasons, labelled by source: the model's, then
+  the ranker's;
+- `refused_because`: why it wasn't auto-accepted, for example "asked twice,
+  it said X then Y", "vetoed: unit °F is a temperature, ...", or "no model
+  configured";
+- the evidence the model saw, and what each ask said;
+- `pattern`, so the review queue (#184) can group 41 identical points into
+  one decision.
+
+Proposals used to be YAML comments appended to `rules/*.yaml`. That file
+is in the checkout bind-mounted into the containers, so writes to it land
+in `/app` on nash-srv (see CLAUDE.md). The rule files aren't edited any
+more. Promoting a pattern to a shared rule is a reviewed PR.
+
+## Provider
+
+The model comes from `BALER_LLM_PROVIDER`, the same switch Cx uses:
+
+| Provider | Model |
+|---|---|
+| `anthropic` | `BALER_TAG_MODEL`, default `claude-haiku-5-5` (the current Haiku) |
+| `openai` | any OpenAI-compatible endpoint (`BALER_LLM_BASE_URL`): `BALER_TAG_MODEL`, else `BALER_LLM_MODEL` |
+| `none` | no model. Every unresolved point becomes a proposal with the ranker's candidates. |
+
+`BALER_CX_MODEL` isn't used here. It defaults to the current Opus
+(`claude-opus-5-5`), meant for reading PDFs, and this step asks twice per
+pattern. Both defaults live side by side in `commissioning/llm.py`
+(`DEFAULT_ANTHROPIC_MODEL`, `DEFAULT_ANTHROPIC_TAG_MODEL`), so a new model
+generation is one edit there.
+
+```bash
+python -m baler.autotag                 # rules, model, proposals
+python -m baler.autotag --no-llm        # rules and proposals only
+python -m baler.autotag --no-proposals  # don't touch Postgres
+```
+
+## Measured
+
+All numbers come from the [mapping eval](/mapping-eval) on the mock hospital
+(492 points and 88 pieces of equipment, windrow `330cf9a`). **No real model
+was run: there was no API key.** The model rows use the harness's stand-ins:
+
+- **inventing** glues a class name out of the label;
+- **echo** repeats the candidates in the order they're listed;
+- **ranker** returns the ranker's top classes whatever their order.
+
+These rows show what the ladder does with a kind of answer, not how good
+Haiku or any other model is.
+
+**Rules only.** Accuracy is unchanged: 48.4% exact, 0% auto-accepted but
+wrong, 30.9% of points left for review. What's new is what review starts
+with: the true class is the top candidate for 30.7% of review points and in
+the top 3 for 82.7%. For equipment it's 77.3% for both.
+
+**Calls.** One call per unresolved point before; two calls per pattern now.
+
+| | Before (one call per point) | After |
+|---|---|---|
+| Model calls on the mock hospital | 240 | 150 (75 patterns × 2) |
+
+**inventing.** Its invented names never reach the graph, before (#181) or
+after.
+
+| inventing | Before | After |
+|---|---|---|
+| Points auto-accepted by the model | 4 (1 correct, 3 less specific) | 4 (1 correct, 3 less specific) |
+| Points auto-accepted but wrong | 0 | 0 |
+| Equipment auto-accepted | 88, all as the generic `Equipment` | 0: its names (`Ahu_Sensor`) aren't Brick classes, so they become proposals |
+
+**echo.** The reordered re-ask catches it. No point is auto-accepted.
+Equipment patterns with a single candidate are accepted, all 63 correctly.
+
+**ranker.** This is the limit of agreeing with yourself. This stand-in is
+always self-consistent, so every pattern passes the agreement check:
+
+| ranker | Points |
+|---|---|
+| Model auto-accepted | 144: 46 correct, 90 less specific, **8 wrong** |
+| Stopped by the veto | 8 |
+| Auto-accepted but wrong | 1.6% |
+
+The veto turned away the pump-speed and firing-rate points: analog values
+on an on/off class. Before the analog-value check it was 16 wrong. The 8
+left are `Damper_Position_Status` for a damper position sensor and
+`Boiler_Command` for a start/stop command. A model that is confidently and
+consistently wrong passes a re-ask. That is why the design wants a second,
+independent voice, memory (#185) or a second model, before auto-accept can
+be trusted.

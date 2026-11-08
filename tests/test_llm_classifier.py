@@ -1,101 +1,105 @@
 """
-Unit tests, no live services and no ANTHROPIC_API_KEY needed.
-classify_with_llm does `import anthropic` lazily inside the function (see
-llm_classifier.py's module docstring for why), so injecting a fake module
-into sys.modules before the call is enough to stub the client - no need
-for the real `anthropic` package to be installed to run this file.
+Model clients for the tagging model step (#182). No network and no
+`anthropic` package needed: a fake module stands in for it, and the
+OpenAI-compatible client gets a fake chat object.
 """
 
 import sys
 import types
-from dataclasses import dataclass
 
 import pytest
 
 from baler import llm_classifier
+from baler.commissioning import llm
 
 
-@dataclass
-class _FakeParsedOutput:
-    brick_class: str
-    confidence: float
-    reasoning: str
+class _Parsed:
+    def __init__(self, data):
+        self.data = data
+
+    def model_dump(self):
+        return self.data
 
 
-def _install_fake_anthropic(monkeypatch, parsed_output):
-    class _FakeResponse:
-        def __init__(self, parsed):
-            self.parsed_output = parsed
-
-    class _FakeMessages:
+def _fake_anthropic(monkeypatch, parsed, seen):
+    class _Messages:
         def parse(self, **kwargs):
-            assert kwargs["model"] == llm_classifier.MODEL
-            return _FakeResponse(parsed_output)
+            seen.append(kwargs)
+            return types.SimpleNamespace(parsed_output=parsed)
 
-    class _FakeClient:
-        def __init__(self, *args, **kwargs):
-            self.messages = _FakeMessages()
+    class _Client:
+        def __init__(self, *a, **k):
+            self.messages = _Messages()
 
-    fake_module = types.ModuleType("anthropic")
-    fake_module.Anthropic = _FakeClient
-    monkeypatch.setitem(sys.modules, "anthropic", fake_module)
-
-
-def test_classify_with_llm_returns_parsed_result(monkeypatch):
-    _install_fake_anthropic(monkeypatch, _FakeParsedOutput(brick_class="Chiller", confidence=0.85, reasoning="chw supply/return pair"))
-
-    result = llm_classifier.classify_with_llm(
-        tags=set(), label="fbf/chiller-1/CHW-Sup-Temp", description=None, existing_brick_classes=["Air_Handling_Unit"]
-    )
-
-    assert result.brick_class == "Chiller"
-    assert result.confidence == 0.85
-    assert result.reasoning == "chw supply/return pair"
+    mod = types.ModuleType("anthropic")
+    mod.Anthropic = _Client
+    monkeypatch.setitem(sys.modules, "anthropic", mod)
 
 
-def test_classify_with_llm_raises_on_unparseable_response(monkeypatch):
-    """AUDIT.md Theme D: response.parsed_output is None whenever the SDK
-    can't parse the model's output into _ClassificationSchema - accessing
-    .brick_class on it directly used to raise an unhandled AttributeError.
-    Confirms it now raises a clear, catchable error instead."""
-    _install_fake_anthropic(monkeypatch, parsed_output=None)
+def test_claude_tagger_returns_the_parsed_reply(monkeypatch):
+    seen: list = []
+    _fake_anthropic(monkeypatch, _Parsed({"candidates": [{"brick_class": "Chiller", "reason": "r"}], "confidence": 0.8}), seen)
+    monkeypatch.delenv("BALER_TAG_MODEL", raising=False)
 
+    out = llm_classifier.ClaudeTagger().ask("which class?")
+
+    assert out["candidates"][0]["brick_class"] == "Chiller"
+    assert seen[0]["model"] == llm_classifier.DEFAULT_ANTHROPIC_MODEL
+    assert seen[0]["messages"][0]["content"] == "which class?"
+
+
+def test_claude_tagger_raises_on_unparseable_reply(monkeypatch):
+    _fake_anthropic(monkeypatch, None, [])
     with pytest.raises(llm_classifier.LLMClassificationError):
-        llm_classifier.classify_with_llm(tags={"chw"}, label="fbf/chiller-1/CHW-Sup-Temp", description=None, existing_brick_classes=[])
+        llm_classifier.ClaudeTagger().ask("x")
 
 
-def test_propose_rule_appends_a_new_proposal(tmp_path):
-    rules_path = tmp_path / "rules.yaml"
-    rules_path.write_text("rules:\n  - tags: [zone, air, temp, sensor]\n    brick_class: Zone_Air_Temperature_Sensor\n")
-
-    added = llm_classifier.propose_rule(str(rules_path), {"chw", "sup", "temp"}, "Chilled_Water_Supply_Temperature_Sensor")
-
-    assert added is True
-    text = rules_path.read_text()
-    assert llm_classifier._PROPOSED_MARKER in text
-    assert "Chilled_Water_Supply_Temperature_Sensor" in text
-    # the promoted rules list itself must be untouched - still exactly one real rule
-    import yaml
-
-    assert len(yaml.safe_load(text)["rules"]) == 1
+def test_tag_model_env_overrides_the_default(monkeypatch):
+    monkeypatch.setenv("BALER_TAG_MODEL", "claude-sonnet-x")
+    assert llm_classifier.ClaudeTagger().model == "claude-sonnet-x"
 
 
-def test_propose_rule_dedupes_identical_tag_sets(tmp_path):
-    rules_path = tmp_path / "rules.yaml"
-    rules_path.write_text("rules:\n  - tags: [zone, air, temp, sensor]\n    brick_class: Zone_Air_Temperature_Sensor\n")
+class _FakeChat:
+    def __init__(self, contents, reject_first=0):
+        self.contents = list(contents)
+        self.calls: list[dict] = []
+        self.reject_first = reject_first
 
-    first = llm_classifier.propose_rule(str(rules_path), {"chw", "sup", "temp"}, "Chilled_Water_Supply_Temperature_Sensor")
-    second = llm_classifier.propose_rule(str(rules_path), {"chw", "sup", "temp"}, "Chilled_Water_Supply_Temperature_Sensor")
+    def chat(self, messages, **params):
+        self.calls.append(params)
+        if len(self.calls) <= self.reject_first:
+            err = llm.LLMError("unsupported response_format")
+            err.status = 400  # type: ignore[attr-defined]
+            raise err
+        return {"choices": [{"message": {"content": self.contents.pop(0)}}]}
 
-    assert (first, second) == (True, False)
-    assert rules_path.read_text().count("Chilled_Water_Supply_Temperature_Sensor") == 1
+
+def test_openai_tagger_parses_json_even_inside_prose():
+    chat = _FakeChat(['Sure: {"candidates": [{"brick_class": "Pump", "reason": "r"}], "confidence": 0.7}'])
+    out = llm_classifier.OpenAITagger(chat=chat, model="m").ask("q")
+    assert out["candidates"][0]["brick_class"] == "Pump"
+    assert chat.calls[0]["response_format"]["type"] == "json_schema"
 
 
-def test_propose_rule_skips_a_tag_set_already_promoted(tmp_path):
-    rules_path = tmp_path / "rules.yaml"
-    rules_path.write_text("rules:\n  - tags: [zone, air, temp, sensor]\n    brick_class: Zone_Air_Temperature_Sensor\n")
+def test_openai_tagger_steps_down_response_formats_the_endpoint_rejects():
+    chat = _FakeChat(['{"candidates": [], "confidence": 0}'], reject_first=2)
+    llm_classifier.OpenAITagger(chat=chat, model="m").ask("q")
+    assert "response_format" not in chat.calls[-1]
 
-    added = llm_classifier.propose_rule(str(rules_path), {"zone", "air", "temp", "sensor"}, "Zone_Air_Temperature_Sensor")
 
-    assert added is False
-    assert llm_classifier._PROPOSED_MARKER not in rules_path.read_text()
+def test_openai_tagger_raises_on_a_non_json_reply():
+    with pytest.raises(llm_classifier.LLMClassificationError):
+        llm_classifier.OpenAITagger(chat=_FakeChat(["no idea"]), model="m").ask("q")
+
+
+def test_model_from_env_follows_baler_llm_provider(monkeypatch):
+    monkeypatch.setenv("BALER_LLM_PROVIDER", "none")
+    assert llm_classifier.model_from_env() is None
+    monkeypatch.setenv("BALER_LLM_PROVIDER", "anthropic")
+    assert isinstance(llm_classifier.model_from_env(), llm_classifier.ClaudeTagger)
+    monkeypatch.setenv("BALER_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("BALER_LLM_BASE_URL", "http://ollama:11434/v1")
+    monkeypatch.setenv("BALER_LLM_MODEL", "qwen2.5:7b")
+    monkeypatch.delenv("BALER_TAG_MODEL", raising=False)
+    m = llm_classifier.model_from_env()
+    assert isinstance(m, llm_classifier.OpenAITagger) and m.model == "qwen2.5:7b"

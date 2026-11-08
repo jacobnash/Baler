@@ -133,9 +133,9 @@ python -m baler.haystack_puller \
 
 It prints a classification summary (`direct`/`fallback`/`miss`/`llm` counts
 for equip and points separately). Follow up with
-`python -m baler.autotag` to LLM-sweep anything the rule engine
-alone couldn't place, proposing new `rules/haystack_to_brick.yaml` entries
-for a human to review — see [Adding a Data Source](/adding-a-data-source)
+`python -m baler.autotag` to run the [model step](/model-step) on
+anything the rule engine alone couldn't place; what it can't settle
+becomes a mapping proposal for a person to review — see [Adding a Data Source](/adding-a-data-source)
 and the README's autotag section.
 
 This works unmodified against a Xeto-enabled Haxall/SkySpark server, too.
