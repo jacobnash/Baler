@@ -1,0 +1,223 @@
+---
+title: Building export
+---
+
+`python -m baler.export` writes a building, or one site of a multi-site
+install, as open files any tool can read without Baler (Baler#193). It's the
+migration exit, the archive tier, and the backbone of the sale package: the
+data has to outlive the software (`todo/building-lifecycle-ubis.md` §10.2).
+
+It isn't a backup. [Backups](/backups) dump the whole database for disaster
+recovery into the same software, in Postgres' own format. An export is the
+owner-readable form of one building: Parquet, Turtle, JSON and CSV, with a
+README that explains it to someone who has never heard of Baler.
+
+## Running it
+
+From a checkout on the host, with Postgres and Oxigraph reachable (the compose
+ports, or `BALER_PG_DSN`/`OXIGRAPH_URL`), and the `export` extra installed:
+
+```bash
+pip install -e ".[export]"                        # pyarrow
+python -m baler.export export /srv/exports/hospital-2026-11-08
+python -m baler.export export /srv/exports/building-a --site <site id>
+python -m baler.export verify /srv/exports/building-a --against-source
+```
+
+- **`--site`**: one site's data. Its points and equipment are the ones under
+  the site's topic prefixes ([Multi-site](/multi-site)), its graph is what
+  that scope can see (the same SPARQL filter the APIs apply), and its Cx
+  records are the projects attached to that site. Org-wide Cx projects aren't
+  in a site export, because they can span other sites. A site with no
+  prefixes owns no data, so the export refuses it.
+- **`--since` / `--until`**: cut the history (ISO 8601). `--until` defaults to
+  the moment the export starts. That cut is recorded in the manifest, so
+  `verify --against-source` compares the same span later. Use both to archive
+  one year at a time.
+- The output directory must not exist. The export is built in
+  `<dir>.partial` and renamed when complete, so a failed export never looks
+  like a finished one.
+
+The app image has pyarrow too, but run the export on the host if you can.
+App containers run as root with the checkout mounted at `/app`, and an export
+written under `/app` is root-owned on the host. If you do run it in a
+container, give it a path outside `/app` and `docker compose cp` it out.
+
+## What's in an export
+
+| Path | What |
+|---|---|
+| `README.md` | What this is and how to read it, without Baler |
+| `manifest.json` | Scope (the site, its prefixes), the history cut, counts, Baler version, what isn't included and why |
+| `SHA256SUMS` | Every file's sha256: `sha256sum -c SHA256SUMS` checks the export with coreutils alone |
+| `history/<point>/<YYYY-MM>.parquet` | Raw samples, one file per point per UTC month |
+| `history/schema.json` | The Parquet columns and what they mean |
+| `history/points.csv` | One row per point: exact URI, directory, rows, span |
+| `history/files.csv` | One row per file: point, month, rows, first/last sample, bytes, sha256 |
+| `graph/building.ttl` | The entity graph (Brick, Haystack, REC) as Turtle |
+| `records/<table>.jsonl` | Cx records and faults, one row per line, every column |
+| `records/cx_issues.csv` | The issues log as a spreadsheet |
+| `documents/manifest.csv` | Documents by sha256 |
+
+### History
+
+Every sample, exactly as stored. Raw history is never downsampled (§15). Each
+Parquet file has the `point_history` columns: `ts` (UTC, microseconds),
+`value`, `value_text`, `value_bool`, `unit`, `label`, and `quality` (null is
+ok; see [Sample quality](/quality)). Each file's key-value metadata repeats its
+`point_uri` and month.
+
+A point's directory is its URI without `urn:point:`, one directory per path
+segment, with each segment percent-encoded. That way `..`, empty segments or
+odd characters can't escape the export or collide. Any other URI goes under
+`_other/`. `points.csv` is the authority for which directory is which point.
+
+The files use standard Parquet encodings every current reader decodes:
+
+- timestamps delta-encoded;
+- float values byte-stream-split;
+- dictionaries for the text columns only;
+- zstd compression.
+
+pyarrow, DuckDB and pandas read them as written (checked on the measured
+export below).
+
+```sql
+-- DuckDB
+SELECT * FROM read_parquet('history/**/*.parquet', filename = true);
+```
+
+### Graph
+
+A whole-install export takes the default graph, as [Backups](/backups) does.
+That's the entity data. The ontology named graph is a copy of a published
+ontology file, so it's left out. A site export takes the triples whose subject
+the site's scope can see. A point's URI in the graph is the same string as in
+`points.csv`.
+
+### Records
+
+Each `records/<table>.jsonl` line is Postgres' `row_to_json` of one row, so
+every column and type survives. The tables:
+
+- the Cx tables (`cx_projects` and everything that hangs off a project: phases,
+  runs and results, issues, issue events and risks, test procedures and runs,
+  spec documents, items and mappings, active tests, agent sessions and
+  proposals, the event log);
+- `faults` on the exported points.
+
+The import reads the rows back with `jsonb_populate_recordset`.
+`records/cx_issues.csv` has the issues log's main columns for a spreadsheet.
+
+### What isn't included, and why
+
+The manifest and the README list these too:
+
+- **Assets and position history** (Baler#197) and **requirement packs**
+  (Baler#205) aren't built yet. The export is table-driven: when their tables
+  land, each is one line in `CX_TABLES` (or a sibling list) in
+  `baler/export.py`.
+- **Document files.** Baler keeps no document files yet. Cx 7 reads a spec and
+  keeps only its sha256, and the document store is Baler#201. So
+  `documents/manifest.csv` lists every known document by sha256, filename, type
+  and size, with `content_included = false`. That lets the owner match their
+  own copies and check them. Once #201 stores files, they go in
+  `documents/<sha256>`.
+- **Users, passwords, API keys, sources and their secrets.** These belong to
+  the install, not the building.
+
+## Checking an export
+
+`python -m baler.export verify DIR` checks:
+
+- every file against `SHA256SUMS`, and that no file is missing from it or
+  extra;
+- every Parquet file's schema, row count and `point_uri` metadata against
+  `files.csv`;
+- `points.csv`'s totals against `files.csv`.
+
+`--against-source` also counts each point's rows per month in the source
+database, over the export's own time cut, and compares. It reports any point
+whose counts differ. The export isn't one long snapshot: each point is read in
+its own statement. A multi-hour transaction would make the compression policy
+wait for its locks, with ingest queued behind it. So a backfill that lands in
+the exported span during or after the export shows up here as a difference,
+which is what you'd want to know.
+
+## Importing an export
+
+```bash
+python -m baler.export import DIR --org-id <org> [--site-id <site>] [--no-graph]
+```
+
+The import is for a fresh install: a new machine, or the buyer's Baler. It
+checks the export first, and refuses a damaged one before writing anything.
+Then it loads:
+
+- **records**: Cx projects move into `--org-id`, and into `--site-id` or
+  org-wide. The source's org and site don't exist in the target. Rows that
+  already exist (by primary key) are left alone, and serial ids continue past
+  the imported ones.
+- **history**: through a staging table, month by month. If the target has
+  nothing of that point in that span, it's a plain insert. Otherwise
+  `ON CONFLICT DO NOTHING`, so re-running an import adds only what's missing.
+  The compression policy is paused meanwhile and resumed however the import
+  ends. Imported history is mostly older than its threshold, and the policy
+  compressing a chunk mid-import would push every later insert into it onto
+  the slow path.
+- **graph**: `graph/building.ttl` into Oxigraph's default graph. A bulk load
+  adds triples, so importing twice into the same store is harmless, because
+  triples are a set.
+
+To make the imported points visible to a site-restricted login, give the
+target site the same topic prefixes (`PUT /auth/sites/{id}/topic-prefixes`).
+The prefixes are in `manifest.json`.
+
+`tests/test_export_integration.py` is the round trip. It seeds one site's
+history (compressed and uncompressed, a NaN, text with commas, quotes and
+newlines, an empty string, a boolean with unit and label, quality flags),
+graph, Cx records and faults, beside another site's. Then it:
+
+1. exports the first site;
+2. checks nothing of the other site leaked into the export;
+3. verifies the export against the source;
+4. imports it into a fresh database, and the graph back into Oxigraph after
+   deleting it;
+5. checks the fresh install gives the same answers: every raw sample and its
+   quality, the hourly rollups, the point labels, an isomorphic graph, the same
+   issues, results and faults.
+
+A second import adds nothing.
+
+## Measured
+
+On the dev box (other compose stacks running on it), against a seeded
+TimescaleDB:
+
+- 100 points at 1/min for four months;
+- one loop point at 1 s for two months (2.4 M samples per point-month);
+- 22.4 M samples in all, every chunk compressed.
+
+| | Wall time | Peak RSS |
+|---|---|---|
+| `export` (402 files, 130 MB) | 34.8 s | 226 MB |
+| `verify --against-source` | 10.5 s | 105 MB |
+| `import` into a fresh database | 134 s | 246 MB |
+
+Memory stays bounded however large the history grows:
+
+- each point's samples arrive by `COPY` in 1 MB CSV blocks;
+- they leave in Parquet row groups of at most 131,072 rows;
+- only one point-month's open row group is held at a time.
+
+Peak memory levels off once a row group fills. These were measured before
+the encoding change above, which didn't change how much is buffered:
+
+- a single point's export peaked at 220 to 230 MB, for one week of 1 s samples
+  and for four weeks alike;
+- the whole export peaked at 291 MB at 10.9 M samples and 261 MB at 22.4 M. The import is bound by Postgres' insert
+rate on this machine. Parsing and `COPY` are 3 s of a 2.4 M-row file's load.
+
+The export size is about 6 bytes per sample on this data (full-precision
+synthetic sine values, every sample different). Real data with repeated values
+should compress better, but measure your own before quoting a number.

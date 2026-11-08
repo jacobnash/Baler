@@ -32,7 +32,7 @@ RUN pip install --no-cache-dir /wheels/openhay-*.whl
 # installed editable against a placeholder; the real src/ lands on top.
 COPY pyproject.toml ./
 RUN mkdir -p src/baler && touch src/baler/__init__.py \
-    && pip install --no-cache-dir -e ".[validate,cx-gl36,cx-spec,llm]"
+    && pip install --no-cache-dir -e ".[validate,cx-gl36,cx-spec,llm,export]"
 COPY src/ ./src/
 
 # No ENTRYPOINT/CMD - each daemon service in docker-compose.yml supplies its
@@ -42,5 +42,6 @@ COPY src/ ./src/
 # is about the bare-metal/local dev install, not this containerized one.
 # `cx-gl36` (pandas, ~75 MB) lets a commissioning project enable the vendored
 # ConStrain items (settings.gl36) live; without it that PATCH answers 400.
+# `export` (pyarrow) lets `python -m baler.export` run in a container too.
 # `cx-spec` (openpyxl) reads XLSX schedules; `llm` (anthropic) is the spec
 # PDF extraction and the commissioning agent in commissioning_api.
