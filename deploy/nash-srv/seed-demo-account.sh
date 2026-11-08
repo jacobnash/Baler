@@ -48,7 +48,10 @@ bad_credentials() { grep -q '"invalid email or password"' "$RESP"; }
 # retry PATH BODY -> sets CODE to the first status that isn't "unknown", or
 # the last unknown one once the budget is spent.
 retry() {
-  local deadline=$(( $(date +%s) + BUDGET )) delay="$DELAY"
+  # Milliseconds, not whole seconds: with a whole-second clock a budget of N
+  # really lasts anywhere from N-1 to N s, so a short budget could expire
+  # after a single attempt (flaked test_seed_demo_account under load).
+  local deadline=$(( $(date +%s%3N) + BUDGET * 1000 )) delay="$DELAY"
   while :; do
     post "$1" "$2"
     if [ "$CODE" = 401 ] && [ "$1" = /auth/login ] && ! bad_credentials; then
@@ -58,7 +61,7 @@ retry() {
       5??|429|000|401\?) ;;
       *) return ;;
     esac
-    if [ "$(date +%s)" -ge "$deadline" ]; then return; fi
+    if [ "$(date +%s%3N)" -ge "$deadline" ]; then return; fi
     echo "POST $1 -> $CODE (auth_api not answering yet), retrying in ${delay}s" >&2
     sleep "$delay"
     delay=$(python3 -c "print(min(float('$delay') * 2, 15))")
