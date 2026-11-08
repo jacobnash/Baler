@@ -95,6 +95,9 @@ for v in postgres-data oxigraph-data grafana-data mosquitto-data windrow-state; 
 After the deploy, the workflow's `verify` job checks the live install (read-only) and files or
 closes `live-check` issues. It needs a credentials file on the runner, created once by hand: see
 [Post-deploy verification](/post-deploy-verify#one-time-setup-on-nash-srv).
+It runs in its own queue, so the next deploy never waits on it, ideally on a second runner instance
+(`nash-srv-baler-verify`) that the same `setup-runner.sh` installs when re-run with a fresh token: see
+[The deploy and verify queues](/post-deploy-verify#the-deploy-and-verify-queues).
 
 ## Demo data (mock hospital)
 

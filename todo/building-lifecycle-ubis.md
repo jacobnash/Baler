@@ -379,7 +379,9 @@ Also check:
   - packs, Cx records, asset history and issues as JSON/CSV;
   - a README that explains it without Baler.
 
-  This is both the migration path and the sale-package backbone.
+  This is both the migration path and the sale-package backbone. *Built:
+  #193, `python -m baler.export` (docs-site `building-export.mdx`); assets,
+  packs and document files join it when #197, #205 and #201 land.*
 - **Licence note:** TimescaleDB's compression is under the Timescale License,
   not Apache-2.0. It's free to self-host, which is what we do, but document
   it. The Parquet export is the exit if that ever changes.
