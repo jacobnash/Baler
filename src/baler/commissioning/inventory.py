@@ -32,6 +32,23 @@ def site_scope(prefixes) -> Scope:
     return Scope(clean) if clean else Scope.everything()
 
 
+def _equip_point_pairs(store) -> list[tuple[str, str | None]]:
+    """(equip, point) for every urn:equip: subject that is typed or has
+    points, (equip, None) for one with none. Two plain pattern scans,
+    joined here: as one query (a UNION of every typed subject and every
+    hasPoint subject, a STRSTARTS filter over all of them, then an
+    OPTIONAL hasPoint) it was 0.35-0.47 s at 10k points against 0.14 s
+    for these two, most of a Cx report's time (Baler#244)."""
+    linked = [(str(r.equip), str(r.point)) for r in store.query(
+        hisquery.PREFIXES + "SELECT ?equip ?point WHERE { ?equip brick:hasPoint ?point }")]
+    typed = {str(r.equip) for r in store.query(
+        'SELECT DISTINCT ?equip WHERE { ?equip a ?_t FILTER(STRSTARTS(STR(?equip), "urn:equip:")) }')}
+    pairs: set[tuple[str, str | None]] = {(e, p) for e, p in linked if e.startswith("urn:equip:")}
+    with_points = {e for e, _ in pairs}
+    pairs |= {(e, None) for e in typed - with_points}
+    return sorted(pairs, key=lambda ep: (ep[0], ep[1] or ""))
+
+
 def build(store, scopes: list[Scope]) -> list[dict]:
     """Equipment rows, sorted by id:
     {id, dis, brickClass, brickClasses, tags, spec, points: [...]}.
@@ -41,33 +58,23 @@ def build(store, scopes: list[Scope]) -> list[dict]:
     # Scope.sparql. As SPARQL FILTERs on every row the scope tests were
     # ~0.33 s of a 0.35 s query (#150). A point URI without a key (none are
     # minted today) still gets the graph-aware SPARQL test.
-    pairs = store.query(
-        hisquery.PREFIXES
-        + """SELECT DISTINCT ?equip ?point WHERE {
-            { ?equip a ?_t } UNION { ?equip brick:hasPoint ?_p }
-            FILTER(STRSTARTS(STR(?equip), "urn:equip:"))
-            OPTIONAL { ?equip brick:hasPoint ?point }
-        }"""
-    )
+    pairs = _equip_point_pairs(store)
 
     def allowed(uri: str) -> bool:
         return all(s.allows(uri) for s in scopes)
 
-    unkeyed = sorted({str(r.point) for r in pairs if getattr(r, "point", None) is not None
-                      and entity_key(str(r.point)) is None})
+    unkeyed = sorted({point for _, point in pairs if point is not None and entity_key(point) is None})
     visible_unkeyed = set(unkeyed)
     for s in scopes:
         visible_unkeyed &= set(hisquery.visible_uris(store, sorted(visible_unkeyed), s))
     points_of: dict[str, list[str]] = {}
-    for row in pairs:
-        equip = str(row.equip)
+    for equip, point in pairs:
         if not allowed(equip):
             continue
-        point = getattr(row, "point", None)
         points_of.setdefault(equip, [])
-        if point is not None and (allowed(str(point)) if entity_key(str(point)) is not None
-                                  else str(point) in visible_unkeyed):
-            points_of[equip].append(str(point))
+        if point is not None and (allowed(point) if entity_key(point) is not None
+                                  else point in visible_unkeyed):
+            points_of[equip].append(point)
     if not points_of:
         return []
 

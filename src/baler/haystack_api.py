@@ -40,6 +40,8 @@ grid saying so, and `ops` doesn't advertise it (docs-site haystack-api.mdx).
 from __future__ import annotations
 
 import argparse
+import json
+import math
 import os
 import threading
 import time as _time
@@ -1059,6 +1061,48 @@ def dispatch(backend: Backend, op: str, req: oh.Grid, scope: Scope = EVERYTHING,
     raise OpError(f"unknown op: {op}")
 
 
+_MARKER_HAYSON = {"_kind": "marker"}
+
+
+def _hayson(v):
+    """oh.to_hayson(v), with the kinds records are made of (strings,
+    markers, Refs, finite Numbers, lists of them) built inline: its
+    isinstance chain was ~0.4 s of encoding 10k points (Baler#244).
+    Anything else goes to oh.to_hayson itself."""
+    t = type(v)
+    if t is str or t is bool or v is None:
+        return v
+    if v is oh.MARKER:
+        return _MARKER_HAYSON
+    if t is oh.Ref:
+        return {"_kind": "ref", "val": v.id} if v.dis is None else {"_kind": "ref", "val": v.id, "dis": v.dis}
+    if t is oh.Number:
+        f = float(v.val)
+        if math.isfinite(f):  # NaN and INF are Hayson strings: oh.to_hayson's job
+            val = int(f) if f.is_integer() and abs(f) < 2**53 else f
+            return {"_kind": "number", "val": val, "unit": v.unit} if v.unit else val
+    if t is list:
+        return [_hayson(x) for x in v]
+    return oh.to_hayson(v)
+
+
+def encode_grid(grid: oh.Grid, fmt: str) -> str:
+    """oh.encode_grid(grid, fmt), the same text: the grid as Hayson, then
+    openhay's native codec to `fmt`. Rows are converted with _hayson."""
+    native = getattr(oh, "_native", None)
+    if native is None:
+        return oh.encode_grid(grid, fmt)
+    cols = []
+    for c in grid.cols:
+        col: dict = {"name": c.name}
+        if c.meta:
+            col["meta"] = {k: oh.to_hayson(x) for k, x in c.meta.items()}
+        cols.append(col)
+    doc = {"_kind": "grid", "meta": {"ver": "3.0", **{k: oh.to_hayson(x) for k, x in grid.meta.items()}}, "cols": cols,
+           "rows": [{k: _hayson(x) for k, x in r.items() if x is not None} for r in grid.rows]}
+    return native.convert(json.dumps(doc), fmt, "hayson")
+
+
 def _rows_grid(rows: list[dict]) -> oh.Grid:
     return oh.Grid.from_rows(rows) if rows else oh.Grid(cols=[oh.Col("empty")])
 
@@ -1255,7 +1299,7 @@ def make_handler(backend: Backend, login: ScramLogin | None):
                 fmt = oh.negotiate(accept, flavor)
                 try:
                     with tracer.start_as_current_span("haystack.encode") as enc:
-                        out = oh.encode_grid(grid, fmt).encode("utf-8")
+                        out = encode_grid(grid, fmt).encode("utf-8")
                         enc.set_attribute("bytes", len(out))
                 except ValueError as exc:
                     # One unencodable value must not drop the connection
@@ -1294,7 +1338,7 @@ def main() -> None:
     def warm():
         hisquery.warm_caches()
         for text in WARM_FILTERS:
-            oh.encode_grid(_rows_grid(backend.read_filter(text, None)), "hayson")
+            encode_grid(_rows_grid(backend.read_filter(text, None)), "hayson")
 
     warmup.run("haystack reads", warm)
 

@@ -89,3 +89,15 @@ def test_rows_read_brick_then_haystack(store):
 def test_site_scope_helper():
     assert inventory.site_scope([]).unrestricted
     assert inventory.site_scope([" fbf/a/ "]).prefixes == ("fbf/a",)
+
+
+def test_typed_equipment_without_points_is_listed_with_none():
+    """_equip_point_pairs joins two scans (Baler#244): equipment found only
+    by its type, with no points, must still be a row, as the single
+    UNION/OPTIONAL query had it."""
+    s = fx.store()
+    lonely = URIRef("urn:equip:fbf/a/lonely-fan")
+    s.add_entity(lonely, BRICK.Fan)
+    rows = {r["id"]: r for r in inventory.build(s, [Scope(("fbf/a",))])}
+    assert rows[str(lonely)]["points"] == []
+    assert rows[fx.AHU]["points"]  # and equipment with points keeps them
