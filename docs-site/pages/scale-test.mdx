@@ -113,6 +113,10 @@ $PY scripts/scale/ladder.py table scripts/scale/results/*-ladder.json   # rows f
 $PY scripts/scale/ladder.py down --rmi                                  # remove the stack, volumes, images
 ```
 
+A ladder starts on a **clean** stack: the read probes scale with every point in the graph, so
+`run` refuses when the graph already has more scale points than the first step. To run it again,
+`down` then `up` first (`crash` reuses whatever is there, so run it after the ladder).
+
 Copy the result JSON files (`scripts/scale/results/<run-id>-ladder.json`) somewhere that
 outlives the checkout. Every result records:
 
@@ -133,7 +137,7 @@ So a 1-CPU run and a 12-CPU run are never compared without saying so.
 | `ingest.stored_rps`, `stored_rate_ratio` | delta of `pg_stat_user_tables` inserts+updates on `point_history`'s chunks over the soak | Sustained write rate, independent of row timestamps. |
 | `ingest.stored_rps_per_host_cpu` | `stored_rps / nproc` | Comparable across machines. |
 | `ingest.broker_dropped_delta` | `$SYS/broker/publish/messages/dropped` | Deliveries mosquitto dropped because a subscriber's queue was full. It's broker-wide: if readings are missing it was the listener (data loss); if stored = acked, it was a QoS 0 subscriber (fault_detector, derivation_engine) whose Cur-mode rules or derivations silently missed readings. Must be 0. |
-| `lag.p50_s` / `p95_s` / `max_s` | canary reading every 2 s on `fbf/scale/canary/lag`, polled in `point_history` | **End-to-end lag**, publish to row stored, behind the same queue as the load. p95 must be < 30 s. |
+| `lag.p50_s` / `p95_s` / `max_s` | canary reading every 2 s on `fbf/scale/canary/lag`, polled in `point_history` | **End-to-end lag**, publish to row stored, behind the same queue as the load. p95 must be under 30 s. |
 | `lag.first_third_median_s` → `last_third_median_s` | same | **Backlog growth.** Rising by more than 10 s over the soak fails the step. |
 | `lag.lost` | canaries never stored within 300 s | Lost data. |
 | `broker.*` | `$SYS/#` | Messages in/out, store count/bytes (queued + retained), load per minute, heap. |
@@ -163,31 +167,94 @@ and group commit are fine; losing acknowledged readings is not.
 Fill this in from `ladder.py table`. Always note nproc, because a 1-CPU nash-srv run and a
 12-CPU run are different machines.
 
+### Local, first runs (dev VM, before nash-srv)
+
+A 4-vCPU Xeon @ 2.10 GHz VM with 15.7 GiB, **shared with two or three other agents' Baler stacks
+at the same time** (load average 5–14). Treat these as directional; nash-srv's runs replace them.
+Soak 300 s per step (not 15 min, for disk), on a clean stack. `--no-live-check`, since there's
+no live install on that host.
+
+**Before any fix** (main at `c9671c20`, ingest not durable):
+
+| Points | Status | Offered/s | Stored | Broker drops | p95 lag | Lost canaries | Listener CPU | First failure |
+|---|---|---|---|---|---|---|---|---|
+| 5,000 | fail | 1,000 | 99.69% | 935 | 11.08 s | 3 | 52% | listener can't keep up: broker queue overflow |
+
+**With the phase-1 fixes** (run `20261108T003311Z`, durable end to end: `durability.comparable = true`):
+
+| Points | Status | Offered/s | Stored/s | Stored/s per CPU | p95 lag | read?filter=point | readAll(equip) | Cx report | First failure |
+|---|---|---|---|---|---|---|---|---|---|
+| 1,000 | **pass** | 200 | 204 | 51 | 0.45 s | 0.31 s | 0.28 s | 0.72 s | - |
+| 2,500 | **pass** | 500 | 509 | 127 | 0.46 s | 0.89 s | 1.08 s | 1.76 s | - |
+| 5,000 | fail | 1,000 | 1,018 | 254 | 0.46 s | 1.80 s | 2.02 s | 3.31 s | reads over the #178 budgets |
+| 10,000 | fail | 2,000 | 2,034 | 509 | 0.59 s | 4.72 s | 5.82 s | 8.93 s | reads over budget |
+| 25,000 | fail | 5,000 | 5,040 | 1,260 | 4.4 s | 19.3 s | 45.0 s | 34.2 s | reads; 115,903 broker drops to the rule daemons |
+
+**Highest passing step: 2,500 points.** Ingest itself held up through 25,000 points: 100% of
+acknowledged readings were stored, zero lost canaries, and p95 lag stayed under 30 s at every step.
+
+**First bottleneck, before the fixes: ingest.** The listener did one INSERT round trip per
+reading, latency-bound at about 1,000 readings/s and about half a CPU. Past that, mosquitto's
+per-session queue overflowed and readings were dropped.
+
+**First bottleneck, after the fixes: reads.** Every list grows with the total number of
+points: `read?filter=point` is unpaged, `readAll(equip)` folds raw history, and the Cx report
+grows with history ([#244](https://github.com/jacobnash/Baler/issues/244)).
+
+**Next, at 25k points: the rule daemons.** `fault_detector` and `derivation_engine` take every
+reading over QoS 0, fall behind (cycle times of 81 s and 121 s) and silently miss readings
+([#243](https://github.com/jacobnash/Baler/issues/243)).
+
+The listener's own ceiling wasn't reached locally: it used 31% CPU at 5,040 readings/s.
+
+| Fix | Measured |
+|---|---|
+| Durable batched ingest (COPY per batch, acks after commit, `synchronous_commit` back on) | 5k points: p95 lag 11.08 → 0.50 s, drops 935 → 0, listener CPU 52 → 18%, postgres 46 → 26% |
+| fault_detector skips no-op writes (in-memory open faults) | 10k points: Postgres transactions/s 1,801 → 268 |
+| Readings traced per batch, not per message | 10k points: listener CPU about 44 → 13% |
+| Restarts resume the session; broker queue 200,000 | crash test below: missing readings → 0 |
+
+Batched writes cost almost nothing to make durable. At 1,000-row batches, `synchronous_commit=on`
+measured 17–25k rows/s against 15–21k for `off`; single-row writes pay the fsync (about 1.3×).
+
+### Crash durability (local, 5k points every 5 s, killed service down about 12 s)
+
+| Code | Killed | Acked | Stored | Missing (acked, not stored) |
+|---|---|---|---|---|
+| main `c9671c20` | mqtt_listener | 57,000 | 11,502 | **45,498** |
+| main `c9671c20` | postgres | 59,000 | 33,928 | **25,072** |
+| + durable batched ingest | mqtt_listener | 56,998 | 27,750 | 29,248 |
+| + durable batched ingest | postgres | 58,999 | 55,296 | 3,703 |
+| + session resume, queue 200,000 | mqtt_listener | 57,000 | 57,000 | **0** |
+| + session resume, queue 200,000 | postgres | 59,000 | 59,000 | **0** |
+| _nash-srv_ | | | | |
+
+Most of main's loss wasn't the async commit itself. After any listener restart, its
+re-subscribe replayed every retained tags message, which it handled at about 150/s. Readings
+queued behind that replay until mosquitto's 10,000-message queue overflowed.
+
+### nash-srv
+
 | Run | Host (nproc, model, RAM) | Durable | Points | Status | Offered/s | Stored/s | Stored/s per CPU | p95 lag | read?filter=point | readAll(equip) | Cx report | First failure |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 20261107T230452Z c9671c20 (local, before fixes) | dev VM (4, Xeon @ 2.10GHz, 15.7 GiB; shared with two other stacks) | no | see [PR](https://github.com/jacobnash/Baler/pulls?q=scale-harness) | | | | | | | | | |
 | _nash-srv_ | | | | | | | | | | | | |
 
 **Max sustained points:** _(nash-srv)_ · **First bottleneck at each step:** _(nash-srv)_
-
-### Crash durability
-
-| Run | Killed | Down for | Acked | Stored | Missing (acked, not stored) |
-|---|---|---|---|---|---|
-| _nash-srv_ | mqtt_listener | 10 s | | | |
-| _nash-srv_ | postgres | 10 s | | | |
 
 ### Disk growth
 
 At 1M points every 5 s, that's 200,000 rows/s, or 17.3 billion rows/day. Bytes per row comes
 from `db.bytes_per_row` in each result (table plus index, uncompressed). On the first local
-run it was about 246 B/row. That works out to about **4.2 TB/day raw**, which is why
+runs it was 228–265 B/row (241 at 1k points, 265 at 25k). That works out to about **4.2 TB/day
+raw** at 1M points, which is why
 native compression ([#192](https://github.com/jacobnash/Baler/issues/192), under [#221](https://github.com/jacobnash/Baler/issues/221)) and a narrower row matter. Raw rows are kept, never downsampled. Fill in compressed bytes per row from `db.compression` once #192 lands.
 
 ### Baler vs Haxall
 
 Same generator, steps, 5 s rate, probes and CPU/memory caps against Haxall, with durability on
-for both. Tracked as its own issue under #190. Not run yet.
+for both. Tracked as [#236](https://github.com/jacobnash/Baler/issues/236). **Not run yet.** The
+harness records Baler's side (durability read live, the crash test); the Haxall target, bridge
+and probes are #236's work.
 
 | Step | Baler stored/s | Haxall stored/s | Baler p95 lag | Haxall p95 lag | Baler read filter | Haxall read filter | Baler hisRead 1000 | Haxall hisRead 1000 | Baler RAM / disk | Haxall RAM / disk |
 |---|---|---|---|---|---|---|---|---|---|---|
