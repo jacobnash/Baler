@@ -650,6 +650,13 @@ def xeto_spec_for(markers, brick_class: str | None = None) -> str | None:
     Haystack markers, plus those its Brick class implies. Shared by
     haystack_api's `spec` tag and the commissioning inventory, so Brick
     and Haystack stay one model read two ways."""
+    return _spec_for(frozenset(markers), brick_class)
+
+
+@lru_cache(maxsize=8192)
+def _spec_for(markers: frozenset[str], brick_class: str | None) -> str | None:
+    """xeto_spec_for, memoized: records share a handful of marker sets, and
+    the scan over every spec was ~50 us a record (Baler#244)."""
     have = set(markers)
     if brick_class:
         have |= markers_of_brick_class().get(brick_class, frozenset())
@@ -1135,6 +1142,20 @@ def _false_without_flags(expr: str) -> bool:
     return not eval(py, {"__builtins__": {}}, {})  # only True/False/and/or/not/() can reach here
 
 
+_ANY_FLAG = re.compile(r"[()F|\s]*")
+# One triple pattern with ?s as its subject, optionally after one VALUES
+# block: what _has/_typed_as_any register for a tag, a class or a marker.
+_TERM = r'(?:\?\w+|<[^<>\s"{}]*>|[A-Za-z][\w-]*:[\w-]*|"(?:[^"\\]|\\.)*")'
+_SUBJECT_PATTERN = re.compile(r"(?:VALUES \?\w+ \{[^{}]*\} )?\?s (?:a|<[^<>\s]*>|[A-Za-z][\w-]*:[\w-]*) " + _TERM)
+
+
+def _any_flag(expr: str) -> bool:
+    """Whether a compiled filter expression is nothing but leaf-set
+    flags or'ed together, i.e. true exactly when any flag is bound."""
+    text = _BOUND.sub("F", expr)
+    return "F" in text and bool(_ANY_FLAG.fullmatch(text))
+
+
 def compile_filter(node, graph: GraphVocab | None = None, scope=None) -> str:
     """One SELECT over every subject in the graph. Each leaf test of the
     filter is a subject-set (see _Compiler), left-joined once; the whole
@@ -1159,6 +1180,23 @@ def compile_filter(node, graph: GraphVocab | None = None, scope=None) -> str:
     )
     # nested Dict nodes (urn:baler:dict:) are values, never records
     record = "FILTER(isIRI(?s) && !STRSTARTS(STR(?s), \"urn:baler:dict:\"))"
+    if compiler.flags and _any_flag(leaf_logic):
+        # Matches exactly when ?s is in some leaf set (`point`, `equip`,
+        # `ahu or vav`): the union of the sets is the answer, so neither
+        # the flag joins nor every candidate's triples (the ?s ?cp ?co
+        # join below, 136k rows for 10k points) are needed. 0.6 s -> 0.2 s
+        # for `point` at 10k points (Baler#244). Sets whose pattern binds
+        # ?s as a subject already say "is a subject"; any other set (a
+        # siteRef walk ends on ?s) asks it per candidate.
+        union = " UNION ".join(f"{{ {pattern} }}" for _, pattern in compiler.flags)
+        subject = "" if all(_SUBJECT_PATTERN.fullmatch(pattern) for _, pattern in compiler.flags) else \
+            " FILTER EXISTS { ?s ?cp ?co }"
+        scoped = f" FILTER({visible})" if visible else ""
+        return (
+            PREFIXES
+            + f"SELECT ?s WHERE {{\n  {{ SELECT DISTINCT ?s WHERE {{ {union} }} }}\n"
+            + f"  FILTER(isIRI(?s)) FILTER(!STRSTARTS(STR(?s), \"urn:baler:dict:\")){subject}{scoped}\n}}"
+        )
     if compiler.flags and _false_without_flags(leaf_logic):
         # Nothing outside every leaf set can match, so the candidates are
         # those sets' union instead of every subject in the graph - the
@@ -1421,6 +1459,28 @@ _DESCRIBE_PREDICATES = {
 _EQUIP_DIS = "urn:baler:describe:equipDis"
 
 
+def _describe_rows(store, query: str):
+    """describe_points' (point, predicate, object, equip) rows, objects
+    decoded as SparqlRow does. From Oxigraph as TSV when the store offers
+    it: for 10k points (156k rows) the JSON result and a SparqlRow per row
+    were most of a readAll(equip).hisRead(today) (Baler#244)."""
+    if hasattr(store, "iter_tsv"):
+        from baler.remote_store import parse_term, typed_value
+
+        for row in store.iter_tsv(query):
+            point, p, o = row[0][1:-1], row[1][1:-1], row[2]
+            if o[0] == "<" or o[-1] == '"' and "\\" not in o:
+                o = o[1:-1]
+            else:
+                v, kind, dt = parse_term(o)
+                o = typed_value(v, kind, dt)
+            e = row[3][1:-1] if len(row) > 3 and row[3] else None
+            yield point, p, o, e
+        return
+    for row in store.query(query):
+        yield str(row.point), str(row.p), row.o, (str(row.e) if getattr(row, "e", None) is not None else None)
+
+
 def describe_points(store, point_uris: list[str]) -> dict[str, dict]:
     if not point_uris:
         return {}
@@ -1430,7 +1490,7 @@ def describe_points(store, point_uris: list[str]) -> dict[str, dict]:
     # GROUP_CONCAT folded them back up: ~0.3 s of Oxigraph time for 800
     # points, a third of a whole readAll(equip).hisRead(today), Baler#107.)
     preds = " ".join(f"<{p}>" for p in _DESCRIBE_PREDICATES)
-    rows = store.query(
+    query = (
         PREFIXES
         + f"""SELECT ?point ?p ?o ?e WHERE {{
             VALUES ?point {{ {values} }}
@@ -1440,17 +1500,18 @@ def describe_points(store, point_uris: list[str]) -> dict[str, dict]:
         }}"""
     )
     found: dict[str, dict] = {}
-    for row in rows:
-        f = found.setdefault(str(row.point), {"types": set(), "tags": set(), "equips": set(), "equipDis": {}})
-        p = str(row.p)
+    for point, p, o, e in _describe_rows(store, query):
+        f = found.get(point)
+        if f is None:
+            f = found[point] = {"types": set(), "tags": set(), "equips": set(), "equipDis": {}}
         if p == _EQUIP_DIS:
-            f["equipDis"].setdefault(str(row.e), row.o)
+            f["equipDis"].setdefault(e, o)
             continue
         field_ = _DESCRIBE_PREDICATES.get(p)
         if field_ in ("types", "tags", "equips"):
-            f[field_].add(str(row.o))
+            f[field_].add(str(o))
         elif field_ is not None:
-            f.setdefault(field_, row.o)
+            f.setdefault(field_, o)
     out: dict[str, dict] = {}
     for uri, f in found.items():
         types = sorted(f["types"])

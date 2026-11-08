@@ -53,6 +53,7 @@ import openhay as oh
 from baler import auth, gateway_auth, hisquery, timeseries, tracing, warmup
 from baler import point_write as pw
 from baler.http_handler_base import BaseAPIHandler
+from baler.remote_store import parse_term, typed_value
 from baler.scope import EVERYTHING, Scope, claims_from_header, scope_for
 from baler.timeseries import connect_pool, read_latest_many
 
@@ -115,12 +116,17 @@ class OpError(Exception):
 # --------------------------------------------------------------------------- refs
 
 _REF_SAFE = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_:-.")
+_REF_ESCAPES = {c: f"~{c:02X}" for c in range(128) if chr(c) not in _REF_SAFE}
 
 
 def uri_to_ref(uri: str) -> str:
     """`urn:point:fbf/ahu-3/analogValue,1` -> `urn:point:windrow~2Fahu-3~2FanalogValue~2C1`.
     Haystack ref ids allow only `[A-Za-z0-9_:\\-.~]`, so everything else (and
-    `~` itself) is escaped byte-wise as `~XX`."""
+    `~` itself) is escaped byte-wise as `~XX`. An ASCII URI (all of them,
+    in practice) goes through one str.translate; the per-character loop
+    was ~20 us a ref, 0.4 s of a 10k-point read (Baler#244)."""
+    if uri.isascii():
+        return uri.translate(_REF_ESCAPES)
     out = []
     for ch in uri:
         if ch in _REF_SAFE:
@@ -213,9 +219,24 @@ def _triples_of(store, values: str):
     is and its datatype; projecting isIRI()/DATATYPE() as extra columns
     nearly doubled the result (7.5 MB vs 4 MB for 800 points) and its parse,
     Baler#107. Objects decode as RemoteStore's SparqlRow does (numbers to
-    int/float, everything else its lexical form)."""
+    int/float, everything else its lexical form). TSV rather than JSON
+    where the store offers it: half the bytes and half of Oxigraph's time
+    for 10k points (Baler#244); the subject and predicate are always IRIs,
+    so only the object needs decoding."""
+    query = f"SELECT ?s ?p ?o WHERE {{ VALUES ?s {{ {values} }} ?s ?p ?o . }}"
+    if hasattr(store, "iter_tsv"):
+        for s, p, o in store.iter_tsv(query):
+            if o[0] == "<":  # the common cases first: an IRI object,
+                yield s[1:-1], p[1:-1], o[1:-1], True, None
+                continue
+            if o[-1] == '"' and "\\" not in o:  # a plain string (a tag)
+                yield s[1:-1], p[1:-1], o[1:-1], False, None
+                continue
+            v, kind, dt = parse_term(o)
+            yield s[1:-1], p[1:-1], typed_value(v, kind, dt), kind == "uri", dt
+        return
     if hasattr(store, "select"):
-        for b in store.select(f"SELECT ?s ?p ?o WHERE {{ VALUES ?s {{ {values} }} ?s ?p ?o . }}"):
+        for b in store.select(query):
             o = b["o"]
             v, dt = o["value"], o.get("datatype")
             if dt and o["type"] == "literal":

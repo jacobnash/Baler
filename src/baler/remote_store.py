@@ -15,6 +15,7 @@ duplicate forever instead of converging (see load_ontology below).
 """
 
 import os
+import re
 
 import requests
 from rdflib.term import Literal, URIRef
@@ -30,6 +31,59 @@ def _to_sparql_term(value) -> str:
     if isinstance(value, str):
         return Literal(value).n3()
     return f"<{value}>"
+
+
+_XSD = "http://www.w3.org/2001/XMLSchema#"
+_ESCAPES = {"t": "\t", "b": "\b", "n": "\n", "r": "\r", "f": "\f", '"': '"', "'": "'", "\\": "\\"}
+_ESCAPE_RE = re.compile(r"\\(?:u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|(.))")
+
+
+def _unescape(m: re.Match) -> str:
+    code = m.group(1) or m.group(2)
+    return chr(int(code, 16)) if code else _ESCAPES.get(m.group(3), m.group(3))
+
+
+def parse_term(tok: str) -> tuple[str, str, str | None] | None:
+    """One SPARQL TSV field -> (value, type, datatype), exactly what the
+    JSON results format says about the same term: type "uri", "literal" or
+    "bnode", the lexical form as `value`, and a datatype only where JSON
+    gives one (none for plain or language-tagged strings). None for an
+    unbound variable. TSV writes terms in Turtle syntax, which abbreviates
+    integers, decimals, doubles and booleans to bare tokens."""
+    if not tok:
+        return None
+    c = tok[0]
+    if c == "<":
+        return tok[1:-1], "uri", None
+    if c == '"':
+        end = tok.rfind('"')  # a datatype IRI or language tag can't hold a quote
+        lex = tok[1:end]
+        if "\\" in lex:
+            lex = _ESCAPE_RE.sub(_unescape, lex)
+        rest = tok[end + 1:]
+        if rest.startswith("^^<"):
+            return lex, "literal", rest[3:-1]
+        return lex, "literal", None  # plain, or @lang (JSON carries no datatype for either)
+    if c == "_" and tok.startswith("_:"):
+        return tok[2:], "bnode", None
+    if tok in ("true", "false"):
+        return tok, "literal", _XSD + "boolean"
+    if "e" in tok or "E" in tok:
+        return tok, "literal", _XSD + "double"
+    if "." in tok:
+        return tok, "literal", _XSD + "decimal"
+    return tok, "literal", _XSD + "integer"
+
+
+def typed_value(value: str, type_: str, datatype: str | None):
+    """A term as SparqlRow hands it back: numbers as int/float, everything
+    else its lexical form."""
+    if type_ == "literal" and datatype:
+        if datatype.endswith(("integer", "int")):
+            return int(value)
+        if datatype.endswith(("double", "float", "decimal")):
+            return float(value)
+    return value
 
 
 class SparqlRow:
@@ -154,6 +208,43 @@ class RemoteStore:
         )
         resp.raise_for_status()
         return resp.json()["results"]["bindings"]
+
+    def select_tsv(self, sparql: str) -> list[list[str]]:
+        """A SELECT's rows as SPARQL TSV fields (Turtle-syntax terms, ""
+        for unbound; decode one with parse_term), for the reads that pull
+        every triple of thousands of records. Against JSON results that is
+        about half the bytes and half of Oxigraph's own time (24.7 MB and
+        0.95 s vs 13 MB and 0.50 s for 10k points' 136k triples, Baler#244),
+        and a split per line instead of a dict per term to decode."""
+        return list(self.iter_tsv(sparql))
+
+    def iter_tsv(self, sparql: str):
+        """select_tsv's rows as they arrive: Oxigraph streams a result while
+        it evaluates it, so decoding row by row overlaps the caller's work
+        with the server's instead of waiting for the last byte first."""
+        resp = self._session.post(
+            f"{self.base_url}/query",
+            headers={"Content-Type": "application/sparql-query", "Accept": "text/tab-separated-values"},
+            data=sparql.encode("utf-8"),
+            stream=True,
+        )
+        try:
+            resp.raise_for_status()
+            rest = b""
+            header = True
+            for chunk in resp.iter_content(chunk_size=1 << 16):
+                lines = (rest + chunk).split(b"\n")
+                rest = lines.pop()
+                if header and lines:  # the first line names the variables (?s ?p ?o)
+                    lines = lines[1:]
+                    header = False
+                for line in lines:
+                    if line:
+                        yield line.decode("utf-8").split("\t")
+            if rest and not header:
+                yield rest.decode("utf-8").split("\t")
+        finally:
+            resp.close()
 
     def __len__(self) -> int:
         rows = self.query("SELECT (COUNT(*) as ?c) WHERE { ?s ?p ?o }")
