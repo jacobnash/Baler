@@ -851,6 +851,12 @@ def cmd_run(args) -> None:
     budgets = json.loads(Path(args.budgets).read_text())
     nproc = os.cpu_count() or 1
     steps = [parse_count(s) for s in args.steps.split(",")] if args.steps else default_steps(nproc)
+    existing = graph_counts(ep)["scale_points"]
+    if existing > steps[0] and not args.reuse:
+        # Reads scale with the points in the graph, not with the step's load:
+        # a 1k step on a graph left with 10k points times 10k-point reads.
+        raise SystemExit(f"the stack already has {existing:,} scale points, more than the first step ({steps[0]:,}): "
+                         "`ladder.py down` then `up` for a clean ladder, or --reuse to measure on top of them")
     safety = LiveSafety(args.live_url, args.live_load_factor, args.live_latency_factor, enabled=not args.no_live_check)
     result = run_header(ep, args)
     result.update(steps=[], live_safety=safety.describe())
@@ -990,6 +996,7 @@ def main(argv=None) -> None:
     p.add_argument("--continue-on-fail", action="store_true")
     p.add_argument("--no-up", action="store_true", help="the stack is already up")
     p.add_argument("--no-build", action="store_true", help="up without rebuilding the images")
+    p.add_argument("--reuse", action="store_true", help="allow a stack that already has more scale points than the first step")
     p.add_argument("--live-url", default="http://127.0.0.1:8080/ui/", help="the live gateway, probed read-only for live-safety")
     p.add_argument("--no-live-check", action="store_true", help="no live install on this host: no live latency or host-load watch")
     p.add_argument("--live-load-factor", type=float, default=1.5)
