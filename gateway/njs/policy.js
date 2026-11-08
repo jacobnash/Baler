@@ -85,6 +85,9 @@ const ROUTES = [
   ["GET",    /^\/ops\/mapping\/proposals$/,            "points", "viewer"],
   ["GET",    /^\/ops\/mapping\/summary$/,              "points", "viewer"],
   ["POST",   /^\/ops\/mapping\/decide$/,               "points", "operator"],
+  // Relationship proposals (Baler#187): equipment groupings and feeds.
+  ["GET",    /^\/ops\/mapping\/relationships$/,        "points", "viewer"],
+  ["POST",   /^\/ops\/mapping\/relationships\/decide$/, "points", "operator"],
   // Site naming conventions (Baler#186): listing and previewing (a dry run,
   // POST for its body) are viewer; saving, applying and deleting are operator.
   ["GET",    /^\/ops\/conventions$/,                    "points", "viewer"],

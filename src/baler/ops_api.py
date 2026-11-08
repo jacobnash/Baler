@@ -19,6 +19,7 @@ from baler import (
     conventions,
     docs_ui,
     edges,
+    equip_inference,
     gateway_auth,
     json_store,
     mapping_proposals,
@@ -179,6 +180,46 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
             span.set_attribute("action", result["action"])
             span.set_attribute("decided", result["decided"])
             respond_json(self, 200, result)
+
+        # --- relationship proposals (Baler#187); policy.js rows
+
+        def _relationships_get(self, span) -> None:
+            with ts_pool.connection() as conn:
+                scope = scope_for(conn, claims_from_header(self.headers.get("Authorization")) or {})
+                rels = equip_inference.PgRelationships(conn)
+                rels.ensure_schema()
+                rows = [r for r in rels.list() if scope.allows(r["subject"]) and all(scope.allows(o) for o in r["objects"])]
+            respond_json(self, 200, rows)
+
+        def _relationships_decide(self, span) -> None:
+            body = self.read_json_body()
+            ids, action = body.get("ids"), body.get("action")
+            if not isinstance(ids, list) or action not in ("accept", "reject"):
+                respond_error(self, 400, "ids is a list of proposal ids, action is accept or reject")
+                return
+            store = self._store()
+            with ts_pool.connection() as conn:
+                claims = claims_from_header(self.headers.get("Authorization")) or {}
+                scope = scope_for(conn, claims)
+                user = self._conv_user(conn, claims)
+                rels = equip_inference.PgRelationships(conn)
+                rels.ensure_schema()
+                held = {r["id"]: r for r in rels.list()}
+                missing = [i for i in ids if i not in held or not scope.allows(held[i]["subject"])]
+                if missing:
+                    respond_error(self, 404, f"no open proposal: {', '.join(map(str, missing))}")
+                    return
+                done = 0
+                for i in ids:
+                    row = rels.decide(i, "accepted" if action == "accept" else "rejected", user["email"])
+                    if row is None:
+                        continue
+                    if action == "accept":
+                        equip_inference.write_relationship(store, row["subject"], row["predicate"], row["objects"])
+                        record_edit.log_edit(conn, row["subject"], "relationship", user["sub"], user["email"],
+                                             {"predicate": row["predicate"], "objects": row["objects"], "proposal": i})
+                    done += 1
+            respond_json(self, 200, {"action": action, "decided": done})
 
         # --- site naming conventions (Baler#186); policy.js rows
 
@@ -357,6 +398,9 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
             if urlparse(self.path).path == "/mapping/decide":
                 self.handle_traced("ops_api.mapping_decide", self._mapping_decide)
                 return
+            if urlparse(self.path).path == "/mapping/relationships/decide":
+                self.handle_traced("ops_api.relationships_decide", self._relationships_decide)
+                return
             if urlparse(self.path).path == "/conventions/preview":
                 self.handle_traced("ops_api.conventions_preview", self._conventions_preview)
                 return
@@ -425,6 +469,11 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
                 if not self._gateway():
                     return
                 self.handle_traced("ops_api.conventions_get", self._conventions_get)
+                return
+            if urlparse(self.path).path == "/mapping/relationships":
+                if not self._gateway():
+                    return
+                self.handle_traced("ops_api.relationships_get", self._relationships_get)
                 return
             if urlparse(self.path).path == "/mapping/summary":
                 if not self._gateway():

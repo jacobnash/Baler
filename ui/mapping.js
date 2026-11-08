@@ -243,5 +243,6 @@ initAuth(async () => {
     statusEl.textContent = err.message;
   } finally {
     if (window.conventionsReady) window.conventionsReady(); // conventions.js
+    if (window.relationshipsReady) window.relationshipsReady(); // relationships.js
   }
 });

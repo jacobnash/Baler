@@ -105,7 +105,8 @@ class _RetryingModel:
         return reply if reply is not None else {}
 
 
-def run(store, model=None, proposals=None, stats=None, site_rules=None, recall=None, conventions=None) -> list[model_step.Decision]:
+def run(store, model=None, proposals=None, stats=None, site_rules=None, recall=None, conventions=None,
+        relationships=None, ts_conn=None) -> list[model_step.Decision]:
     point_rules = mapping.load_rules(POINT_RULES_PATH)
     equip_rules = mapping.load_rules(EQUIP_RULES_PATH)
 
@@ -139,6 +140,12 @@ def run(store, model=None, proposals=None, stats=None, site_rules=None, recall=N
         else:
             top = ", ".join(c["brick_class"] for c in d.candidates) or "no candidates"
             print(f"{d.uri}: proposed ({top}) - {d.refused_because}")
+    # Last: equipment relationships, as proposals only (#187).
+    if relationships is not None:
+        from baler import equip_inference
+
+        counts = equip_inference.propose_relationships(store, relationships, ts_conn)
+        print(f"relationships proposed: {counts['hasPoint']} equipment grouping(s), {counts['feeds']} feeds")
     return decisions
 
 
@@ -152,7 +159,7 @@ def main() -> None:
     store = RemoteStore()
 
     model = None if args.no_llm else llm_classifier.model_from_env()
-    proposals = stats = site_rules = recall = convs = None
+    proposals = stats = site_rules = recall = convs = rels = conn = None
     if not args.no_proposals:
         from baler import mapping_proposals, timeseries
 
@@ -171,7 +178,12 @@ def main() -> None:
 
         conv_mod.ensure_schema(conn)
         convs = conv_mod.load_all(conn)
-    run(store, model=model, proposals=proposals, stats=stats, site_rules=site_rules, recall=recall, conventions=convs)
+        from baler import equip_inference
+
+        rels = equip_inference.PgRelationships(conn)
+        rels.ensure_schema()
+    run(store, model=model, proposals=proposals, stats=stats, site_rules=site_rules, recall=recall, conventions=convs,
+        relationships=rels, ts_conn=conn)
 
 
 if __name__ == "__main__":

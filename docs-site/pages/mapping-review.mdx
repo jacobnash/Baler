@@ -91,6 +91,13 @@ proposal or for a whole group. It needs the operator role.
 An answered proposal can't be answered again (409). The API only acts on
 proposals on your sites; for anyone else's it answers 404.
 
+## Equipment relationships
+
+Proposed equipment groupings and `feeds` edges from
+[equipment inference](/equipment-inference) are listed in their own
+section, with the evidence. **Accept** writes the edges (and creates the
+equipment for a grouping); **Reject** closes the proposal.
+
 ## Training data
 
 Every accepted proposal is also written to `mapping_examples`, with the
