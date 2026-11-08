@@ -30,13 +30,16 @@ compressed chunk holds its rows as batches of up to 1,000 samples per point:
 The continuous aggregates (`point_history_5m`, `point_history_1h`) aren't
 compressed. They're small.
 
-Every service applies the setup itself when it opens a history connection
-(`baler/timeseries.py`, `_ensure_compression`). It's idempotent and works on an
-existing database: once compression and its policy are in place, each new
-connection does one catalog read and nothing else. The one-time `ALTER TABLE`
+Migration 0001 sets compression up (`baler/migrations/v0001_baseline.py`, see
+[Schema migrations](/schema-migrations)): it enables it on a database that
+doesn't have it and adds the policy, once, before any service starts.
+`BALER_HISTORY_COMPRESS_AFTER` is a setting rather than schema, so it's kept in
+step separately: the `migrate` service and each process, once at start
+(`baler/timeseries.py`, `sync_settings`), compare the policy with the setting
+in one catalog read and replace the policy only if it differs. That change
 waits at most 5 seconds for its lock, so it never queues ingest behind a long
-read. If it can't get the lock, the next new connection tries again. A failure
-here is logged and never fails the connection.
+read; if it can't get it, the next process start tries again. A failure there
+is logged and never stops the process.
 
 ## When
 

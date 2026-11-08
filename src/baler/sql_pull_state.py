@@ -8,18 +8,14 @@ point_uri since one query pulls every point for a source at once.
 
 import psycopg
 
-from baler import ddl
+from baler import schema
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS sql_pull_checkpoint (
-    source_id      TEXT NOT NULL PRIMARY KEY,
-    last_pulled_ts DOUBLE PRECISION NOT NULL
-);
-"""
+# Schema (sql_pull_checkpoint): baler/migrations/, from 0001 (#194). Change it
+# with a new migration there, not here.
 
 
 def ensure_schema(conn: psycopg.Connection) -> None:
-    ddl.run(conn, SCHEMA)
+    schema.ensure(conn)
 
 
 def get_checkpoint(conn: psycopg.Connection, source_id: str) -> float | None:

@@ -28,23 +28,10 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from baler import ddl
+from baler import schema
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS point_write_levels (
-    point_uri  TEXT NOT NULL,
-    level      SMALLINT NOT NULL,
-    value_json TEXT NOT NULL,
-    who        TEXT NOT NULL,
-    user_sub   TEXT,
-    written_at TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (point_uri, level)
-);
--- Level 17 is Haystack's default (BACnet relinquish-default); the original
--- table capped levels at 16. expires_at: when a timed level-8 override ends.
-ALTER TABLE point_write_levels DROP CONSTRAINT IF EXISTS point_write_levels_level_check;
-ALTER TABLE point_write_levels ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
-"""
+# Schema (point_write_levels): baler/migrations/, from 0001 (#194). Change it
+# with a new migration there, not here.
 
 # Haystack's level names, as haxall labels them (WriteRec.levelDis).
 LEVEL_DIS = {1: "1 (emergency)", 8: "8 (manual)", 17: "def"}
@@ -58,7 +45,7 @@ class CommandError(RuntimeError):
 
 
 def ensure_schema(conn) -> None:
-    ddl.run(conn, SCHEMA)
+    schema.ensure(conn)
 
 
 def record_level(conn, point_uri: str, level: int, value, who: str, user_sub: str | None,

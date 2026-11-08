@@ -8,18 +8,14 @@ differently.
 
 import psycopg
 
-from baler import ddl
+from baler import schema
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS haystack_pull_checkpoint (
-    point_uri      TEXT NOT NULL PRIMARY KEY,
-    last_pulled_ts DOUBLE PRECISION NOT NULL
-);
-"""
+# Schema (haystack_pull_checkpoint): baler/migrations/, from 0001 (#194).
+# Change it with a new migration there, not here.
 
 
 def ensure_schema(conn: psycopg.Connection) -> None:
-    ddl.run(conn, SCHEMA)
+    schema.ensure(conn)
 
 
 def get_checkpoint(conn: psycopg.Connection, point_uri: str) -> float | None:

@@ -1,0 +1,307 @@
+---
+title: Schema migrations
+---
+
+Baler's Postgres schema is a numbered list of migrations in
+`src/baler/migrations/`, and every database records which ones it has
+(Baler#194). A building's record has to last 15+ years on one host, so the
+schema must be able to *change* in place, not only grow new tables.
+
+Until this, every service ran its own `CREATE TABLE IF NOT EXISTS ...` each
+time it connected. That added tables well, but it couldn't change a column
+safely, recorded nothing, and ran DDL checks on every new connection of every
+service.
+
+## How it runs
+
+- **Once per deploy, before any service.** The `migrate` compose service runs
+  `python -m baler.migrate`, and every daemon waits for it to finish. It
+  applies whatever migrations are pending, then does the Timberdoodle graph
+  rewrite it always did. On a current database it logs
+  `schema: at migration N, nothing to do`.
+  On nash-srv, a deploy that adds a migration always takes the full path,
+  which runs `migrate`, never the restart-only fast path
+  (`deploy/nash-srv/setup-runner.sh`; it takes effect once the wrapper is
+  reinstalled by rerunning that script).
+- **Never per connection.** Each process checks the recorded version once per
+  database, on its first connection (`baler.schema.ensure`, called by
+  `timeseries.connect`/`connect_pool` and every module's `ensure_schema`).
+  After that a new connection costs no catalog reads and takes no locks. If
+  the database is behind, which happens to a process started without the
+  `migrate` service (bare metal, tests), that process upgrades it. That suits
+  light migrations. Before starting services on a heavy one (one that
+  rewrites chunks), run `python -m baler.schema upgrade` or
+  `docker compose run --rm migrate` yourself, so it isn't run inside a
+  service's startup, whose connection pool gives up after 30 s.
+- **One at a time, each exactly once.** Each migration runs in its own
+  transaction, under the advisory lock the old connect-time DDL took
+  (`ddl.LOCK_KEY`), so new and old code take turns during a deploy. After
+  taking the lock it re-reads the recorded versions, so ten processes
+  starting at once apply each migration once. Its row in
+  `baler_schema_migrations` commits with it: a failed migration leaves nothing
+  applied and nothing recorded, and the next run tries it again from the start.
+  The migration transaction has no statement timeout.
+
+The `migrate` service connects with the same `BALER_PG_DSN` as every daemon,
+built from `BALER_PG_USER`/`BALER_PG_DB`, so an install still on the old
+`timberdoodle` role and database (see `deploy/MIGRATING-TO-BALER.md`) is
+migrated in place.
+
+## Commands
+
+```bash
+python -m baler.schema status        # each migration: when and how it was applied, or PENDING
+python -m baler.schema plan          # dry run: what upgrade would run now
+python -m baler.schema plan --sql    # ... with every statement
+python -m baler.schema upgrade       # apply what's pending (what the migrate service runs)
+python -m baler.schema stamp 1       # record 1..N as applied without running them
+```
+
+They use `BALER_PG_DSN`, or `--dsn`. Inside the stack:
+`docker compose run --rm migrate python -m baler.schema status`.
+
+`plan` only reads. It plans each pending migration against the database as it
+is now; `upgrade` plans each one again just before running it, after the ones
+before it have run.
+
+`stamp` is for a database whose schema someone brought to a version by other
+means. You won't need it for an install made by Baler's own code: the baseline
+adopts those by itself.
+
+## What's recorded
+
+```sql
+SELECT * FROM baler_schema_migrations;
+-- version | name     | how     | statements | duration_ms | applied_at
+--       1 | baseline | adopted |         18 |         ... | 2026-11-08 ...
+```
+
+`how` is `applied`, `adopted` (the baseline on a database that already had
+Baler's tables) or `stamped`. `statements` is how many statements ran on
+*this* database.
+
+## The baseline, and the live install
+
+Migration 0001 (`v0001_baseline.py`) is a frozen copy of the DDL the last
+release before migrations ran at connect time (main at `6946378`): about 40
+tables, `point_history` as a hypertable with its index, continuous aggregates,
+their refresh policies, compression and the compression policy.
+
+On a fresh database it builds all of that. On an existing one, nash-srv's
+included, it **adopts** what's there. Nothing destructive runs, and nothing is
+rebuilt:
+
+- `point_history`'s pieces are each checked in the catalog first, and only
+  what's missing runs. An install made by the previous release has all of
+  them, so nothing touches `point_history`, its chunks or their compression.
+  This matters because even a no-op `CREATE INDEX IF NOT EXISTS` takes a SHARE
+  lock on every chunk (Baler#107).
+- The other tables' statements are the same idempotent `IF NOT EXISTS` forms
+  every service already ran on every start. On an install that has the tables
+  they change nothing.
+
+The upgrade test below checks exactly this. It builds a database with the
+previous release's own code, compressed chunks included, adopts it, and
+requires the result to be identical to a fresh database and every row and
+compressed chunk to be unchanged.
+
+`point_history_empty`, the Cx report's helper index, isn't part of any
+migration. `commissioning_api` builds it in the background, one chunk per
+transaction (`WITH (timescaledb.transaction_per_chunk)`, Baler#237), which
+can't run inside a migration's transaction, and reads work without it.
+
+## Writing a migration
+
+1. Add `src/baler/migrations/vNNNN_<what>.py` with the next number, and list
+   it in `migrations/__init__.py`'s `ALL`. `tests/test_schema.py` checks the
+   numbers run 1..N with no gap.
+
+   ```python
+   from baler.schema import Step
+
+   VERSION = 2
+   NAME = "faults.resolved_by"
+
+
+   def plan(conn) -> list[Step]:
+       return [Step("ALTER TABLE faults ADD COLUMN IF NOT EXISTS resolved_by TEXT", "faults.resolved_by")]
+   ```
+
+2. `plan(conn)` returns the statements; it must not change anything itself.
+   It may look in the catalog to skip what's already there.
+3. Everything runs in one transaction, so no `CREATE INDEX CONCURRENTLY`, no
+   `transaction_per_chunk`, and no `VACUUM`. Things that can't run in a
+   transaction belong in a background task, as `point_history_empty` does.
+4. **Never edit a migration once it's on main.** It has to mean the same thing
+   on every database forever. `tests/test_schema.py` pins each released
+   file's sha256; add a new migration instead. A comment-only fix is the one
+   reason to update a hash there.
+5. Add a line to the module whose table it is, if a reader there would look
+   for it.
+6. Migrations only go forward. To undo a change, write the next migration.
+   To roll a deploy back, older code runs on a newer schema: `ensure` logs a
+   warning and carries on. Make migrations additive where you can, so that
+   holds. To undo a migration that destroyed data, restore a backup (see
+   [Backups](/backups)).
+
+### Hypertables and compressed chunks
+
+What TimescaleDB 2.31 (the version our pinned image runs) does with an
+`ALTER` on a hypertable whose chunks are compressed. These were measured on
+that image, not taken from the docs:
+
+| Change | On compressed chunks |
+|---|---|
+| `ADD COLUMN`, nullable or with a default | works |
+| `RENAME COLUMN`, including a segmentby column | works |
+| `DROP COLUMN` of a non-segmentby, non-orderby column | works |
+| `ALTER COLUMN SET/DROP DEFAULT`, `SET/DROP NOT NULL` | works |
+| `CREATE INDEX`, `ADD CONSTRAINT ... CHECK` | works |
+| `ALTER COLUMN ... TYPE` | refused: `operation not supported on hypertables with compressed chunks` |
+| `DROP COLUMN` of a segmentby or orderby column | refused |
+| `SET (timescaledb.compress = false)` | refused while any chunk is compressed |
+| new `compress_segmentby` / `compress_orderby` | accepted, but only chunks compressed later use it; existing ones need `compress_chunk(c, recompress => true)` |
+
+For the refused ones, `baler.migrations.hypertable.with_decompressed` wraps
+the statements. It decompresses the compressed chunks, runs the statements,
+then compresses the same chunks again, all in the migration's one
+transaction:
+
+```python
+from baler.migrations import hypertable
+
+def plan(conn):
+    return hypertable.with_decompressed(conn, "point_history",
+                                        ["ALTER TABLE point_history ALTER COLUMN quality TYPE VARCHAR(32)"])
+```
+
+- If anything fails, the table is exactly as it was.
+- Every row comes back. Nothing is ever downsampled.
+- `plan` lists the chunks and their total uncompressed size. That much disk
+  must be free while the migration runs.
+- Measured on a 4-core dev machine: 3.0 M rows in 3 compressed chunks
+  (411 MB uncompressed) took 18.6 s to decompress, alter and recompress.
+  Time grows with the number of compressed rows. We haven't measured it on
+  nash-srv's hardware, so run `plan` there and time a copy first (the restore
+  drill gives you one).
+- A column that a continuous aggregate uses (`value`, `value_bool`, `ts`,
+  `point_uri`) can't change type at all while the aggregate exists. That
+  migration has to drop and re-create the aggregate.
+
+## The upgrade-from-every-release test
+
+`tests/test_schema_upgrade.py` (integration, run by CI's integration job)
+gives each case its own scratch database on the stack's Postgres:
+
+- **Fresh:** every migration applies, `plan` matched what ran, and a second
+  `upgrade` changes nothing.
+- **From every release:** for the last release before migrations
+  (`PRE_MIGRATIONS_REF`) and every `v*` tag, it takes that release's source
+  with `git archive` and builds a database with it in a subprocess. It then
+  writes history, compresses the older chunks, and writes late into a
+  compressed one. Then this code upgrades it. The test requires:
+  - the schema equals a fresh database's (`schema.snapshot`: tables,
+    columns, constraints, indexes, hypertables, compression settings,
+    aggregates and policies);
+  - every table's rows, every `point_history` value and the set of compressed
+    chunks are unchanged;
+  - a second run changes nothing;
+  - this code can still write into a compressed chunk afterwards.
+- **Concurrent starters:** six connections upgrading at once apply each
+  migration once.
+- **Compressed chunks:** a type change on `point_history`, refused directly,
+  goes through `with_decompressed` with every row kept.
+
+CI checks out with `fetch-depth: 0` so the releases are there. There are no
+`v*` tags yet. Each one you push is tested from then on, with no change to the
+test. A release whose services build their schema differently would need its
+own branch in the test's `_BUILD` script.
+
+## Upgrading Postgres or TimescaleDB
+
+Both procedures below were rehearsed on 2026-11-08 against a database built by
+this code: 2.0 M `point_history` rows (100 points at 1/min for 14 days), one
+of three chunks compressed, with the aggregates and policies. Take a backup
+first either way (see [Backups](/backups)).
+
+### TimescaleDB minor version (same Postgres major)
+
+The `timescale/timescaledb` image ships many 2.x versions side by side, and
+an existing database stays on the version it was created with until you
+update it.
+
+1. Change the image in `docker-compose.yml` (keep the same `-pg16` suffix) and
+   recreate only postgres: `docker compose up -d --wait postgres`.
+2. Update the extension. It must be the first statement of a fresh session,
+   hence `psql -X`:
+
+   ```bash
+   docker compose exec postgres psql -X -U baler -c "ALTER EXTENSION timescaledb UPDATE"
+   docker compose exec postgres psql -X -U baler -c "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'"
+   ```
+
+   Use your `BALER_PG_USER` (and `-d` with your `BALER_PG_DB`) if they differ.
+3. `docker compose up -d`. The `migrate` service finds nothing to do.
+
+Rehearsal: from 2.30.2 to 2.31.0 the `UPDATE` took 0.3 s. The row count,
+an md5 over every row, the compressed chunks and the three policies were all
+unchanged, and `python -m baler.schema upgrade` found nothing to do.
+
+### Postgres major version (e.g. 16 to 17)
+
+A new Postgres major can't open the old data directory, so this is a dump and
+restore into a new volume, with the tools the restore drill already proves.
+The old volume stays as it was until you delete it, so going back means
+pointing at it again.
+
+1. Back up the running stack: `python scripts/backup.py`.
+2. Stop the stack: `docker compose down`, without `-v`.
+3. Pick the new image with the **same TimescaleDB version** as the old one,
+   e.g. `timescale/timescaledb:2.31.0-pg17`. `restore.py` needs the dump's
+   TimescaleDB version to be in the image (see [Backups](/backups#timescaledb)).
+   Put it, and a new name for the Postgres volume, in a compose override, so
+   only Postgres starts empty and every other volume is kept:
+
+   ```yaml
+   # pg17.compose.yml, used with -f docker-compose.yml -f pg17.compose.yml (or COMPOSE_FILE)
+   services:
+     postgres:
+       image: timescale/timescaledb:2.31.0-pg17
+   volumes:
+     postgres-data:
+       name: ${BALER_VOLUME_PREFIX:-baler}_postgres-pg17
+   ```
+
+   On nash-srv, add it after `deploy/nash-srv/docker-compose.override.yml`.
+   Once it's done, move the new image into `docker-compose.yml` and the
+   volume name into nash-srv's override, so later deploys keep both.
+4. Start only postgres and oxigraph: `docker compose up -d --wait postgres oxigraph`.
+   Wait a few seconds more before restoring: the image's healthcheck can pass
+   while its first-start init is still restarting the server, and a restore
+   started in that window fails to connect. Rerunning it is safe.
+5. Restore:
+   `python scripts/restore.py --postgres-file backups/postgres-<ts>.sql.gz --oxigraph-file backups/oxigraph-<ts>.ttl.gz`
+6. Check it: `python -m baler.schema status` should show the same migrations as
+   before, and `plan` nothing to do.
+7. `docker compose up -d`.
+
+Rehearsal, 16.15 to 17.11 with TimescaleDB 2.31.0 on both:
+
+| Step | Result |
+|---|---|
+| Backup | 12 s, 20 MB gzip'd |
+| Restore | 11 s |
+| Rows, md5 over every row | identical |
+| Compressed chunks | identical (1 of 3) |
+| Policies (compression, two refreshes) | present |
+| `baler_schema_migrations` | carried over, `upgrade` found nothing to do |
+| `schema.snapshot`, old vs new | identical |
+| Hypertable size | 248 MB before, 189 MB after: the restore rewrote the uncompressed chunks without dead space |
+
+Before a real upgrade, run the same steps on a copy. The rehearsal above did:
+the source and the target were scratch compose projects
+(`COMPOSE_PROJECT_NAME=pgup16` and `pgup17`, each with its own
+`BALER_VOLUME_PREFIX`, and `scripts/restore-drill.compose.yml` on top for
+loopback ports), the target with the override above, and the backup came
+from the source with `scripts/backup.py`. Both were removed with
+`docker compose down -v` afterwards.
