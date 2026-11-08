@@ -21,15 +21,33 @@ success; only an uncaught exception counts against a target's failure
 count. A derivation-level failure (bad SPARQL, a fn_source that won't
 compile) skips only that derivation for this pass, not the whole sweep -
 same "skip and log" shape as depends_on cycle handling below.
+
+Cur mode (a formula derivation with applies_to_topic_glob re-runs when one
+of its inputs reports) reads the reading feed (baler.reading_feed, #243),
+not a QoS 0 subscription to `#` that the broker silently dropped from as
+soon as this daemon fell behind. Per committed batch, each derivation's
+triggered rows are found in an index of its select's rows by input point
+(CurTargets, refreshed every --select-refresh seconds or when the
+derivation changes) and each runs once, however many of its inputs
+reported in the batch - not a SPARQL query and a run per reading. A pass
+reads open masking faults and disabled targets once (_Snapshot), not per
+input and per target, and a computed point's graph lineage is written once
+per process (_attach_once), not on every evaluation.
 """
 
 import argparse
+import contextlib
+import contextvars
 import fnmatch
 import graphlib
 import json
 import os
 import re
+import threading
 import time
+import traceback
+import weakref
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
@@ -39,13 +57,13 @@ from baler import (
     derivation_health,
     heartbeat,
     json_store,
-    mqtt_util,
+    reading_feed,
     sandbox,
     timeseries,
     tracing,
 )
 from baler.faults import list_faults
-from baler.ingest import link_point_to_equip, topic_to_point_uri
+from baler.ingest import link_point_to_equip
 from baler.remote_store import RemoteStore
 from baler.schemas import Derivation, TraceEntry
 from baler.store import BRICK, TD
@@ -97,6 +115,54 @@ VALIDITY_RULE_TYPES = ("stale", "stuck")
 _rules = json_store.RuleCache(json_store.data_file("rules.json"))
 
 
+class _Snapshot:
+    """One evaluation pass's view of the masking faults and the disabled
+    targets, read in two queries instead of one per input and one per
+    target (#243). The same answers _masking_fault and is_target_disabled
+    give, as of the start of the pass."""
+
+    def __init__(self, fault_conn, health_conn):
+        self.masks: dict[str, dict] | None = None
+        if fault_conn is not None:
+            self.masks = {}
+            validity = sorted(r["id"] for r in _rules.get() if r.get("type") in VALIDITY_RULE_TYPES)
+            if validity:
+                for rule_id, point_uri in fault_conn.execute(
+                        "SELECT rule_id, point_uri FROM faults WHERE status = 'open' AND rule_id = ANY(%s) "
+                        "ORDER BY started_at DESC", (validity,)).fetchall():
+                    self.masks.setdefault(point_uri, {"rule_id": rule_id, "point_uri": point_uri})
+        self.disabled: set[tuple[str, str]] | None = None
+        if health_conn is not None:
+            self.disabled = {(d, t) for d, t in health_conn.execute(
+                "SELECT derivation_id, target_uri FROM derivation_target_health WHERE disabled").fetchall()}
+
+
+_snapshot: contextvars.ContextVar[_Snapshot | None] = contextvars.ContextVar("derivation_snapshot", default=None)
+
+
+@contextlib.contextmanager
+def _pass(fault_conn, health_conn) -> Iterator[None]:
+    """Within it, masking faults and disabled targets come from one
+    _Snapshot (nested passes share the outer one)."""
+    if _snapshot.get() is not None:
+        yield
+        return
+    token = _snapshot.set(_Snapshot(fault_conn, health_conn))
+    try:
+        yield
+    finally:
+        _snapshot.reset(token)
+
+
+def _target_disabled(health_conn, derivation_id: str, target_uri: str) -> bool:
+    if health_conn is None:
+        return False
+    snap = _snapshot.get()
+    if snap is not None and snap.disabled is not None:
+        return (derivation_id, target_uri) in snap.disabled
+    return derivation_health.is_target_disabled(health_conn, derivation_id, target_uri)
+
+
 def _masking_fault(fault_conn, point_uri: str) -> dict | None:
     """The open fault that masks this input, if any: a stale/stuck fault
     from a rule that still exists. Not any open fault (Baler#58): a
@@ -106,6 +172,9 @@ def _masking_fault(fault_conn, point_uri: str) -> dict | None:
     duty cycle for two months."""
     if fault_conn is None:
         return None
+    snap = _snapshot.get()
+    if snap is not None and snap.masks is not None:
+        return snap.masks.get(point_uri)
     validity = {r["id"] for r in _rules.get() if r.get("type") in VALIDITY_RULE_TYPES}
     if not validity:
         return None
@@ -130,15 +199,36 @@ def _read_input_series(ts_conn, fault_conn, point_uri: str, start: datetime, end
     return timeseries.read_range(ts_conn, point_uri, start, end)
 
 
-def _write_and_attach(store, ts_conn, output_uri: str, target_uri: str, value, now: datetime, output_cfg: dict, input_uris: list[str], span=None) -> None:
-    timeseries.write_point_value(ts_conn, output_uri, value, now, unit=output_cfg.get("unit"), label=output_cfg.get("label"))
+# Graph lineage already written by this process, per store: the triples
+# are the same every evaluation (additive, idempotent), so writing them
+# again was 2 + len(inputs) Oxigraph round trips per output per run for
+# nothing (#243). Re-asserted every ATTACH_REFRESH_S anyway, so lineage
+# removed from the graph by hand (Ops -> Orphaned points) comes back
+# within the hour while the derivation still writes, as it did before.
+ATTACH_REFRESH_S = 3600.0
+_attached: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
+
+def _attach_once(store, output_uri: str, target_uri: str, brick_class: str | None, input_uris: list[str]) -> None:
+    key = (output_uri, target_uri, brick_class, tuple(input_uris))
+    try:
+        seen = _attached.setdefault(store, {})
+    except TypeError:  # a store that can't be weakly referenced: no memo
+        seen = {}
+    at = seen.get(key)
+    if at is not None and time.monotonic() - at < ATTACH_REFRESH_S:
+        return
     output_ref = URIRef(output_uri)
-    brick_class = output_cfg.get("brick_class")
     store.add_entity(output_ref, BRICK[brick_class] if brick_class else TD.ComputedPoint)
     link_point_to_equip(store, output_ref, URIRef(target_uri))
     for input_uri in input_uris:
         store.add_derived_from(output_ref, URIRef(input_uri))
+    seen[key] = time.monotonic()
+
+
+def _write_and_attach(store, ts_conn, output_uri: str, target_uri: str, value, now: datetime, output_cfg: dict, input_uris: list[str], span=None) -> None:
+    timeseries.write_point_value(ts_conn, output_uri, value, now, unit=output_cfg.get("unit"), label=output_cfg.get("label"))
+    _attach_once(store, output_uri, target_uri, output_cfg.get("brick_class"), input_uris)
 
     if span is not None:
         span.set_attribute("wrote_point", output_uri)
@@ -190,7 +280,10 @@ def _read_formula_inputs(ts_conn, fault_conn, input_uris: dict[str, str], input_
     return inputs
 
 
-def _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation: Derivation, now: datetime, dry_run: bool, trigger_point_uri: str | None = None) -> list[TraceEntry]:
+def _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation: Derivation, now: datetime, dry_run: bool,
+                      trigger_point_uri: str | None = None, rows: list | None = None) -> list[TraceEntry]:
+    """`rows`: the select's rows to run (Cur mode's triggered ones), instead
+    of running the select."""
     fn = sandbox.compile_fn(derivation["fn_source"])
     derivation_id = derivation["id"]
     target_var = derivation["target_var"]
@@ -201,14 +294,15 @@ def _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation: Deriv
     output_cfg = derivation.get("output", {})
 
     trace: list[TraceEntry] = []
-    rows = list(store.query(derivation["select"]))
+    if rows is None:
+        rows = list(store.query(derivation["select"]))
     for row in rows:
         target_uri = str(getattr(row, target_var))
         input_uris = {name: str(getattr(row, name)) for name in input_vars}
 
         if trigger_point_uri is not None and trigger_point_uri not in input_uris.values():
             continue
-        if health_conn is not None and derivation_health.is_target_disabled(health_conn, derivation_id, target_uri):
+        if _target_disabled(health_conn, derivation_id, target_uri):
             continue
 
         with tracer.start_as_current_span("derivation_engine.evaluate_target") as span:
@@ -281,7 +375,7 @@ def _walk_rollup_tree(store, ts_conn, fault_conn, health_conn, derivation: Deriv
     window_start = now - timedelta(seconds=window_seconds)
 
     for node in order:
-        if health_conn is not None and derivation_health.is_target_disabled(health_conn, derivation_id, node):
+        if _target_disabled(health_conn, derivation_id, node):
             continue
 
         with tracer.start_as_current_span("derivation_engine.evaluate_target") as span:
@@ -327,58 +421,152 @@ def evaluate_derivations(store, ts_conn, fault_conn, health_conn, derivations: l
         order = [did for did in order if did in only_ids]
 
     trace: list[TraceEntry] = []
-    for derivation_id in order:
-        derivation = by_id[derivation_id]
-        with tracer.start_as_current_span("derivation_engine.evaluate") as span:
-            span.set_attribute("derivation_id", derivation_id)
-            kind = derivation.get("kind", "formula")
-            span.set_attribute("kind", kind)
-            try:
-                rows = _evaluate_rollup(store, ts_conn, fault_conn, health_conn, derivation, now, dry_run) if kind == "rollup" \
-                    else _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation, now, dry_run)
-            except Exception as exc:  # noqa: BLE001 - one derivation failing (bad SPARQL, sandboxed code) must not stop the whole sweep
-                span.set_attribute("error", str(exc))
-                continue
-            span.set_attribute("target_count", len(rows))
-        trace.extend({"derivation_id": derivation_id, **row} for row in rows)
+    with _pass(fault_conn, health_conn):
+        for derivation_id in order:
+            trace.extend(_evaluate_one(store, ts_conn, fault_conn, health_conn, by_id[derivation_id], now, dry_run))
     return trace
 
 
-def make_on_message(store, ts_conn, fault_conn, health_conn, cache: json_store.RuleCache):
-    """Cur-mode: a cheap fnmatch prefilter (mirrors fault_detector.py's
-    Cur-mode) decides which formula derivations even bother re-running
-    their select, then trigger_point_uri narrows evaluation to the row(s)
-    the incoming point actually feeds - not a full re-sweep. Rollups have
-    no Cur-mode analog (a single leaf message triggering a full tree
-    re-walk would be wasteful); they're filtered out below."""
-    def on_message(client, userdata, msg):
-        topic = msg.topic
-        point_uri = str(topic_to_point_uri(topic))
-        for derivation in cast(list[Derivation], cache.get()):
-            glob = derivation.get("applies_to_topic_glob")
-            if not glob or derivation.get("kind") == "rollup" or not fnmatch.fnmatch(topic, glob):
+def _evaluate_one(store, ts_conn, fault_conn, health_conn, derivation: Derivation, now: datetime, dry_run: bool) -> list[TraceEntry]:
+    derivation_id = derivation["id"]
+    with tracer.start_as_current_span("derivation_engine.evaluate") as span:
+        span.set_attribute("derivation_id", derivation_id)
+        kind = derivation.get("kind", "formula")
+        span.set_attribute("kind", kind)
+        try:
+            rows = _evaluate_rollup(store, ts_conn, fault_conn, health_conn, derivation, now, dry_run) if kind == "rollup" \
+                else _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation, now, dry_run)
+        except Exception as exc:  # noqa: BLE001 - one derivation failing (bad SPARQL, sandboxed code) must not stop the whole sweep
+            span.set_attribute("error", str(exc))
+            return []
+        span.set_attribute("target_count", len(rows))
+    return [{"derivation_id": derivation_id, **row} for row in rows]
+
+
+class CurTargets:
+    """Cur-mode formula derivations' select rows, indexed by input point:
+    which rows a reading of point P re-runs. A derivation's select runs
+    again after `ttl` seconds (new equipment, re-tagged points) or as soon
+    as its select/vars change - not once per reading, as the per-message
+    path did."""
+
+    def __init__(self, ttl: float = 60.0):
+        self.ttl = ttl
+        self._cache: dict[str, tuple[tuple, float, list, dict[str, list[int]]]] = {}
+
+    def rows_for(self, store, derivation: Derivation, triggered: set[str]) -> list:
+        key = (derivation["select"], tuple(derivation["input_vars"]), derivation["target_var"])
+        hit = self._cache.get(derivation["id"])
+        if hit is None or hit[0] != key or time.monotonic() - hit[1] >= self.ttl:
+            rows = list(store.query(derivation["select"]))
+            by_input: dict[str, list[int]] = {}
+            for i, row in enumerate(rows):
+                for name in derivation["input_vars"]:
+                    by_input.setdefault(str(getattr(row, name)), []).append(i)
+            hit = (key, time.monotonic(), rows, by_input)
+            self._cache[derivation["id"]] = hit
+        index = sorted({i for uri in triggered for i in hit[3].get(uri, ())})
+        return [hit[2][i] for i in index]
+
+
+class _GlobMemo:
+    """fnmatch(topic, glob), memoized per glob and topic."""
+
+    def __init__(self):
+        self._memo: dict[str, dict[str, bool]] = {}
+
+    def __call__(self, glob: str, topic: str) -> bool:
+        memo = self._memo.setdefault(glob, {})
+        hit = memo.get(topic)
+        if hit is None:
+            hit = memo[topic] = fnmatch.fnmatch(topic, glob)
+        return hit
+
+
+def cur_derivations(derivations: list[Derivation]) -> list[Derivation]:
+    """The ones a reading re-runs: formula derivations with a topic glob.
+    Rollups have no Cur-mode analog (a single leaf message triggering a
+    full tree re-walk would be wasteful)."""
+    return [d for d in derivations if d.get("applies_to_topic_glob") and d.get("kind") != "rollup"]
+
+
+def evaluate_cur_points(store, ts_conn, fault_conn, health_conn, derivations: list[Derivation], point_uris: set[str],
+                        targets: CurTargets, globs: _GlobMemo | None = None, now: datetime | None = None) -> int:
+    """Cur mode for one batch of readings: every formula derivation whose
+    topic glob matches a point in `point_uris`, re-run for the rows those
+    points feed, each row once. Returns how many rows ran."""
+    globs = globs or _GlobMemo()
+    ran = 0
+    with _pass(fault_conn, health_conn):
+        for derivation in cur_derivations(derivations):
+            glob = derivation["applies_to_topic_glob"]
+            hits = {u for u in point_uris if globs(glob, reading_feed.topic_of(u))}
+            if not hits:
                 continue
             with tracer.start_as_current_span("derivation_engine.evaluate_cur") as span:
                 span.set_attribute("derivation_id", derivation["id"])
-                span.set_attribute("topic", topic)
+                span.set_attribute("triggered_points", len(hits))
                 try:
-                    _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation, datetime.now(timezone.utc), dry_run=False, trigger_point_uri=point_uri)
-                except Exception as exc:  # noqa: BLE001 - one MQTT-triggered derivation failing must not crash the listener callback
+                    rows = targets.rows_for(store, derivation, hits)
+                    span.set_attribute("rows", len(rows))
+                    if rows:
+                        _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation,
+                                          now or datetime.now(timezone.utc), dry_run=False, rows=rows)
+                        ran += len(rows)
+                except Exception as exc:  # noqa: BLE001 - one triggered derivation failing must not stop the others
                     span.set_attribute("error", str(exc))
+    return ran
+
+
+def make_on_message(store, ts_conn, fault_conn, health_conn, cache: json_store.RuleCache, targets: CurTargets | None = None):
+    """Cur mode for one MQTT message: evaluate_cur_points for its point.
+    main() reads the reading feed instead (a batch at a time); this stays
+    for callers that hold a message."""
+    targets = targets or CurTargets()
+    globs = _GlobMemo()
+
+    def on_message(client, userdata, msg):
+        point_uri = f"{reading_feed.URI_PREFIX}{msg.topic}"
+        evaluate_cur_points(store, ts_conn, fault_conn, health_conn, cast(list[Derivation], cache.get()), {point_uri},
+                            targets, globs)
 
     return on_message
 
 
+def run_feed(store, dsn: str, cache: json_store.RuleCache, targets: CurTargets, status: heartbeat.Status,
+             stop: threading.Event | None = None) -> None:
+    """The Cur-mode thread: the reading feed, a batch at a time, on its own
+    connections (psycopg connections aren't for concurrent use)."""
+    ts_conn, fault_conn, health_conn, feed_conn = (timeseries.connect(dsn) for _ in range(4))
+    consumer = reading_feed.FeedConsumer(feed_conn, "derivation_engine", points_only=True)
+    consumer.start()
+    globs = _GlobMemo()
+
+    def handle(batch):
+        derivations = cast(list[Derivation], cache.get())
+        if not batch.readings or not cur_derivations(derivations):
+            return
+        points = {uri for uri, *_ in batch.readings}
+        status.add("cur_rows", evaluate_cur_points(store, ts_conn, fault_conn, health_conn, derivations, points,
+                                                   targets, globs))
+
+    def report(stats):
+        status.update("feed", stats.as_dict())
+        status.beat(feed_conn)
+
+    consumer.run(handle, stop=stop, report=report)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mqtt-host", default=os.environ.get("MQTT_HOST", "localhost"))
-    parser.add_argument("--mqtt-port", type=int, default=1883)
     parser.add_argument("--derivations-file", default=json_store.data_file("derivations.json"))
     parser.add_argument("--rules-file", default=json_store.data_file("rules.json"),
                         help="fault rules: open stale/stuck faults from these mask derivation inputs")
     parser.add_argument("--dsn", default=timeseries.DEFAULT_DSN)
     parser.add_argument("--oxigraph-url", default=os.environ.get("OXIGRAPH_URL", "http://localhost:7878"))
     parser.add_argument("--tick-seconds", type=float, default=5.0)
+    parser.add_argument("--select-refresh", type=float, default=60.0,
+                        help="seconds a Cur-mode derivation's select rows are reused before it runs again")
     parser.add_argument("--dry-run", action="store_true", help="run one pass against live data, print the trace, write nothing")
     parser.add_argument("--derivation-id", default=None, help="with --dry-run, evaluate only this derivation")
     args = parser.parse_args()
@@ -404,28 +592,30 @@ def main() -> None:
             print(json.dumps(entry, default=str))
         return
 
-    client = mqtt_util.make_client()
-    client.on_message = make_on_message(store, ts_conn, fault_conn, health_conn, cache)
-    client.connect(args.mqtt_host, args.mqtt_port)
-    client.subscribe("#")  # per-derivation applies_to_topic_glob is the real filter, applied in on_message
-    client.loop_start()
+    status = heartbeat.Status("derivation_engine", tick_seconds=args.tick_seconds, feed={}, cur_rows=0)
+
+    def feed_thread():
+        try:
+            run_feed(RemoteStore(args.oxigraph_url), args.dsn, cache, CurTargets(args.select_refresh), status)
+        except Exception:  # noqa: BLE001 - exit; the feed offset makes the restart lossless
+            traceback.print_exc()
+            os._exit(1)
+
+    threading.Thread(target=feed_thread, name="reading-feed", daemon=True).start()
 
     next_run: dict[str, datetime] = {}
-    print(f"derivation engine ticking every {args.tick_seconds}s")
-    try:
-        while True:
-            now = datetime.now(timezone.utc)
-            derivations = cast(list[Derivation], cache.get())
-            due_ids = {d["id"] for d in derivations if now >= next_run.get(d["id"], now)}
-            if due_ids:
-                evaluate_derivations(store, ts_conn, fault_conn, health_conn, derivations, now=now, dry_run=False, only_ids=due_ids)
-                for d in derivations:
-                    if d["id"] in due_ids:
-                        next_run[d["id"]] = now + timedelta(seconds=d.get("interval_seconds") or args.tick_seconds)
-            heartbeat.beat(health_conn, "derivation_engine", {"tick_seconds": args.tick_seconds})
-            time.sleep(args.tick_seconds)
-    finally:
-        client.loop_stop()
+    print(f"derivation engine ticking every {args.tick_seconds}s, Cur mode from the reading feed", flush=True)
+    while True:
+        now = datetime.now(timezone.utc)
+        derivations = cast(list[Derivation], cache.get())
+        due_ids = {d["id"] for d in derivations if now >= next_run.get(d["id"], now)}
+        if due_ids:
+            evaluate_derivations(store, ts_conn, fault_conn, health_conn, derivations, now=now, dry_run=False, only_ids=due_ids)
+            for d in derivations:
+                if d["id"] in due_ids:
+                    next_run[d["id"]] = now + timedelta(seconds=d.get("interval_seconds") or args.tick_seconds)
+        status.beat(health_conn)
+        time.sleep(args.tick_seconds)
 
 
 if __name__ == "__main__":
