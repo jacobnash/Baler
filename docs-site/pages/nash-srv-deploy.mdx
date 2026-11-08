@@ -36,6 +36,26 @@ CLAUDE.md gotcha.
 touches (no `down -v` anywhere in the pipeline), so the demo/e2e data your
 friends generate survives every redeploy.
 
+The data volumes on nash-srv predate the rename, so they carry the old
+names (`BALER_VOLUME_PREFIX=timberdoodle`, `WINDROW_STATE_VOLUME=fbf-state`
+in `nash-srv.env`, see `deploy/MIGRATING-TO-BALER.md`) and were created by
+the `timberdoodle` compose project. The override file marks those five
+(`postgres-data`, `oxigraph-data`, `grafana-data`, `mosquitto-data` and
+Windrow's `windrow-state`) `external: true`, with the same `name:` as the
+base file. Compose then uses them as they are, instead of warning on every
+deploy that they belong to another project, and never creates or removes
+them. The base `docker-compose.yml` doesn't do this, because a fresh install
+has no such volumes and compose refuses to start with a missing external
+volume.
+
+A from-scratch nash-srv (no old volumes, prefix unset) has to create them
+once before its first deploy, or that deploy stops with
+`external volume "baler_postgres-data" not found`:
+
+```bash
+for v in postgres-data oxigraph-data grafana-data mosquitto-data windrow-state; do sudo docker volume create "baler_$v"; done
+```
+
 ## One-time setup
 
 1. **DNS** - add CNAMEs (not A records - nash-srv's public IP is dynamic):
