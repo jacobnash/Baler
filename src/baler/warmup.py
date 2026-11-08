@@ -14,6 +14,7 @@ service from starting (the thread is a daemon, left to finish alone).
 
 from __future__ import annotations
 
+import gc
 import threading
 import time
 
@@ -43,3 +44,17 @@ def run(name: str, fn, timeout: float = DEFAULT_TIMEOUT) -> None:
         print(f"warm-up {name}: still running after {timeout:g}s, starting anyway", flush=True)
     else:
         print(f"warm-up {name}: {took:.1f}s", flush=True)
+    freeze_heap()
+
+
+def freeze_heap() -> None:
+    """Move everything alive now - imported modules, the vendored Brick
+    vocabulary, the lookup tables warm-up just built: hundreds of thousands
+    of objects that live as long as the process - out of the cyclic
+    garbage collector's view (gc.freeze). Otherwise every full collection
+    walks them all again, and a large read allocates enough to trigger
+    several: freezing them took a 10k-point /api/read from 1.78 s to
+    1.07 s and its encode from 0.79 s to 0.57 s (Baler#244). Garbage first
+    (gc.collect), so only live objects are frozen."""
+    gc.collect()
+    gc.freeze()

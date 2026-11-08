@@ -89,6 +89,12 @@ sudo bash ~github-runner/actions-runner-baler/_work/Baler/Baler/deploy/nash-srv/
 gh variable set BALER_VERIFY_RUNNER --body baler-verify -R jacobnash/Baler   # anywhere with gh
 ```
 
+**Measured on nash-srv (2026-11-08, two runners).** Three merges in about 12 minutes (#262, #263,
+#264): the second deploy job started 1 s after the first one ended, where it used to wait for the
+whole verification (7-8 minutes). The verification it overtook stopped in 9 s as superseded, with no
+issue changes; the last deploy's verification ran complete (cold, wait, warm) with 0 findings; no two
+deploys overlapped. Results are on #260.
+
 The script is idempotent: everything already installed is skipped, and step 8 adds only the verify
 runner. Set the variable only after the runner shows as online, or verify jobs queue with no runner to
 take them. To go back to one runner, delete the variable.

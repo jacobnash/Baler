@@ -213,6 +213,52 @@ reading over QoS 0, fell behind (cycle times of 81 s and 121 s) and silently mis
 
 The listener's own ceiling wasn't reached locally: it used 31% CPU at 5,040 readings/s.
 
+**With the read fixes** ([#244](https://github.com/jacobnash/Baler/issues/244)). Same VM, steps,
+soak (300 s) and caps, on a clean stack each time. Run `20261108T165606Z` is main at `6946378`
+(load average 1.3 at start); run `20261108T180642Z` is the fixes (load average 6.0 at start: other
+stacks shared the VM, so its 2.5k column is no faster than before).
+
+| Points | Run | Status | read?filter=point | filter=equip | readAll(equip) | Cx report | First failure |
+|---|---|---|---|---|---|---|---|
+| 2,500 | before | pass | 0.66 s | 0.07 s | 0.69 s | 0.32 s | - |
+| 2,500 | after | pass | 0.80 s | 0.09 s | 0.55 s | 0.28 s | - |
+| 5,000 | before | fail | 1.74 s | 0.22 s | 1.62 s | 0.48 s | read?filter=point |
+| 5,000 | after | **pass** | 0.99 s | 0.11 s | 0.91 s | 0.28 s | - |
+| 10,000 | before | fail | 7.20 s | 0.86 s | 6.31 s | 1.30 s | point, equip, readAll(equip) |
+| 10,000 | after | fail | 2.12 s | 0.26 s | 2.01 s | 0.51 s | point (1.5 s), readAll(equip) (2.0 s) |
+
+**Highest passing step, with the read fixes: 5,000 points.** At 10k, read?filter=point and
+readAll(equip) still miss. Both return every point, so they grow with the graph by definition.
+What's left is the per-request pull of every record's triples out of Oxigraph (about 3.5 µs a
+triple, 136k triples at 10k points) and the encode.
+
+Most of the time was spent in reading and decoding the graph, not in Postgres:
+
+- Graph reads that pull every record's triples (haystack `build_records`, hisquery
+  `describe_points`) use SPARQL TSV, decoded row by row as Oxigraph streams it. That's half the
+  bytes of JSON results and half of Oxigraph's own time.
+- A filter that is only or'ed tags (`point`, `equip`, `ahu or vav`) is answered by the union of its
+  leaf sets. It skips the flag joins and the join on every candidate's triples: `point` at 10k
+  points dropped from 0.6 s to 0.2 s.
+- Each API freezes its startup heap after warm-up (`gc.freeze`), so the cyclic GC stops re-walking
+  the vendored Brick and the lookup tables during every large read. A 10k-point read went from
+  1.78 s to 1.07 s in-process.
+- The Cx inventory reads equipment and points with two plain scans instead of one UNION/OPTIONAL
+  over every typed subject: 0.35–0.47 s down to 0.14 s at 10k points.
+- `hisRead` reads the points' graph metadata on a side thread while Postgres folds their history.
+
+On one 10k-point stack with no load running, restarting the APIs on each tree in turn (cold is the
+first request after restart and warm-up, warm is the median of the next 5):
+
+| Probe | main, cold / warm | fixes, cold / warm |
+|---|---|---|
+| read?filter=point | 3.02 / 3.06 s | 1.69 / 1.73 s |
+| read?filter=equip | 0.35 / 0.35 s | 0.23 / 0.22 s |
+| readAll(equip) hisRead(today) | 3.14 / 3.16 s | 1.53 / 1.43 s |
+| Cx report, 500-point project | 0.78 / 0.63 s | 0.36 / 0.47 s |
+| hisRead 1000 points | 0.43 / 0.34 s | 0.16 / 0.19 s |
+| /ops/status | 0.24 / 0.24 s | 0.22 / 0.24 s |
+
 | Fix | Measured |
 |---|---|
 | Durable batched ingest (COPY per batch, acks after commit, `synchronous_commit` back on) | 5k points: p95 lag 11.08 → 0.50 s, drops 935 → 0, listener CPU 52 → 18%, postgres 46 → 26% |
