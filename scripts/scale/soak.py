@@ -99,7 +99,7 @@ def chunks(conn, compress_after_s: float | None) -> dict:
     uncompressed chunk, and how many are old enough to compress but aren't."""
     after = timedelta(seconds=compress_after_s or 0)
     rows = conn.execute("""
-        SELECT format('%%I.%%I', c.chunk_schema, c.chunk_name), c.range_start, c.range_end, c.is_compressed,
+        SELECT format('%I.%I', c.chunk_schema, c.chunk_name), c.range_start, c.range_end, c.is_compressed,
                COALESCE(s.n_tup_ins, 0)
         FROM timescaledb_information.chunks c
         LEFT JOIN pg_stat_user_tables s ON s.schemaname = c.chunk_schema AND s.relname = c.chunk_name
@@ -130,9 +130,9 @@ def compression_running(conn) -> bool:
     """A compression policy run in progress, from pg_stat_activity (job_stats
     only says so on some versions)."""
     return bool(conn.execute(
-        "SELECT count(*) FROM pg_stat_activity WHERE backend_type LIKE '%%Columnstore%%' OR backend_type LIKE "
-        "'%%Compression%%' OR (application_name LIKE '%%Columnstore Policy%%' OR application_name LIKE "
-        "'%%Compression Policy%%')").fetchone()[0])
+        "SELECT count(*) FROM pg_stat_activity WHERE backend_type LIKE '%Columnstore%' OR backend_type LIKE "
+        "'%Compression%' OR (application_name LIKE '%Columnstore Policy%' OR application_name LIKE "
+        "'%Compression Policy%')").fetchone()[0])
 
 
 def watermarks(conn) -> dict:
@@ -145,7 +145,8 @@ def watermarks(conn) -> dict:
                            _timescaledb_functions.cagg_watermark(ca.mat_hypertable_id)))
                 FROM _timescaledb_catalog.continuous_agg ca
                 WHERE ca.user_view_name IN ('point_history_5m', 'point_history_1h')"""):
-            out[view] = round(float(age), 1) if age is not None else None
+            # never materialized yet: the watermark is the type's minimum
+            out[view] = round(float(age), 1) if age is not None and age < 365 * 86400 else None
     except Exception as exc:  # noqa: BLE001 - catalog differs on another TimescaleDB
         out["error"] = repr(exc)[:200]
     return out
@@ -198,7 +199,7 @@ class LateWriter:
         each replayed as is (same ts, new value) and backfilled 1.23 s later,
         published at `rate` messages/s (the soak's own rate)."""
         chunk = conn.execute("""
-            SELECT format('%%I.%%I', chunk_schema, chunk_name), range_start, range_end
+            SELECT format('%I.%I', chunk_schema, chunk_name), range_start, range_end
             FROM timescaledb_information.chunks WHERE hypertable_name = 'point_history' AND is_compressed
             ORDER BY range_end DESC LIMIT 1""").fetchone()
         if chunk is None:
