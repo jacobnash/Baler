@@ -9,9 +9,10 @@ the same BALER_LLM_PROVIDER switch as Cx (commissioning/llm.py):
     becomes a proposal carrying the deterministic candidates.
 
 The model is BALER_TAG_MODEL, else (openai) BALER_LLM_MODEL, else (anthropic)
-DEFAULT_ANTHROPIC_MODEL: a small, cheap model by default, since the step
-asks twice per naming pattern. Cx's BALER_CX_MODEL is deliberately not
-used: it defaults to a large model meant for reading PDFs.
+commissioning.llm.DEFAULT_ANTHROPIC_TAG_MODEL, the current Haiku, defined
+beside Cx's default so the two move together. Cx's BALER_CX_MODEL is
+deliberately not used: it defaults to the current Opus, meant for reading
+PDFs, and this step asks twice per naming pattern.
 
 A client is anything with `.name` and `.ask(prompt) -> dict` (the reply
 JSON); tests and the eval harness pass fakes. `anthropic` is imported only
@@ -27,8 +28,10 @@ from baler.commissioning import llm
 
 tracer = tracing.get_tracer(__name__)
 
-DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5"
-MAX_TOKENS = 1024
+DEFAULT_ANTHROPIC_MODEL = llm.DEFAULT_ANTHROPIC_TAG_MODEL
+# Room for the reply plus the thinking Haiku 5.5 does by default (adaptive,
+# counted against max_tokens); the JSON itself is a few hundred tokens.
+MAX_TOKENS = 4096
 
 
 class LLMClassificationError(Exception):

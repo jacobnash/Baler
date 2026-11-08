@@ -29,7 +29,12 @@ import time
 import requests
 
 PROVIDERS = ("anthropic", "openai", "none")
+# The Claude defaults, in one place: the current Opus for Cx (reading PDFs,
+# the agent), the current Haiku for the tagging model step, which asks
+# twice per naming pattern and needs a cheap, quick model rather than a
+# large one. Bump both together when a new generation ships.
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5"
+DEFAULT_ANTHROPIC_TAG_MODEL = "claude-haiku-5-5"
 DEFAULT_TIMEOUT = 300.0  # seconds; a CPU-only Ollama is slow
 RETRIES = 3  # on 429/503 - free tiers rate-limit hard
 

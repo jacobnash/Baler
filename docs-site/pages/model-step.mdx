@@ -94,12 +94,15 @@ The model comes from `BALER_LLM_PROVIDER`, the same switch Cx uses:
 
 | Provider | Model |
 |---|---|
-| `anthropic` | `BALER_TAG_MODEL`, default `claude-haiku-4-5` |
+| `anthropic` | `BALER_TAG_MODEL`, default `claude-haiku-5-5` (the current Haiku) |
 | `openai` | any OpenAI-compatible endpoint (`BALER_LLM_BASE_URL`): `BALER_TAG_MODEL`, else `BALER_LLM_MODEL` |
 | `none` | no model. Every unresolved point becomes a proposal with the ranker's candidates. |
 
-`BALER_CX_MODEL` isn't used here. It defaults to a large model meant for
-reading PDFs, and this step asks twice per pattern.
+`BALER_CX_MODEL` isn't used here. It defaults to the current Opus
+(`claude-opus-5-5`), meant for reading PDFs, and this step asks twice per
+pattern. Both defaults live side by side in `commissioning/llm.py`
+(`DEFAULT_ANTHROPIC_MODEL`, `DEFAULT_ANTHROPIC_TAG_MODEL`), so a new model
+generation is one edit there.
 
 ```bash
 python -m baler.autotag                 # rules, model, proposals
