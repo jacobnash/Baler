@@ -15,12 +15,15 @@ BACnet, MQTT or Oxigraph:
      identifier and description, plus the `writable` and `unit` tags
      `connection_manager._tag_points` adds;
   2. Baler's `ingest.ingest_tags` into an in-memory Store;
-  3. `mapping.classify_point_with_fallback`: the rules, then the model step
-     when one is given (`autotag` does the same, point and equip).
+  3. `mapping.classify_point`, then `model_step.run` on what the rules
+     left, as `autotag` does (points, then equipment).
 
 Each point ends on one ladder step: `rules` (a direct rule match,
-auto-accepted), `model` (the LLM's answer, auto-accepted at its threshold)
-or `review` (a PROJ fallback class or TD:UnmappedPoint: a person decides).
+auto-accepted), `model` (both model asks agreed and nothing vetoed) or
+`review` (a mapping proposal: a person decides). The model step runs even
+without a model: its proposals carry the deterministic candidates, and
+the report scores those too (is the truth in the top 1 / top 3 a reviewer
+is shown?).
 Memory and site conventions (#185, #186) don't exist yet; their steps
 appear here once they do.
 
@@ -41,6 +44,7 @@ points, so a point left for review counts against it.
   python -m baler.mapping_eval --check tests/fixtures/mapping_eval_baseline.json
   python -m baler.mapping_eval --llm --llm-record answers.json   # costs money
   python -m baler.mapping_eval --llm-replay answers.json         # free re-run
+  python -m baler.mapping_eval --simulate inventing              # no key, see SIMULATED
 
 CI runs the `--check` form: deterministic, rules only, a few seconds.
 """
@@ -48,9 +52,11 @@ CI runs the `--check` form: deterministic, rules only, a few seconds.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -61,7 +67,7 @@ from typing import Any
 
 from rdflib import RDF, Literal, URIRef
 
-from baler import brick_vocab, ingest, mapping
+from baler import brick_vocab, ingest, mapping, mapping_proposals, model_step
 from baler.store import TD, Store
 
 REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -153,6 +159,7 @@ class CorpusPoint:
     tokens: tuple[str, ...]
     style: str
     truth: tuple[str, ...]
+    initial_value: Any = None
 
     @property
     def topic(self) -> str:
@@ -182,12 +189,14 @@ class Result:
     kind: str  # "point" | "equip"
     truth: list[str]
     tags: list[str]
-    outcome: str  # classify_point_with_fallback's: direct/fallback/miss/llm
+    outcome: str  # classify_point's direct/fallback/miss, or model
     step: str  # rules/model/review
     predicted: str | None  # the Brick class written, auto-accepted steps only
     verdict: str | None  # correct/partial/wrong, auto-accepted steps only
     style: str = ""
     has_description: bool = False
+    candidates: list[str] = field(default_factory=list)  # shown to a reviewer, best first
+    refused_because: str | None = None
 
 
 @dataclass
@@ -197,6 +206,7 @@ class Report:
     points: list[Result] = field(default_factory=list)
     equipment: list[Result] = field(default_factory=list)
     llm_calls: int = 0
+    patterns: int = 0
 
 
 # --- corpus ---------------------------------------------------------------
@@ -275,7 +285,7 @@ def load_mock_hospital(windrow_dir: str = DEFAULT_WINDROW_DIR, seed: int | None 
             points.append(CorpusPoint(
                 topic_prefix=prefix, equip_kind=kind, label=p["label"], description=p["description"],
                 object_identifier=p["object_identifier"], units=spec_obj["units"], tokens=tokens, style=style,
-                truth=POINT_TRUTH[tokens],
+                truth=POINT_TRUTH[tokens], initial_value=spec_obj.get("initial_value"),
             ))
         equips.append(CorpusEquip(prefix, kind, EQUIP_TRUTH[kind], [p["label"] for p in equip["points"]]))
 
@@ -310,12 +320,18 @@ def judge(vocab: brick_vocab.Vocab, predicted: str, truth: tuple[str, ...] | lis
     return "wrong"
 
 
-LLMClassify = Callable[[set, Any, Any, list], Any]
+class _CountingModel:
+    def __init__(self, model, report: Report):
+        self.model, self.report, self.name = model, report, model.name
+
+    def ask(self, prompt: str) -> dict:
+        self.report.llm_calls += 1
+        return self.model.ask(prompt)
 
 
 def evaluate(
     corpus: Corpus,
-    llm_classify: LLMClassify | None = None,
+    model: model_step.Model | None = None,
     vocab: brick_vocab.Vocab | None = None,
     point_rules_path: str = mapping.DEFAULT_RULES_PATH,
     equip_rules_path: str = mapping.EQUIP_RULES_PATH,
@@ -325,16 +341,9 @@ def evaluate(
     point_rules = mapping.load_rules(point_rules_path)
     equip_rules = mapping.load_rules(equip_rules_path)
     store = Store()
-    report = Report(corpus=corpus.name, mode=mode or ("rules + model" if llm_classify else "rules only"))
+    report = Report(corpus=corpus.name, mode=mode or (f"rules + model ({model.name})" if model else "rules only"))
 
-    counted = None
-    if llm_classify is not None:
-        inner = llm_classify
-
-        def counted(tags, label, description, known):
-            report.llm_calls += 1
-            return inner(tags, label, description, known)
-
+    values: dict[str, Any] = {}
     for point in corpus.points:
         tags = corpus.tagger({
             "label": point.label, "object_identifier": point.object_identifier,
@@ -344,6 +353,7 @@ def evaluate(
         # ingest_reading's graph write: the first reading gives the point its
         # source topic, which is the label the model step sees.
         store.add_many([(uri, RDF.type, TD.RawPoint), (uri, TD.sourceTopic, Literal(point.topic))])
+        values[str(uri)] = point.initial_value
     for equip in corpus.equipment:
         # Windrow's BACnet equip/tags carries no marker tags (only
         # windrowSite/windrowInstance, and only on a registered edge).
@@ -351,24 +361,42 @@ def evaluate(
         for label in equip.point_labels:
             ingest.link_point_to_equip(store, ingest.topic_to_point_uri(f"{equip.topic_prefix}/{label}"), equip_uri)
 
-    for point in corpus.points:
-        uri = ingest.topic_to_point_uri(point.topic)
-        r = _classify(store, uri, point_rules, counted, vocab, point.truth, "point")
-        r.style, r.has_description = point.style, bool(point.description)
-        report.points.append(r)
-    for equip in corpus.equipment:
-        uri = ingest.topic_prefix_to_equip_uri(equip.topic_prefix)
-        report.equipment.append(_classify(store, uri, equip_rules, counted, vocab, equip.truth, "equip"))
+    entities: list[tuple[URIRef, str, tuple[str, ...], CorpusPoint | None]] = [
+        (ingest.topic_to_point_uri(p.topic), "point", p.truth, p) for p in corpus.points
+    ] + [(ingest.topic_prefix_to_equip_uri(e.topic_prefix), "equip", e.truth, None) for e in corpus.equipment]
+    results: dict[str, Result] = {}
+    unresolved = []
+    for uri, kind, truth, source in entities:
+        tag_list = sorted(mapping.read_tags(store, uri))
+        outcome, brick_class = mapping.classify_point(store, uri, point_rules if kind == "point" else equip_rules)
+        r = Result(uri=str(uri), kind=kind, truth=list(truth), tags=tag_list, outcome=outcome, step="review", predicted=None, verdict=None)
+        if source is not None:
+            r.style, r.has_description = source.style, bool(source.description)
+        if outcome == "direct":
+            r.step, r.predicted, r.verdict = "rules", brick_class, judge(vocab, brick_class, truth)
+        else:
+            unresolved.append((uri, kind))
+        results[str(uri)] = r
+
+    # One reading per point is all the corpus has (the generator's initial
+    # value): enough to tell on/off from analog, not a distribution.
+    def stats(uris: list[str]) -> dict:
+        return {u: {"samples": 1, "boolean": isinstance(values[u], str)} | ({} if isinstance(values[u], str) else {"min": values[u], "max": values[u]})
+                for u in uris if u in values and values[u] is not None}
+
+    counted = _CountingModel(model, report) if model is not None else None
+    decisions = model_step.run(store, unresolved, counted, proposals=mapping_proposals.MemoryProposals(), stats=stats, vocab=vocab)
+    report.patterns = len({d.pattern for d in decisions})
+    for d in decisions:
+        r = results[d.uri]
+        r.candidates = [c["brick_class"] for c in d.candidates]
+        r.refused_because = d.refused_because
+        if d.accepted is not None:
+            r.step, r.outcome, r.predicted, r.verdict = "model", "model", d.accepted, judge(vocab, d.accepted, r.truth)
+
+    report.points = [results[str(u)] for u, k, _, _ in entities if k == "point"]
+    report.equipment = [results[str(u)] for u, k, _, _ in entities if k == "equip"]
     return report
-
-
-def _classify(store, uri: URIRef, rules, llm_classify, vocab, truth, kind: str) -> Result:
-    tags = sorted(mapping.read_tags(store, uri))
-    outcome, brick_class = mapping.classify_point_with_fallback(store, uri, rules=rules, llm_classify=llm_classify)
-    step = {"direct": "rules", "llm": "model"}.get(outcome, "review")
-    predicted = brick_class if step != "review" else None
-    verdict = judge(vocab, predicted, truth) if predicted is not None else None
-    return Result(uri=str(uri), kind=kind, truth=list(truth), tags=tags, outcome=outcome, step=step, predicted=predicted, verdict=verdict)
 
 
 # --- summary --------------------------------------------------------------
@@ -429,8 +457,15 @@ def summarize_results(results: list[Result], vocab: brick_vocab.Vocab) -> dict:
         for c in sorted(set(support) | set(predicted))
     }
 
+    # What a reviewer is shown: is the true class among the proposal's
+    # candidates? Over review points that have a true class.
+    reviewed = [r for r in results if r.step == "review" and r.truth]
+    in_top = {k: sum(any(judge(vocab, c, r.truth) == "correct" for c in r.candidates[:k]) for r in reviewed) for k in (1, 3)}
+
     return {
         "total": total,
+        "review_truth_in_top1": _ratio(in_top[1], len(reviewed)),
+        "review_truth_in_top3": _ratio(in_top[3], len(reviewed)),
         "accuracy": _ratio(verdicts["correct"], total),
         "correct": verdicts["correct"],
         "partial": verdicts["partial"],
@@ -465,6 +500,7 @@ def summarize(report: Report, vocab: brick_vocab.Vocab | None = None) -> dict:
         "corpus": report.corpus,
         "mode": report.mode,
         "llm_calls": report.llm_calls,
+        "patterns": report.patterns,
         "points": summarize_results(report.points, vocab),
         "points_by_style": _breakdown(report.points, lambda r: r.style),
         "points_by_description": _breakdown(report.points, lambda r: "with description" if r.has_description else "no description"),
@@ -478,8 +514,7 @@ def _fmt_ratio(x: float | None) -> str:
 
 def format_summary(summary: dict, report: Report | None = None, per_class: bool = True) -> str:
     lines = [f"Mapping eval: {summary['corpus']}, {summary['mode']}"]
-    if summary["llm_calls"]:
-        lines.append(f"model calls: {summary['llm_calls']}")
+    lines.append(f"model-step patterns: {summary['patterns']}, model calls: {summary['llm_calls']}")
     for section in ("points", "equipment"):
         s = summary[section]
         lines += [
@@ -490,6 +525,8 @@ def format_summary(summary: dict, report: Report | None = None, per_class: bool 
             f"  auto-accepted but wrong       {s['auto_accepted_wrong_pct']:5.1f}%  ({s['auto_accepted_wrong']})",
             f"  auto-accepted, less specific  {_pct(s['partial'], s['total']):5.1f}%  ({s['partial']})",
             f"  left for review               {s['review_pct']:5.1f}%  ({s['review']})",
+            f"    truth is the top candidate  {_fmt_ratio(s['review_truth_in_top1'])}",
+            f"    truth in the top 3          {_fmt_ratio(s['review_truth_in_top3'])}",
             "",
             "  step      points      %  correct  partial  wrong  accuracy",
         ]
@@ -532,70 +569,120 @@ def compare(summary: dict, baseline: dict) -> list[str]:
     return problems
 
 
-# --- model step: real, recorded, replayed ----------------------------------
+# --- model step: real, recorded, replayed, simulated -----------------------
 
 
-def _recording(llm_classify: LLMClassify, answers: dict) -> LLMClassify:
-    def classify(tags, label, description, known):
-        result = llm_classify(tags, label, description, known)
-        answers[_answer_key(tags, label)] = {"brick_class": result.brick_class, "confidence": result.confidence, "reasoning": result.reasoning}
-        return result
+class _Recording:
+    def __init__(self, model, answers: dict):
+        self.model, self.answers, self.name = model, answers, model.name
 
-    return classify
-
-
-def _answer_key(tags, label) -> str:
-    return f"{label or ''}|{','.join(sorted(tags))}"
+    def ask(self, prompt: str) -> dict:
+        reply = self.model.ask(prompt)
+        self.answers[_prompt_key(prompt)] = reply
+        return reply
 
 
-def replay(answers: dict) -> LLMClassify:
-    """A model step that answers from a recorded run (--llm-record), so a
-    paid run can be re-scored for free after a change downstream of the
-    model. Equipment with identical inputs share one answer, as they would
-    get the same prompt."""
-    from baler.llm_classifier import ClassificationResult
+def _prompt_key(prompt: str) -> str:
+    return hashlib.sha256(prompt.encode()).hexdigest()[:16]
 
-    def classify(tags, label, description, known):
-        key = _answer_key(tags, label)
-        if key not in answers:
-            raise KeyError(f"no recorded model answer for {key!r}: record against the same corpus and seed")
-        return ClassificationResult(**answers[key])
 
-    return classify
+class Replay:
+    """A model step answering from a recorded run (--llm-record), keyed by
+    the exact prompt: free to re-run after a change downstream of the
+    model. A change to the prompt itself (evidence, candidates) misses."""
+
+    def __init__(self, answers: dict, name: str = "replay"):
+        self.answers, self.name = answers, name
+
+    def ask(self, prompt: str) -> dict:
+        key = _prompt_key(prompt)
+        if key not in self.answers:
+            raise KeyError(f"no recorded answer for prompt {key}: record again against this version")
+        return self.answers[key]
+
+
+def _prompt_field(prompt: str, name: str) -> list[str]:
+    for line in prompt.splitlines():
+        if line.startswith(name + ": "):
+            return [x.strip() for x in line[len(name) + 2:].split(",") if x.strip() and x.strip() != "(none found)"]
+    return []
+
+
+class Simulated:
+    """Stand-ins for a model, for exercising the ladder without a key. They
+    say nothing about how good a real model is; they show what the ladder
+    does with a given kind of answer.
+
+      inventing  glues a class name out of the first example label
+                 (CHW-SUP-TEM-7 -> Chw_Sup_Tem_Sensor), sure of itself
+      echo       answers the first three candidates in the order the prompt
+                 lists them - the re-ask lists them reversed, so it never
+                 agrees with itself
+      ranker     answers the deterministic ranker's top candidates whatever
+                 their order in the prompt, so it always agrees with itself:
+                 what auto-accept would do if a model just trusted the ranker
+    """
+
+    KINDS = ("inventing", "echo", "ranker")
+
+    def __init__(self, kind: str):
+        if kind not in self.KINDS:
+            raise ValueError(f"simulated model must be one of {', '.join(self.KINDS)}")
+        self.kind, self.name = kind, f"simulated:{kind}"
+
+    def ask(self, prompt: str) -> dict:
+        cands = _prompt_field(prompt, "Candidate Brick classes")
+        if self.kind == "inventing":
+            first = (_prompt_field(prompt, "Examples of the pattern") or [""])[0].split(";")[0]
+            leaf = first.split("(")[0].strip().rstrip("/").rsplit("/", 1)[-1]
+            words = [w.capitalize() for w in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])", leaf)]
+            name = "_".join(words) or "Equipment"
+            if not name.endswith(("Sensor", "Status", "Command", "Setpoint", "Equipment")):
+                name += "_Sensor"
+            picks = [name]
+        elif self.kind == "echo":
+            picks = cands[:3]
+        else:
+            if not prompt.startswith("Pick the Brick"):  # the reworded ask lists them reversed
+                cands = list(reversed(cands))
+            picks = cands[:3]
+        return {"candidates": [{"brick_class": c, "reason": self.kind} for c in picks], "confidence": 0.9}
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Score Baler's tagging ladder against Windrow's mock_hospital site.")
     parser.add_argument("--windrow", default=DEFAULT_WINDROW_DIR, help="Windrow checkout (default: the submodule)")
     parser.add_argument("--seed", type=int, default=None, help="mock_hospital seed (default: its own, 42)")
-    model = parser.add_mutually_exclusive_group()
-    model.add_argument("--llm", action="store_true", help="enable the model step (llm_classifier, needs ANTHROPIC_API_KEY; costs money)")
-    model.add_argument("--llm-replay", metavar="FILE", help="enable the model step from answers recorded with --llm-record")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--llm", action="store_true", help="enable the model step (BALER_LLM_PROVIDER's model; costs money)")
+    group.add_argument("--llm-replay", metavar="FILE", help="enable the model step from answers recorded with --llm-record")
+    group.add_argument("--simulate", choices=Simulated.KINDS, help="enable the model step with a stand-in model (no key; see Simulated)")
     parser.add_argument("--llm-record", metavar="FILE", help="with --llm: save the model's answers for --llm-replay")
     parser.add_argument("--json", metavar="FILE", help="write the summary as JSON")
     parser.add_argument("--check", metavar="BASELINE", nargs="?", const=DEFAULT_BASELINE, help="exit 1 on a regression against this baseline JSON")
     parser.add_argument("--no-per-class", action="store_true", help="leave the per-class table out of the text report")
     args = parser.parse_args(argv)
 
-    llm_classify: LLMClassify | None = None
+    model: model_step.Model | None = None
     answers: dict = {}
-    mode = None
     if args.llm:
         from baler import llm_classifier
 
-        llm_classify = llm_classifier.classify_with_llm
-        mode = f"rules + model ({llm_classifier.MODEL})"
+        model = llm_classifier.model_from_env()
+        if model is None:
+            parser.error("--llm needs a model: BALER_LLM_PROVIDER is none (set ANTHROPIC_API_KEY, or BALER_LLM_BASE_URL and BALER_LLM_MODEL)")
         if args.llm_record:
-            llm_classify = _recording(llm_classify, answers)
+            model = _Recording(model, answers)
     elif args.llm_replay:
         with open(args.llm_replay) as f:
-            llm_classify = replay(json.load(f))
-        mode = f"rules + model (replayed from {os.path.basename(args.llm_replay)})"
-    elif args.llm_record:
+            model = Replay(json.load(f), name=f"replayed from {os.path.basename(args.llm_replay)}")
+    elif args.simulate:
+        model = Simulated(args.simulate)
+    if args.llm_record and not args.llm:
         parser.error("--llm-record needs --llm")
 
     corpus = load_mock_hospital(args.windrow, args.seed)
-    report = evaluate(corpus, llm_classify=llm_classify, mode=mode)
+    report = evaluate(corpus, model=model)
     summary = summarize(report)
     print(format_summary(summary, report, per_class=not args.no_per_class))
 

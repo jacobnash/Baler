@@ -293,9 +293,10 @@ def classify_point(store, point_uri, rules: list[dict] | None = None) -> tuple[s
     # default) over whatever HAYSTACK:hasTag triples are on this URI.
     # Works identically for a point or an equipment URI.
 
-def classify_point_with_fallback(store, point_uri, rules=None, llm_classify=None) -> tuple[str, str | None]
-    # classify_point, plus an LLM fallback when llm_classify is supplied
-    # (autotag.py's job, not a puller's - leave llm_classify=None here).
+def classify_point_with_fallback(store, point_uri, rules=None) -> tuple[str, str | None]
+    # The same as classify_point (the name pullers already call). The model
+    # step for what the rules can't place is autotag.py's job, not a
+    # puller's - see model_step.py.
 
 # baler.remote_store
 class RemoteStore:
