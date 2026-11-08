@@ -115,6 +115,9 @@ jobs:
     permissions:
       contents: read
       issues: write
+      # Perf damping reads the previous run's live-verify artifact back
+      # (tools/live-check/previous.mjs).
+      actions: read
     env:
       # The operator test account. Created by hand on nash-srv (needs sudo and
       # a credential), outside the checkout: actions/checkout's git clean

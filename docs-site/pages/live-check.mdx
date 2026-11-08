@@ -66,6 +66,8 @@ Screenshots, `findings.json`, the summaries and the `live-verify-<sha>.json` art
 - A finding that is already open is updated in place: *Last seen*, pages and viewports change, but *First
   seen* is kept. Editing a body doesn't notify anyone.
 - A closed issue whose finding comes back is reopened with a comment.
+- Performance-budget breaches are the exception: they open or reopen an issue only on the second
+  consecutive complete run of their phase (see [Post-deploy verification](/post-deploy-verify)).
 - An open `live-check` issue that a **complete** run of its check (signed in, every page and report
   loaded) no longer sees is closed with a comment. An incomplete run (the site was down, a page failed
   to load, axe failed) closes nothing.

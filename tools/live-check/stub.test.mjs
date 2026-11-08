@@ -60,10 +60,17 @@ test("dry run against a healthy stub: every API check passes, only reads are sen
     assert.equal(art.phases.cold.only_reads, true);
     assert.deepEqual(art.phases.warm.ran, ["dataflow", "deploy", "edges", "login", "perf:warm"]);
     assert.equal(art.phases.cold.checks.filter((c) => c.module === "perf").length, 6);
+    for (const ph of ["cold", "warm"]) {
+      const h = art.phases[ph].perf_host;
+      assert.equal(h.phase, ph);
+      for (const k of ["load_1m", "load_5m", "load_15m", "nproc"]) assert.equal(typeof h.before[k], "number", `${ph} ${k}`);
+      assert.equal(typeof h.after.load_1m, "number");
+    }
     const summary = readFileSync(path.join(cold.dir, "summary.md"), "utf8");
     assert.match(summary, /live-check \(cold phase\)/);
     assert.match(summary, /live-check \(warm phase\)/);
     assert.match(summary, /\| perf \(warm\) \| GET \/fault\/faults \| pass \|/);
+    assert.match(summary, /Runner host `[^`]+` during perf \(cold\), load 1\/5\/15 min: [\d.]+ \/ [\d.]+ \/ [\d.]+, nproc \d+ before/);
     assert.doesNotMatch(summary + JSON.stringify(art), /not-a-real-secret|\.sig/, "no password or token in the outputs");
   } finally {
     server.close();

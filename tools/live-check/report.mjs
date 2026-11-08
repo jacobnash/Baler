@@ -14,13 +14,17 @@ export function counts(checks) {
   return c;
 }
 
-export function summaryMarkdown({ run, checks, findings, actions, requests, blocked, ran, dry }) {
+export const loadLine = (h) => `${h.load_1m} / ${h.load_5m} / ${h.load_15m}, nproc ${h.nproc}`;
+
+export function summaryMarkdown({ run, checks, findings, actions, requests, blocked, ran, dry, perf_host: host, perf_previous: prev }) {
   const c = counts(checks);
   const lines = [
     `## live-check${run.phase ? ` (${run.phase} phase)` : ""} against ${run.base}`,
     "",
     `${run.at}, commit \`${run.sha}\`, signed in as ${run.role}. ${checks.length} checks: ${c.pass} pass, ${c.fail} fail, ${c.error} error, ${c.skip} skipped. ${findings.length} finding(s).`,
     `Complete scopes (may close issues): ${[...ran].sort().join(", ") || "none"}.`,
+    ...(host ? [`Runner host \`${host.before.host}\` during perf (${host.phase}), load 1/5/15 min: ${loadLine(host.before)} before, ${loadLine(host.after)} after.`] : []),
+    ...(prev ? [`Previous complete perf (${prev.scope.split(":")[1]}) run: ${prev.at}, ${prev.breached.length} route(s) over budget. A perf breach opens an issue only if that run breached too.`] : []),
     "",
     "| Module | Check | Result | Numbers | Budget | Detail |",
     "|---|---|---|---|---|---|",
@@ -35,7 +39,8 @@ export function summaryMarkdown({ run, checks, findings, actions, requests, bloc
     lines.push("### Findings", "");
     for (const f of findings) {
       const a = byFp.get(f.fp);
-      const what = dry ? "dry run, no issue changed" : !a ? "" : a.op === "skip" ? `#${a.number} left alone (${a.reason})` : a.url || `${a.op} #${a.number}`;
+      const what = dry ? "dry run, no issue changed" : !a ? "" : a.op === "skip" ? `#${a.number} left alone (${a.reason})`
+        : a.op === "hold" ? `held, no issue changed${a.number ? ` (#${a.number} stays closed)` : ""}: ${a.reason}` : a.url || `${a.op} #${a.number}`;
       lines.push(`- [${f.label}] ${f.title}${what ? ` - ${what}` : ""}`);
     }
     lines.push("");

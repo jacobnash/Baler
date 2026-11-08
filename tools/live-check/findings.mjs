@@ -41,7 +41,7 @@ export function merge(raw) {
   const by = new Map();
   for (const r of raw) {
     const fp = fingerprint(r.kind, r.key);
-    const f = by.get(fp) || { fp, kind: r.kind, label: KIND_LABEL[r.kind] || "bug", title: r.title, scope: r.scope || "browser",
+    const f = by.get(fp) || { fp, kind: r.kind, key: r.key, label: KIND_LABEL[r.kind] || "bug", title: r.title, scope: r.scope || "browser",
                               pages: new Set(), viewports: new Set(), details: [], ms: 0, count: 0, rows: [], refs: [] };
     f.count += 1;
     if (r.page) f.pages.add(r.page);
@@ -70,7 +70,17 @@ const ignored = (i) => (i.labels || []).some((l) => (typeof l === "string" ? l :
 // A person has the last word: an issue closed as "not planned" (won't fix)
 // is never reopened or edited, and one labelled live-check:ignore is never
 // touched at all. Those findings come back as op "skip".
-export function plan(findings, issues, { complete = false, ran = null } = {}) {
+//
+// Perf damping (#227, #251): a perf-budget finding opens or reopens its
+// issue only when its scope ran completely this time AND the previous
+// complete run of that phase breached the same budget. prev maps a scope
+// (perf:cold, perf:warm) to the fingerprints that run breached
+// (previous.mjs). Otherwise it comes back as op "hold" and no issue changes.
+// An issue that is already open is still updated, and closing is unchanged:
+// one complete passing run closes it. Every other kind is not damped.
+export const DAMPED_KINDS = new Set(["perf-budget"]);
+
+export function plan(findings, issues, { complete = false, ran = null, prev = new Map() } = {}) {
   // Several issues can share a fingerprint (a closed duplicate); use the open
   // one, else the newest.
   const byFp = new Map();
@@ -80,11 +90,15 @@ export function plan(findings, issues, { complete = false, ran = null } = {}) {
   }
   const closes = (scope) => complete === true || (!!ran && (scope ? ran.has(scope) : LEGACY_SCOPES.every((s) => ran.has(s))));
   const seen = new Set(findings.map((f) => f.fp));
+  const confirmed = (f) => !DAMPED_KINDS.has(f.kind) || (closes(f.scope) && !!prev.get(f.scope)?.has(f.fp));
+  const hold = (f, i) => ({ op: "hold", number: i?.number, f,
+    reason: closes(f.scope) ? "first breach; opens if the next complete run of this phase breaches too" : "its check didn't run completely" });
   const actions = findings.map((f) => {
     const i = byFp.get(f.fp);
-    if (!i) return { op: "create", f };
+    if (!i) return confirmed(f) ? { op: "create", f } : hold(f);
     if (ignored(i)) return { op: "skip", number: i.number, f, reason: IGNORE_LABEL };
     if (i.state !== "OPEN" && notPlanned(i)) return { op: "skip", number: i.number, f, reason: "closed as not planned" };
+    if (i.state !== "OPEN" && !confirmed(f)) return hold(f, i);
     return { op: i.state === "OPEN" ? "update" : "reopen", number: i.number, f, body: i.body };
   });
   for (const i of issues) {
@@ -122,7 +136,9 @@ export function issueBody(f, run, oldBody = "") {
     "",
     reproduce(f, run),
     "",
-    "live-check updates this issue on every run, closes it when a complete run no longer sees it, and reopens it if it comes back.",
+    f.kind === "perf-budget"
+      ? "live-check updates this issue on every run and closes it when a complete run of its phase is back under budget. It opens or reopens only after two consecutive complete runs of the phase breach, so one slow run on a loaded host doesn't."
+      : "live-check updates this issue on every run, closes it when a complete run no longer sees it, and reopens it if it comes back.",
     "",
     `<!-- live-check fp:${f.fp} scope:${f.scope || "browser"} -->`,
   ].join("\n");

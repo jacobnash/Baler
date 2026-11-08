@@ -21,6 +21,8 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { LABEL, issueBody, merge, plan } from "./findings.mjs";
 import { Guard } from "./guard.mjs";
+import { fetchPrevious } from "./previous.mjs";
+import { loadText } from "./perf.mjs";
 import { summaryMarkdown, writeArtifact } from "./report.mjs";
 
 const MODULES = ["perf", "browser", "layout", "dataflow", "edges", "deploy"];
@@ -118,7 +120,7 @@ function gh(args, input) {
 }
 
 // The only writes the tool makes: GitHub issues (never the install).
-function sync(findings, ran, run) {
+function sync(findings, ran, run, prev) {
   execFileSync("gh", ["label", "create", LABEL, "--color", "5319e7", "--force",
     "--description", "Found by tools/live-check against the live install",
     ...(process.env.LIVE_CHECK_REPO ? ["-R", process.env.LIVE_CHECK_REPO] : [])], { stdio: "ignore" });
@@ -128,7 +130,7 @@ function sync(findings, ran, run) {
   const issues = execFileSync("gh", ["api", "--paginate", `repos/${repo}/issues?labels=${LABEL}&state=all&per_page=100`,
     "-q", ".[] | select(.pull_request | not) | {number, state: (.state | ascii_upcase), state_reason, labels: [.labels[].name], body}"], { encoding: "utf8" })
     .split("\n").filter(Boolean).map((l) => JSON.parse(l));
-  const actions = plan(findings, issues, { ran });
+  const actions = plan(findings, issues, { ran, prev });
   for (const a of actions) {
     if (a.op === "create") {
       a.url = gh(["issue", "create", "--title", `[live-check] ${a.f.title}`, "--label", a.f.label, "--label", LABEL, "--body-file", "-"],
@@ -139,6 +141,8 @@ function sync(findings, ran, run) {
       console.log(`closed #${a.number}`);
     } else if (a.op === "skip") {
       console.log(`left #${a.number} alone (${a.reason})`);
+    } else if (a.op === "hold") {
+      console.log(`held ${a.f.title}${a.number ? ` (#${a.number} stays closed)` : ""}: ${a.reason}`);
     } else {
       if (a.op === "reopen") gh(["issue", "reopen", String(a.number), "--comment", `Seen again by live-check at ${run.at}.`]);
       gh(["issue", "edit", String(a.number), "--body-file", "-"], issueBody(a.f, run, a.body));
@@ -153,6 +157,7 @@ const run = { at: new Date().toISOString().replace(/\.\d+Z$/, "Z"), base: BASE, 
               modules, slowMs: Number(process.env.LIVE_CHECK_SLOW_MS || 2000) };
 const checks = [];
 const ran = new Set();
+let perfHost = null;
 const auth = await login().catch((e) => ({ error: e.message }));
 let browser = null;
 if (auth.error) {
@@ -185,19 +190,44 @@ if (auth.error) {
     checks.push(...res.checks);
     raw.push(...res.raw);
     if (res.complete) ran.add(res.scope);
+    if (res.host) perfHost = { phase: PERF_PHASE, ...res.host };
     console.log(`${m}: ${res.checks.length} check(s), ${res.complete ? "complete" : "INCOMPLETE"} (${Math.round((Date.now() - t0) / 1000)} s)`);
   }
   if (browser) await browser.close();
 }
 
+// Perf damping (previous.mjs): the previous complete run of this perf phase,
+// read back from its artifact. Not asked in a dry run (no issue changes)
+// unless LIVE_CHECK_PREVIOUS names a file.
+let perfPrevious = null;
+const prev = new Map();
+if (modules.includes("perf") && (!DRY || process.env.LIVE_CHECK_PREVIOUS)) {
+  try {
+    perfPrevious = fetchPrevious(PERF_PHASE);
+    if (perfPrevious) prev.set(perfPrevious.scope, perfPrevious.fps);
+    console.log(perfPrevious ? `perf: previous complete ${PERF_PHASE} run ${perfPrevious.at} from ${perfPrevious.source}, ${perfPrevious.fps.size} breach(es)`
+      : `perf: no earlier complete ${PERF_PHASE} run found; a breach now is held`);
+  } catch (e) {
+    // Without the previous run no perf issue can open: say so loudly.
+    checks.push({ module: "perf", phase: PERF_PHASE, name: "previous run (damping)", status: "error",
+                  detail: `couldn't read the previous verification artifact, so no perf issue can open: ${(e.stderr && String(e.stderr).trim().split("\n").pop()) || String(e.message).split("\n")[0]}` });
+  }
+}
 const findings = merge(raw);
+for (const f of findings) {
+  const r = perfPrevious && f.kind === "perf-budget" && f.scope === perfPrevious.scope && perfPrevious.routes[String(f.key).split("|").slice(1).join("|")];
+  if (r) f.rows = [...f.rows, ["Previous complete run", `${r.status}, median ${r.median_s} s, max ${r.max_s} s (${perfPrevious.at})`]];
+}
 let actions = [];
 if (DRY) console.log("\n--dry-run: no issues changed.");
-else actions = sync(findings, ran, run);
+else actions = sync(findings, ran, run, prev);
 
 const active = findings.filter((f) => !actions.some((a) => a.op === "skip" && a.f?.fp === f.fp));
 const errors = checks.filter((c) => c.status === "error");
-const data = { run, ran: [...ran].sort(), checks, findings, actions: actions.map(({ f, body, ...a }) => ({ ...a, fp: f?.fp })),
+const previousOut = perfPrevious && { at: perfPrevious.at, sha: perfPrevious.sha, scope: perfPrevious.scope, source: perfPrevious.source,
+                                      breached: [...perfPrevious.fps], routes: perfPrevious.routes };
+const data = { run, ran: [...ran].sort(), checks, findings, perf_host: perfHost, perf_previous: previousOut,
+               actions: actions.map(({ f, body, ...a }) => ({ ...a, fp: f?.fp })),
                requests: guard.summary(), only_reads: guard.onlyReads(), blocked: [...guard.blocked] };
 const artifact = path.join(OUT, `live-verify-${run.sha.slice(0, 12)}.json`);
 writeArtifact(artifact, opt.phase || "manual", data);
@@ -209,6 +239,7 @@ if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMM
 console.log(`live-check ${run.at} against ${BASE} as ${run.role} (${modules.join(", ")}): ${findings.length} finding(s), ${errors.length} check error(s)`);
 for (const c of checks.filter((x) => x.status !== "pass")) console.log(`  ${c.status.toUpperCase()} ${c.module}${c.phase ? `/${c.phase}` : ""}: ${c.name} - ${c.detail || ""}`);
 for (const f of findings) console.log(`  [${f.label}] ${f.title}`);
+if (perfHost) console.log(`perf (${perfHost.phase}) runner host ${perfHost.before.host}: ${loadText(perfHost.before)} before, ${loadText(perfHost.after)} after`);
 if (guard.blocked.size) console.log(`blocked writes (read-only guard): ${[...guard.blocked].join(", ")}`);
 console.log(`artifact: ${artifact}`);
 process.exitCode = active.length || errors.length ? 1 : 0;

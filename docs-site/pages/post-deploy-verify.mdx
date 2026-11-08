@@ -64,10 +64,32 @@ and judged against that phase's budget.
 | his `readAll(equip)` (`GET /ingest/his?expr=readAll(equip)`) | ≤ 2 s | ≤ 5 s | 1.64-1.65 / 4.92 (#107) |
 | Cx project report (Home Edge Pilot) | ≤ 2 s | ≤ 5 s | 3.3-3.5 / 10.2, over budget (#150) |
 
-A breach is one issue per route and phase (labels `live-check` and `optimization`). A later run of
-the same phase that is back under budget closes it.
+A breach is one issue per route and phase (labels `live-check` and `optimization`). It is
+**damped**: the issue opens (or reopens) only when the route breaches its budget on **two consecutive
+complete runs of the same phase**. nash-srv's warm timings swing with the box's load (one CPU at a
+load of 15 has given `GET /api/read?filter=equip` anything from 0.16 to 0.7 s within minutes, #227,
+#251), and a single slow run shouldn't file an issue. A first breach is listed in the summary as
+*held* and turns the job red, but changes no issue. An issue that's already open keeps being updated
+while the route breaches. Closing isn't damped: one complete run of the phase that's back under
+budget closes it.
 
-**When it fails:** compare the numbers in the issue with earlier artifacts. One slow run right after a
+"The previous run" is the newest earlier `live-verify-<sha>` artifact whose phase ran `perf`
+completely (an incomplete one is skipped, as it would be for closing). The job reads it back through
+the GitHub API (`gh run download`, the job's `actions: read` permission): the artifact already holds
+each route's numbers and the run's findings, it outlives the runner, and nothing extra has to be
+written or kept in sync. The issue table shows that run's numbers as *Previous complete run*. If the
+artifact can't be read, the summary has an error row `previous run (damping)` (red job) and no perf
+issue opens until it can; a first run with no earlier artifact holds everything once.
+`tools/live-check/previous.mjs` has the code, `findings.test.mjs` the tests.
+
+**Host load.** Each perf phase records the load average (1, 5 and 15 min, from `/proc/loadavg`) and
+`nproc` of the machine running the check, before and after timing the routes. In the Deploy workflow
+that's nash-srv itself (the self-hosted runner), so it's the install's own host. It's in the job
+summary (`Runner host … during perf`), in the artifact (`phases.<phase>.perf_host`) and in each perf
+issue (*Runner host load*). Read a breach against it: a slow number at a load of 15 on one CPU says
+more about the box than the route. Run by hand from another machine, it's that machine's load.
+
+**When it fails:** compare the numbers in the issue with earlier artifacts and with the host load. One slow run right after a
 deploy is usually a cold cache; a breach in the warm phase is real. Jaeger (`ssh -L 16686:…`, see
 [nash-srv deploy](/nash-srv-deploy)) shows where the time goes. A route that errors is an
 error in the summary (the job is red), not an issue, and nothing in that phase closes.
@@ -163,7 +185,8 @@ runs an older `nginx.conf` or lacks the volume: an error, not a pass.
 
 ## How it keeps the issue log tidy
 
-- A finding with no issue opens one; an open issue is updated in place (*First seen* kept); a
+- A finding with no issue opens one (a perf breach only on its second consecutive complete run, see
+  [perf](#perf-r4-budgets-cold-and-warm)); an open issue is updated in place (*First seen* kept); a
   closed one is reopened with a comment, **unless it was closed as "not planned"**: a won't-fix
   is left alone for good.
 - An issue labelled **`live-check:ignore`** is never touched: not updated, reopened or closed. Use it
@@ -173,7 +196,8 @@ runs an older `nginx.conf` or lacks the volume: an error, not a pass.
   *scope*: `browser`, `layout`, `perf:cold`, `perf:warm`, `dataflow`, `edges` or `deploy`) ran
   completely: signed in, and every page, route or endpoint answered. A cold run never closes a warm
   issue, and an incomplete run closes nothing in that scope.
-- The job is red when there is any open finding or any check that couldn't run.
+- The job is red when there is any finding that isn't ignored or won't-fix (held perf breaches
+  included) or any check that couldn't run.
 
 ## The write guard
 
@@ -215,7 +239,8 @@ This needs Jacob (sudo and a credential); the job fails with a message naming th
    downloads Playwright's Chromium into `~github-runner/.cache/ms-playwright` on its first run. If that
    Chromium can't start (missing system libraries), install them once:
    `sudo npx -y playwright-core@1.57.0 install-deps chromium`, or install Google Chrome.
-4. Nothing else: the job's `GH_TOKEN` is the workflow's own token (`issues: write` on that job only).
+4. Nothing else: the job's `GH_TOKEN` is the workflow's own token (`issues: write` and `actions: read`,
+   to read the previous run's artifact, on that job only).
 
 The file lives outside the checkout because `actions/checkout` cleans the workspace. It is never
 printed: the job only checks it exists, is readable, has the three keys, and warns if its mode isn't 600.
@@ -231,7 +256,8 @@ node live-check.mjs --dry-run --phase cold --deploy-start 2026-11-07T22:00:00Z -
 node live-check.mjs --dry-run --only perf,edges
 ```
 
-`--dry-run` changes no issue. Without it, issues are synced with `gh` (signed in, write access).
+`--dry-run` changes no issue. Without it, issues are synced with `gh` (signed in, write access), and the
+previous run of the perf phase is read from the repo's newest `live-verify-*` artifact.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -240,6 +266,7 @@ node live-check.mjs --dry-run --only perf,edges
 | `LIVE_CHECK_EXPECTED_EDGES` | `expected-edges.json` | an alternative expected-edges file |
 | `LIVE_CHECK_OUT` | `tools/live-check/out` | where the artifact, summaries and screenshots go |
 | `LIVE_CHECK_SHA` | `git rev-parse HEAD` | the commit named in the artifact and issues |
+| `LIVE_CHECK_PREVIOUS` | the newest `live-verify-*` artifact | a `live-verify-<sha>.json` to use as the previous run for perf damping (also read in a dry run) |
 | `LIVE_CHECK_DEPLOY_START` / `_END` | none | the deploy window, like `--deploy-start` / `--deploy-end` |
 | `LIVE_CHECK_SLOW_MS`, `LIVE_CHECK_SETTLE_MS`, `LIVE_CHECK_PROJECT`, `LIVE_CHECK_REPO`, `CHROME_PATH` | | see [Live check](/live-check) |
 
