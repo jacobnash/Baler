@@ -20,6 +20,12 @@ compressed chunk holds its rows as batches of up to 1,000 samples per point:
   without decompressing them.
 - **ordered by `ts DESC`**: timestamps and values are delta-encoded within each
   batch.
+- **everything else is a compressed column**, including the per-sample
+  `quality` flag ([Sample quality](/quality)). It varies from sample to sample,
+  so it doesn't belong in the segment columns. NULL (ok) costs almost nothing.
+  The quality sweep only flags the last hour, which is still uncompressed. A
+  flag written into an older, compressed range takes the slower write path
+  described below.
 
 The continuous aggregates (`point_history_5m`, `point_history_1h`) aren't
 compressed. They're small.
@@ -70,7 +76,7 @@ with random noise):
 |---|---|---|---|
 | 766 points every 10 s, 3,290,400 rows | 733 MB (heap 284 + indexes 449) | 26.8 MB | 222.8 → 8.2 |
 | the same 12 h, plus 27 points every 5 s for 21 days: 13,123,304 rows | 2,878 MB | 105 MB | 219.3 → 8.0 |
-| the 13.1 M rows with `quality` added (#183, 0.1% flagged) | | 106 MB | 8.07 |
+| the same 13.1 M rows with #183's `quality` column, 0.1% flagged | 2,889 MB | 106 MB | 220.2 → 8.07 |
 
 That's about 27× smaller. Real values compress differently: random noise in
 every float is close to the worst case, while quantized sensor readings and
@@ -99,9 +105,10 @@ probe is split where the compressed chunks end:
   oldest for hisStart). Only points it didn't find go to the other side.
 
 The rows are the same as a single probe's. Measured on the 13.1 M-row seed
-with the two oldest chunks compressed, curVal for the 27 deep-history points
-took 1,063 ms with #237's form alone and 3.2 ms split. hisStart took 100 ms and
-2.9 ms. Finding where the compressed chunks end costs a few milliseconds per
+with the two oldest chunks compressed (what the policy compresses there),
+curVal for the 27 deep-history points took 757 ms with #237's form alone and
+2.8 ms split, against 1.5 ms with nothing compressed. hisStart took 77 ms
+and 2.2 ms. Finding where the compressed chunks end costs a few milliseconds per
 call.
 
 Cx's empty-rows index (`point_history_empty`, built per chunk in the
