@@ -2,31 +2,212 @@
 title: Backups
 ---
 
-`scripts/backup.py` dumps the two volumes that hold real state —
-`postgres-data` (via `docker compose exec postgres pg_dump`) and
-`oxigraph-data` (via the same bulk graph-store GET the SHACL validator
-uses) — into timestamped, gzip'd files under `backups/` (gitignored).
+`scripts/backup.py` dumps the two volumes that hold real state:
+
+- `postgres-data`: history (`point_history`, its compressed chunks and
+  continuous aggregates), auth, sites, faults, Cx records and every other
+  table, as a plain `pg_dump` through `docker compose exec postgres`;
+- `oxigraph-data`: the entity graph, through the same bulk graph-store GET
+  the SHACL validator uses.
+
+Each run writes a timestamped, gzip'd pair under `backups/` (gitignored).
 `grafana-data` is regenerable dashboard config, out of scope.
-`scripts/restore.py` does the inverse.
+`scripts/restore.py` restores a pair into a fresh stack, and
+`scripts/restore_drill.py` proves that it does (see [Restore drill](#restore-drill)).
 
 ```bash
 docker compose up -d postgres oxigraph   # only these two are needed
 python scripts/backup.py                 # writes backups/postgres-<ts>.sql.gz, backups/oxigraph-<ts>.ttl.gz
-python scripts/restore.py --postgres-file backups/postgres-<ts>.sql.gz --oxigraph-file backups/oxigraph-<ts>.ttl.gz
 ```
 
-`restore.py` assumes a fresh/empty postgres+oxigraph (disaster recovery,
-not a merge onto live data) — restoring onto tables that already exist
-exits non-zero (`psql -v ON_ERROR_STOP=1`) rather than silently
-succeeding. Both scripts default to this checkout's own docker-compose
-project and to `$OXIGRAPH_URL`/`http://localhost:7878`; `--help` on
-either documents `--compose-project-dir`/`--oxigraph-url`/`--out-dir` for
-pointing at a different target.
+The dump streams through gzip, so it never sits in memory, and each file is
+written as `<name>.partial` and renamed only when complete: a failed backup
+leaves no file that looks like a good one. `pg_dump` prints a warning about
+"circular foreign-key constraints" on TimescaleDB's catalog tables. It's
+expected and harmless here: it concerns data-only dumps, and this is a full
+dump.
 
-## Automating it
+What a backup doesn't hold:
+
+- **The ontology named graph.** Turtle can't carry named graphs, so only the
+  default graph (entity data) is backed up. The ontology graph
+  (`urn:baler:ontology`) is a copy of a published ontology file: if you
+  loaded one with `RemoteStore.load_ontology`, load it again after a restore.
+- **Database roles and passwords.** A single-database `pg_dump` has none. The
+  restore target creates its role from `.env` as usual.
+
+Measured on a 2.0 M-sample database (100 points at 1/min for 14 days, a
+236 MB hypertable with one of its three chunks compressed): the backup took
+12 s and is 11 MB gzip'd, the restore 6 to 8 s, and the whole drill 23 to
+27 s.
+
+## Restore
+
+Restore is disaster recovery into a **fresh, empty** Postgres and Oxigraph,
+not a merge onto live data. `restore.py` refuses a database that already has
+tables, and Oxigraph's bulk load adds to whatever graph is there.
+
+1. Stop the stack, and move the old volumes out of the way (or restore on
+   another host with the same checkout):
+
+   ```bash
+   docker compose down
+   docker volume rm baler_postgres-data baler_oxigraph-data   # your BALER_VOLUME_PREFIX, if you set one
+   ```
+
+2. Start **only** postgres and oxigraph, on new volumes. Starting the whole
+   stack would let every service create its tables first, and the restore
+   would then refuse the database.
+
+   ```bash
+   docker compose up -d --wait postgres oxigraph
+   ```
+
+   Use the same `.env` as the install the backup came from. In particular
+   `BALER_PG_USER` (an install from before the rename may use
+   `timberdoodle`): the dump's tables belong to that role, and the restore
+   fails with `role "..." does not exist` if the new database has another.
+
+3. Restore both files:
+
+   ```bash
+   python scripts/restore.py \
+     --postgres-file backups/postgres-<ts>.sql.gz \
+     --oxigraph-file backups/oxigraph-<ts>.ttl.gz
+   ```
+
+4. Start everything: `docker compose up -d`.
+
+### TimescaleDB
+
+A dump of a TimescaleDB database restores only between
+`timescaledb_pre_restore()` and `timescaledb_post_restore()`, and only into the
+same TimescaleDB extension version (Baler#241). Without the two calls it stops
+at `could not find hypertable with id 1`. `restore.py` does it for you:
+
+1. It reads the version the dump was taken from: the dump has it, in
+   TimescaleDB's own `_timescaledb_catalog.metadata` table. Backups made
+   before this change work too.
+2. If the target's version differs, it installs the dump's version from those
+   the postgres image ships (`timescale/timescaledb` images ship many 2.x
+   versions side by side). It refuses with a clear message if the image
+   doesn't have it. Use the image the backup was taken with.
+3. It loads the dump in one `psql` session: `timescaledb_pre_restore()`, the
+   dump, then `timescaledb_post_restore()`, streamed with `ON_ERROR_STOP`. Any
+   error stops it before `post_restore`, and it exits non-zero and tells you
+   to restore again into a fresh volume.
+4. It checks the database is out of restore mode. If it installed an older
+   version for the load, it then runs `ALTER EXTENSION timescaledb UPDATE` in
+   a fresh session, which is TimescaleDB's upgrade procedure.
+   `--no-extension-update` leaves it on the dump's version.
+
+Compressed chunks and continuous aggregates come back as they were: same
+chunks, same compression state, same policies (scheduled again by
+`post_restore`). The drill checks every one of these.
+
+Doing it by hand, in case you need to:
+
+```bash
+docker compose exec -T postgres psql -U baler -c "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'"
+zcat backups/postgres-<ts>.sql.gz | grep -A3 '^COPY _timescaledb_catalog.metadata'   # the dump's version
+( echo 'SELECT public.timescaledb_pre_restore();'
+  zcat backups/postgres-<ts>.sql.gz
+  echo 'SELECT public.timescaledb_post_restore();' ) \
+  | docker compose exec -T postgres sh -c 'psql -X -q -o /dev/null -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB"'
+```
+
+The calls are schema-qualified because the dump sets `search_path` to empty.
+
+## Restore drill
+
+An untested backup isn't a backup. `scripts/restore_drill.py` (Baler#196)
+restores a backup into a **scratch stack** and checks it:
+
+```bash
+pip install -e .                        # the drill imports baler for its checks
+python scripts/restore_drill.py         # the newest pair in backups/
+python scripts/restore_drill.py --postgres-file backups/postgres-<ts>.sql.gz --oxigraph-file backups/oxigraph-<ts>.ttl.gz
+```
+
+The scratch stack is postgres and oxigraph from `docker-compose.yml` with
+`scripts/restore-drill.compose.yml` on top, under their own compose project
+and volume prefix (`baler-restore-drill` by default, `--project` to change it).
+So it uses the same images as the live stack and runs beside it without
+touching it: its ports are loopback-only ones Docker picks, it uses its own
+volumes, and it takes the dump's owner role automatically. TimescaleDB's
+background jobs are off in the scratch stack, so no policy moves rows during
+the checks. The drill restores with the real `restore.py`, then checks:
+
+| Check | Passes when |
+|---|---|
+| every table has the dump's rows | `count(*)` of every table equals the rows in its `COPY` block in the dump, including each compressed chunk table and TimescaleDB's catalog (through the extension's own dump filter) |
+| out of TimescaleDB restore mode | `timescaledb.restoring` is `off` |
+| TimescaleDB version | reports the dump's and the restored version |
+| compression and refresh policies scheduled | `point_history`'s compression policy and both aggregates' refresh policies exist and are scheduled |
+| point_history samples | samples in `point_history` = rows in its chunks + samples packed in its compressed chunks, both counted from the dump; also reports points and compressed chunks |
+| newest sample | reports the newest sample and how long before the backup it was |
+| `point_history_5m`/`_1h` = raw fold | after refreshing a 6-hour window (`--window-hours`) before the newest sample, and one at the end of the newest compressed chunk, every bucket's sum, count, min and max equals a fold of the raw rows |
+| write into a compressed chunk | an idempotent re-insert into the newest compressed chunk, through the ingest path's upsert, leaves the same rows |
+| Cx report renders | the newest finished commissioning run's report renders from the restored database and graph |
+| graph triples | the restored graph has as many triples as the backup file |
+
+It prints each check, `restore drill PASSED` or `FAILED`, and exits non-zero on
+any failure. `--report file.json` also writes the report as JSON. The scratch
+stack is removed afterwards, along with its volumes. Only volumes Docker labels
+as the scratch project's are removed, and the drill refuses to use the live
+project's name. `--keep` leaves the stack up to look around (it prints the DSN),
+and `--down --project <name>` removes it later.
+
+`docker-compose.yml` requires `MQTT_PASSWORD` and the gateway secrets for
+services the drill never starts. When they aren't set, the drill sets
+placeholders so that `docker compose up` works on a host with no `.env` in the
+checkout.
+
+### Automated: in CI
+
+`tests/test_restore_drill.py` runs the whole thing on every CI run (in the
+integration job, about 40 s). It seeds a scratch source stack the way Baler's
+own code builds it: the `point_history` hypertable with its compression policy
+and aggregates, history in a forced-compressed range (with a late write into
+it) and an uncompressed range, numbers, booleans, text, units, labels and
+quality flags, the auth, site, faults and Cx tables, a Cx run, and the graph.
+It then runs the real `backup.py` and the real `restore_drill.py`, and compares
+the restored stack with the source:
+
+- every value in `point_history`, compressed and uncompressed ranges;
+- the chunks and their compression state;
+- both continuous aggregates after a full refresh;
+- every other table, row for row;
+- the policies, the extension version, the graph and the Cx report HTML.
+
+It needs Docker but not the main stack. Its two scratch projects are `restore`
+and `restore-drill`:
+
+```bash
+pytest tests/test_restore_drill.py -m integration
+```
+
+### On a schedule, on your host
+
+The CI test proves the scripts. The point of a drill is to prove **your**
+backups, so run it on the host that has them. `scripts/systemd/` has a weekly
+timer for it, next to the backup's:
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e .
+sudo cp scripts/systemd/baler-restore-drill.{service,timer} /etc/systemd/system/
+sudo $EDITOR /etc/systemd/system/baler-restore-drill.service   # WorkingDirectory=, the venv's python
+sudo systemctl enable --now baler-restore-drill.timer
+systemctl status baler-restore-drill     # last result; journalctl -u baler-restore-drill for the report
+```
+
+It restores the newest backup in `backups/`, writes
+`backups/restore-drill-latest.json` and fails the unit when a check fails.
+
+## Automating backups
 
 Nothing runs `backup.py` on its own. `backup.py` shells out to the
-**host's** `docker compose exec postgres pg_dump` — it assumes it's
+**host's** `docker compose exec postgres pg_dump`. It assumes it's
 running on the Docker host, not inside a container on the compose
 network. That ruled out a compose sidecar (it would need the Docker
 socket/CLI mounted into a new image just to keep that call working, more
@@ -42,10 +223,10 @@ sudo systemctl enable --now baler-backup.timer
 ```
 
 `baler-backup.timer` runs daily by default (`OnCalendar=daily`,
-edit that line directly to change the schedule — see `man systemd.time`)
+edit that line directly to change the schedule, see `man systemd.time`)
 with `Persistent=true`, so a run missed while the host was off fires on
 next boot instead of silently skipping. `baler-backup.service` sets
-`Environment=PATH=...` explicitly — systemd services don't inherit a
+`Environment=PATH=...` explicitly: systemd services don't inherit a
 login shell's `PATH`, so without it `docker` isn't found and the job fails
 every run with no output unless you go looking in `journalctl`.
 
@@ -55,8 +236,30 @@ every run with no output unless you go looking in `journalctl`.
 0 3 * * * cd /path/to/baler && python3 scripts/backup.py >> backups/backup.log 2>&1
 ```
 
+### A checkout managed by a CI runner (nash-srv)
+
+Don't keep backups in a checkout that GitHub Actions deploys from, like
+nash-srv's runner workspace. `actions/checkout` cleans the workspace on every
+deploy, ignored files included, so `backups/` would be deleted. And a
+`backups/` directory created by a root systemd job is root-owned, which makes
+the next checkout fail with EACCES (#29). Write them somewhere else, and point
+the drill there:
+
+```bash
+python3 scripts/backup.py --out-dir /var/backups/baler
+python3 scripts/restore_drill.py --backup-dir /var/backups/baler --report /var/backups/baler/restore-drill-latest.json
+```
+
+On nash-srv the compose project's env file isn't `.env` in the checkout
+(`deploy/nash-srv/setup-runner.sh` passes `--env-file`). `backup.py` and
+`restore.py` work without it, because `docker compose exec` doesn't need the
+missing variables. To restore *onto* nash-srv itself, start postgres and
+oxigraph with the deploy's own `-f`/`--env-file` arguments so that
+`BALER_PG_USER` and the volume names match. Then run `restore.py` with
+`COMPOSE_ENV_FILES=<that env file>` and the same `COMPOSE_FILE`.
+
 ### Either way
 
-Backups accumulate in `backups/` indefinitely — there's no
-retention/pruning yet. Watch disk usage, or clean the directory out
-yourself if it becomes a problem.
+Backups accumulate indefinitely: there's no retention or pruning yet. Watch
+disk usage, or clean the directory out yourself if it becomes a problem. A
+drill on the newest backup is what tells you that the ones you keep restore.
