@@ -365,6 +365,26 @@ def make_on_message(fault_conn, rule_cache: RuleCache, webhooks_path: str, open_
     return on_message
 
 
+def _evaluate_stuck(ts_conn, point_uri: str, stuck_seconds: float, now: datetime) -> bool:
+    """One point's stuck verdict: the reference the set-based sweep
+    (_STUCK_SQL) gives for every point at once."""
+    window_start = now - timedelta(seconds=stuck_seconds)
+    n, distinct_values = ts_conn.execute(
+        f"""
+        SELECT COUNT(*), COUNT(DISTINCT COALESCE(value::text, value_text, value_bool::text))
+        FROM point_history WHERE point_uri = %s AND ts >= %s AND {quality.GOOD_SQL}
+        """,
+        (point_uri, window_start),
+    ).fetchone()
+    return his_checks.stuck_verdict(n, distinct_values)
+
+
+def _evaluate_stale(ts_conn, point_uri: str, max_age_seconds: float, now: datetime) -> bool:
+    """One point's stale verdict: the reference _stale_verdicts gives."""
+    (max_ts,) = ts_conn.execute("SELECT MAX(ts) FROM point_history WHERE point_uri = %s", (point_uri,)).fetchone()
+    return his_checks.is_stale(max_ts, now, max_age_seconds)
+
+
 # One stuck window's verdict inputs for every point that reported in it, in
 # one GROUP BY: good samples, and whether they hold exactly one distinct
 # value (COUNT(DISTINCT key) = 1 is: some non-null key, and min = max - a

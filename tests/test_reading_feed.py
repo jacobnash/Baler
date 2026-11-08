@@ -18,7 +18,7 @@ import psycopg
 import pytest
 
 from baler import reading_feed, timeseries
-from baler.fault_detector import evaluate_his_rules
+from baler.fault_detector import _evaluate_stuck, evaluate_his_rules
 from baler.faults import ensure_schema, list_faults
 
 pytestmark = pytest.mark.integration
@@ -28,7 +28,10 @@ pytestmark = pytest.mark.integration
 def conn():
     c = timeseries.connect()
     ensure_schema(c)
-    return c
+    yield c
+    # a test consumer left registered would hold back pruning (and be
+    # charged misses) on the shared database forever
+    c.execute("DELETE FROM reading_feed_consumers WHERE consumer LIKE 'test:test-feed-%'")
 
 
 def _tag():
@@ -189,3 +192,4 @@ def test_stuck_matches_the_per_point_verdict(conn, values, stuck):
             "stuck_seconds": 120}
     _his(conn, [rule], now)
     assert _open(conn, rule["id"]) == ({p} if stuck else set())
+    assert _evaluate_stuck(conn, p, 120, now) is stuck  # the per-point reference agrees
