@@ -83,6 +83,10 @@ decided stays as it is. Each row holds:
 - `pattern`, so the review queue (#184) can group 41 identical points into
   one decision.
 
+People answer proposals in [Mapping review](/mapping-review). A whole
+group accepted there becomes a **site rule**: later points with that
+pattern get its class without a model call, unless the veto objects.
+
 Proposals used to be YAML comments appended to `rules/*.yaml`. That file
 is in the checkout bind-mounted into the containers, so writes to it land
 in `/app` on nash-srv (see CLAUDE.md). The rule files aren't edited any

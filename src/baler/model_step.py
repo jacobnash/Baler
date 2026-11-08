@@ -446,12 +446,17 @@ def run(
     proposals=None,
     stats: Callable[[list[str]], dict] | None = None,
     vocab: brick_vocab.Vocab | None = None,
+    site_rules: dict[str, str] | None = None,
 ) -> list[Decision]:
     """The model step over (uri, "point"|"equip") pairs the rules left
     unresolved. Points go first, so an equip's question sees its points'
     new classes. Auto-accepted classes are written to the graph; every
     other entity becomes a proposal in `proposals` (mapping_proposals.*),
-    if given."""
+    if given.
+
+    `site_rules` ({pattern: Brick class}) are patterns a person approved
+    in the review queue (#184): a matching group takes that class without
+    asking a model, unless the veto objects for one of its entities."""
     vocab = vocab or brick_vocab.load()
     entities = list(entities)
     decisions: list[Decision] = []
@@ -464,11 +469,24 @@ def run(
         groups: dict[str, list[Evidence]] = {}
         for e in evs:
             groups.setdefault(pattern(e), []).append(e)
-        for _, group in sorted(groups.items()):
-            for d in decide_pattern(group, model, vocab):
+        for key, group in sorted(groups.items()):
+            approved = (site_rules or {}).get(key)
+            for d in (by_site_rule(group, approved, vocab) if approved else decide_pattern(group, model, vocab)):
                 decisions.append(d)
                 _apply(store, d, proposals)
     return decisions
+
+
+def by_site_rule(evs: list[Evidence], brick_class: str, vocab: brick_vocab.Vocab) -> list[Decision]:
+    """A pattern a person already answered: their class, no model call."""
+    key = pattern(evs[0])
+    cand = [{"brick_class": brick_class, "reason": "a person approved this naming pattern", "source": "site rule"}]
+    out = []
+    for ev in evs:
+        why = veto(ev, brick_class, vocab)
+        out.append(Decision(ev.uri, key, None if why else brick_class, cand, f"vetoed: {why}" if why else None,
+                            [{"model": "site rule", "candidates": cand}], ev))
+    return out
 
 
 def _apply(store, d: Decision, proposals) -> None:
@@ -476,7 +494,9 @@ def _apply(store, d: Decision, proposals) -> None:
     if d.accepted is not None:
         store.add_entity(uri, BRICK[d.accepted])
         reason = next((c["reason"] for c in d.candidates if c["brick_class"] == d.accepted), "")
-        store.add_relationship(uri, SKOS.definition, Literal(f"model-classified (agreed on re-ask): {reason}"))
+        site_rule = any(c.get("source") == "site rule" for c in d.candidates)
+        store.add_relationship(uri, SKOS.definition, Literal(
+            f"site-rule-classified: {reason}" if site_rule else f"model-classified (agreed on re-ask): {reason}"))
         if proposals is not None:
             proposals.resolve(d.uri, "auto-accepted", d.accepted)
         return

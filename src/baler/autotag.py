@@ -105,7 +105,7 @@ class _RetryingModel:
         return reply if reply is not None else {}
 
 
-def run(store, model=None, proposals=None, stats=None) -> list[model_step.Decision]:
+def run(store, model=None, proposals=None, stats=None, site_rules=None) -> list[model_step.Decision]:
     point_rules = mapping.load_rules(POINT_RULES_PATH)
     equip_rules = mapping.load_rules(EQUIP_RULES_PATH)
 
@@ -122,7 +122,7 @@ def run(store, model=None, proposals=None, stats=None) -> list[model_step.Decisi
             unresolved.append((uri, _kind(uri)))
 
     model = _RetryingModel(model) if model is not None else None
-    decisions = model_step.run(store, unresolved, model, proposals=proposals, stats=stats)
+    decisions = model_step.run(store, unresolved, model, proposals=proposals, stats=stats, site_rules=site_rules)
     for d in decisions:
         if d.accepted:
             print(f"{d.uri}: model -> {d.accepted}")
@@ -142,7 +142,7 @@ def main() -> None:
     store = RemoteStore()
 
     model = None if args.no_llm else llm_classifier.model_from_env()
-    proposals = stats = None
+    proposals = stats = site_rules = None
     if not args.no_proposals:
         from baler import mapping_proposals, timeseries
 
@@ -150,7 +150,8 @@ def main() -> None:
         proposals = mapping_proposals.PgProposals(conn)
         proposals.ensure_schema()
         stats = model_step.pg_stats(conn)
-    run(store, model=model, proposals=proposals, stats=stats)
+        site_rules = proposals.site_rules()
+    run(store, model=model, proposals=proposals, stats=stats, site_rules=site_rules)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,98 @@
+---
+title: Mapping review
+---
+
+The tagging ladder (rules, then [the model step](/model-step)) classifies
+what it can agree on. Everything else is left as a **mapping proposal**.
+**Ops → Mapping review** (`ui/mapping.html`) is where a person answers
+proposals. Extracted facts are proposals and a person confirms them: the
+same pattern as Cx spec items.
+
+## How much of the building Baler understands
+
+The page opens with a count of points by state:
+
+| State | Meaning |
+|---|---|
+| By a rule | A rule in `rules/haystack_to_brick.yaml` matched. |
+| By a site rule | A pattern a person approved here; see below. |
+| By memory | Nearest confirmed examples. Always 0 until #185 lands. |
+| By the model step | Both model asks agreed, and nothing vetoed it. |
+| By a person | Accepted here, or the class was edited by hand (`record_edits`). |
+| Proposed | Waiting for a person. |
+| Escalated | Waiting for a specialist. |
+| Unmapped | No class and no proposal. Run `python -m baler.autotag`. |
+
+"Understood" is the share of points classified by a rule, a site rule,
+memory, the model or a person. The counts come from
+`GET /ops/mapping/summary` and are scoped to your sites.
+
+## The queue
+
+`GET /ops/mapping/proposals` groups the open proposals by **naming pattern**:
+digits become `{n}`, and the marker tags and unit must match. One answer can
+then cover all 41 points like `VAV-{n}-DA-T`. Groups are ranked by impact:
+
+1. **A fault rule needs it.** A rule's `topic_glob` matches a member, or one
+   of its candidate classes is a class a `brick_class` rule targets.
+2. **The site has an active Cx project.** It isn't archived.
+3. Everything else.
+
+Within a tier, bigger groups come first.
+
+Each group shows:
+- the candidates, with their source (model, ranker or site rule) and reason;
+- the evidence the model step saw: label, marker and valued tags, value
+  stats, and the points on the same equipment;
+- what each model ask said, including names it gave that aren't Brick
+  classes;
+- why it wasn't auto-accepted;
+- a 24 h sparkline of the first member, from `GET /ingest/history`.
+
+Windrow doesn't send the BACnet description or object type yet
+(Windrow#19). When it does, they show up here as tags. Nearest confirmed
+examples come with memory (#185).
+
+## Answers
+
+`POST /ops/mapping/decide` takes `{ids, action, ...}`, either for one
+proposal or for a whole group. It needs the operator role.
+
+- **Accept** a candidate, or type any other Brick class.
+  - The name is checked against the vendored Brick ontology. An unknown
+    name is a 400.
+  - The class is written the same way as a hand edit (`record_edit`) and
+    logged in `record_edits` with action `mapping`. The point's `PROJ:` or
+    `TD:UnmappedPoint` type is removed.
+  - For a group, *Save as a site rule* stores the pattern in
+    `mapping_site_rules`. From then on the model step gives every new point
+    with that pattern this class without asking a model, unless the unit or
+    value veto objects.
+- **Escalate** to a specialist: the site's controls contractor, the MSI, or
+  our own expert.
+  - The proposals stay in the queue, marked with who was asked.
+  - Every webhook in the registry with no filter, or filtered to `rule_id`
+    `mapping`, gets a `mapping.escalated` event. It carries the proposals,
+    the assignee and a link back here, with the same SSRF rules as fault
+    webhooks. Baler has no email path, so webhooks are the notification.
+  - The specialist answers on this same page. A later autotag run refreshes
+    an escalated proposal's evidence, but never opens a second one or
+    closes it.
+- **Needs a site visit** is a valid answer.
+  - It records that the points can't be identified without going there.
+  - It opens a Cx issue ("Site visit: identify N point(s) like ...") on the
+    newest active Cx project covering the points, with the candidates and
+    your note.
+  - With no such project, the answer is still recorded and the page says
+    no issue was opened.
+
+An answered proposal can't be answered again (409). The API only acts on
+proposals on your sites; for anyone else's it answers 404.
+
+## Training data
+
+Every accepted proposal stays in `mapping_proposals`, along with the
+evidence the person saw and their answer.
+`PgProposals.confirmed_examples()` returns them. That is the labelled
+store memory (#185) learns from, and it stays inside the organisation that
+made it.
