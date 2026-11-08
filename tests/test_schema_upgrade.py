@@ -37,7 +37,7 @@ from datetime import datetime, timedelta, timezone
 import psycopg
 import pytest
 
-from baler import schema, timeseries
+from baler import migrations, schema, timeseries
 from baler.migrations import hypertable
 
 pytestmark = pytest.mark.integration
@@ -213,6 +213,12 @@ def test_upgrade_from_release(ref, scratch, tmp_path, monkeypatch):
     with _connect(scratch()) as fresh:
         schema.upgrade(fresh)
         want = schema.snapshot(fresh)
+    # The baseline alone (0001), for the adoption check: later migrations add
+    # their own tables on top of what a pre-migration install already has.
+    with _connect(scratch()) as fresh, monkeypatch.context() as m:
+        m.setattr(migrations, "ALL", migrations.ALL[:1])
+        schema.upgrade(fresh)
+        want_baseline = schema.snapshot(fresh)
 
     dsn = scratch()
     print(_build_with_release(ref, dsn, tmp_path))
@@ -228,10 +234,18 @@ def test_upgrade_from_release(ref, scratch, tmp_path, monkeypatch):
             # were all there), only the other tables' idempotent statements.
             assert done[0][2] == "adopted"
             assert not [s for s in planned[0][1] if "point_history" in s.note]
-            assert _without_version_table(before_schema) == _without_version_table(want)
+            assert _without_version_table(before_schema) == _without_version_table(want_baseline)
 
         assert schema.snapshot(conn) == want  # exactly a fresh database's schema
-        assert _data(conn) == before_data  # every row, every compressed chunk, as it was
+        after_data = _data(conn)
+        # every row, every compressed chunk, as it was; tables a later
+        # migration added are new, and 0002 seeds point_registry with every
+        # point that has history
+        assert {k: v for k, v in after_data.items() if k in before_data} == before_data
+        if "point_registry" not in before_data:
+            assert after_data["point_registry"] == conn.execute(
+                "SELECT count(DISTINCT point_uri) FROM point_history").fetchone()[0] > 0
+        before_data = after_data
 
         assert schema.plan(conn) == []
         assert schema.upgrade(conn) == []  # twice: nothing

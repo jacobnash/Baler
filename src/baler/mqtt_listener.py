@@ -17,7 +17,7 @@ from functools import lru_cache
 
 from opentelemetry import trace
 
-from baler import bacnet_alarms, mapping, mqtt_util, quality, tracing
+from baler import bacnet_alarms, mapping, mqtt_util, quality, reading_feed, tracing
 from baler.ingest import (
     ingest_equip_tags,
     ingest_haystack_equip_tags,
@@ -40,6 +40,10 @@ tracer = tracing.get_tracer(__name__)
 # same fan status over Modbus (0/1) charted fine. Multi-state values are
 # unsigned integers in BACnet, so these two names mean binary only.
 BINARY_STATES = {"active": True, "inactive": False}
+
+# Marks a queued controller alarm (ReadingBatcher.put_alarm) apart from a
+# reading's quality flag.
+ALARM = object()
 
 
 def binary_state(value):
@@ -114,9 +118,17 @@ class ReadingBatcher:
     paho stops reading the socket, and the backlog waits at the broker.
     """
 
-    def __init__(self, client, store, ts_conn, max_rows: int = 5000, max_wait: float = 0.25, max_queued: int = 50_000):
+    def __init__(self, client, store, ts_conn, max_rows: int = 5000, max_wait: float = 0.25, max_queued: int = 50_000,
+                 feed: bool = False, feed_retention_s: float = reading_feed.DEFAULT_RETENTION_S,
+                 prune_every: float = 5.0):
         self.client, self.store, self.ts_conn = client, store, ts_conn
         self.max_rows, self.max_wait = max_rows, max_wait
+        # The reading feed (#243): each committed batch, readings and
+        # controller alarms, is appended to reading_feed in the same
+        # transaction, for fault_detector and derivation_engine to read
+        # instead of a QoS 0 subscription of their own.
+        self.feed, self.feed_retention_s, self.prune_every = feed, feed_retention_s, prune_every
+        self._last_prune = 0.0
         self.queue: queue.Queue = queue.Queue(maxsize=max_queued)
         # Bumped on every (re)connect: a message id is only meaningful on the
         # connection it arrived on (ids are reused), and the broker resends
@@ -131,6 +143,11 @@ class ReadingBatcher:
 
     def put(self, msg, topic: str, value, ts, flag: str | None = None) -> None:
         self.queue.put((self.generation, msg.mid, msg.qos, topic, value, ts, flag))
+
+    def put_alarm(self, msg, topic: str, event, ts) -> None:
+        """A controller alarm (Baler#168): not stored as a reading, but it
+        rides the batch into the feed, acknowledged once that commits."""
+        self.queue.put((self.generation, msg.mid, msg.qos, topic, event, ts, ALARM))
 
     def _run(self) -> None:
         try:
@@ -154,6 +171,9 @@ class ReadingBatcher:
                     except queue.Empty:
                         break
                 self.flush(batch)
+                if self.feed and time.monotonic() - self._last_prune >= self.prune_every:
+                    self._last_prune = time.monotonic()
+                    self.prune()
         except Exception:  # noqa: BLE001 - infrastructure failure: exit, let the broker redeliver
             # Same contract as the old synchronous path (Postgres/Oxigraph
             # down -> the container restarts), from a thread: nothing in
@@ -163,13 +183,32 @@ class ReadingBatcher:
 
     def flush(self, batch: list) -> None:
         with tracer.start_as_current_span("mqtt_listener.flush") as span:
-            span.set_attribute("readings", len(batch))
-            ingest_readings(self.store, self.ts_conn, [(topic, value, ts, flag) for _, _, _, topic, value, ts, flag in batch])
+            readings = [(topic, value, ts, flag) for _, _, _, topic, value, ts, flag in batch if flag is not ALARM]
+            alarms = [[topic, value, ts] for _, _, _, topic, value, ts, flag in batch if flag is ALARM]
+            span.set_attribute("readings", len(readings))
+            if self.feed:
+                ingest_readings(self.store, self.ts_conn, readings,
+                                then=lambda conn: reading_feed.append_from_stage(conn, alarms))
+            elif readings:
+                ingest_readings(self.store, self.ts_conn, readings)
             for gen, mid, qos, *_ in batch:
                 if qos and gen == self.generation:
                     self.client.ack(mid, qos)
-            self.rows += len(batch)
+            self.rows += len(readings)
             self.batches += 1
+
+    def prune(self) -> None:
+        """Drop feed batches every consumer has read, and any past the
+        retention window (counted against the consumers that hadn't). A
+        failure here is logged, never fatal: ingest matters more."""
+        try:
+            _, missed = reading_feed.prune(self.ts_conn, self.feed_retention_s)
+        except Exception as exc:  # noqa: BLE001 - pruning is housekeeping
+            print(f"reading feed: prune failed: {exc!r}", flush=True)
+            return
+        for consumer, readings, batches in missed:
+            print(f"reading feed: {consumer} MISSED {readings} reading(s) in {batches} batch(es): "
+                  f"more than {self.feed_retention_s:.0f} s behind, pruned unread", flush=True)
 
 
 def make_on_message(store, ts_conn, batcher: ReadingBatcher | None = None):
@@ -278,6 +317,9 @@ def make_on_message(store, ts_conn, batcher: ReadingBatcher | None = None):
         # reading: fault_detector raises/clears it as a fault. Storing it
         # here would invent a `<label>/alarm` point with dicts for history.
         if bacnet_alarms.is_alarm(msg.topic, value):
+            if batcher is not None and batcher.feed:
+                batcher.put_alarm(msg, msg.topic, value, ts)
+                return True
             return False
 
         flag = quality.from_envelope(payload.get("quality"))
@@ -300,6 +342,12 @@ def main() -> None:
     # (mosquitto/mosquitto.conf): unacknowledged messages are in flight.
     parser.add_argument("--batch-rows", type=int, default=5000)
     parser.add_argument("--batch-ms", type=float, default=250.0)
+    parser.add_argument("--no-feed", dest="feed", action="store_false",
+                        help="don't append committed batches to the reading feed (fault_detector and "
+                             "derivation_engine read it; without it they see nothing)")
+    parser.add_argument("--feed-retention", type=float, default=reading_feed.DEFAULT_RETENTION_S,
+                        help="seconds a feed batch is kept for a consumer that hasn't read it "
+                             "(BALER_FEED_RETENTION_S); past that it is pruned and counted as missed")
     args = parser.parse_args()
 
     tracing.init_tracing("baler-mqtt-listener")
@@ -315,7 +363,8 @@ def main() -> None:
     # (ReadingBatcher), so an unstored reading is never one the broker has
     # forgotten.
     client = mqtt_util.make_client(client_id="baler-mqtt-listener", clean_session=False, manual_ack=True)
-    batcher = ReadingBatcher(client, store, ts_conn, max_rows=args.batch_rows, max_wait=args.batch_ms / 1000)
+    batcher = ReadingBatcher(client, store, ts_conn, max_rows=args.batch_rows, max_wait=args.batch_ms / 1000,
+                             feed=args.feed, feed_retention_s=args.feed_retention)
     client.on_connect = make_on_connect(args.topic_pattern, batcher)
     client.on_disconnect = on_disconnect
     client.on_message = make_on_message(store, ts_conn, batcher)

@@ -324,6 +324,33 @@ def graph_counts(ep: Endpoints) -> dict:
             "count_scale_points_s": round(t_points, 3), "count_triples_s": round(t_triples, 3)}
 
 
+def feed_status(conn) -> dict:
+    """The rule daemons' place in the reading feed (Baler#243): consumed
+    offset, lag and readings missed, per consumer. {} on a Baler without
+    the feed (then their QoS 0 drops show only as broker drops)."""
+    try:
+        rows = conn.execute(
+            """SELECT c.consumer, c.seq, c.missed_readings, c.missed_batches,
+                      (SELECT COALESCE(sum(n), 0) FROM reading_feed f WHERE f.seq > c.seq),
+                      (SELECT extract(epoch FROM now() - min(committed_at)) FROM reading_feed f WHERE f.seq > c.seq)
+               FROM reading_feed_consumers c WHERE c.consumer IN ('fault_detector', 'derivation_engine')""").fetchall()
+    except Exception:  # noqa: BLE001 - no feed (an older Baler)
+        conn.rollback()
+        return {}
+    return {name: {"seq": seq, "missed_readings": mr, "missed_batches": mb, "lag_readings": int(lr),
+                   "lag_s": round(float(ls), 2) if ls is not None else 0.0}
+            for name, seq, mr, mb, lr, ls in rows}
+
+
+def heartbeat_details(conn) -> dict:
+    try:
+        return {s: d for s, d in conn.execute(
+            "SELECT service, detail FROM service_heartbeats WHERE service IN ('fault_detector', 'derivation_engine')")}
+    except Exception:  # noqa: BLE001
+        conn.rollback()
+        return {}
+
+
 def chunk_writes(conn) -> int:
     """Rows inserted or updated into point_history so far (its chunks'
     pg_stat counters): the stored-rows/s numerator, independent of row ts."""
@@ -636,6 +663,13 @@ def evaluate(step: dict) -> tuple[str, list[str]]:
             # silently missed readings: not graceful, not visible.
             reasons.append(f"broker dropped {ing['broker_dropped_delta']} deliveries (a subscriber can't keep up: "
                            "the listener if readings are missing, else fault_detector/derivation_engine missed readings)")
+    for svc, r in (step.get("rules") or {}).items():
+        feed = r.get("feed") or {}
+        if feed.get("missed_readings_delta"):
+            reasons.append(f"{svc} missed {feed['missed_readings_delta']} readings (fell more than the reading feed's "
+                           "retention behind)")
+        elif (feed.get("lag_s_last") or 0) > MAX_P95_LAG_S:
+            reasons.append(f"{svc} is {feed['lag_s_last']} s behind on the reading feed at the end of the soak")
     lag = step.get("lag", {})
     if lag:
         if lag.get("lost"):
@@ -707,6 +741,7 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
         soak_start = time.time()
         w0 = chunk_writes(conn)
         sys0 = sysmon.snapshot()
+        feed0 = feed_status(conn)
         hb: dict[str, list[datetime]] = {}
         while time.time() - soak_start < args.soak:
             time.sleep(args.sample_every)
@@ -714,7 +749,8 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
             st = read_stats(stats_file)
             sample = {"t": round(time.time() - soak_start, 1), "live": live, "stored_total": chunk_writes(conn),
                       "gen_rate": round(st.get("sent_rate_10s", 0)), "gen_behind_s": round(st.get("behind_s", 0), 1),
-                      "broker": sysmon.snapshot(), "docker": docker_stats(), "lag": canary.stats(soak_start)}
+                      "broker": sysmon.snapshot(), "docker": docker_stats(), "lag": canary.stats(soak_start),
+                      "feed": feed_status(conn)}
             t1 = time.perf_counter()
             conn.execute("SELECT 1")
             sample["pg_roundtrip_s"] = round(time.perf_counter() - t1, 4)
@@ -740,6 +776,7 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
         soak_end = time.time()
         w1 = chunk_writes(conn)
         sys1 = sysmon.snapshot()
+        feed1 = feed_status(conn)
 
         # 3. read probes and rules, still under load
         s = session(ep)
@@ -756,6 +793,17 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
                                "median_cycle_s": round(statistics.median(
                                    [(b - a).total_seconds() for a, b in itertools.pairwise(v)]), 1) if len(v) > 2 else None}
                          for svc, v in hb.items()}
+        # Rule daemons on the reading feed (#243): readings consumed per
+        # second, how far behind they ran, and what they missed.
+        details = heartbeat_details(conn)
+        for svc, f1 in feed1.items():
+            f0 = feed0.get(svc, {})
+            lags = [x["feed"][svc]["lag_s"] for x in samples if svc in x.get("feed", {})]
+            r = step["rules"].setdefault(svc, {})
+            r["feed"] = {"missed_readings_delta": f1["missed_readings"] - f0.get("missed_readings", 0),
+                         "lag_s_max": max(lags, default=None), "lag_s_last": f1["lag_s"],
+                         "lag_readings_last": f1["lag_readings"]}
+            r["heartbeat"] = details.get(svc)
     finally:
         gen.send_signal(signal.SIGTERM)
         try:

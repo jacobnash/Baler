@@ -85,6 +85,11 @@ def _seed_history(conn: psycopg.Connection) -> None:
                 while ts < b:
                     cp.write_row((uri, ts, *_sample(i, p)))
                     ts, i = ts + step, i + 1
+    # A raw COPY bypasses the writers that keep point_registry (#243); fill
+    # it the way they (and migration 0002's seed) would, so the drill's
+    # idempotent re-insert finds it already current.
+    conn.execute("INSERT INTO point_registry (point_uri, last_ts) SELECT point_uri, max(ts) FROM point_history "
+                 "GROUP BY point_uri ON CONFLICT (point_uri) DO UPDATE SET last_ts = EXCLUDED.last_ts")
 
 
 def _seed(src) -> dict:
