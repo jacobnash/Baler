@@ -19,6 +19,9 @@ from baler import (
     docs_ui,
     edges,
     gateway_auth,
+    json_store,
+    mapping_proposals,
+    mapping_review,
     ops_freshness,
     orphans,
     record_edit,
@@ -117,6 +120,63 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
                 result = orphans.remove(self._store(), conn, body.get("ids"), bool(body.get("purge_history")),
                                         (sub, user["email"] if user else sub), scope)
             span.set_attribute("removed", len(result["removed"]))
+            respond_json(self, 200, result)
+
+        # --- mapping review queue (Baler#184); policy.js rows
+
+        def _mapping_context(self, conn):
+            claims = claims_from_header(self.headers.get("Authorization")) or {}
+            scope = scope_for(conn, claims)
+            props = mapping_proposals.PgProposals(conn)
+            props.ensure_schema()
+            return claims, scope, props
+
+        def _mapping_proposals_get(self, span) -> None:
+            from baler import brick_vocab
+
+            with ts_pool.connection() as conn:
+                _claims, scope, props = self._mapping_context(conn)
+                rows = props.list(mapping_proposals.HELD, limit=20000)
+                rules = json_store.load(json_store.data_file("rules.json"))
+                needs = mapping_review.fault_rule_needs(rules, brick_vocab.load())
+                result = mapping_review.groups(rows, needs, mapping_review.active_cx_prefixes(conn), scope.allows)
+            span.set_attribute("groups", len(result))
+            respond_json(self, 200, result)
+
+        def _mapping_summary_get(self, span) -> None:
+            with ts_pool.connection() as conn:
+                _claims, scope, props = self._mapping_context(conn)
+                rows = props.list(mapping_proposals.HELD, limit=100000)
+                payload = mapping_review.summary(self._store(), rows, mapping_review.person_classified(conn), scope.allows)
+            respond_json(self, 200, payload)
+
+        def _mapping_decide(self, span) -> None:
+            from baler.commissioning import db as cx_db
+
+            body = self.read_json_body()
+            ids = body.get("ids")
+            if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+                respond_error(self, 400, "ids is a list of proposal ids")
+                return
+            with ts_pool.connection() as conn:
+                claims, scope, props = self._mapping_context(conn)
+                sub = claims.get("sub")
+                user = auth.get_user(conn, sub) if sub and claims.get("kind") == "session" else None
+                who = {"sub": sub, "email": user["email"] if user else sub}
+                try:
+                    result = mapping_review.decide(
+                        props, self._store(), conn, ids, str(body.get("action") or ""), who,
+                        brick_class=body.get("brick_class"), assignee=body.get("assignee"), note=body.get("note"),
+                        save_rule=bool(body.get("save_rule")), allows=scope.allows,
+                        webhooks_path=json_store.data_file("webhooks.json"),
+                        cx_repo=cx_db.PgRepo(ts_pool, self._store()),
+                    )
+                except mapping_review.DecisionError as exc:
+                    status = 404 if str(exc).startswith("no such proposal") else 409 if str(exc).startswith("already decided") else 400
+                    respond_error(self, status, str(exc))
+                    return
+            span.set_attribute("action", result["action"])
+            span.set_attribute("decided", result["decided"])
             respond_json(self, 200, result)
 
         # --- edge nodes and connectors (Connectors page); policy.js rows
@@ -232,6 +292,9 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
             if urlparse(self.path).path == "/sources":
                 self.handle_traced("ops_api.post_source", self._sources_post)
                 return
+            if urlparse(self.path).path == "/mapping/decide":
+                self.handle_traced("ops_api.mapping_decide", self._mapping_decide)
+                return
             self.send_response(404)
             self.end_headers()
 
@@ -276,6 +339,16 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
                 if not self._gateway():
                     return
                 self.handle_traced("ops_api.get_edges", self._edges_get)
+                return
+            if urlparse(self.path).path == "/mapping/proposals":
+                if not self._gateway():
+                    return
+                self.handle_traced("ops_api.mapping_proposals", self._mapping_proposals_get)
+                return
+            if urlparse(self.path).path == "/mapping/summary":
+                if not self._gateway():
+                    return
+                self.handle_traced("ops_api.mapping_summary", self._mapping_summary_get)
                 return
             if urlparse(self.path).path == "/freshness":
                 if not self._gateway():
@@ -322,6 +395,7 @@ def main() -> None:
     with ts_pool.connection() as conn:
         sources.ensure_schema(conn)
         record_edit.ensure_schema(conn)
+        mapping_proposals.PgProposals(conn).ensure_schema()
     # /status answers from the latest round (Baler#106). The first round runs
     # before the API listens, along with the Building counts' queries: right
     # after a deploy a request used to find no round yet and probe for

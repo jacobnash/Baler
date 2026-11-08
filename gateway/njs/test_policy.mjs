@@ -87,6 +87,13 @@ check("haystack routes: both URL layouts, reads are viewer, writes are operator"
     assert.equal(policy.resolveRoute("GET", "/api/openapi.yaml").minRole, null);
 });
 
+check("mapping review: reading is viewer, answering is operator", () => {
+    assert.equal(policy.resolveRoute("GET", "/ops/mapping/proposals").minRole, "viewer");
+    assert.equal(policy.resolveRoute("GET", "/ops/mapping/summary").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/ops/mapping/decide").minRole, "operator");
+    assert.equal(policy.resolveRoute("POST", "/ops/mapping/proposals"), null);
+});
+
 check("bearerFromHeader accepts OAuth and Haystack forms only", () => {
     assert.equal(policy.bearerFromHeader("Bearer abc.def.ghi"), "abc.def.ghi");
     assert.equal(policy.bearerFromHeader("bearer abc.def.ghi"), "abc.def.ghi");

@@ -78,6 +78,13 @@ const ROUTES = [
   ["DELETE", /^\/ops\/sources\/[^/]+$/,                "ops", "admin"],
   ["GET",    /^\/ops\/orphans$/,                     "ops", "admin"],
   ["POST",   /^\/ops\/orphans\/remove$/,              "ops", "admin"],
+  // Mapping review queue (Baler#184): reading the queue and the "how much
+  // is understood" summary is viewer; answering (accept, escalate, site
+  // visit) writes classes and is operator. ops_api scopes both to the
+  // caller's sites.
+  ["GET",    /^\/ops\/mapping\/proposals$/,            "points", "viewer"],
+  ["GET",    /^\/ops\/mapping\/summary$/,              "points", "viewer"],
+  ["POST",   /^\/ops\/mapping\/decide$/,               "points", "operator"],
   // Connectors page: edge nodes and their devices/connections, local or
   // remote (baler.edges). Listing is read-only; every other action changes
   // an edge node (or scans its network) and is admin. Whole-org, like the

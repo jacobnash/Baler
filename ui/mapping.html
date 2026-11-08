@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Baler — Mapping review</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="console.css" />
+  <link rel="stylesheet" href="ops.css" />
+  <link rel="stylesheet" href="mapping.css" />
+</head>
+<body>
+  <header>
+    <h1>Mapping review</h1>
+    <span id="status">connecting…</span>
+    <span id="system-chip" class="system-chip" hidden></span>
+    <nav class="top-nav">
+      <a href="index.html">Equipment tree</a>
+      <a href="his.html">Query</a>
+      <a href="alarms.html">Alarms</a>
+      <a href="derivations.html">Derivations</a>
+      <a href="cx.html">Commissioning</a>
+      <a href="connectors.html">Connectors</a>
+      <a href="ops.html">Ops</a>
+      <a href="/docs" target="_blank" rel="noopener">Docs</a>
+    </nav>
+  </header>
+  <div id="login-gate" class="login-gate">
+    <form id="login-form">
+      <h2>Sign in</h2>
+      <label>Email <input type="email" id="login-email" autocomplete="username" required /></label>
+      <label>Password <input type="password" id="login-password" autocomplete="current-password" required /></label>
+      <button type="submit">Sign in</button>
+      <p id="login-error" class="hint" hidden></p>
+      <p class="hint"><button type="button" id="show-create-org" class="linkish">First time? Create an organization</button></p>
+    </form>
+    <form id="create-org-form" hidden>
+      <h2>Create organization</h2>
+      <label>Organization <input type="text" id="org-name" required /></label>
+      <label>Admin email <input type="email" id="org-email" autocomplete="username" required /></label>
+      <label>Admin password <input type="password" id="org-password" autocomplete="new-password" required /></label>
+      <button type="submit">Create &amp; sign in</button>
+      <p id="org-error" class="hint" hidden></p>
+      <p class="hint"><button type="button" id="show-login" class="linkish">Back to sign in</button></p>
+    </form>
+  </div>
+  <main id="main" class="console-main" style="display: none">
+    <section>
+      <h2>How much of the building Baler understands</h2>
+      <div id="mapping-summary" class="ops-grid"></div>
+      <p class="hint">Points by who classified them. Proposed and escalated points are waiting for a person here; unmapped points have no class and no proposal yet (run <code>python -m baler.autotag</code>).</p>
+    </section>
+
+    <section>
+      <h2>Waiting for a person</h2>
+      <p class="hint">Grouped by naming pattern and ranked: patterns a fault rule needs first, then points on a site with an active Cx project, then the rest. One answer covers the whole group; accepting a group also saves it as a site rule, so later points with that pattern are classified without asking a model.</p>
+      <div class="toolbar"><button type="button" id="mapping-refresh">Refresh</button> <span id="mapping-status" class="hint"></span></div>
+      <div id="mapping-groups"></div>
+    </section>
+  </main>
+
+  <dialog id="decide-dialog">
+    <form id="decide-form" method="dialog">
+      <h3 id="decide-title"></h3>
+      <p class="hint" id="decide-text"></p>
+      <label id="decide-class-label">Brick class <input type="text" id="decide-class" list="decide-classes" autocomplete="off" /></label>
+      <datalist id="decide-classes"></datalist>
+      <label class="inline" id="decide-rule-label"><input type="checkbox" id="decide-rule" checked /> Save as a site rule for this pattern</label>
+      <label id="decide-assignee-label">Specialist (name or email) <input type="text" id="decide-assignee" autocomplete="off" /></label>
+      <label>Note <input type="text" id="decide-note" autocomplete="off" maxlength="2000" /></label>
+      <p id="decide-error" class="field-error" hidden></p>
+      <menu>
+        <button type="submit" value="ok" id="decide-ok">Save</button>
+        <button type="button" id="decide-cancel">Cancel</button>
+      </menu>
+    </form>
+  </dialog>
+  <script src="auth.js"></script>
+  <script src="chart.js"></script>
+  <script src="mapping.js"></script>
+</body>
+</html>
