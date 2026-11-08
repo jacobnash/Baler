@@ -205,6 +205,9 @@ def test_issues_and_risks_round_trip(repo):
     assert [c[2] for c in changes] == ["retest.passed"]
     assert repo.get_issue(issue["id"])["retest"]["run_id"] == "r3"
     assert repo.list_issue_events(issue["id"])[0]["actor"] == "system"
+    # the report reads every issue's events in one query (#150)
+    assert repo.list_issue_events_many([issue["id"], ext["id"]]) == {
+        issue["id"]: repo.list_issue_events(issue["id"]), ext["id"]: repo.list_issue_events(ext["id"])}
     repo.update_issue(issue["id"], {"status": "closed", "closed_at": now, "closed_run": "r3"})  # the person's close
     # closed: a new issue on the same check is allowed again
     repo.create_issue({**issue, "id": db.new_id()})
@@ -235,6 +238,16 @@ def test_procedures_and_test_runs_round_trip(repo):
     repo.update_test_run(tr["id"], {"status": "completed", "equipment": [{"equip_uri": "e", "steps": []}], "finished_at": now})
     assert repo.get_test_run(tr["id"])["equipment"] == [{"equip_uri": "e", "steps": []}]
     assert [r["id"] for r in repo.list_test_runs(proc["id"])] == [tr["id"]]
+    # the report's one-query read: the newest completed run among the newest 20 (#150)
+    newer = {**tr, "id": db.new_id(), "status": "failed", "requested_at": now + timedelta(seconds=1)}
+    repo.create_test_run(newer)
+    other = {"id": db.new_id(), "project_id": pid, **procedures.from_seed("boiler_startup"), "created_by": "it",
+             "created_at": now, "updated_at": now}
+    repo.create_procedure(other)
+    latest = repo.latest_completed_test_runs([proc["id"], other["id"]])
+    assert latest[proc["id"]] == next(t for t in repo.list_test_runs(proc["id"], 20) if t["status"] == "completed")
+    assert latest[other["id"]] is None
+    assert repo.latest_completed_test_runs([proc["id"]], window=1) == {proc["id"]: None}
     repo.update_project(pid, now, settings={"schedule": {"every_hours": 12}})
     assert pid in {p["id"] for p in repo.list_scheduled_projects()}
     repo.update_project(pid, now, archived_at=now)
@@ -346,7 +359,7 @@ def test_a_point_shared_by_two_equipment_and_a_repeat_dont_abort_the_run(repo):
     assert sorted(r["equip_uri"] for r in stored) == ["urn:equip:cx-it/ahu-1", "urn:equip:cx-it/building"]
 
 
-def test_availability_on_postgres_is_availability_pct(repo):
+def test_availability_on_postgres_is_availability_pct(repo, monkeypatch):
     """repo.availability folds in Postgres what procedures.availability_pct
     folds in Python (Baler#150): same samples, same percentage - gaps longer
     than max_gap, a late first sample, empty rows, a point with nothing."""
@@ -368,8 +381,16 @@ def test_availability_on_postgres_is_availability_pct(repo):
         write_point_value(conn, "urn:point:test-cxint-avail/gappy", None, start + timedelta(minutes=35))  # no value: not a sample
         write_point_value(conn, "urn:point:test-cxint-avail/steady", 2.0, end)  # end is exclusive
     uris = [*series, "urn:point:test-cxint-avail/silent"]
-    got = repo.availability(uris, start, end, gap)
-    for uri in uris:
-        times = series.get(uri, [])
-        assert got[uri] == (len(times), availability_pct(times, start, end, gap)), uri
-    assert got["urn:point:test-cxint-avail/silent"] == (0, 0.0)
+    from baler.commissioning import history
+
+    with repo.pool.connection() as conn:
+        conn.autocommit = True
+        assert history.ensure_empty_rows_index(conn) in ("present", "built", "another process is building it")
+    # with the empty-rows index (index-only scans, the heap for `gappy`) and without it (heap only)
+    for valid_sql in (history._EMPTY_ROWS_VALID, "SELECT false"):
+        monkeypatch.setattr(history, "_EMPTY_ROWS_VALID", valid_sql)
+        got = repo.availability(uris, start, end, gap)
+        for uri in uris:
+            times = series.get(uri, [])
+            assert got[uri] == (len(times), availability_pct(times, start, end, gap)), (uri, valid_sql)
+        assert got["urn:point:test-cxint-avail/silent"] == (0, 0.0)

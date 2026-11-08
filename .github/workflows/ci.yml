@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true  # windrow/: mock_hospital is the mapping eval's corpus (#180)
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -38,6 +40,9 @@ jobs:
       - run: pip install -e ".[dev,validate,cx-gl36,cx-spec]"
       # parallel across the runner's cores: ~3 min serial (#27)
       - run: pytest -m "not integration" -n auto
+      # Mapping eval (#180): rules only, no model key, a few seconds. Prints
+      # the score to the log and fails on a regression against the baseline.
+      - run: python -m baler.mapping_eval --check
 
   # The static checks and the live LLM check, split out of `unit` so they run
   # beside its pytest instead of after it (~35 s off what was, once the

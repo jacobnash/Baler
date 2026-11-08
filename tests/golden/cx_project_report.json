@@ -1,0 +1,2362 @@
+{
+ "acceptance": {
+  "judged_from": "2026-11-05T12:30:00+00:00",
+  "max_gap_minutes": 10.0,
+  "min_pct": 90.0,
+  "points": [
+   {
+    "availability_pct": 0.0,
+    "dis": "RAT",
+    "equip_uri": "urn:equip:fbf/a/ahu-1",
+    "expected": 141,
+    "pass": false,
+    "samples": 0,
+    "subject": "urn:point:fbf/a/ahu-1/RAT"
+   },
+   {
+    "availability_pct": 1.06,
+    "dis": "SAT",
+    "equip_uri": "urn:equip:fbf/a/ahu-1",
+    "expected": 141,
+    "pass": false,
+    "samples": 1,
+    "subject": "urn:point:fbf/a/ahu-1/SAT"
+   },
+   {
+    "availability_pct": 1.06,
+    "dis": "SF-S",
+    "equip_uri": "urn:equip:fbf/a/ahu-1",
+    "expected": 141,
+    "pass": false,
+    "samples": 1,
+    "subject": "urn:point:fbf/a/ahu-1/SF-S"
+   },
+   {
+    "availability_pct": 0.0,
+    "dis": "X",
+    "equip_uri": "urn:equip:fbf/a/ahu-1",
+    "expected": 141,
+    "pass": false,
+    "samples": 0,
+    "subject": "urn:point:fbf/a/ahu-1/X"
+   },
+   {
+    "availability_pct": 1.06,
+    "dis": "KW",
+    "equip_uri": "urn:equip:fbf/a/mtr-1",
+    "expected": 141,
+    "pass": false,
+    "samples": 1,
+    "subject": "urn:point:fbf/a/mtr-1/KW"
+   },
+   {
+    "availability_pct": 0.0,
+    "dis": "DMP",
+    "equip_uri": "urn:equip:fbf/a/vav-1",
+    "expected": 141,
+    "pass": false,
+    "samples": 0,
+    "subject": "urn:point:fbf/a/vav-1/DMP"
+   },
+   {
+    "availability_pct": 1.06,
+    "dis": "ZNT",
+    "equip_uri": "urn:equip:fbf/a/vav-1",
+    "expected": 141,
+    "pass": false,
+    "samples": 1,
+    "subject": "urn:point:fbf/a/vav-1/ZNT"
+   }
+  ],
+  "settle_minutes": 30.0,
+  "window_end": "2026-11-06T12:00:00+00:00",
+  "window_start": "2026-11-05T12:00:00+00:00"
+ },
+ "active_runs": [],
+ "cxa": "Ann Example",
+ "equipment": {
+  "urn:equip:fbf/a/ahu-1": {
+   "brickClass": "AHU",
+   "dis": "AHU-1",
+   "points": [
+    {
+     "brickClass": "Return_Air_Temperature_Sensor",
+     "dis": "RAT",
+     "equip": "urn:equip:fbf/a/ahu-1",
+     "equipDis": "AHU-1",
+     "equip_uri": "urn:equip:fbf/a/ahu-1",
+     "id": "urn:point:fbf/a/ahu-1/RAT",
+     "kind": null,
+     "point": "fbf/a/ahu-1/RAT",
+     "spec": "ph.points.x::ReturnAirTempSensor",
+     "tags": [],
+     "unit": null
+    },
+    {
+     "brickClass": "Discharge_Air_Temperature_Sensor",
+     "dis": "SAT",
+     "equip": "urn:equip:fbf/a/ahu-1",
+     "equipDis": "AHU-1",
+     "equip_uri": "urn:equip:fbf/a/ahu-1",
+     "id": "urn:point:fbf/a/ahu-1/SAT",
+     "kind": null,
+     "point": "fbf/a/ahu-1/SAT",
+     "spec": "ph.points.x::DischargeAirTempSensor",
+     "tags": [],
+     "unit": null
+    },
+    {
+     "brickClass": "Fan_Status",
+     "dis": "SF-S",
+     "equip": "urn:equip:fbf/a/ahu-1",
+     "equipDis": "AHU-1",
+     "equip_uri": "urn:equip:fbf/a/ahu-1",
+     "id": "urn:point:fbf/a/ahu-1/SF-S",
+     "kind": null,
+     "point": "fbf/a/ahu-1/SF-S",
+     "spec": "ph.points::RunSensor",
+     "tags": [],
+     "unit": null
+    },
+    {
+     "brickClass": null,
+     "dis": "X",
+     "equip": "urn:equip:fbf/a/ahu-1",
+     "equipDis": "AHU-1",
+     "equip_uri": "urn:equip:fbf/a/ahu-1",
+     "id": "urn:point:fbf/a/ahu-1/X",
+     "kind": null,
+     "point": "fbf/a/ahu-1/X",
+     "spec": "ph::Point",
+     "tags": [],
+     "unit": null
+    }
+   ]
+  },
+  "urn:equip:fbf/a/mtr-1": {
+   "brickClass": "Electrical_Meter",
+   "dis": "MTR-1",
+   "points": [
+    {
+     "brickClass": "Electric_Power_Sensor",
+     "dis": "KW",
+     "equip": "urn:equip:fbf/a/mtr-1",
+     "equipDis": "MTR-1",
+     "equip_uri": "urn:equip:fbf/a/mtr-1",
+     "id": "urn:point:fbf/a/mtr-1/KW",
+     "kind": null,
+     "point": "fbf/a/mtr-1/KW",
+     "spec": "ph::SensorPoint",
+     "tags": [],
+     "unit": null
+    }
+   ]
+  },
+  "urn:equip:fbf/a/vav-1": {
+   "brickClass": "Variable_Air_Volume_Box",
+   "dis": "VAV-1",
+   "points": [
+    {
+     "brickClass": null,
+     "dis": "DMP",
+     "equip": "urn:equip:fbf/a/vav-1",
+     "equipDis": "VAV-1",
+     "equip_uri": "urn:equip:fbf/a/vav-1",
+     "id": "urn:point:fbf/a/vav-1/DMP",
+     "kind": null,
+     "point": "fbf/a/vav-1/DMP",
+     "spec": "ph::CmdPoint",
+     "tags": [
+      "cmd",
+      "damper",
+      "point"
+     ],
+     "unit": null
+    },
+    {
+     "brickClass": "Zone_Air_Temperature_Sensor",
+     "dis": "ZNT",
+     "equip": "urn:equip:fbf/a/vav-1",
+     "equipDis": "VAV-1",
+     "equip_uri": "urn:equip:fbf/a/vav-1",
+     "id": "urn:point:fbf/a/vav-1/ZNT",
+     "kind": null,
+     "point": "fbf/a/vav-1/ZNT",
+     "spec": "ph.points::ZoneAirTempSensor",
+     "tags": [
+      "air",
+      "point",
+      "sensor",
+      "temp",
+      "zone"
+     ],
+     "unit": null
+    }
+   ]
+  }
+ },
+ "equipment_names": true,
+ "generated_at": "2026-11-06T12:00:00+00:00",
+ "generated_by": "a@example.com",
+ "inconclusive": {
+  "total": 8,
+  "waived": 0
+ },
+ "issue_counts": {
+  "closed": 1,
+  "open": 6,
+  "other": 0,
+  "total": 8,
+  "waived": 1
+ },
+ "issues": [
+  {
+   "assignee": null,
+   "check_id": "exists",
+   "closed_at": null,
+   "closed_run": null,
+   "created_at": "2026-11-06T12:00:00+00:00",
+   "created_by": "u-a",
+   "detail": {
+    "candidates": [
+     {
+      "cause": "controller offline or unreachable",
+      "distinguish": "do sibling points on the same device also stop then?"
+     },
+     {
+      "cause": "polling/COV subscription stopped",
+      "distinguish": "other devices on the same Windrow connection still reporting?"
+     },
+     {
+      "cause": "point removed or renamed in the controller",
+      "distinguish": "re-learn the device and compare object lists"
+     }
+    ],
+    "evidence": {
+     "last_ts": "2026-11-03T12:00:00+00:00",
+     "last_value": 55.0,
+     "window_start": "2026-11-05T12:00:00+00:00"
+    },
+    "symptom": "offline - last sample 2026-11-03 12:00:00 is older than the 24 h window"
+   },
+   "equip_uri": "urn:equip:fbf/a/ahu-1",
+   "events": [
+    {
+     "action": "risk.covered",
+     "actor": "system",
+     "detail": {
+      "risk_id": "id-1",
+      "test_run_id": "id-2"
+     },
+     "id": 12,
+     "ts": "2026-11-06T12:00:00+00:00",
+     "user_email": null,
+     "user_sub": null
+    },
+    {
+     "action": "risk.accept",
+     "actor": "user",
+     "detail": {
+      "accepted_name": "Ann Example",
+      "from": "open",
+      "owner": "Controls Co",
+      "reason": "read-only point",
+      "retest_trigger": "writes enabled",
+      "review_by": "2027-01-05",
+      "risk_id": "id-1"
+     },
+     "id": 8,
+     "ts": "2026-11-06T12:00:00+00:00",
+     "user_email": "a@example.com",
+     "user_sub": "u-a"
+    },
+    {
+     "action": "create",
+     "actor": "user",
+     "detail": {
+      "check_id": "exists",
+      "run_id": "id-3"
+     },
+     "id": 1,
+     "ts": "2026-11-06T12:00:00+00:00",
+     "user_email": "a@example.com",
+     "user_sub": "u-a"
+    }
+   ],
+   "id": "id-4",
+   "last_seen_run": "id-3",
+   "opened_run": "id-3",
+   "project_id": "id-5",
+   "resolved_at": null,
+   "resolved_by": null,
+   "retest": null,
+   "risk": {
+    "accepted_by": "u-a",
+    "accepted_email": "a@example.com",
+    "accepted_name": "Ann Example",
+    "accepted_name_source": "account",
+    "created_at": "2026-11-06T12:00:00+00:00",
+    "id": "id-1",
+    "issue_id": "id-4",
+    "owner": "Controls Co",
+    "reason": "read-only point",
+    "retest_trigger": "writes enabled",
+    "review_by": "2027-01-05",
+    "revoked_at": null,
+    "revoked_by": null
+   },
+   "severity": "major",
+   "source": "baler",
+   "source_id": null,
+   "status": "risk_accepted",
+   "subject": "urn:point:fbf/a/ahu-1/RAT",
+   "title": "fbf/a/ahu-1/RAT: offline - last sample 2026-11-03 12:00:00 is older than the 24 h window",
+   "updated_at": "2026-11-06T12:00:00+00:00"
+  },
+  {
+   "assignee": null,
+   "check_id": "template:AHU_FanCommand",
+   "closed_at": null,
+   "closed_run": null,
+   "created_at": "2026-11-06T12:00:00+00:00",
+   "created_by": "u-a",
+   "detail": {
+    "candidates": [
+     {
+      "cause": "point exists on the controller but isn't classified",
+      "distinguish": "look for an unclassified point with this name on the equipment (record editor / autotag)"
+     },
+     {
+      "cause": "point isn't linked to this equipment",
+      "distinguish": "search the site for the class; check brick:isPointOf"
+     },
+     {
+      "cause": "point was never installed or programmed",
+      "distinguish": "field check against the points list"
+     }
+    ],
+    "evidence": {
+     "classes": [
+      "Fan_Command"
+     ],
+     "matched": [],
+     "matched_by": null,
+     "requirement": "supply fan command",
+     "template": "AHU_ExpectedPoints"
+    },
+    "symptom": "no fan command"
+   },
+   "equip_uri": "urn:equip:fbf/a/ahu-1",
+   "events": [
+    {
+     "action": "update",
+     "actor": "user",
+     "detail": {
+      "closed_at": null,
+      "closed_run": null,
+      "from": "open",
+      "note": "on it",
+      "resolved_at": null,
+      "status": "in_progress"
+     },
+     "id": 9,
+     "ts": "2026-11-06T12:00:00+00:00",
+     "user_email": "a@example.com",
+     "user_sub": "u-a"
+    },
+    {
+     "action": "create",
+     "actor": "user",
+     "detail": {
+      "check_id": "template:AHU_FanCommand",
+      "run_id": "id-3"
+     },
+     "id": 2,
+     "ts": "2026-11-06T12:00:00+00:00",
+     "user_email": "a@example.com",
+     "user_sub": "u-a"
+    }
+   ],
+   "id": "id-6",
+   "last_seen_run": "id-3",
+   "opened_run": "id-3",
+   "project_id": "id-5",
+   "resolved_at": null,
+   "resolved_by": null,
+   "retest": null,
+   "risk": null,
+   "severity": "minor",
+   "source": "baler",
+   "source_id": null,
+   "status": "in_progress",
+   "subject": "urn:equip:fbf/a/ahu-1",
+   "title": "fbf/a/ahu-1: no fan command",
+   "updated_at": "2026-11-06T12:00:00+00:00"
+  },
+  {
+   "assignee": null,
+   "check_id": "template:AHU_MAT",
+   "closed_at": null,
+   "closed_run": null,
+   "created_at": "2026-11-06T12:00:00+00:00",
+   "created_by": "u-a",
+   "detail": {
+    "candidates": [
+     {
+      "cause": "point exists on the controller but isn't classified",
+      "distinguish": "look for an unclassified point with this name on the equipment (record editor / autotag)"
+     },
+     {
+      "cause": "point isn't linked to this equipment",
+      "distinguish": "search the site for the class; check brick:isPointOf"
+     },
+     {
+      "cause": "point was never installed or programmed",
+      "distinguish": "field check against the points list"
+     }
+    ],
+    "evidence": {
+     "classes": [
+      "Mixed_Air_Temperature_Sensor"
+     ],
+     "matched": [],
+     "matched_by": null,
+     "requirement": "mixed air temperature",
+     "template": "AHU_ExpectedPoints"
+    },
+    "symptom": "no mixed air temperature sensor"
+   },
+   "equip_uri": "urn:equip:fbf/a/ahu-1",
+   "events": [
+    {
+     "action": "create",
+     "actor": "user",
+     "detail": {
+      "check_id": "template:AHU_MAT",
+      "run_id": "id-3"
+     },
+     "id": 3,
+     "ts": "2026-11-06T12:00:00+00:00",
+     "user_email": "a@example.com",
+     "user_sub": "u-a"
+    }
+   ],
+   "id": "id-7",
+   "last_seen_run": "id-3",
+   "opened_run": "id-3",
+   "project_id": "id-5",
+   "resolved_at": null,
+   "resolved_by": null,
+   "retest": null,
+   "risk": null,
+   "severity": "minor",
+   "source": "baler",
+   "source_id": null,
+   "status": "open",
+   "subject": "urn:equip:fbf/a/ahu-1",
+   "title": "fbf/a/ahu-1: no mixed air temperature sensor",
+   "updated_at": "2026-11-06T12:00:00+00:00"
+  },
+  {
+   "assignee": null,
+   "check_id": "template:AHU_OAT",
+   "closed_at": null,
+   "closed_run": null,
+   "created_at": "2026-11-06T12:00:00+00:00",
+   "created_by": "u-a",
+   "detail": {
+    "candidates": [
+     {
+      "cause": "point exists on the controller but isn't classified",
+      "distinguish": "look for an unclassified point with this name on the equipment (record editor / autotag)"
+     },
+     {
+      "cause": "point isn't linked to this equipment",
+      "distinguish": "search the site for the class; check brick:isPointOf"
+     },
+     {
+      "cause": "point was never installed or programmed",
+      "distinguish": "field check against the points list"
+     }
+    ],
+    "evidence": {
+     "classes": [
+      "Outside_Air_Temperature_Sensor"
+     ],
+     "matched": [],
+     "matched_by": null,
+     "requirement": "outside air temperature",
+     "template": "AHU_ExpectedPoints"
+    },
+    "symptom": "no outside air temperature sensor (an AHU may share a building OAT - confirm)"
+   },
+   "equip_uri": "urn:equip:fbf/a/ahu-1",
+   "events": [
+    {
+     "action": "create",
+     "actor": "user",
+     "detail": {
+      "check_id": "template:AHU_OAT",
+      "run_id": "id-3"
+     },
+     "id": 4,
+     "ts": "2026-11-06T12:00:00+00:00",
+     "user_email": "a@example.com",
+     "user_sub": "u-a"
+    }
+   ],
+   "id": "id-8",
+   "last_seen_run": "id-3",
+   "opened_run": "id-3",
+   "project_id": "id-5",
+   "resolved_at": null,
+   "resolved_by": null,
+   "retest": null,
+   "risk": null,
+   "severity": "minor",
+   "source": "baler",
+   "source_id": null,
+   "status": "open",
+   "subject": "urn:equip:fbf/a/ahu-1",
+   "title": "fbf/a/ahu-1: no outside air temperature sensor (an AHU may share a building OAT - confirm)",
+   "updated_at": "2026-11-06T12:00:00+00:00"
+  },
+  {
+   "assignee": null,
+   "check_id": "template:AHU_SATSP",
+   "closed_at": null,
+   "closed_run": null,
+   "created_at": "2026-11-06T12:00:00+00:00",
+   "created_by": "u-a",
+   "detail": {
+    "candidates": [
+     {
+      "cause": "point exists on the controller but isn't classified",
+      "distinguish": "look for an unclassified point with this name on the equipment (record editor / autotag)"
+     },
+     {
+      "cause": "point isn't linked to this equipment",
+      "distinguish": "search the site for the class; check brick:isPointOf"
+     },
+     {
+      "cause": "point was never installed or programmed",
+      "distinguish": "field check against the points list"
+     }
+    ],
+    "evidence": {
+     "classes": [
+      "Supply_Air_Temperature_Setpoint"
+     ],
+     "matched": [],
+     "matched_by": null,
+     "requirement": "supply air temperature setpoint",
+     "template": "AHU_ExpectedPoints"
+    },
+    "symptom": "no supply air temperature setpoint"
+   },
+   "equip_uri": "urn:equip:fbf/a/ahu-1",
+   "events": [
+    {
+     "action": "create",
+     "actor": "user",
+     "detail": {
+      "check_id": "template:AHU_SATSP",
+      "run_id": "id-3"
+     },
+     "id": 5,
+     "ts": "2026-11-06T12:00:00+00:00",
+     "user_email": "a@example.com",
+     "user_sub": "u-a"
+    }
+   ],
+   "id": "id-9",
+   "last_seen_run": "id-3",
+   "opened_run": "id-3",
+   "project_id": "id-5",
+   "resolved_at": null,
+   "resolved_by": null,
+   "retest": null,
+   "risk": null,
+   "severity": "minor",
+   "source": "baler",
+   "source_id": null,
+   "status": "open",
+   "subject": "urn:equip:fbf/a/ahu-1",
+   "title": "fbf/a/ahu-1: no supply air temperature setpoint",
+   "updated_at": "2026-11-06T12:00:00+00:00"
+  },
+  {
+   "assignee": null,
+   "check_id": "template:VAV_Flow",
+   "closed_at": null,
+   "closed_run": null,
+   "created_at": "2026-11-06T12:00:00+00:00",
+   "created_by": "u-a",
+   "detail": {
+    "candidates": [
+     {
+      "cause": "point exists on the controller but isn't classified",
+      "distinguish": "look for an unclassified point with this name on the equipment (record editor / autotag)"
+     },
+     {
+      "cause": "point isn't linked to this equipment",
+      "distinguish": "search the site for the class; check brick:isPointOf"
+     },
+     {
+      "cause": "point was never installed or programmed",
+      "distinguish": "field check against the points list"
+     }
+    ],
+    "evidence": {
+     "classes": [
+      "Air_Flow_Sensor"
+     ],
+     "matched": [],
+     "matched_by": null,
+     "requirement": "airflow",
+     "template": "VAV_ExpectedPoints"
+    },
+    "symptom": "no airflow sensor (pressure-independent boxes need one)"
+   },
+   "equip_uri": "urn:equip:fbf/a/vav-1",
+   "events": [
+    {
+     "action": "create",
+     "actor": "user",
+     "detail": {
+      "check_id": "template:VAV_Flow",
+      "run_id": "id-3"
+     },
+     "id": 6,
+     "ts": "2026-11-06T12:00:00+00:00",
+     "user_email": "a@example.com",
+     "user_sub": "u-a"
+    }
+   ],
+   "id": "id-10",
+   "last_seen_run": "id-3",
+   "opened_run": "id-3",
+   "project_id": "id-5",
+   "resolved_at": null,
+   "resolved_by": null,
+   "retest": null,
+   "risk": null,
+   "severity": "minor",
+   "source": "baler",
+   "source_id": null,
+   "status": "open",
+   "subject": "urn:equip:fbf/a/vav-1",
+   "title": "fbf/a/vav-1: no airflow sensor (pressure-independent boxes need one)",
+   "updated_at": "2026-11-06T12:00:00+00:00"
+  },
+  {
+   "assignee": null,
+   "check_id": "template:VAV_ZATSP",
+   "closed_at": null,
+   "closed_run": null,
+   "created_at": "2026-11-06T12:00:00+00:00",
+   "created_by": "u-a",
+   "detail": {
+    "candidates": [
+     {
+      "cause": "point exists on the controller but isn't classified",
+      "distinguish": "look for an unclassified point with this name on the equipment (record editor / autotag)"
+     },
+     {
+      "cause": "point isn't linked to this equipment",
+      "distinguish": "search the site for the class; check brick:isPointOf"
+     },
+     {
+      "cause": "point was never installed or programmed",
+      "distinguish": "field check against the points list"
+     }
+    ],
+    "evidence": {
+     "classes": [
+      "Zone_Air_Temperature_Setpoint"
+     ],
+     "matched": [],
+     "matched_by": null,
+     "requirement": "zone air temperature setpoint",
+     "template": "VAV_ExpectedPoints"
+    },
+    "symptom": "no zone air temperature setpoint"
+   },
+   "equip_uri": "urn:equip:fbf/a/vav-1",
+   "events": [
+    {
+     "action": "create",
+     "actor": "user",
+     "detail": {
+      "check_id": "template:VAV_ZATSP",
+      "run_id": "id-3"
+     },
+     "id": 7,
+     "ts": "2026-11-06T12:00:00+00:00",
+     "user_email": "a@example.com",
+     "user_sub": "u-a"
+    }
+   ],
+   "id": "id-11",
+   "last_seen_run": "id-3",
+   "opened_run": "id-3",
+   "project_id": "id-5",
+   "resolved_at": null,
+   "resolved_by": null,
+   "retest": null,
+   "risk": null,
+   "severity": "minor",
+   "source": "baler",
+   "source_id": null,
+   "status": "open",
+   "subject": "urn:equip:fbf/a/vav-1",
+   "title": "fbf/a/vav-1: no zone air temperature setpoint",
+   "updated_at": "2026-11-06T12:00:00+00:00"
+  },
+  {
+   "assignee": null,
+   "check_id": null,
+   "closed_at": "2026-11-06T12:00:00+00:00",
+   "closed_run": null,
+   "created_at": "2026-11-06T12:00:00+00:00",
+   "created_by": "u-a",
+   "detail": {
+    "description": null
+   },
+   "equip_uri": null,
+   "events": [
+    {
+     "action": "close",
+     "actor": "user",
+     "detail": {
+      "closed_at": "2026-11-06T12:00:00+00:00",
+      "from": "open",
+      "note": "labelled",
+      "status": "closed"
+     },
+     "id": 11,
+     "ts": "2026-11-06T12:00:00+00:00",
+     "user_email": "a@example.com",
+     "user_sub": "u-a"
+    },
+    {
+     "action": "create",
+     "actor": "user",
+     "detail": {
+      "check_id": null,
+      "title": "Label the AHU"
+     },
+     "id": 10,
+     "ts": "2026-11-06T12:00:00+00:00",
+     "user_email": "a@example.com",
+     "user_sub": "u-a"
+    }
+   ],
+   "id": "id-12",
+   "last_seen_run": null,
+   "opened_run": null,
+   "project_id": "id-5",
+   "risk": null,
+   "severity": null,
+   "source": "baler",
+   "source_id": null,
+   "status": "closed",
+   "subject": null,
+   "title": "Label the AHU",
+   "updated_at": "2026-11-06T12:00:00+00:00"
+  }
+ ],
+ "latest_run": {
+  "active_runs": [],
+  "equipment": [
+   {
+    "counts": {
+     "fail": 5,
+     "inconclusive": 3,
+     "not_applicable": 0,
+     "pass": 5
+    },
+    "equip_uri": "urn:equip:fbf/a/ahu-1",
+    "highest_rung_passed": 1,
+    "results": [
+     {
+      "candidates": [
+       {
+        "cause": "controller offline or unreachable",
+        "distinguish": "do sibling points on the same device also stop then?"
+       },
+       {
+        "cause": "polling/COV subscription stopped",
+        "distinguish": "other devices on the same Windrow connection still reporting?"
+       },
+       {
+        "cause": "point removed or renamed in the controller",
+        "distinguish": "re-learn the device and compare object lists"
+       }
+      ],
+      "check_id": "exists",
+      "equip_uri": "urn:equip:fbf/a/ahu-1",
+      "evidence": {
+       "last_ts": "2026-11-03T12:00:00+00:00",
+       "last_value": 55.0,
+       "window_start": "2026-11-05T12:00:00+00:00"
+      },
+      "evidence_link": "/ui/his.html?expr=readAll%28id%3D%3D%40urn%3Apoint%3Afbf%2Fa%2Fahu-1%2FRAT%29.hisRead%282026-11-05..2026-11-06%29",
+      "reason": "offline - last sample 2026-11-03 12:00:00 is older than the 24 h window",
+      "severity": null,
+      "status": "fail",
+      "subject": "urn:point:fbf/a/ahu-1/RAT",
+      "symptom": "offline - last sample 2026-11-03 12:00:00 is older than the 24 h window",
+      "waived_by": "id-4"
+     },
+     {
+      "candidates": [
+       {
+        "cause": "point exists on the controller but isn't classified",
+        "distinguish": "look for an unclassified point with this name on the equipment (record editor / autotag)"
+       },
+       {
+        "cause": "point isn't linked to this equipment",
+        "distinguish": "search the site for the class; check brick:isPointOf"
+       },
+       {
+        "cause": "point was never installed or programmed",
+        "distinguish": "field check against the points list"
+       }
+      ],
+      "check_id": "template:AHU_FanCommand",
+      "equip_uri": "urn:equip:fbf/a/ahu-1",
+      "evidence": {
+       "classes": [
+        "Fan_Command"
+       ],
+       "matched": [],
+       "matched_by": null,
+       "requirement": "supply fan command",
+       "template": "AHU_ExpectedPoints"
+      },
+      "evidence_link": null,
+      "reason": "no fan command",
+      "severity": "expected",
+      "status": "fail",
+      "subject": "urn:equip:fbf/a/ahu-1",
+      "symptom": "no fan command",
+      "waived_by": null
+     },
+     {
+      "candidates": [
+       {
+        "cause": "point exists on the controller but isn't classified",
+        "distinguish": "look for an unclassified point with this name on the equipment (record editor / autotag)"
+       },
+       {
+        "cause": "point isn't linked to this equipment",
+        "distinguish": "search the site for the class; check brick:isPointOf"
+       },
+       {
+        "cause": "point was never installed or programmed",
+        "distinguish": "field check against the points list"
+       }
+      ],
+      "check_id": "template:AHU_MAT",
+      "equip_uri": "urn:equip:fbf/a/ahu-1",
+      "evidence": {
+       "classes": [
+        "Mixed_Air_Temperature_Sensor"
+       ],
+       "matched": [],
+       "matched_by": null,
+       "requirement": "mixed air temperature",
+       "template": "AHU_ExpectedPoints"
+      },
+      "evidence_link": null,
+      "reason": "no mixed air temperature sensor",
+      "severity": "expected",
+      "status": "fail",
+      "subject": "urn:equip:fbf/a/ahu-1",
+      "symptom": "no mixed air temperature sensor",
+      "waived_by": null
+     },
+     {
+      "candidates": [
+       {
+        "cause": "point exists on the controller but isn't classified",
+        "distinguish": "look for an unclassified point with this name on the equipment (record editor / autotag)"
+       },
+       {
+        "cause": "point isn't linked to this equipment",
+        "distinguish": "search the site for the class; check brick:isPointOf"
+       },
+       {
+        "cause": "point was never installed or programmed",
+        "distinguish": "field check against the points list"
+       }
+      ],
+      "check_id": "template:AHU_OAT",
+      "equip_uri": "urn:equip:fbf/a/ahu-1",
+      "evidence": {
+       "classes": [
+        "Outside_Air_Temperature_Sensor"
+       ],
+       "matched": [],
+       "matched_by": null,
+       "requirement": "outside air temperature",
+       "template": "AHU_ExpectedPoints"
+      },
+      "evidence_link": null,
+      "reason": "no outside air temperature sensor (an AHU may share a building OAT - confirm)",
+      "severity": "expected",
+      "status": "fail",
+      "subject": "urn:equip:fbf/a/ahu-1",
+      "symptom": "no outside air temperature sensor (an AHU may share a building OAT - confirm)",
+      "waived_by": null
+     },
+     {
+      "candidates": [
+       {
+        "cause": "point exists on the controller but isn't classified",
+        "distinguish": "look for an unclassified point with this name on the equipment (record editor / autotag)"
+       },
+       {
+        "cause": "point isn't linked to this equipment",
+        "distinguish": "search the site for the class; check brick:isPointOf"
+       },
+       {
+        "cause": "point was never installed or programmed",
+        "distinguish": "field check against the points list"
+       }
+      ],
+      "check_id": "template:AHU_SATSP",
+      "equip_uri": "urn:equip:fbf/a/ahu-1",
+      "evidence": {
+       "classes": [
+        "Supply_Air_Temperature_Setpoint"
+       ],
+       "matched": [],
+       "matched_by": null,
+       "requirement": "supply air temperature setpoint",
+       "template": "AHU_ExpectedPoints"
+      },
+      "evidence_link": null,
+      "reason": "no supply air temperature setpoint",
+      "severity": "expected",
+      "status": "fail",
+      "subject": "urn:equip:fbf/a/ahu-1",
+      "symptom": "no supply air temperature setpoint",
+      "waived_by": null
+     },
+     {
+      "candidates": [
+       {
+        "cause": "point not trended / history collection not configured",
+        "distinguish": "check the Windrow connection's his_collect settings for this point"
+       },
+       {
+        "cause": "device offline since before it was first polled",
+        "distinguish": "Windrow device list: is the controller answering?"
+       },
+       {
+        "cause": "point exists in the model but not on the network",
+        "distinguish": "learn the device again and compare object lists"
+       }
+      ],
+      "check_id": "exists",
+      "equip_uri": "urn:equip:fbf/a/ahu-1",
+      "evidence": {
+       "last_ts": null,
+       "window_start": "2026-11-05T12:00:00+00:00"
+      },
+      "evidence_link": "/ui/his.html?expr=readAll%28id%3D%3D%40urn%3Apoint%3Afbf%2Fa%2Fahu-1%2FX%29.hisRead%282026-11-05..2026-11-06%29",
+      "reason": "no samples have ever been recorded for this point",
+      "severity": null,
+      "status": "inconclusive",
+      "subject": "urn:point:fbf/a/ahu-1/X",
+      "symptom": "no samples have ever been recorded for this point",
+      "waived_by": null
+     },
+     {
+      "candidates": [],
+      "check_id": "ladder",
+      "equip_uri": "urn:equip:fbf/a/ahu-1",
+      "evidence": {
+       "fell_to_rung": null,
+       "highest_rung_passed": 1,
+       "rungs": {
+        "1": "pass",
+        "2": "inconclusive",
+        "3": "not_attempted"
+       }
+      },
+      "evidence_link": null,
+      "reason": "rung 2 inconclusive; rung 3 not attempted",
+      "severity": null,
+      "status": "inconclusive",
+      "subject": "urn:equip:fbf/a/ahu-1",
+      "symptom": null,
+      "waived_by": null
+     },
+     {
+      "candidates": [],
+      "check_id": "live",
+      "equip_uri": "urn:equip:fbf/a/ahu-1",
+      "evidence": {
+       "fell_to_rung": null,
+       "reason": "fewer than 3 numeric samples in the window",
+       "rung": 2,
+       "samples": 1
+      },
+      "evidence_link": "/ui/his.html?expr=readAll%28id%3D%3D%40urn%3Apoint%3Afbf%2Fa%2Fahu-1%2FSAT%29.hisRead%282026-11-05..2026-11-06%29",
+      "reason": "fewer than 3 numeric samples in the window",
+      "severity": null,
+      "status": "inconclusive",
+      "subject": "urn:point:fbf/a/ahu-1/SAT",
+      "symptom": null,
+      "waived_by": null
+     },
+     {
+      "candidates": [],
+      "check_id": "exists",
+      "equip_uri": "urn:equip:fbf/a/ahu-1",
+      "evidence": {
+       "last_ts": "2026-11-06T11:55:00+00:00",
+       "last_value": 55.0,
+       "window_start": "2026-11-05T12:00:00+00:00"
+      },
+      "evidence_link": "/ui/his.html?expr=readAll%28id%3D%3D%40urn%3Apoint%3Afbf%2Fa%2Fahu-1%2FSAT%29.hisRead%282026-11-05..2026-11-06%29",
+      "reason": "",
+      "severity": null,
+      "status": "pass",
+      "subject": "urn:point:fbf/a/ahu-1/SAT",
+      "symptom": null,
+      "waived_by": null
+     },
+     {
+      "candidates": [],
+      "check_id": "exists",
+      "equip_uri": "urn:equip:fbf/a/ahu-1",
+      "evidence": {
+       "last_ts": "2026-11-06T11:55:00+00:00",
+       "last_value": 55.0,
+       "window_start": "2026-11-05T12:00:00+00:00"
+      },
+      "evidence_link": "/ui/his.html?expr=readAll%28id%3D%3D%40urn%3Apoint%3Afbf%2Fa%2Fahu-1%2FSF-S%29.hisRead%282026-11-05..2026-11-06%29",
+      "reason": "",
+      "severity": null,
+      "status": "pass",
+      "subject": "urn:point:fbf/a/ahu-1/SF-S",
+      "symptom": null,
+      "waived_by": null
+     },
+     {
+      "candidates": [],
+      "check_id": "template:AHU_FanStatus",
+      "equip_uri": "urn:equip:fbf/a/ahu-1",
+      "evidence": {
+       "classes": [
+        "Fan_Status"
+       ],
+       "matched": [
+        "urn:point:fbf/a/ahu-1/SF-S"
+       ],
+       "matched_by": "brick",
+       "requirement": "supply fan status",
+       "template": "AHU_ExpectedPoints"
+      },
+      "evidence_link": null,
+      "reason": "",
+      "severity": "required",
+      "status": "pass",
+      "subject": "urn:equip:fbf/a/ahu-1",
+      "symptom": null,
+      "waived_by": null
+     },
+     {
+      "candidates": [],
+      "check_id": "template:AHU_RAT",
+      "equip_uri": "urn:equip:fbf/a/ahu-1",
+      "evidence": {
+       "classes": [
+        "Return_Air_Temperature_Sensor"
+       ],
+       "matched": [
+        "urn:point:fbf/a/ahu-1/RAT"
+       ],
+       "matched_by": "brick",
+       "requirement": "return air temperature",
+       "template": "AHU_ExpectedPoints"
+      },
+      "evidence_link": null,
+      "reason": "",
+      "severity": "expected",
+      "status": "pass",
+      "subject": "urn:equip:fbf/a/ahu-1",
+      "symptom": null,
+      "waived_by": null
+     },
+     {
+      "candidates": [],
+      "check_id": "template:AHU_SAT",
+      "equip_uri": "urn:equip:fbf/a/ahu-1",
+      "evidence": {
+       "classes": [
+        "Supply_Air_Temperature_Sensor"
+       ],
+       "matched": [
+        "urn:point:fbf/a/ahu-1/SAT"
+       ],
+       "matched_by": "brick",
+       "requirement": "supply air temperature",
+       "template": "AHU_ExpectedPoints"
+      },
+      "evidence_link": null,
+      "reason": "",
+      "severity": "required",
+      "status": "pass",
+      "subject": "urn:equip:fbf/a/ahu-1",
+      "symptom": null,
+      "waived_by": null
+     }
+    ],
+    "status": "fail",
+    "verdict": "fail",
+    "waived": 1
+   },
+   {
+    "counts": {
+     "fail": 2,
+     "inconclusive": 3,
+     "not_applicable": 0,
+     "pass": 3
+    },
+    "equip_uri": "urn:equip:fbf/a/vav-1",
+    "highest_rung_passed": 1,
+    "results": [
+     {
+      "candidates": [
+       {
+        "cause": "point exists on the controller but isn't classified",
+        "distinguish": "look for an unclassified point with this name on the equipment (record editor / autotag)"
+       },
+       {
+        "cause": "point isn't linked to this equipment",
+        "distinguish": "search the site for the class; check brick:isPointOf"
+       },
+       {
+        "cause": "point was never installed or programmed",
+        "distinguish": "field check against the points list"
+       }
+      ],
+      "check_id": "template:VAV_Flow",
+      "equip_uri": "urn:equip:fbf/a/vav-1",
+      "evidence": {
+       "classes": [
+        "Air_Flow_Sensor"
+       ],
+       "matched": [],
+       "matched_by": null,
+       "requirement": "airflow",
+       "template": "VAV_ExpectedPoints"
+      },
+      "evidence_link": null,
+      "reason": "no airflow sensor (pressure-independent boxes need one)",
+      "severity": "expected",
+      "status": "fail",
+      "subject": "urn:equip:fbf/a/vav-1",
+      "symptom": "no airflow sensor (pressure-independent boxes need one)",
+      "waived_by": null
+     },
+     {
+      "candidates": [
+       {
+        "cause": "point exists on the controller but isn't classified",
+        "distinguish": "look for an unclassified point with this name on the equipment (record editor / autotag)"
+       },
+       {
+        "cause": "point isn't linked to this equipment",
+        "distinguish": "search the site for the class; check brick:isPointOf"
+       },
+       {
+        "cause": "point was never installed or programmed",
+        "distinguish": "field check against the points list"
+       }
+      ],
+      "check_id": "template:VAV_ZATSP",
+      "equip_uri": "urn:equip:fbf/a/vav-1",
+      "evidence": {
+       "classes": [
+        "Zone_Air_Temperature_Setpoint"
+       ],
+       "matched": [],
+       "matched_by": null,
+       "requirement": "zone air temperature setpoint",
+       "template": "VAV_ExpectedPoints"
+      },
+      "evidence_link": null,
+      "reason": "no zone air temperature setpoint",
+      "severity": "expected",
+      "status": "fail",
+      "subject": "urn:equip:fbf/a/vav-1",
+      "symptom": "no zone air temperature setpoint",
+      "waived_by": null
+     },
+     {
+      "candidates": [
+       {
+        "cause": "point not trended / history collection not configured",
+        "distinguish": "check the Windrow connection's his_collect settings for this point"
+       },
+       {
+        "cause": "device offline since before it was first polled",
+        "distinguish": "Windrow device list: is the controller answering?"
+       },
+       {
+        "cause": "point exists in the model but not on the network",
+        "distinguish": "learn the device again and compare object lists"
+       }
+      ],
+      "check_id": "exists",
+      "equip_uri": "urn:equip:fbf/a/vav-1",
+      "evidence": {
+       "last_ts": null,
+       "window_start": "2026-11-05T12:00:00+00:00"
+      },
+      "evidence_link": "/ui/his.html?expr=readAll%28id%3D%3D%40urn%3Apoint%3Afbf%2Fa%2Fvav-1%2FDMP%29.hisRead%282026-11-05..2026-11-06%29",
+      "reason": "no samples have ever been recorded for this point",
+      "severity": null,
+      "status": "inconclusive",
+      "subject": "urn:point:fbf/a/vav-1/DMP",
+      "symptom": "no samples have ever been recorded for this point",
+      "waived_by": null
+     },
+     {
+      "candidates": [],
+      "check_id": "ladder",
+      "equip_uri": "urn:equip:fbf/a/vav-1",
+      "evidence": {
+       "fell_to_rung": null,
+       "highest_rung_passed": 1,
+       "rungs": {
+        "1": "pass",
+        "2": "inconclusive",
+        "3": "not_attempted"
+       }
+      },
+      "evidence_link": null,
+      "reason": "rung 2 inconclusive; rung 3 not attempted",
+      "severity": null,
+      "status": "inconclusive",
+      "subject": "urn:equip:fbf/a/vav-1",
+      "symptom": null,
+      "waived_by": null
+     },
+     {
+      "candidates": [],
+      "check_id": "live",
+      "equip_uri": "urn:equip:fbf/a/vav-1",
+      "evidence": {
+       "fell_to_rung": null,
+       "reason": "fewer than 3 numeric samples in the window",
+       "rung": 2,
+       "samples": 1
+      },
+      "evidence_link": "/ui/his.html?expr=readAll%28id%3D%3D%40urn%3Apoint%3Afbf%2Fa%2Fvav-1%2FZNT%29.hisRead%282026-11-05..2026-11-06%29",
+      "reason": "fewer than 3 numeric samples in the window",
+      "severity": null,
+      "status": "inconclusive",
+      "subject": "urn:point:fbf/a/vav-1/ZNT",
+      "symptom": null,
+      "waived_by": null
+     },
+     {
+      "candidates": [],
+      "check_id": "exists",
+      "equip_uri": "urn:equip:fbf/a/vav-1",
+      "evidence": {
+       "last_ts": "2026-11-06T11:55:00+00:00",
+       "last_value": 55.0,
+       "window_start": "2026-11-05T12:00:00+00:00"
+      },
+      "evidence_link": "/ui/his.html?expr=readAll%28id%3D%3D%40urn%3Apoint%3Afbf%2Fa%2Fvav-1%2FZNT%29.hisRead%282026-11-05..2026-11-06%29",
+      "reason": "",
+      "severity": null,
+      "status": "pass",
+      "subject": "urn:point:fbf/a/vav-1/ZNT",
+      "symptom": null,
+      "waived_by": null
+     },
+     {
+      "candidates": [],
+      "check_id": "template:VAV_Damper",
+      "equip_uri": "urn:equip:fbf/a/vav-1",
+      "evidence": {
+       "classes": [
+        "Damper_Position_Command",
+        "Damper_Position_Sensor"
+       ],
+       "matched": [
+        "urn:point:fbf/a/vav-1/DMP"
+       ],
+       "matched_by": "haystack",
+       "requirement": "damper position",
+       "template": "VAV_ExpectedPoints"
+      },
+      "evidence_link": null,
+      "reason": "",
+      "severity": "required",
+      "status": "pass",
+      "subject": "urn:equip:fbf/a/vav-1",
+      "symptom": null,
+      "waived_by": null
+     },
+     {
+      "candidates": [],
+      "check_id": "template:VAV_ZAT",
+      "equip_uri": "urn:equip:fbf/a/vav-1",
+      "evidence": {
+       "classes": [
+        "Zone_Air_Temperature_Sensor"
+       ],
+       "matched": [
+        "urn:point:fbf/a/vav-1/ZNT"
+       ],
+       "matched_by": "brick",
+       "requirement": "zone air temperature",
+       "template": "VAV_ExpectedPoints"
+      },
+      "evidence_link": null,
+      "reason": "",
+      "severity": "required",
+      "status": "pass",
+      "subject": "urn:equip:fbf/a/vav-1",
+      "symptom": null,
+      "waived_by": null
+     }
+    ],
+    "status": "fail",
+    "verdict": "fail",
+    "waived": 0
+   },
+   {
+    "counts": {
+     "fail": 0,
+     "inconclusive": 2,
+     "not_applicable": 0,
+     "pass": 1
+    },
+    "equip_uri": "urn:equip:fbf/a/mtr-1",
+    "highest_rung_passed": 1,
+    "results": [
+     {
+      "candidates": [],
+      "check_id": "ladder",
+      "equip_uri": "urn:equip:fbf/a/mtr-1",
+      "evidence": {
+       "fell_to_rung": null,
+       "highest_rung_passed": 1,
+       "rungs": {
+        "1": "pass",
+        "2": "inconclusive",
+        "3": "not_attempted"
+       }
+      },
+      "evidence_link": null,
+      "reason": "rung 2 inconclusive; rung 3 not attempted",
+      "severity": null,
+      "status": "inconclusive",
+      "subject": "urn:equip:fbf/a/mtr-1",
+      "symptom": null,
+      "waived_by": null
+     },
+     {
+      "candidates": [],
+      "check_id": "live",
+      "equip_uri": "urn:equip:fbf/a/mtr-1",
+      "evidence": {
+       "fell_to_rung": null,
+       "reason": "fewer than 3 numeric samples in the window",
+       "rung": 2,
+       "samples": 1
+      },
+      "evidence_link": "/ui/his.html?expr=readAll%28id%3D%3D%40urn%3Apoint%3Afbf%2Fa%2Fmtr-1%2FKW%29.hisRead%282026-11-05..2026-11-06%29",
+      "reason": "fewer than 3 numeric samples in the window",
+      "severity": null,
+      "status": "inconclusive",
+      "subject": "urn:point:fbf/a/mtr-1/KW",
+      "symptom": null,
+      "waived_by": null
+     },
+     {
+      "candidates": [],
+      "check_id": "exists",
+      "equip_uri": "urn:equip:fbf/a/mtr-1",
+      "evidence": {
+       "last_ts": "2026-11-06T11:55:00+00:00",
+       "last_value": 55.0,
+       "window_start": "2026-11-05T12:00:00+00:00"
+      },
+      "evidence_link": "/ui/his.html?expr=readAll%28id%3D%3D%40urn%3Apoint%3Afbf%2Fa%2Fmtr-1%2FKW%29.hisRead%282026-11-05..2026-11-06%29",
+      "reason": "",
+      "severity": null,
+      "status": "pass",
+      "subject": "urn:point:fbf/a/mtr-1/KW",
+      "symptom": null,
+      "waived_by": null
+     }
+    ],
+    "status": "inconclusive",
+    "verdict": "incomplete",
+    "waived": 0
+   }
+  ],
+  "issues": [
+   {
+    "assignee": null,
+    "check_id": "exists",
+    "closed_at": null,
+    "closed_run": null,
+    "created_at": "2026-11-06T12:00:00+00:00",
+    "created_by": "u-a",
+    "detail": {
+     "candidates": [
+      {
+       "cause": "controller offline or unreachable",
+       "distinguish": "do sibling points on the same device also stop then?"
+      },
+      {
+       "cause": "polling/COV subscription stopped",
+       "distinguish": "other devices on the same Windrow connection still reporting?"
+      },
+      {
+       "cause": "point removed or renamed in the controller",
+       "distinguish": "re-learn the device and compare object lists"
+      }
+     ],
+     "evidence": {
+      "last_ts": "2026-11-03T12:00:00+00:00",
+      "last_value": 55.0,
+      "window_start": "2026-11-05T12:00:00+00:00"
+     },
+     "symptom": "offline - last sample 2026-11-03 12:00:00 is older than the 24 h window"
+    },
+    "equip_uri": "urn:equip:fbf/a/ahu-1",
+    "events": [
+     {
+      "action": "risk.covered",
+      "actor": "system",
+      "detail": {
+       "risk_id": "id-1",
+       "test_run_id": "id-2"
+      },
+      "id": 12,
+      "ts": "2026-11-06T12:00:00+00:00",
+      "user_email": null,
+      "user_sub": null
+     },
+     {
+      "action": "risk.accept",
+      "actor": "user",
+      "detail": {
+       "accepted_name": "Ann Example",
+       "from": "open",
+       "owner": "Controls Co",
+       "reason": "read-only point",
+       "retest_trigger": "writes enabled",
+       "review_by": "2027-01-05",
+       "risk_id": "id-1"
+      },
+      "id": 8,
+      "ts": "2026-11-06T12:00:00+00:00",
+      "user_email": "a@example.com",
+      "user_sub": "u-a"
+     },
+     {
+      "action": "create",
+      "actor": "user",
+      "detail": {
+       "check_id": "exists",
+       "run_id": "id-3"
+      },
+      "id": 1,
+      "ts": "2026-11-06T12:00:00+00:00",
+      "user_email": "a@example.com",
+      "user_sub": "u-a"
+     }
+    ],
+    "id": "id-4",
+    "last_seen_run": "id-3",
+    "opened_run": "id-3",
+    "project_id": "id-5",
+    "resolved_at": null,
+    "resolved_by": null,
+    "retest": null,
+    "risk": {
+     "accepted_by": "u-a",
+     "accepted_email": "a@example.com",
+     "accepted_name": "Ann Example",
+     "accepted_name_source": "account",
+     "created_at": "2026-11-06T12:00:00+00:00",
+     "id": "id-1",
+     "issue_id": "id-4",
+     "owner": "Controls Co",
+     "reason": "read-only point",
+     "retest_trigger": "writes enabled",
+     "review_by": "2027-01-05",
+     "revoked_at": null,
+     "revoked_by": null
+    },
+    "severity": "major",
+    "source": "baler",
+    "source_id": null,
+    "status": "risk_accepted",
+    "subject": "urn:point:fbf/a/ahu-1/RAT",
+    "title": "fbf/a/ahu-1/RAT: offline - last sample 2026-11-03 12:00:00 is older than the 24 h window",
+    "updated_at": "2026-11-06T12:00:00+00:00"
+   },
+   {
+    "assignee": null,
+    "check_id": "template:AHU_FanCommand",
+    "closed_at": null,
+    "closed_run": null,
+    "created_at": "2026-11-06T12:00:00+00:00",
+    "created_by": "u-a",
+    "detail": {
+     "candidates": [
+      {
+       "cause": "point exists on the controller but isn't classified",
+       "distinguish": "look for an unclassified point with this name on the equipment (record editor / autotag)"
+      },
+      {
+       "cause": "point isn't linked to this equipment",
+       "distinguish": "search the site for the class; check brick:isPointOf"
+      },
+      {
+       "cause": "point was never installed or programmed",
+       "distinguish": "field check against the points list"
+      }
+     ],
+     "evidence": {
+      "classes": [
+       "Fan_Command"
+      ],
+      "matched": [],
+      "matched_by": null,
+      "requirement": "supply fan command",
+      "template": "AHU_ExpectedPoints"
+     },
+     "symptom": "no fan command"
+    },
+    "equip_uri": "urn:equip:fbf/a/ahu-1",
+    "events": [
+     {
+      "action": "update",
+      "actor": "user",
+      "detail": {
+       "closed_at": null,
+       "closed_run": null,
+       "from": "open",
+       "note": "on it",
+       "resolved_at": null,
+       "status": "in_progress"
+      },
+      "id": 9,
+      "ts": "2026-11-06T12:00:00+00:00",
+      "user_email": "a@example.com",
+      "user_sub": "u-a"
+     },
+     {
+      "action": "create",
+      "actor": "user",
+      "detail": {
+       "check_id": "template:AHU_FanCommand",
+       "run_id": "id-3"
+      },
+      "id": 2,
+      "ts": "2026-11-06T12:00:00+00:00",
+      "user_email": "a@example.com",
+      "user_sub": "u-a"
+     }
+    ],
+    "id": "id-6",
+    "last_seen_run": "id-3",
+    "opened_run": "id-3",
+    "project_id": "id-5",
+    "resolved_at": null,
+    "resolved_by": null,
+    "retest": null,
+    "risk": null,
+    "severity": "minor",
+    "source": "baler",
+    "source_id": null,
+    "status": "in_progress",
+    "subject": "urn:equip:fbf/a/ahu-1",
+    "title": "fbf/a/ahu-1: no fan command",
+    "updated_at": "2026-11-06T12:00:00+00:00"
+   },
+   {
+    "assignee": null,
+    "check_id": "template:AHU_MAT",
+    "closed_at": null,
+    "closed_run": null,
+    "created_at": "2026-11-06T12:00:00+00:00",
+    "created_by": "u-a",
+    "detail": {
+     "candidates": [
+      {
+       "cause": "point exists on the controller but isn't classified",
+       "distinguish": "look for an unclassified point with this name on the equipment (record editor / autotag)"
+      },
+      {
+       "cause": "point isn't linked to this equipment",
+       "distinguish": "search the site for the class; check brick:isPointOf"
+      },
+      {
+       "cause": "point was never installed or programmed",
+       "distinguish": "field check against the points list"
+      }
+     ],
+     "evidence": {
+      "classes": [
+       "Mixed_Air_Temperature_Sensor"
+      ],
+      "matched": [],
+      "matched_by": null,
+      "requirement": "mixed air temperature",
+      "template": "AHU_ExpectedPoints"
+     },
+     "symptom": "no mixed air temperature sensor"
+    },
+    "equip_uri": "urn:equip:fbf/a/ahu-1",
+    "events": [
+     {
+      "action": "create",
+      "actor": "user",
+      "detail": {
+       "check_id": "template:AHU_MAT",
+       "run_id": "id-3"
+      },
+      "id": 3,
+      "ts": "2026-11-06T12:00:00+00:00",
+      "user_email": "a@example.com",
+      "user_sub": "u-a"
+     }
+    ],
+    "id": "id-7",
+    "last_seen_run": "id-3",
+    "opened_run": "id-3",
+    "project_id": "id-5",
+    "resolved_at": null,
+    "resolved_by": null,
+    "retest": null,
+    "risk": null,
+    "severity": "minor",
+    "source": "baler",
+    "source_id": null,
+    "status": "open",
+    "subject": "urn:equip:fbf/a/ahu-1",
+    "title": "fbf/a/ahu-1: no mixed air temperature sensor",
+    "updated_at": "2026-11-06T12:00:00+00:00"
+   },
+   {
+    "assignee": null,
+    "check_id": "template:AHU_OAT",
+    "closed_at": null,
+    "closed_run": null,
+    "created_at": "2026-11-06T12:00:00+00:00",
+    "created_by": "u-a",
+    "detail": {
+     "candidates": [
+      {
+       "cause": "point exists on the controller but isn't classified",
+       "distinguish": "look for an unclassified point with this name on the equipment (record editor / autotag)"
+      },
+      {
+       "cause": "point isn't linked to this equipment",
+       "distinguish": "search the site for the class; check brick:isPointOf"
+      },
+      {
+       "cause": "point was never installed or programmed",
+       "distinguish": "field check against the points list"
+      }
+     ],
+     "evidence": {
+      "classes": [
+       "Outside_Air_Temperature_Sensor"
+      ],
+      "matched": [],
+      "matched_by": null,
+      "requirement": "outside air temperature",
+      "template": "AHU_ExpectedPoints"
+     },
+     "symptom": "no outside air temperature sensor (an AHU may share a building OAT - confirm)"
+    },
+    "equip_uri": "urn:equip:fbf/a/ahu-1",
+    "events": [
+     {
+      "action": "create",
+      "actor": "user",
+      "detail": {
+       "check_id": "template:AHU_OAT",
+       "run_id": "id-3"
+      },
+      "id": 4,
+      "ts": "2026-11-06T12:00:00+00:00",
+      "user_email": "a@example.com",
+      "user_sub": "u-a"
+     }
+    ],
+    "id": "id-8",
+    "last_seen_run": "id-3",
+    "opened_run": "id-3",
+    "project_id": "id-5",
+    "resolved_at": null,
+    "resolved_by": null,
+    "retest": null,
+    "risk": null,
+    "severity": "minor",
+    "source": "baler",
+    "source_id": null,
+    "status": "open",
+    "subject": "urn:equip:fbf/a/ahu-1",
+    "title": "fbf/a/ahu-1: no outside air temperature sensor (an AHU may share a building OAT - confirm)",
+    "updated_at": "2026-11-06T12:00:00+00:00"
+   },
+   {
+    "assignee": null,
+    "check_id": "template:AHU_SATSP",
+    "closed_at": null,
+    "closed_run": null,
+    "created_at": "2026-11-06T12:00:00+00:00",
+    "created_by": "u-a",
+    "detail": {
+     "candidates": [
+      {
+       "cause": "point exists on the controller but isn't classified",
+       "distinguish": "look for an unclassified point with this name on the equipment (record editor / autotag)"
+      },
+      {
+       "cause": "point isn't linked to this equipment",
+       "distinguish": "search the site for the class; check brick:isPointOf"
+      },
+      {
+       "cause": "point was never installed or programmed",
+       "distinguish": "field check against the points list"
+      }
+     ],
+     "evidence": {
+      "classes": [
+       "Supply_Air_Temperature_Setpoint"
+      ],
+      "matched": [],
+      "matched_by": null,
+      "requirement": "supply air temperature setpoint",
+      "template": "AHU_ExpectedPoints"
+     },
+     "symptom": "no supply air temperature setpoint"
+    },
+    "equip_uri": "urn:equip:fbf/a/ahu-1",
+    "events": [
+     {
+      "action": "create",
+      "actor": "user",
+      "detail": {
+       "check_id": "template:AHU_SATSP",
+       "run_id": "id-3"
+      },
+      "id": 5,
+      "ts": "2026-11-06T12:00:00+00:00",
+      "user_email": "a@example.com",
+      "user_sub": "u-a"
+     }
+    ],
+    "id": "id-9",
+    "last_seen_run": "id-3",
+    "opened_run": "id-3",
+    "project_id": "id-5",
+    "resolved_at": null,
+    "resolved_by": null,
+    "retest": null,
+    "risk": null,
+    "severity": "minor",
+    "source": "baler",
+    "source_id": null,
+    "status": "open",
+    "subject": "urn:equip:fbf/a/ahu-1",
+    "title": "fbf/a/ahu-1: no supply air temperature setpoint",
+    "updated_at": "2026-11-06T12:00:00+00:00"
+   },
+   {
+    "assignee": null,
+    "check_id": "template:VAV_Flow",
+    "closed_at": null,
+    "closed_run": null,
+    "created_at": "2026-11-06T12:00:00+00:00",
+    "created_by": "u-a",
+    "detail": {
+     "candidates": [
+      {
+       "cause": "point exists on the controller but isn't classified",
+       "distinguish": "look for an unclassified point with this name on the equipment (record editor / autotag)"
+      },
+      {
+       "cause": "point isn't linked to this equipment",
+       "distinguish": "search the site for the class; check brick:isPointOf"
+      },
+      {
+       "cause": "point was never installed or programmed",
+       "distinguish": "field check against the points list"
+      }
+     ],
+     "evidence": {
+      "classes": [
+       "Air_Flow_Sensor"
+      ],
+      "matched": [],
+      "matched_by": null,
+      "requirement": "airflow",
+      "template": "VAV_ExpectedPoints"
+     },
+     "symptom": "no airflow sensor (pressure-independent boxes need one)"
+    },
+    "equip_uri": "urn:equip:fbf/a/vav-1",
+    "events": [
+     {
+      "action": "create",
+      "actor": "user",
+      "detail": {
+       "check_id": "template:VAV_Flow",
+       "run_id": "id-3"
+      },
+      "id": 6,
+      "ts": "2026-11-06T12:00:00+00:00",
+      "user_email": "a@example.com",
+      "user_sub": "u-a"
+     }
+    ],
+    "id": "id-10",
+    "last_seen_run": "id-3",
+    "opened_run": "id-3",
+    "project_id": "id-5",
+    "resolved_at": null,
+    "resolved_by": null,
+    "retest": null,
+    "risk": null,
+    "severity": "minor",
+    "source": "baler",
+    "source_id": null,
+    "status": "open",
+    "subject": "urn:equip:fbf/a/vav-1",
+    "title": "fbf/a/vav-1: no airflow sensor (pressure-independent boxes need one)",
+    "updated_at": "2026-11-06T12:00:00+00:00"
+   },
+   {
+    "assignee": null,
+    "check_id": "template:VAV_ZATSP",
+    "closed_at": null,
+    "closed_run": null,
+    "created_at": "2026-11-06T12:00:00+00:00",
+    "created_by": "u-a",
+    "detail": {
+     "candidates": [
+      {
+       "cause": "point exists on the controller but isn't classified",
+       "distinguish": "look for an unclassified point with this name on the equipment (record editor / autotag)"
+      },
+      {
+       "cause": "point isn't linked to this equipment",
+       "distinguish": "search the site for the class; check brick:isPointOf"
+      },
+      {
+       "cause": "point was never installed or programmed",
+       "distinguish": "field check against the points list"
+      }
+     ],
+     "evidence": {
+      "classes": [
+       "Zone_Air_Temperature_Setpoint"
+      ],
+      "matched": [],
+      "matched_by": null,
+      "requirement": "zone air temperature setpoint",
+      "template": "VAV_ExpectedPoints"
+     },
+     "symptom": "no zone air temperature setpoint"
+    },
+    "equip_uri": "urn:equip:fbf/a/vav-1",
+    "events": [
+     {
+      "action": "create",
+      "actor": "user",
+      "detail": {
+       "check_id": "template:VAV_ZATSP",
+       "run_id": "id-3"
+      },
+      "id": 7,
+      "ts": "2026-11-06T12:00:00+00:00",
+      "user_email": "a@example.com",
+      "user_sub": "u-a"
+     }
+    ],
+    "id": "id-11",
+    "last_seen_run": "id-3",
+    "opened_run": "id-3",
+    "project_id": "id-5",
+    "resolved_at": null,
+    "resolved_by": null,
+    "retest": null,
+    "risk": null,
+    "severity": "minor",
+    "source": "baler",
+    "source_id": null,
+    "status": "open",
+    "subject": "urn:equip:fbf/a/vav-1",
+    "title": "fbf/a/vav-1: no zone air temperature setpoint",
+    "updated_at": "2026-11-06T12:00:00+00:00"
+   },
+   {
+    "assignee": null,
+    "check_id": null,
+    "closed_at": "2026-11-06T12:00:00+00:00",
+    "closed_run": null,
+    "created_at": "2026-11-06T12:00:00+00:00",
+    "created_by": "u-a",
+    "detail": {
+     "description": null
+    },
+    "equip_uri": null,
+    "events": [
+     {
+      "action": "close",
+      "actor": "user",
+      "detail": {
+       "closed_at": "2026-11-06T12:00:00+00:00",
+       "from": "open",
+       "note": "labelled",
+       "status": "closed"
+      },
+      "id": 11,
+      "ts": "2026-11-06T12:00:00+00:00",
+      "user_email": "a@example.com",
+      "user_sub": "u-a"
+     },
+     {
+      "action": "create",
+      "actor": "user",
+      "detail": {
+       "check_id": null,
+       "title": "Label the AHU"
+      },
+      "id": 10,
+      "ts": "2026-11-06T12:00:00+00:00",
+      "user_email": "a@example.com",
+      "user_sub": "u-a"
+     }
+    ],
+    "id": "id-12",
+    "last_seen_run": null,
+    "opened_run": null,
+    "project_id": "id-5",
+    "risk": null,
+    "severity": null,
+    "source": "baler",
+    "source_id": null,
+    "status": "closed",
+    "subject": null,
+    "title": "Label the AHU",
+    "updated_at": "2026-11-06T12:00:00+00:00"
+   }
+  ],
+  "origin": "",
+  "project": {
+   "id": "id-5",
+   "name": "Building A",
+   "phase": "startup",
+   "site_id": "site-a"
+  },
+  "run": {
+   "error": null,
+   "finished_at": "2026-11-06T12:00:00+00:00",
+   "id": "id-3",
+   "phase": "startup",
+   "progress": null,
+   "project_id": "id-5",
+   "scope": {
+    "caller": {
+     "exclude": [],
+     "prefixes": [
+      "fbf/a",
+      "fbf/a2"
+     ]
+    },
+    "site_prefixes": [
+     "fbf/a"
+    ]
+   },
+   "started_at": "2026-11-06T12:00:00+00:00",
+   "status": "completed",
+   "summary": {
+    "by_check": {
+     "exists": {
+      "fail": 1,
+      "inconclusive": 2,
+      "not_applicable": 0,
+      "pass": 4
+     },
+     "ladder": {
+      "fail": 0,
+      "inconclusive": 3,
+      "not_applicable": 0,
+      "pass": 0
+     },
+     "live": {
+      "fail": 0,
+      "inconclusive": 3,
+      "not_applicable": 0,
+      "pass": 0
+     },
+     "template": {
+      "fail": 6,
+      "inconclusive": 0,
+      "not_applicable": 0,
+      "pass": 5
+     }
+    },
+    "by_status": {
+     "fail": 7,
+     "inconclusive": 8,
+     "not_applicable": 0,
+     "pass": 9
+    },
+    "equipment": 3,
+    "equipment_with_template": 2,
+    "equipment_without_template": [
+     {
+      "brickClass": "Electrical_Meter",
+      "id": "urn:equip:fbf/a/mtr-1"
+     }
+    ],
+    "freshness": "as of 2026-11-06 12:00 UTC: 4 of 7 points reported in the last 24 h, 1 stale, 2 never reported",
+    "ladder": {
+     "highest_rung_passed": {
+      "0": 0,
+      "1": 3,
+      "2": 0,
+      "3": 0
+     },
+     "rungs": {
+      "1": "existence",
+      "2": "liveness",
+      "3": "responsiveness",
+      "4": "command response: an active test (Cx 9) where writes are allowed; otherwise rung 3's command/status check over history"
+     }
+    },
+    "phase": "startup",
+    "points": 7,
+    "required_missing": 0,
+    "unclassified_points": 2,
+    "window_hours": 24.0
+   },
+   "triggered_by": "u-a",
+   "window_end": "2026-11-06T12:00:00+00:00",
+   "window_start": "2026-11-05T12:00:00+00:00"
+  }
+ },
+ "limitations": [
+  {
+   "kind": "passive_only",
+   "text": "Passive only: no active (commanded) tests were run - writes to equipment are disabled on this server."
+  },
+  {
+   "kind": "inconclusive",
+   "text": "8 result(s) in the latest run are inconclusive - no evidence either way, never counted as a pass: 0 waived (risk accepted), 8 not waived."
+  },
+  {
+   "kind": "rung3",
+   "text": "3 equipment could not reach rung 3 (status follows command / sensor tracks setpoint): no command-status or sensor-setpoint pair was judged."
+  }
+ ],
+ "origin": "",
+ "phase_history": [],
+ "procedures": [
+  {
+   "kind": "startup",
+   "name": "AHU seq",
+   "procedure_id": "id-13",
+   "status": "active",
+   "steps": [
+    {
+     "criteria": [
+      {
+       "point_class": "Discharge_Air_Temperature_Sensor",
+       "range": {
+        "max": 80,
+        "min": 40,
+        "unit": "F"
+       },
+       "sequence": "S1"
+      }
+     ],
+     "id": "s1",
+     "instruction": "",
+     "title": "Supply air band"
+    }
+   ],
+   "test_run": {
+    "diff": {
+     "changes": [
+      {
+       "after": "pass",
+       "before": null,
+       "equip_uri": "urn:equip:fbf/a/ahu-1",
+       "state": "new",
+       "step": "s1"
+      }
+     ],
+     "counts": {
+      "new": 1
+     }
+    },
+    "equipment": [
+     {
+      "dis": "AHU-1",
+      "equip_uri": "urn:equip:fbf/a/ahu-1",
+      "status": "pass",
+      "steps": [
+       {
+        "criteria": [
+         {
+          "counts": {
+           "fail": 0,
+           "inconclusive": 0,
+           "pass": 1
+          },
+          "criterion": {
+           "point_class": "Discharge_Air_Temperature_Sensor",
+           "range": {
+            "max": 80,
+            "min": 40,
+            "unit": "F"
+           },
+           "sequence": "S1"
+          },
+          "failing": [],
+          "observed": [
+           {
+            "dis": "SAT",
+            "first_ts": "2026-11-06T11:55:00+00:00",
+            "last": 55.0,
+            "last_ts": "2026-11-06T11:55:00+00:00",
+            "max": 55.0,
+            "min": 55.0,
+            "samples": 1,
+            "subject": "urn:point:fbf/a/ahu-1/SAT",
+            "unit": null
+           }
+          ],
+          "status": "pass"
+         }
+        ],
+        "id": "s1",
+        "status": "pass",
+        "title": "Supply air band"
+       }
+      ]
+     }
+    ],
+    "error": null,
+    "finished_at": "2026-11-06T12:00:00+00:00",
+    "id": "id-2",
+    "phase": "startup",
+    "previous_id": null,
+    "procedure": {
+     "equip_class": "Air_Handling_Unit",
+     "equip_uris": null,
+     "id": "id-13",
+     "kind": "startup",
+     "name": "AHU seq",
+     "steps": [
+      {
+       "criteria": [
+        {
+         "point_class": "Discharge_Air_Temperature_Sensor",
+         "range": {
+          "max": 80,
+          "min": 40,
+          "unit": "F"
+         },
+         "sequence": "S1"
+        }
+       ],
+       "id": "s1",
+       "instruction": "",
+       "title": "Supply air band"
+      }
+     ],
+     "window_hours": 24.0
+    },
+    "procedure_id": "id-13",
+    "project_id": "id-5",
+    "requested_at": "2026-11-06T12:00:00+00:00",
+    "scope": {
+     "caller": {
+      "exclude": [],
+      "prefixes": [
+       "fbf/a",
+       "fbf/a2"
+      ]
+     },
+     "site_prefixes": [
+      "fbf/a"
+     ]
+    },
+    "started_at": "2026-11-06T10:00:00+00:00",
+    "status": "completed",
+    "summary": {
+     "by_status": {
+      "fail": 0,
+      "inconclusive": 0,
+      "not_applicable": 0,
+      "pass": 1
+     },
+     "equipment": 1,
+     "partial": false,
+     "steps_by_status": {
+      "fail": 0,
+      "inconclusive": 0,
+      "not_applicable": 0,
+      "pass": 1
+     },
+     "window_hours": 2.0
+    },
+    "triggered_by": "u-a",
+    "window_end": "2026-11-06T12:00:00+00:00"
+   }
+  }
+ ],
+ "project": {
+  "id": "id-5",
+  "name": "Building A",
+  "phase": "startup",
+  "phases": [
+   {
+    "completed_at": null,
+    "key": "design",
+    "name": "Design",
+    "position": 0,
+    "started_at": null,
+    "status": "pending"
+   },
+   {
+    "completed_at": null,
+    "key": "construction",
+    "name": "Construction / installation",
+    "position": 1,
+    "started_at": null,
+    "status": "pending"
+   },
+   {
+    "completed_at": null,
+    "key": "startup",
+    "name": "Start-up / power-on",
+    "position": 2,
+    "started_at": "2026-11-06T12:00:00+00:00",
+    "status": "active"
+   },
+   {
+    "completed_at": null,
+    "key": "functional",
+    "name": "Functional testing",
+    "position": 3,
+    "started_at": null,
+    "status": "pending"
+   },
+   {
+    "completed_at": null,
+    "key": "acceptance",
+    "name": "Acceptance",
+    "position": 4,
+    "started_at": null,
+    "status": "pending"
+   },
+   {
+    "completed_at": null,
+    "key": "warranty",
+    "name": "Warranty",
+    "position": 5,
+    "started_at": null,
+    "status": "pending"
+   },
+   {
+    "completed_at": null,
+    "key": "operations",
+    "name": "Operations",
+    "position": 6,
+    "started_at": null,
+    "status": "pending"
+   }
+  ],
+  "site_id": "site-a",
+  "site_name": "A"
+ },
+ "sequences": [
+  {
+   "observed": [
+    {
+     "dis": "SAT",
+     "first_ts": "2026-11-06T11:55:00+00:00",
+     "last": 55.0,
+     "last_ts": "2026-11-06T11:55:00+00:00",
+     "max": 55.0,
+     "min": 55.0,
+     "samples": 1,
+     "subject": "urn:point:fbf/a/ahu-1/SAT",
+     "unit": null
+    }
+   ],
+   "procedure": "AHU seq",
+   "procedure_edited": false,
+   "procedure_id": "id-13",
+   "reason": null,
+   "rule": "S1: Discharge_Air_Temperature_Sensor within 40..80 F",
+   "rule_recorded": true,
+   "sequence": "S1",
+   "status": "pass",
+   "step": "Supply air band",
+   "test_run_id": "id-2"
+  }
+ ],
+ "spec": {
+  "deviations": [
+   {
+    "equip_uri": "urn:equip:fbf/a/ahu-1",
+    "interpretation": "AHU-1 is in the field but no accepted spec item names it",
+    "kind": "unspecified_in_field",
+    "severity": "info",
+    "to_settle": "add it to the schedule, or confirm it's out of scope"
+   },
+   {
+    "equip_uri": "urn:equip:fbf/a/mtr-1",
+    "interpretation": "MTR-1 is in the field but no accepted spec item names it",
+    "kind": "unspecified_in_field",
+    "severity": "info",
+    "to_settle": "add it to the schedule, or confirm it's out of scope"
+   },
+   {
+    "equip_uri": "urn:equip:fbf/a/vav-1",
+    "interpretation": "VAV-1 is in the field but no accepted spec item names it",
+    "kind": "unspecified_in_field",
+    "severity": "info",
+    "to_settle": "add it to the schedule, or confirm it's out of scope"
+   }
+  ],
+  "items": 0,
+  "matched": 0,
+  "unmatched": 0
+ },
+ "spec_documents": [],
+ "verdicts": {
+  "fail": 2,
+  "inconclusive": 1,
+  "not_applicable": 0,
+  "pass": 0
+ }
+}

@@ -1,0 +1,133 @@
+---
+title: Mapping eval
+---
+
+`python -m baler.mapping_eval` scores Baler's tagging ladder against a site
+whose answers are known. A change to the tagging rules, the Brick mapping
+rules or the LLM fallback then comes with a number, not a guess. It is the
+first item of the messy-data-to-ontology work (#188) and every later item
+reports against it.
+
+## The corpus
+
+Windrow's `mock_hospital` site, read from the `windrow` submodule at its
+pinned commit: 492 points on 88 pieces of equipment (AHUs, VAVs, chillers,
+boilers, pumps, meters, exhaust fans). Each point name is rendered in one of
+four styles (`Discharge Air Temp`, `discharge_air_temp`, `DIS-AIR-TEM-12`,
+`DischargeAirTemp`), and about 70% get a description. The generator knows
+each point's true kind. The harness maps each kind to the Brick class a
+person would assign (`POINT_TRUTH` and `EQUIP_TRUTH` in
+`src/baler/mapping_eval.py`). Where Brick 1.4.4 offers two fair answers
+(a pump's `Pump_Status` or `Run_Status`), both count. Where it has none (a
+boiler's firing rate), the only right outcome is review.
+
+## What runs
+
+Everything a real BACnet job goes through, offline: no BACnet, MQTT or
+Oxigraph.
+
+1. Windrow's `bacnet_tagger.tag_point` over the label, object identifier
+   and description, plus the `writable` and `unit` tags Windrow's
+   connection manager adds.
+2. `ingest.ingest_tags` into an in-memory store.
+3. `mapping.classify_point_with_fallback`: the rules, then the model step if
+   one is enabled. `autotag` runs the same function.
+
+Each point ends on one ladder step:
+
+| Step | Meaning |
+|---|---|
+| `rules` | A direct rule match. Auto-accepted. |
+| `model` | The LLM's answer at or above its confidence threshold. Auto-accepted. |
+| `review` | A `PROJ:` fallback class or `TD:UnmappedPoint`. A person decides. |
+
+Memory and site naming conventions (#185, #186) get their own steps when they
+exist.
+
+## How a point is scored
+
+| Verdict | When |
+|---|---|
+| correct | The class written is the true class or a Brick equivalent (`Discharge_Air_Temperature_Sensor` is `Supply_Air_Temperature_Sensor`). |
+| partial | The class written is a Brick ancestor of the true class. That is true, but less specific (`Zone_Air_Temperature_Setpoint` for an occupied zone setpoint). |
+| wrong | Anything else, including a class Brick doesn't have. |
+
+The report gives, for points and for equipment:
+
+- **accuracy**: exactly correct over all points, so review counts against it;
+- **auto-accepted**: the share decided without a person;
+- **auto-accepted but wrong**: the share nobody will look at that is wrong.
+  This must stay near zero;
+- **left for review**;
+- the same per ladder step, per Brick class (precision and recall), per
+  naming style, and with or without a description;
+- every auto-accepted-but-wrong point by name.
+
+## Running it
+
+```bash
+python -m baler.mapping_eval            # rules only: no key, ~3 s
+python -m baler.mapping_eval --check    # also fail on a regression (CI runs this)
+python -m baler.mapping_eval --json out.json
+```
+
+It needs the submodule: `git submodule update --init windrow`. Without it,
+`tests/test_mapping_eval.py` skips its corpus tests.
+
+The model step costs money, so it runs only by hand:
+
+```bash
+ANTHROPIC_API_KEY=... python -m baler.mapping_eval --llm --llm-record answers.json
+python -m baler.mapping_eval --llm-replay answers.json   # re-score for free
+```
+
+A replay answers from the recording, keyed by each call's label and tags. A
+change downstream of the model, such as the Brick-class check, can be
+measured again without paying again.
+
+## The model step only writes real Brick classes
+
+A model will name a class Brick doesn't have, such as
+`Chilled_Water_Supply_Temp_Sensor` for `Chilled_Water_Supply_Temperature_Sensor`.
+`classify_point_with_fallback` checks every answer with
+`brick_vocab.canonical_class` against the vendored ontology (#181). A real
+class is written in Brick's own spelling. Anything else is discarded, and
+the point keeps what the rules gave it, a `PROJ:` class or
+`TD:UnmappedPoint`, so it lands in review. The answer isn't mapped to a
+near match, because that would be a second guess nobody confirmed.
+
+To measure the check without a key, the harness was run with a simulated
+model that glues a class name out of each label (`CHW-SUP-TEM-7` becomes
+`Chw_Sup_Tem_Sensor`) at confidence 0.9. Before the check, 148 of its 240
+answers named no Brick class and were written: 30.1% of points were
+auto-accepted but wrong. With the check, none were written. Those 148
+points went to review, and auto-accepted but wrong was 0%. A real model
+invents far fewer names than this stand-in. The point is that what it does
+invent can no longer reach the graph.
+
+## The baseline
+
+`tests/fixtures/mapping_eval_baseline.json` is the rules-only summary from
+the last change that moved the score. `--check` fails if exact accuracy
+falls or auto-accepted-but-wrong rises, for points or equipment. An
+improvement passes. Regenerate the file in the PR that makes the
+improvement, so the diff shows the before and after:
+
+```bash
+python -m baler.mapping_eval --json tests/fixtures/mapping_eval_baseline.json
+```
+
+At the first baseline (rules only, windrow `330cf9a`):
+
+| | Points (492) | Equipment (88) |
+|---|---|---|
+| Accuracy (exact class) | 48.4% | 0% |
+| Auto-accepted | 69.1% | 0% |
+| Auto-accepted but wrong | 0% | 0% |
+| Auto-accepted, less specific | 20.7% | 0% |
+| Left for review | 30.9% | 100% |
+
+Points without a description: 27.4% accuracy. With one: 56.3%. Every chiller,
+boiler and pump point and all 88 pieces of equipment go to review, because
+Windrow's tagger has no rule for their vocabulary and sends no equipment
+tags. That is the gap the later items aim at.

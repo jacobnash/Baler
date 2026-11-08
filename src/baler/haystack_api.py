@@ -50,7 +50,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 import openhay as oh
 
-from baler import auth, gateway_auth, hisquery, timeseries, tracing
+from baler import auth, gateway_auth, hisquery, timeseries, tracing, warmup
 from baler import point_write as pw
 from baler.http_handler_base import BaseAPIHandler
 from baler.scope import EVERYTHING, Scope, claims_from_header, scope_for
@@ -407,10 +407,10 @@ def read_first_ts_many(conn, point_uris: list[str]) -> dict[str, datetime]:
     if not point_uris:
         return {}
     cur = conn.execute(
-        """
+        f"""
         SELECT u.uri, h.ts FROM unnest(%s::text[]) AS u(uri)
         CROSS JOIN LATERAL (
-            SELECT ts FROM point_history WHERE point_uri = u.uri ORDER BY ts LIMIT 1
+            SELECT ts FROM point_history WHERE {timeseries._ONE_POINT} ORDER BY point_uri, ts LIMIT 1
         ) h
         """,
         (point_uris,),
@@ -1239,7 +1239,9 @@ def make_handler(backend: Backend, login: ScramLogin | None):
                     return
                 fmt = oh.negotiate(accept, flavor)
                 try:
-                    out = oh.encode_grid(grid, fmt).encode("utf-8")
+                    with tracer.start_as_current_span("haystack.encode") as enc:
+                        out = oh.encode_grid(grid, fmt).encode("utf-8")
+                        enc.set_attribute("bytes", len(out))
                 except ValueError as exc:
                     # One unencodable value must not drop the connection
                     # (a client sees a reset, not an error): say what failed.
@@ -1248,6 +1250,12 @@ def make_handler(backend: Backend, login: ScramLogin | None):
                 self._send(200, out, f"{oh.mime(fmt)}; charset=utf-8", extra)
 
     return HaystackHandler
+
+
+# The Equipment page's first reads (ui/app.js), run once before the API
+# listens (baler.warmup): on nash-srv the first `point` read after a deploy
+# took 3 s against 0.9 s warm.
+WARM_FILTERS = ("point", "equip", "Site or Building or Floor or Zone")
 
 
 def main() -> None:
@@ -1267,7 +1275,13 @@ def main() -> None:
         pw.ensure_schema(conn)
     login = ScramLogin(ts_pool) if os.environ.get("BALER_JWT_SECRET") else None
     backend = Backend(RemoteStore(), ts_pool)
-    hisquery.warm_caches()
+
+    def warm():
+        hisquery.warm_caches()
+        for text in WARM_FILTERS:
+            oh.encode_grid(_rows_grid(backend.read_filter(text, None)), "hayson")
+
+    warmup.run("haystack reads", warm)
 
     def expire_loop():
         while True:
