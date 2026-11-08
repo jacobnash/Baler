@@ -45,6 +45,8 @@ points, so a point left for review counts against it.
   python -m baler.mapping_eval --llm --llm-record answers.json   # costs money
   python -m baler.mapping_eval --llm-replay answers.json         # free re-run
   python -m baler.mapping_eval --simulate inventing              # no key, see SIMULATED
+  python -m baler.mapping_eval --seed 7 --memory-from-seed 42    # memory from a reviewed building (#185)
+  python -m baler.mapping_eval --convention-budget 10            # a site naming convention (#186)
 
 CI runs the `--check` form: deterministic, rules only, a few seconds.
 """
@@ -68,15 +70,15 @@ from typing import Any
 from rdflib import RDF, Literal, URIRef
 
 from baler import brick_vocab, ingest, mapping, mapping_proposals, model_step
-from baler.store import TD, Store
+from baler.store import BRICK, TD, Store
 
 REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DEFAULT_WINDROW_DIR = os.path.join(REPO_ROOT, "windrow")
 DEFAULT_BASELINE = os.path.join(REPO_ROOT, "tests", "fixtures", "mapping_eval_baseline.json")
 
 # Ladder steps in order. A point's step is the one that decided it.
-STEPS = ("rules", "model", "review")
-AUTO_STEPS = ("rules", "model")
+STEPS = ("convention", "rules", "memory", "model", "review")
+AUTO_STEPS = ("convention", "rules", "memory", "model")
 
 # mock_hospital point kind (its token list) -> the Brick 1.4.4 classes a
 # person would accept, preferred first. Every name is checked against the
@@ -207,6 +209,7 @@ class Report:
     equipment: list[Result] = field(default_factory=list)
     llm_calls: int = 0
     patterns: int = 0
+    evidence: dict = field(default_factory=dict)  # uri -> what the model step saw (for building memory)
 
 
 # --- corpus ---------------------------------------------------------------
@@ -336,7 +339,11 @@ def evaluate(
     point_rules_path: str = mapping.DEFAULT_RULES_PATH,
     equip_rules_path: str = mapping.EQUIP_RULES_PATH,
     mode: str | None = None,
+    memory=None,
+    convention=None,
 ) -> Report:
+    """`memory` (memory.Memory): confirmed examples the model step may
+    recall (#185), as if a person had reviewed another building."""
     vocab = vocab or brick_vocab.load()
     point_rules = mapping.load_rules(point_rules_path)
     equip_rules = mapping.load_rules(equip_rules_path)
@@ -366,8 +373,22 @@ def evaluate(
     ] + [(ingest.topic_prefix_to_equip_uri(e.topic_prefix), "equip", e.truth, None) for e in corpus.equipment]
     results: dict[str, Result] = {}
     unresolved = []
+    # Rung 2, before the rules (#186): a site naming convention a person wrote.
+    by_convention: set[str] = set()
+    if convention is not None:
+        from baler import conventions as conv_mod
+
+        by_convention = conv_mod.run_ladder([convention], store, [str(u) for u, _, _, _ in entities])
     for uri, kind, truth, source in entities:
         tag_list = sorted(mapping.read_tags(store, uri))
+        if str(uri) in by_convention:
+            cls = next(str(t).rsplit("#", 1)[1] for t in store.graph.objects(uri, RDF.type) if str(t).startswith(str(BRICK)))
+            r = Result(uri=str(uri), kind=kind, truth=list(truth), tags=tag_list, outcome="convention", step="convention",
+                       predicted=cls, verdict=judge(vocab, cls, truth))
+            if source is not None:
+                r.style, r.has_description = source.style, bool(source.description)
+            results[str(uri)] = r
+            continue
         outcome, brick_class = mapping.classify_point(store, uri, point_rules if kind == "point" else equip_rules)
         r = Result(uri=str(uri), kind=kind, truth=list(truth), tags=tag_list, outcome=outcome, step="review", predicted=None, verdict=None)
         if source is not None:
@@ -385,14 +406,20 @@ def evaluate(
                 for u in uris if u in values and values[u] is not None}
 
     counted = _CountingModel(model, report) if model is not None else None
-    decisions = model_step.run(store, unresolved, counted, proposals=mapping_proposals.MemoryProposals(), stats=stats, vocab=vocab)
+    from baler import memory as memory_mod
+
+    recall = memory_mod.recall_for(memory) if memory is not None else None
+    decisions = model_step.run(store, unresolved, counted, proposals=mapping_proposals.MemoryProposals(), stats=stats, vocab=vocab,
+                               recall=recall)
     report.patterns = len({d.pattern for d in decisions})
     for d in decisions:
         r = results[d.uri]
         r.candidates = [c["brick_class"] for c in d.candidates]
         r.refused_because = d.refused_because
+        report.evidence[d.uri] = d.evidence.to_dict()
         if d.accepted is not None:
-            r.step, r.outcome, r.predicted, r.verdict = "model", "model", d.accepted, judge(vocab, d.accepted, r.truth)
+            step = "memory" if d.source == "memory" else "model"
+            r.step, r.outcome, r.predicted, r.verdict = step, step, d.accepted, judge(vocab, d.accepted, r.truth)
 
     report.points = [results[str(u)] for u, k, _, _ in entities if k == "point"]
     report.equipment = [results[str(u)] for u, k, _, _ in entities if k == "equip"]
@@ -569,6 +596,70 @@ def compare(summary: dict, baseline: dict) -> list[str]:
     return problems
 
 
+# --- memory from a reviewed building -----------------------------------------
+
+
+def reviewed_memory(reference: Corpus, vocab: brick_vocab.Vocab | None = None):
+    """Memory as if a person had answered every review proposal of
+    `reference` correctly (its first true class; points with no Brick class
+    get no example, as their answer would be a site visit). The rules-only
+    ladder decides what reaches review, so memory holds exactly the points a
+    reviewer would have been asked about."""
+    from baler import memory as memory_mod
+
+    vocab = vocab or brick_vocab.load()
+    rep = evaluate(reference, vocab=vocab)
+    examples = []
+    for r in rep.points + rep.equipment:
+        if r.step == "review" and r.truth and r.uri in rep.evidence:
+            ev = {**rep.evidence[r.uri], "kind": r.kind}
+            examples.append(memory_mod.Example(r.uri, r.kind, r.truth[0], memory_mod.tokens(ev), label=ev.get("label", "")))
+    return memory_mod.Memory(examples, vocab), len(examples)
+
+
+# --- a naming convention written by a person ----------------------------------
+
+# What an integrator would write for mock_hospital after looking at it:
+# labels like `fbf/vav-12/DAM-POS-345` (cryptic, and every name made unique
+# with a number) and `fbf/vav-3/DamperPos` (the rest). Two annotations.
+MOCK_HOSPITAL_TEMPLATES = [
+    "fbf/{equip_type:ahu}-{equip_id:1}/{point:DIS-AIR-TEM}-{ignore:12}",
+    "fbf/{equip_type:ahu}-{equip_id:1}/{point:DischargeAirTemp}",
+]
+
+
+def annotated_convention(corpus: Corpus, budget: int | None, vocab: brick_vocab.Vocab | None = None):
+    """The convention a person builds for `corpus`: the two templates, a
+    code for each equipment kind, and point codes answered one at a time
+    in the order the preview ranks them (most unclassified points first),
+    `budget` of them (None = all). Each answer is the true class of the
+    code's points (the most common, if a code spans kinds); a code whose
+    points have no Brick class is skipped, as a person would. Returns
+    (convention, point codes answered)."""
+    from baler import conventions as conv_mod
+
+    vocab = vocab or brick_vocab.load()
+    base = conv_mod.Convention(MOCK_HOSPITAL_TEMPLATES)
+    rules_only = evaluate(corpus, vocab=vocab)
+    unresolved = {r.uri for r in rules_only.points if r.step == "review"}
+    truth_by_uri = {f"urn:point:{p.topic}": p.truth for p in corpus.points}
+    labels = {f"urn:point:{p.topic}": p.topic for p in corpus.points}
+    ranked = conv_mod.preview(base, {u: t for u, t in labels.items() if u in unresolved})["unknown_point_codes"]
+    by_code: dict[str, Counter] = {}
+    for u, t in labels.items():
+        got = base.parse(t)
+        if got and truth_by_uri[u]:
+            by_code.setdefault(got["point_code"], Counter())[truth_by_uri[u][0]] += 1
+    point_codes: dict[str, str] = {}
+    for row in ranked:
+        if budget is not None and len(point_codes) >= budget:
+            break
+        if row["code"] in by_code:
+            point_codes[row["code"]] = by_code[row["code"]].most_common(1)[0][0]
+    equip_codes = {conv_mod.code(e.kind): e.truth[0] for e in corpus.equipment}
+    return conv_mod.Convention(MOCK_HOSPITAL_TEMPLATES, point_codes, equip_codes, name="mock_hospital"), len(point_codes)
+
+
 # --- model step: real, recorded, replayed, simulated -----------------------
 
 
@@ -658,6 +749,10 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--llm-replay", metavar="FILE", help="enable the model step from answers recorded with --llm-record")
     group.add_argument("--simulate", choices=Simulated.KINDS, help="enable the model step with a stand-in model (no key; see Simulated)")
     parser.add_argument("--llm-record", metavar="FILE", help="with --llm: save the model's answers for --llm-replay")
+    parser.add_argument("--convention-budget", metavar="N|all",
+                        help="run a naming convention (#186) a person built with 2 annotated labels, 8 equip codes and N point codes")
+    parser.add_argument("--memory-from-seed", type=int, metavar="SEED",
+                        help="give the model step memory (#185): mock_hospital at SEED, with every review proposal answered correctly")
     parser.add_argument("--json", metavar="FILE", help="write the summary as JSON")
     parser.add_argument("--check", metavar="BASELINE", nargs="?", const=DEFAULT_BASELINE, help="exit 1 on a regression against this baseline JSON")
     parser.add_argument("--no-per-class", action="store_true", help="leave the per-class table out of the text report")
@@ -682,7 +777,17 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--llm-record needs --llm")
 
     corpus = load_mock_hospital(args.windrow, args.seed)
-    report = evaluate(corpus, model=model)
+    mem, mode = None, None
+    if args.memory_from_seed is not None:
+        mem, n = reviewed_memory(load_mock_hospital(args.windrow, args.memory_from_seed))
+        mode = (f"rules + memory ({n} examples from seed {args.memory_from_seed})"
+                + (f" + model ({model.name})" if model else ""))
+    conv = None
+    if args.convention_budget is not None:
+        budget = None if args.convention_budget == "all" else int(args.convention_budget)
+        conv, n_codes = annotated_convention(corpus, budget)
+        mode = (mode or ("rules + model" if model else "rules")) + f" + convention (2 templates, {len(conv.equip_codes)} equip codes, {n_codes} point codes)"
+    report = evaluate(corpus, model=model, memory=mem, mode=mode, convention=conv)
     summary = summarize(report)
     print(format_summary(summary, report, per_class=not args.no_per_class))
 

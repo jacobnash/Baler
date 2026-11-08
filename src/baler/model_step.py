@@ -116,6 +116,7 @@ class Decision:
     refused_because: str | None
     asks: list[dict]  # what each ask said
     evidence: Evidence
+    source: str = "model"  # model | memory | model+memory | site rule
 
 
 # --- evidence -------------------------------------------------------------
@@ -337,7 +338,7 @@ _REWORDED = (
 _REPLY = 'Reply with JSON only: {"candidates": [{"brick_class": "...", "reason": "..."}], "confidence": 0.0}'
 
 
-def prompt(evs: list[Evidence], cands: list[str], variant: int) -> str:
+def prompt(evs: list[Evidence], cands: list[str], variant: int, examples: list[dict] | None = None) -> str:
     ev = evs[0]
     lines = [(_INSTRUCTIONS if variant == 0 else _REWORDED).format(kind=ev.kind, n=TOP_N), ""]
     lines.append("Examples of the pattern: " + "; ".join(e.label for e in evs[:MAX_EXAMPLES]) + f" ({len(evs)} in all)")
@@ -349,6 +350,9 @@ def prompt(evs: list[Evidence], cands: list[str], variant: int) -> str:
     if ev.siblings:
         lines.append(("Other points on the same equipment" if ev.kind == "point" else "Its points") + ": "
                      + "; ".join(f"{s['label']}" + (f" ({s['class']})" if s["class"] else "") for s in ev.siblings))
+    if examples:  # memory (#185): the most similar points a person confirmed
+        lines.append("Confirmed points from this organisation, most similar first: "
+                     + "; ".join(f"{e['label']} -> {e['brick_class']}" for e in examples))
     ordered = cands if variant == 0 else list(reversed(cands))
     lines.append("Candidate Brick classes: " + (", ".join(ordered) or "(none found)"))
     lines += ["", _REPLY]
@@ -386,44 +390,71 @@ def _same(vocab: brick_vocab.Vocab, a: str, b: str) -> bool:
     return a == b or (b in vocab.descendants(a) and a in vocab.descendants(b))
 
 
-def decide_pattern(evs: list[Evidence], model: Model | None, vocab: brick_vocab.Vocab) -> list[Decision]:
-    """One question (asked twice) for a group of entities sharing a pattern;
-    one Decision per entity."""
+def decide_pattern(evs: list[Evidence], model: Model | None, vocab: brick_vocab.Vocab, recall=None) -> list[Decision]:
+    """One question (asked twice, or once when memory agrees) for a group
+    of entities sharing a pattern; one Decision per entity.
+
+    `recall(evidence) -> memory.Vote` (#185): when the nearest confirmed
+    examples agree, their class is taken without a model call. Otherwise
+    they go into the prompt as examples, and their most common class is a
+    second voice - the model's first answer matching it is agreement."""
     key = pattern(evs[0])
     cands = candidates(evs[0], vocab)
     asks: list[dict] = []
     answers: list[tuple[list[dict], float]] = []
-    if model is not None:
-        for variant in (0, 1):
-            with tracer.start_as_current_span("model_step.ask") as span:
-                span.set_attribute("pattern", key)
-                span.set_attribute("variant", variant)
-                reply = model.ask(prompt(evs, cands, variant))
-            got, conf, rejected = _parse(reply, vocab)
-            answers.append((got, conf))
-            asks.append({"model": model.name, "variant": variant, "candidates": got, "confidence": conf, "rejected": rejected})
+    vote = recall(evs[0]) if recall is not None else None
+    memory_ask = {"model": "memory", "candidates": [{"brick_class": vote.suggestion, "reason": vote.why}] if vote and vote.suggestion else [],
+                  "neighbours": vote.neighbours if vote else [], "why": vote.why if vote else ""}
 
     accepted: str | None = None
     refused: str | None
-    if model is None:
-        refused = "no model configured"
-    elif not answers[0][0] or not answers[1][0]:
-        refused = "the model gave no Brick class" + (f" (named {', '.join(asks[0]['rejected'] + asks[1]['rejected'])}, not in Brick)"
-                                                      if asks[0]["rejected"] or asks[1]["rejected"] else "")
-    elif not _same(vocab, answers[0][0][0]["brick_class"], answers[1][0][0]["brick_class"]):
-        refused = f"asked twice, it said {answers[0][0][0]['brick_class']} then {answers[1][0][0]['brick_class']}"
-    elif min(answers[0][1], answers[1][1]) < MIN_CONFIDENCE:
-        refused = f"it agreed with itself but said it was unsure ({min(answers[0][1], answers[1][1]):.2f})"
+    source = "model"
+    if vote is not None and vote.accepted:
+        accepted, refused, source = vote.accepted, None, "memory"
+        asks.append(memory_ask)
     else:
-        accepted, refused = answers[0][0][0]["brick_class"], None
+        if vote is not None:
+            asks.append(memory_ask)
+        examples = vote.neighbours if vote else None
+        if model is not None:
+            for variant in (0, 1):
+                with tracer.start_as_current_span("model_step.ask") as span:
+                    span.set_attribute("pattern", key)
+                    span.set_attribute("variant", variant)
+                    reply = model.ask(prompt(evs, cands, variant, examples))
+                got, conf, rejected = _parse(reply, vocab)
+                answers.append((got, conf))
+                asks.append({"model": model.name, "variant": variant, "candidates": got, "confidence": conf, "rejected": rejected})
+                # Agreement with memory is enough: no re-ask needed.
+                if variant == 0 and vote is not None and vote.suggestion and got and conf >= MIN_CONFIDENCE \
+                        and _same(vocab, got[0]["brick_class"], vote.suggestion):
+                    break
+        model_asks = [a for a in asks if a["model"] != "memory"]
+        if model is None:
+            refused = "no model configured"
+        elif len(answers) == 1:  # the model agreed with memory
+            accepted, refused, source = answers[0][0][0]["brick_class"], None, "model+memory"
+        elif not answers[0][0] or not answers[1][0]:
+            rejected_names = model_asks[0]["rejected"] + model_asks[1]["rejected"]
+            refused = "the model gave no Brick class" + (f" (named {', '.join(rejected_names)}, not in Brick)" if rejected_names else "")
+        elif not _same(vocab, answers[0][0][0]["brick_class"], answers[1][0][0]["brick_class"]):
+            refused = f"asked twice, it said {answers[0][0][0]['brick_class']} then {answers[1][0][0]['brick_class']}"
+        elif min(answers[0][1], answers[1][1]) < MIN_CONFIDENCE:
+            refused = f"it agreed with itself but said it was unsure ({min(answers[0][1], answers[1][1]):.2f})"
+        else:
+            accepted, refused = answers[0][0][0]["brick_class"], None
 
     # Candidates for review: the model's (first ask, then any new from the
-    # second), then the deterministic ranker's, top 3 overall.
+    # second), memory's suggestion, then the deterministic ranker's.
     merged: list[dict] = []
+    if source == "memory" and accepted:
+        merged.append({"brick_class": accepted, "reason": vote.why if vote else "", "source": "memory"})
     for got, _ in answers:
         for c in got:
             if all(not _same(vocab, m["brick_class"], c["brick_class"]) for m in merged):
                 merged.append({**c, "source": "model"})
+    if vote is not None and vote.suggestion and all(not _same(vocab, m["brick_class"], vote.suggestion) for m in merged):
+        merged.append({"brick_class": vote.suggestion, "reason": vote.why, "source": "memory"})
     for name in cands:
         if all(not _same(vocab, m["brick_class"], name) for m in merged):
             merged.append({"brick_class": name, "reason": "names match the label, tags and unit", "source": "ranker"})
@@ -435,7 +466,7 @@ def decide_pattern(evs: list[Evidence], model: Model | None, vocab: brick_vocab.
             why = veto(ev, accepted, vocab)
             if why:
                 this_accepted, this_refused = None, f"vetoed: {why}"
-        decisions.append(Decision(ev.uri, key, this_accepted, merged[:TOP_N], this_refused, asks, ev))
+        decisions.append(Decision(ev.uri, key, this_accepted, merged[:TOP_N], this_refused, asks, ev, source))
     return decisions
 
 
@@ -447,6 +478,7 @@ def run(
     stats: Callable[[list[str]], dict] | None = None,
     vocab: brick_vocab.Vocab | None = None,
     site_rules: dict[str, str] | None = None,
+    recall=None,
 ) -> list[Decision]:
     """The model step over (uri, "point"|"equip") pairs the rules left
     unresolved. Points go first, so an equip's question sees its points'
@@ -471,7 +503,7 @@ def run(
             groups.setdefault(pattern(e), []).append(e)
         for key, group in sorted(groups.items()):
             approved = (site_rules or {}).get(key)
-            for d in (by_site_rule(group, approved, vocab) if approved else decide_pattern(group, model, vocab)):
+            for d in (by_site_rule(group, approved, vocab) if approved else decide_pattern(group, model, vocab, recall)):
                 decisions.append(d)
                 _apply(store, d, proposals)
     return decisions
@@ -485,7 +517,7 @@ def by_site_rule(evs: list[Evidence], brick_class: str, vocab: brick_vocab.Vocab
     for ev in evs:
         why = veto(ev, brick_class, vocab)
         out.append(Decision(ev.uri, key, None if why else brick_class, cand, f"vetoed: {why}" if why else None,
-                            [{"model": "site rule", "candidates": cand}], ev))
+                            [{"model": "site rule", "candidates": cand}], ev, "site rule"))
     return out
 
 
@@ -494,9 +526,12 @@ def _apply(store, d: Decision, proposals) -> None:
     if d.accepted is not None:
         store.add_entity(uri, BRICK[d.accepted])
         reason = next((c["reason"] for c in d.candidates if c["brick_class"] == d.accepted), "")
-        site_rule = any(c.get("source") == "site rule" for c in d.candidates)
-        store.add_relationship(uri, SKOS.definition, Literal(
-            f"site-rule-classified: {reason}" if site_rule else f"model-classified (agreed on re-ask): {reason}"))
+        text = {
+            "site rule": f"site-rule-classified: {reason}",
+            "memory": f"memory-classified: {reason}",
+            "model+memory": f"model-classified (agreed with memory): {reason}",
+        }.get(d.source, f"model-classified (agreed on re-ask): {reason}")
+        store.add_relationship(uri, SKOS.definition, Literal(text))
         if proposals is not None:
             proposals.resolve(d.uri, "auto-accepted", d.accepted)
         return

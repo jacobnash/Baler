@@ -14,9 +14,10 @@ The page opens with a count of points by state:
 
 | State | Meaning |
 |---|---|
+| By a naming convention | A site [naming convention](/naming-conventions) settled it. |
 | By a rule | A rule in `rules/haystack_to_brick.yaml` matched. |
 | By a site rule | A pattern a person approved here; see below. |
-| By memory | Nearest confirmed examples. Always 0 until #185 lands. |
+| By memory | The nearest confirmed examples agreed ([memory](/memory)). |
 | By the model step | Both model asks agreed, and nothing vetoed it. |
 | By a person | Accepted here, or the class was edited by hand (`record_edits`). |
 | Proposed | Waiting for a person. |
@@ -49,9 +50,10 @@ Each group shows:
 - why it wasn't auto-accepted;
 - a 24 h sparkline of the first member, from `GET /ingest/history`.
 
+The nearest confirmed examples from [memory](/memory) are listed with
+their similarity and whether they came from this site or the org.
 Windrow doesn't send the BACnet description or object type yet
-(Windrow#19). When it does, they show up here as tags. Nearest confirmed
-examples come with memory (#185).
+(Windrow#19). When it does, they show up here as tags.
 
 ## Answers
 
@@ -91,8 +93,6 @@ proposals on your sites; for anyone else's it answers 404.
 
 ## Training data
 
-Every accepted proposal stays in `mapping_proposals`, along with the
-evidence the person saw and their answer.
-`PgProposals.confirmed_examples()` returns them. That is the labelled
-store memory (#185) learns from, and it stays inside the organisation that
-made it.
+Every accepted proposal is also written to `mapping_examples`, with the
+evidence the person saw, their answer, and the org and site it belongs
+to. [Memory](/memory) learns from it, and it never leaves that org.

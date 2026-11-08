@@ -100,7 +100,7 @@ def test_run_skips_an_entity_after_max_retries_on_connection_error(monkeypatch):
     monkeypatch.setattr(mapping, "classify_point", flaky)
     monkeypatch.setattr(autotag, "_RETRY_DELAY_SECONDS", 0)
     sent = []
-    monkeypatch.setattr(model_step, "run", lambda store, entities, model, proposals=None, stats=None, site_rules=None: sent.append(list(entities)) or [])
+    monkeypatch.setattr(model_step, "run", lambda store, entities, model, proposals=None, stats=None, site_rules=None, recall=None: sent.append(list(entities)) or [])
 
     run(store=object())  # must not raise
 
@@ -114,7 +114,7 @@ def test_run_sends_only_what_the_rules_left_to_the_model_step(monkeypatch):
     outcomes = {direct: ("direct", "Fan_Status"), miss: ("miss", None), equip: ("miss", None)}
     monkeypatch.setattr(mapping, "classify_point", lambda store, uri, rules: outcomes[uri])
     sent = []
-    monkeypatch.setattr(model_step, "run", lambda store, entities, model, proposals=None, stats=None, site_rules=None: sent.append(list(entities)) or [])
+    monkeypatch.setattr(model_step, "run", lambda store, entities, model, proposals=None, stats=None, site_rules=None, recall=None: sent.append(list(entities)) or [])
 
     run(store=object())
 

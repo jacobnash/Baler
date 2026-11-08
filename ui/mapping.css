@@ -15,3 +15,9 @@
 .mapping-group dl.evidence dd { margin: 0; overflow-wrap: anywhere; }
 .mapping-group dl.evidence ul { margin: 0; padding-left: 1rem; }
 .mapping-group canvas.spark { width: 100%; max-width: 360px; height: 90px; }
+/* Naming conventions (Baler#186). */
+.conv-form label { display: block; margin: 0.4rem 0; }
+.conv-form textarea, .conv-form input[type="text"] { width: 100%; font-family: ui-monospace, monospace; }
+.conv-codes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1rem; }
+@media (max-width: 800px) { .conv-codes { grid-template-columns: 1fr; } }
+#conv-result table { margin-top: 0.5rem; }

@@ -105,12 +105,22 @@ class _RetryingModel:
         return reply if reply is not None else {}
 
 
-def run(store, model=None, proposals=None, stats=None, site_rules=None) -> list[model_step.Decision]:
+def run(store, model=None, proposals=None, stats=None, site_rules=None, recall=None, conventions=None) -> list[model_step.Decision]:
     point_rules = mapping.load_rules(POINT_RULES_PATH)
     equip_rules = mapping.load_rules(EQUIP_RULES_PATH)
 
+    pending = find_unclassified(store)
+    # Rung 2, before the rules: site naming conventions a person wrote (#186).
+    if conventions:
+        from baler import conventions as conv_mod
+
+        settled = conv_mod.run_ladder(conventions, store, [str(u) for u in pending])
+        for u in sorted(settled):
+            print(f"{u}: convention")
+        pending = [u for u in pending if str(u) not in settled]
+
     unresolved = []
-    for uri in find_unclassified(store):
+    for uri in pending:
         rules = equip_rules if _kind(uri) == "equip" else point_rules
         result = _with_retries(str(uri), lambda uri=uri, rules=rules: mapping.classify_point(store, uri, rules))
         if result is None:
@@ -122,7 +132,7 @@ def run(store, model=None, proposals=None, stats=None, site_rules=None) -> list[
             unresolved.append((uri, _kind(uri)))
 
     model = _RetryingModel(model) if model is not None else None
-    decisions = model_step.run(store, unresolved, model, proposals=proposals, stats=stats, site_rules=site_rules)
+    decisions = model_step.run(store, unresolved, model, proposals=proposals, stats=stats, site_rules=site_rules, recall=recall)
     for d in decisions:
         if d.accepted:
             print(f"{d.uri}: model -> {d.accepted}")
@@ -142,7 +152,7 @@ def main() -> None:
     store = RemoteStore()
 
     model = None if args.no_llm else llm_classifier.model_from_env()
-    proposals = stats = site_rules = None
+    proposals = stats = site_rules = recall = convs = None
     if not args.no_proposals:
         from baler import mapping_proposals, timeseries
 
@@ -151,7 +161,17 @@ def main() -> None:
         proposals.ensure_schema()
         stats = model_step.pg_stats(conn)
         site_rules = proposals.site_rules()
-    run(store, model=model, proposals=proposals, stats=stats, site_rules=site_rules)
+        from baler import memory
+
+        memory.ensure_schema(conn)
+        mem = memory.load(conn)
+        print(f"memory: {len(mem.examples)} confirmed example(s)")
+        recall = memory.recall_for(mem, memory.pg_locator(conn)) if mem.examples else None
+        from baler import conventions as conv_mod
+
+        conv_mod.ensure_schema(conn)
+        convs = conv_mod.load_all(conn)
+    run(store, model=model, proposals=proposals, stats=stats, site_rules=site_rules, recall=recall, conventions=convs)
 
 
 if __name__ == "__main__":
