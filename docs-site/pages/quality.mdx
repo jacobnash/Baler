@@ -1,0 +1,85 @@
+---
+title: Sample quality
+---
+
+A failed, overridden or out-of-service sensor keeps sending values. Before
+#183, those values reached fault rules, Cx checks and his queries looking
+exactly like good data. Now each sample in `point_history` can carry a
+**quality flag**. A flagged value is **kept exactly as received**: Baler
+flags it and never rewrites it.
+
+## The flags
+
+| Flag | Meaning | Set by |
+|---|---|---|
+| (none) | ok. Stored as NULL, so healthy history costs nothing extra. | |
+| `fault` | The device says the value is unreliable: BACnet status-flags `fault`, or a `reliability` other than `no-fault-detected`. | the reading |
+| `overridden` | The device says someone overrode it at the panel. | the reading |
+| `out_of_service` | The device says the object is out of service. | the reading |
+| `out_of_range` | Outside the plausible range for the point's Brick class and unit (below). | Baler's sweep |
+| `spike` | An isolated jump: more than 6 scaled MADs from the median of the 5 samples on each side. | Baler's sweep |
+| `unit_suspect` | The values fit the other temperature unit, not the one the point claims (21 "°F" in a zone). | Baler's sweep |
+
+Stale and stuck stay as they were: derived when a rule runs (`his_checks`),
+not stored. They describe a series, not one sample.
+
+## Where flags come from
+
+**The reading.** An MQTT reading or a `POST /ingest` body may carry `quality`:
+either a flag name, or BACnet's own status:
+
+```json
+{"value": 140.0, "ts": 1786454667, "quality": {"status_flags": ["fault"], "reliability": "open-loop"}}
+```
+
+`in-alarm` alone isn't bad data: the value is real, and the alarm is about
+it. A reading without `quality` is ok, as before, and so is a `quality`
+Baler doesn't recognise. An unknown field never makes good data look bad.
+Windrow will send this once Windrow#20 lands. Until then, only Baler's own
+checks set flags.
+
+**Baler's sweep.** `fault_detector` runs `quality.sweep` every 5 minutes
+(`--quality-interval`, 0 turns it off). It covers the last hour of every
+point that has both a Brick class and a `unit` tag:
+
+- **Range.** A wide plausible range per class and unit, meant to catch a
+  failed sensor, not a comfort complaint. Examples: zone air temperature
+  32–120 °F (0–50 °C); outside air -60–140 °F; water temperature 32–260 °F;
+  humidity 0–100 %RH; damper, valve, position and speed 0–100 %; CO2
+  0–10000 ppm. The table is `quality.RANGES`. A class with no row isn't
+  range-checked; power is one, since it can go negative with PV.
+- **Spikes.** Each sample is compared with the median of the 5 samples
+  before it and the 5 after. The window is centred, so a real step change
+  (a setpoint change) isn't flagged. The newest 5 samples wait for the next
+  sweep.
+- **Unit suspicion.** The median and 90% of the values fit the claimed
+  unit's range, or they fit the other unit's and not their own. In the
+  second case Baler writes an open suggestion to `quality_suggestions`, for
+  example "this zone reads 21–23 °F; °C?". The samples are flagged
+  `unit_suspect`. **The unit is never changed**; a person decides.
+
+The sweep only fills a sample that has no flag yet, so a device's own flag
+always wins. It's idempotent.
+
+## Who skips, who shows
+
+| Consumer | What it does with a flagged sample |
+|---|---|
+| Fault rules, Cur mode | A reading the device flags neither opens nor resolves a fault. The fault stays as it was until a good reading arrives. |
+| Fault rules, `stuck` | Counts only good samples: a spike doesn't count as "the value moved". |
+| Fault rules, `stale` | Unchanged. A flagged sample still arrived. |
+| Cx checks (`commissioning.history`) | Latest-value checks and windows read good samples only. |
+| `GET /history` | Returns every sample. A flagged one has a `quality` key; an ok one looks exactly as before. |
+| `GET /his` (his queries, raw reads) | Same: `quality` on flagged samples. In `compact=1`, a parallel `quality` array appears only when something in the series is flagged. |
+
+## Not covered yet
+
+- **Rollups.** `/his` reads with a rollup, and the 5-minute and 1-hour
+  continuous aggregates behind them, still fold every sample, flagged or
+  not. Excluding flags means recreating those aggregates on a live
+  hypertable. That needs its own migration.
+- **Derivations** (`derivation_engine`) and the **Haystack API's
+  `hisRead`** read every sample and don't show the flag.
+- **Cx availability** counts every sample that arrived, flagged or not.
+- There's no UI or API for `quality_suggestions` yet. The review queue
+  (#184) is where it belongs.

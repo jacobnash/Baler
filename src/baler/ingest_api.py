@@ -14,7 +14,16 @@ from urllib.parse import parse_qs, urlparse
 
 from rdflib import URIRef
 
-from baler import auth, docs_ui, gateway_auth, hisquery, record_edit, tracing, warmup
+from baler import (
+    auth,
+    docs_ui,
+    gateway_auth,
+    hisquery,
+    quality,
+    record_edit,
+    tracing,
+    warmup,
+)
 from baler.http_handler_base import BaseAPIHandler, respond_json_streamed
 from baler.http_handler_base import respond_error as _respond_error
 from baler.http_handler_base import respond_json as _respond_json
@@ -106,7 +115,8 @@ def make_handler(store, ts_pool):
                     with ts_pool.connection() as conn:
                         for reading in readings:
                             topic = reading["point"]
-                            ingest_reading(store, conn, topic, reading.get("value"), reading.get("ts"))
+                            ingest_reading(store, conn, topic, reading.get("value"), reading.get("ts"),
+                                           quality=quality.from_envelope(reading.get("quality")))
                 except (KeyError, TypeError) as exc:
                     span.set_attribute("error", str(exc))
                     _respond_error(self, 400, f"reading missing required field: {exc}")
@@ -389,9 +399,13 @@ def make_handler(store, ts_pool):
                         # reveal that an out-of-scope point exists.
                         _respond_json(self, 200, [])
                         return
-                    rows = read_range(conn, point_uri, start, end)
+                    rows = read_range(conn, point_uri, start, end, with_quality=True)
                 span.set_attribute("count", len(rows))
-                respond_json_streamed(self, 200, [{"ts": ts.timestamp(), "value": value} for ts, value in rows])
+                # `quality` only on a flagged sample (#183): an ok one reads
+                # exactly as it always did.
+                respond_json_streamed(self, 200, [
+                    {"ts": ts.timestamp(), "value": value} | ({"quality": q} if q is not None else {}) for ts, value, q in rows
+                ])
 
         def _delete_history(self) -> None:
             with tracer.start_as_current_span("ingest_api.delete_history") as span:
