@@ -337,8 +337,8 @@ def read_latest_many(
     empty rows doesn't walk its whole history."""
     if not point_uris:
         return {}
-    conds = [_ONE_POINT]
-    params: list = [point_uris]
+    conds: list[str] = []
+    params: list = []
     if before is not None:
         conds.append("ts <= %s")
         params.append(before)
@@ -347,20 +347,88 @@ def read_latest_many(
         params.append(since)
     if with_value:
         conds.append("(value IS NOT NULL OR value_text IS NOT NULL OR value_bool IS NOT NULL)")
-    cur = conn.execute(
-        f"""
-        SELECT u.uri, h.ts, h.value, h.value_text, h.value_bool
-        FROM unnest(%s::text[]) AS u(uri)
-        CROSS JOIN LATERAL (
-            -- one backward primary-key probe per point; DISTINCT ON sorted
-            -- every row of every point's history (>60s at 20M rows)
-            SELECT ts, value, value_text, value_bool FROM point_history
-            WHERE {" AND ".join(conds)} ORDER BY point_uri DESC, ts DESC LIMIT 1
-        ) h
-        """,
-        params,
-    )
-    return {uri: (ts, _row_to_value((v, vt, vb))) for uri, ts, v, vt, vb in cur.fetchall()}
+    rows = probe_points(conn, point_uris, "ts, value, value_text, value_bool", conds, params, newest=True)
+    return {uri: (ts, _row_to_value((v, vt, vb))) for uri, (ts, v, vt, vb) in rows.items()}
+
+
+# Where the compressed chunks end (#192): chunks wholly below this ts are
+# compressed. timescaledb_information.chunks is a catalog view, a few ms.
+_COMPRESSED_BELOW_SQL = """
+SELECT bool_or(is_compressed), min(range_start) FILTER (WHERE NOT is_compressed)
+FROM timescaledb_information.chunks
+WHERE hypertable_schema = 'public' AND hypertable_name = 'point_history'
+"""
+_ALL_COMPRESSED = datetime.max.replace(tzinfo=timezone.utc)
+
+
+def _compressed_below(conn: psycopg.Connection) -> datetime | None:
+    """None when no chunk is compressed; otherwise the oldest uncompressed
+    chunk's start (every chunk older than it is compressed), or
+    _ALL_COMPRESSED."""
+    try:
+        with conn.transaction():  # a savepoint: a failure mustn't abort the caller's transaction
+            row = conn.execute(_COMPRESSED_BELOW_SQL).fetchone()
+    except psycopg.Error:  # not TimescaleDB, or the view changed: one plain probe
+        return None
+    if not row or not row[0]:
+        return None
+    return row[1] or _ALL_COMPRESSED
+
+
+def probe_points(conn: psycopg.Connection, point_uris: list[str], cols: str, conds: list[str], params: list,
+                 newest: bool) -> dict[str, tuple]:
+    """Per point, `cols` of its newest (or oldest) row matching `conds`
+    (SQL with %s placeholders, filled from `params` in order): curVal,
+    hisStart and the Cx "latest as of" checks.
+
+    On uncompressed chunks this is #237's probe, point_uri as a range
+    ordered (point_uri, ts): one primary-key probe per chunk, never a walk
+    of a chunk's ts index (see _ONE_POINT). That order can't stop at the
+    first chunk with a row, though: it asks every chunk, and on a
+    compressed chunk the answer costs a sort of the point's compressed
+    batches (~20 ms a chunk a point, measured), so a curVal would grow
+    with every week of compressed history. So the probe is split at
+    _compressed_below. Below it, chunks are compressed and have no
+    full-size ts index to walk, so the plain `point_uri = u.uri ORDER BY
+    ts` probe is safe there and stops at the first chunk with a row
+    (~0.2 ms a point). The side nearest the answer goes first (the newest
+    rows for curVal, the oldest for hisStart), and only points it didn't
+    find go to the other side: the same rows a single probe returns."""
+    if not point_uris:
+        return {}
+    direction = "DESC" if newest else "ASC"
+
+    def run(uris: list[str], split: str | None, plain: bool) -> dict[str, tuple]:
+        where = ["point_uri = u.uri" if plain else _ONE_POINT, *conds]
+        extra: list = []
+        if split:
+            where.append(split)
+            extra.append(boundary)
+        order = f"ts {direction}" if plain else f"point_uri {direction}, ts {direction}"
+        cur = conn.execute(
+            f"""
+            SELECT u.uri, h.* FROM unnest(%s::text[]) AS u(uri)
+            CROSS JOIN LATERAL (
+                SELECT {cols} FROM point_history WHERE {" AND ".join(where)} ORDER BY {order} LIMIT 1
+            ) h
+            """,
+            [uris, *params, *extra],
+        )
+        return {r[0]: tuple(r[1:]) for r in cur.fetchall()}
+
+    boundary = _compressed_below(conn)
+    if boundary is None:
+        return run(list(point_uris), None, plain=False)
+    near: tuple[str, bool]
+    far: tuple[str, bool] | None
+    near, far = (("ts >= %s", False), ("ts < %s", True)) if newest else (("ts < %s", True), ("ts >= %s", False))
+    if boundary is _ALL_COMPRESSED:
+        near, far = ("ts < %s", True), None
+    found = run(list(point_uris), *near)
+    rest = [u for u in point_uris if u not in found]
+    if rest and far is not None:
+        found.update(run(rest, *far))
+    return found
 
 
 def read_range(conn: psycopg.Connection, point_uri: str, start_ts: datetime, end_ts: datetime):

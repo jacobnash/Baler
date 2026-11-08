@@ -17,7 +17,7 @@ import psycopg
 import pytest
 
 from baler import ddl, timeseries
-from baler.commissioning.history import _AVAILABILITY_SQL
+from baler.commissioning.history import _VALUED_SQL
 
 PREFIX = "urn:point:test-compress/"
 
@@ -186,7 +186,7 @@ def _reads(conn, uris, start, end):
         "labels": timeseries.read_point_labels(conn, uris),
         "rollup_planned": timeseries.read_rollup(conn, uris, start, end, "avg", 3600, None, "UTC"),
         "rollup_month": timeseries.read_rollup(conn, uris, start, end, "max", None, 1, "UTC"),
-        "availability": sorted(conn.execute(_AVAILABILITY_SQL, {"uris": uris, "start": start, "end": end, "gap": 60.0}).fetchall()),
+        "availability": sorted(conn.execute(_VALUED_SQL, {"uris": uris, "start": start, "end": end, "gap": 60.0}).fetchall()),
     }
     timeseries._rollup_levels = lambda *a: []  # type: ignore[assignment]
     try:
@@ -274,3 +274,135 @@ def test_late_writes_into_compressed_chunks(conn, monkeypatch):
         assert [b for b, _ in planned[uri]] == [b for b, _ in raw[uri]]
         for (_, a), (_, b) in zip(planned[uri], raw[uri], strict=True):
             assert a == pytest.approx(b, rel=1e-9, abs=1e-9)
+
+
+# --- #237's per-point probes and empty-rows index, on compressed chunks ------
+
+
+def _reference(conn, uris, newest, extra="", params=()):
+    """The probe's answer the slow, obvious way."""
+    order = "DESC" if newest else "ASC"
+    out = {}
+    for u in uris:
+        row = conn.execute(f"SELECT ts, value, value_text, value_bool FROM point_history WHERE point_uri = %s {extra} "
+                           f"ORDER BY ts {order} LIMIT 1", (u, *params)).fetchone()
+        if row:
+            out[u] = row
+    return out
+
+
+@pytest.mark.integration
+def test_probes_give_the_same_rows_across_the_compressed_boundary(conn):
+    start, end = _old_span()
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old_only, both, recent_only, ghost = (f"{PREFIX}{k}" for k in ("old-only", "both", "recent-only", "ghost"))
+    rows = [(old_only, start + timedelta(minutes=i), float(i)) for i in range(30)]
+    rows += [(both, start + timedelta(minutes=i), float(i)) for i in range(30)]
+    rows += [(both, now - timedelta(minutes=i), 100.0 + i) for i in range(5)]
+    rows += [(recent_only, now - timedelta(minutes=i), 200.0 + i) for i in range(5)]
+    with conn.cursor() as cur:
+        cur.executemany("INSERT INTO point_history (point_uri, ts, value) VALUES (%s, %s, %s)", rows)
+    conn.execute("INSERT INTO point_history (point_uri, ts) VALUES (%s, %s)", (both, now + timedelta(seconds=1)))  # empty row
+    uris = [old_only, both, recent_only, ghost]
+
+    def check():
+        latest = timeseries.read_latest_many(conn, uris)
+        assert latest == {u: (r[0], timeseries._row_to_value(r[1:])) for u, r in _reference(conn, uris, True).items()}
+        valued = timeseries.read_latest_many(conn, uris, with_value=True)
+        assert valued == {u: (r[0], timeseries._row_to_value(r[1:])) for u, r in _reference(
+            conn, uris, True, "AND (value IS NOT NULL OR value_text IS NOT NULL OR value_bool IS NOT NULL)").items()}
+        asof = timeseries.read_latest_many(conn, uris, before=end, since=start)
+        assert asof == {u: (r[0], timeseries._row_to_value(r[1:])) for u, r in _reference(
+            conn, uris, True, "AND ts <= %s AND ts >= %s", (end, start)).items()}
+        first = timeseries.probe_points(conn, uris, "ts", [], [], newest=False)
+        assert {u: r[0] for u, r in first.items()} == {u: r[0] for u, r in _reference(conn, uris, False).items()}
+        assert ghost not in latest and ghost not in first
+
+    check()  # whatever the shared database's chunks are now
+    _compress(conn, start, end)
+    assert timeseries._compressed_below(conn) is not None
+    check()
+
+
+def test_compressed_below_is_none_without_timescale_catalog():
+    class Broken:
+        def transaction(self):
+            import contextlib
+            return contextlib.nullcontext()
+
+        def execute(self, *a):
+            raise psycopg.errors.UndefinedTable("no view")
+
+    assert timeseries._compressed_below(Broken()) is None
+
+
+@pytest.mark.integration
+def test_empty_rows_index_and_availability_on_compressed_chunks(conn):
+    from baler.commissioning import history
+
+    start, end = _old_span()
+    uris = [f"{PREFIX}e{p}" for p in range(3)]
+    rows = []
+    for p, uri in enumerate(uris):
+        for i in range(360):
+            empty = p == 0 and i % 11 == 0  # one point with empty rows (Baler#85)
+            rows.append((uri, start + timedelta(minutes=i), None if empty else float(i)))
+    with conn.cursor() as cur:
+        cur.executemany("INSERT INTO point_history (point_uri, ts, value) VALUES (%s, %s, %s)", rows)
+    _compress(conn, start, end)
+    # the background build works with compressed chunks present, and the
+    # report's index-only path gives what the heap path gives
+    assert history.ensure_empty_rows_index(conn) in ("built", "present", "another process is building it")
+    params = {"uris": uris, "start": start, "end": end, "gap": 90.0}
+    got = history.PostgresHistory(conn).availability(uris, start, end, timedelta(seconds=90))
+    heap = {u: (n, history.coverage_pct(n, float(cov or 0), f, start, end, timedelta(seconds=90)))
+            for u, n, cov, f in conn.execute(history._VALUED_SQL, params).fetchall()}
+    assert got == heap
+    assert got[uris[0]][0] < got[uris[1]][0] == 360
+
+
+# --- a column added beside compression (#183's quality) ----------------------
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("column_first", [True, False])
+def test_add_nullable_column_beside_compression(conn, column_first):
+    """#183 adds `quality TEXT` with ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
+    Either order of upgrade works, also once chunks are compressed, and the
+    new column stays a compressed column, not a segment column."""
+    t = "ph_compress_addcol"
+    conn.execute(f"DROP TABLE IF EXISTS {t}")
+    conn.execute(timeseries.SCHEMA.replace("point_history", t))
+    conn.execute(f"SELECT create_hypertable('{t}', 'ts')")
+    add = f"ALTER TABLE {t} ADD COLUMN IF NOT EXISTS quality TEXT"
+    enable = timeseries._ENABLE_COMPRESSION.replace("point_history", t)
+    try:
+        start, _ = _old_span()
+        with conn.cursor() as cur:
+            cur.executemany(f"INSERT INTO {t} (point_uri, ts, value) VALUES (%s, %s, %s)",
+                            [("p", start + timedelta(minutes=i), float(i)) for i in range(100)])
+        if column_first:
+            conn.execute(add)
+            conn.execute(enable)
+            conn.execute(f"SELECT compress_chunk(c) FROM show_chunks('{t}') c")
+        else:
+            conn.execute(enable)
+            conn.execute(f"SELECT compress_chunk(c) FROM show_chunks('{t}') c")
+            conn.execute(add)  # on already-compressed chunks
+        conn.execute(add)  # idempotent
+        # write and overwrite a flag in the compressed range
+        conn.execute(f"INSERT INTO {t} (point_uri, ts, value, quality) VALUES ('p', %s, 1, 'fault') "
+                     "ON CONFLICT (point_uri, ts) DO UPDATE SET value = EXCLUDED.value, quality = EXCLUDED.quality",
+                     (start + timedelta(minutes=5),))
+        conn.execute(f"INSERT INTO {t} (point_uri, ts, value, quality) VALUES ('p', %s, 2, 'spike')",
+                     (start + timedelta(minutes=5, seconds=30),))
+        conn.execute(f"SELECT compress_chunk(c) FROM show_chunks('{t}') c")
+        flagged = conn.execute(f"SELECT ts, value, quality FROM {t} WHERE quality IS NOT NULL ORDER BY ts").fetchall()
+        assert flagged == [(start + timedelta(minutes=5), 1.0, "fault"), (start + timedelta(minutes=5, seconds=30), 2.0, "spike")]
+        assert conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0] == 101
+        seg = {a: s for a, s in conn.execute(
+            "SELECT attname, segmentby_column_index FROM timescaledb_information.compression_settings "
+            "WHERE hypertable_name = %s", (t,)).fetchall()}
+        assert seg.get("quality") is None and seg["point_uri"] == 1
+    finally:
+        conn.execute(f"DROP TABLE IF EXISTS {t}")

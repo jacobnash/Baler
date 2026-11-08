@@ -63,23 +63,52 @@ timescaledb.max_tuples_decompressed_per_dml_transaction = 0` for that session.
 
 ## What it saves
 
-Measured on a local stack seeded by `scripts/seed_perf.py` (766 points every
-10 s, 3,290,400 rows, synthetic values with random noise):
+Measured on local stacks seeded by `scripts/seed_perf.py` (synthetic values
+with random noise):
 
-| | Bytes | Bytes per sample |
-|---|---|---|
-| Uncompressed (heap 284 MB + indexes 449 MB) | 733,159,424 | 222.8 |
-| Compressed | 26,820,608 | 8.2 |
+| Seed | Uncompressed | Compressed | Bytes per sample |
+|---|---|---|---|
+| 766 points every 10 s, 3,290,400 rows | 733 MB (heap 284 + indexes 449) | 26.8 MB | 222.8 → 8.2 |
+| the same 12 h, plus 27 points every 5 s for 21 days: 13,123,304 rows | 2,878 MB | 105 MB | 219.3 → 8.0 |
+| the 13.1 M rows with `quality` added (#183, 0.1% flagged) | | 106 MB | 8.07 |
 
 That's about 27× smaller. Real values compress differently: random noise in
 every float is close to the worst case, while quantized sensor readings and
 constant setpoints compress better. Irregular timestamps compress slightly
 worse. For the live number, run the queries below on that install.
 
-Reads return identical results either way. Compressed history is faster to scan
-in bulk (a raw rollup or Cx availability over many points) and slightly slower
-for single-row lookups. The newest chunk is always uncompressed, so current
-values and today's reads don't change.
+Reads return identical results either way. Compressed history is faster to
+scan in bulk (a raw rollup or Cx availability over many points). The newest
+chunks are always uncompressed, so current values and today's reads don't
+change.
+
+## Per-point probes on compressed chunks
+
+curVal, hisStart and the Cx "latest as of" checks look up one row per point
+(`timeseries.probe_points`). On uncompressed chunks they use #237's form: one
+primary-key probe per chunk, which never walks a chunk's `ts` index. That form
+asks *every* chunk, though, and on a compressed chunk each answer costs a sort
+of the point's compressed batches, about 20 ms per chunk per point. So the
+probe is split where the compressed chunks end:
+
+- **Below that point** the plain `ORDER BY ts` probe runs. It stops at the
+  first chunk with a row (about 0.2 ms per point), and compressed chunks have
+  no full-size `ts` index to walk.
+- **Above it** #237's form runs, over the uncompressed chunks only.
+- **Order:** the side nearest the answer goes first (newest rows for curVal,
+  oldest for hisStart). Only points it didn't find go to the other side.
+
+The rows are the same as a single probe's. Measured on the 13.1 M-row seed
+with the two oldest chunks compressed, curVal for the 27 deep-history points
+took 1,063 ms with #237's form alone and 3.2 ms split. hisStart took 100 ms and
+2.9 ms. Finding where the compressed chunks end costs a few milliseconds per
+call.
+
+Cx's empty-rows index (`point_history_empty`, built per chunk in the
+background by commissioning_api) builds fine with compressed chunks present.
+On a compressed chunk the index covers only rows written since compression,
+and TimescaleDB reads the compressed rows directly, so the report's results
+are the same either way (tested).
 
 ## Checking it
 
