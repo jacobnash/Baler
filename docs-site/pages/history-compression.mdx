@@ -1,0 +1,181 @@
+---
+title: History compression
+---
+
+`point_history` (every sample of every point) is a TimescaleDB hypertable with
+**native columnar compression** (Baler#192). Raw history is compressed, never
+downsampled: hunting detection, Cx and the building record need the actual
+samples, years later.
+
+## What is compressed, and how
+
+TimescaleDB stores `point_history` in time chunks (7 days each by default). A
+compressed chunk holds its rows as batches of up to 1,000 samples per point:
+
+- **segmented by `point_uri, unit, label`**: the point URI is stored once per
+  batch instead of in every row and every primary-key entry. `unit` and `label`
+  are constant per point, so they cost nothing extra. They're segment columns so
+  that the point-label lookup (`read_point_labels`, which runs on every
+  `/api/read` of points and every `hisRead` expression) filters batches
+  without decompressing them.
+- **ordered by `ts DESC`**: timestamps and values are delta-encoded within each
+  batch.
+- **everything else is a compressed column**, including the per-sample
+  `quality` flag ([Sample quality](/quality)). It varies from sample to sample,
+  so it doesn't belong in the segment columns. NULL (ok) costs almost nothing.
+  The quality sweep only flags the last hour, which is still uncompressed. A
+  flag written into an older, compressed range takes the slower write path
+  described below.
+
+The continuous aggregates (`point_history_5m`, `point_history_1h`) aren't
+compressed. They're small.
+
+Every service applies the setup itself when it opens a history connection
+(`baler/timeseries.py`, `_ensure_compression`). It's idempotent and works on an
+existing database: once compression and its policy are in place, each new
+connection does one catalog read and nothing else. The one-time `ALTER TABLE`
+waits at most 5 seconds for its lock, so it never queues ingest behind a long
+read. If it can't get the lock, the next new connection tries again. A failure
+here is logged and never fails the connection.
+
+## When
+
+A background job, added with `add_compression_policy`, compresses each chunk
+once **all** of it is older than `BALER_HISTORY_COMPRESS_AFTER` (default
+`7 days`). With 7-day chunks, raw data stays uncompressed for 7 to 14 days. The
+job runs every 12 hours.
+
+Why 7 days: data that arrives late should usually land in an uncompressed
+chunk, because that path is the cheapest. Late data comes from:
+
+- retained MQTT replays (seconds late);
+- Windrow's trend-log backfill (hours late);
+- an edge node's spool after an outage (a long weekend).
+
+Writes into an already-compressed chunk **still work**. Inserts, upserts
+(`ON CONFLICT ... DO UPDATE`, last write wins as always), `ON CONFLICT DO
+NOTHING` replays and deletes all succeed. TimescaleDB decompresses only the
+batches the write touches, and the policy recompresses the chunk on its next
+run. `hisWrite` and `haystack_import` can write history of any age and take
+this path. `tests/test_history_compression.py` covers all of these against the
+pinned image.
+
+One limit: by default one transaction may decompress at most 100,000 compressed
+rows (`timescaledb.max_tuples_decompressed_per_dml_transaction`). Baler's own
+writers commit every row on its own, so this never applies to them. A bulk SQL
+load that rewrites a large old range in **one** statement or transaction should
+decompress the chunk first (below), or `SET
+timescaledb.max_tuples_decompressed_per_dml_transaction = 0` for that session.
+
+## What it saves
+
+Measured on local stacks seeded by `scripts/seed_perf.py` (synthetic values
+with random noise):
+
+| Seed | Uncompressed | Compressed | Bytes per sample |
+|---|---|---|---|
+| 766 points every 10 s, 3,290,400 rows | 733 MB (heap 284 + indexes 449) | 26.8 MB | 222.8 → 8.2 |
+| the same 12 h, plus 27 points every 5 s for 21 days: 13,123,304 rows | 2,878 MB | 105 MB | 219.3 → 8.0 |
+| the same 13.1 M rows with #183's `quality` column, 0.1% flagged | 2,889 MB | 106 MB | 220.2 → 8.07 |
+
+That's about 27× smaller. Real values compress differently: random noise in
+every float is close to the worst case, while quantized sensor readings and
+constant setpoints compress better. Irregular timestamps compress slightly
+worse. For the live number, run the queries below on that install.
+
+Reads return identical results either way. Compressed history is faster to
+scan in bulk (a raw rollup or Cx availability over many points). The newest
+chunks are always uncompressed, so current values and today's reads don't
+change.
+
+## Per-point probes on compressed chunks
+
+curVal, hisStart and the Cx "latest as of" checks look up one row per point
+(`timeseries.probe_points`). On uncompressed chunks they use #237's form: one
+primary-key probe per chunk, which never walks a chunk's `ts` index. That form
+asks *every* chunk, though, and on a compressed chunk each answer costs a sort
+of the point's compressed batches, about 20 ms per chunk per point. So the
+probe is split where the compressed chunks end:
+
+- **Below that point** the plain `ORDER BY ts` probe runs. It stops at the
+  first chunk with a row (about 0.2 ms per point), and compressed chunks have
+  no full-size `ts` index to walk.
+- **Above it** #237's form runs, over the uncompressed chunks only.
+- **Order:** the side nearest the answer goes first (newest rows for curVal,
+  oldest for hisStart). Only points it didn't find go to the other side.
+
+The rows are the same as a single probe's. Measured on the 13.1 M-row seed
+with the two oldest chunks compressed (what the policy compresses there),
+curVal for the 27 deep-history points took 757 ms with #237's form alone and
+2.8 ms split, against 1.5 ms with nothing compressed. hisStart took 77 ms
+and 2.2 ms. Finding where the compressed chunks end costs a few milliseconds per
+call.
+
+Cx's empty-rows index (`point_history_empty`, built per chunk in the
+background by commissioning_api) builds fine with compressed chunks present.
+On a compressed chunk the index covers only rows written since compression,
+and TimescaleDB reads the compressed rows directly, so the report's results
+are the same either way (tested).
+
+## Checking it
+
+```sql
+-- is it on, and what's the policy?
+SELECT compression_enabled FROM timescaledb_information.hypertables
+WHERE hypertable_name = 'point_history';
+SELECT job_id, schedule_interval, config, next_start
+FROM timescaledb_information.jobs j JOIN timescaledb_information.job_stats USING (job_id)
+WHERE j.proc_name = 'policy_compression';
+
+-- bytes before/after, and per sample
+SELECT pg_size_pretty(before_compression_total_bytes) AS before,
+       pg_size_pretty(after_compression_total_bytes) AS after,
+       round(before_compression_total_bytes::numeric / NULLIF(after_compression_total_bytes, 0), 1) AS ratio
+FROM hypertable_compression_stats('point_history');
+SELECT round(hypertable_size('point_history')::numeric / (SELECT count(*) FROM point_history), 1) AS bytes_per_sample;
+
+-- per chunk
+SELECT c.chunk_name, c.range_start, c.range_end, c.is_compressed, pg_size_pretty(d.total_bytes)
+FROM timescaledb_information.chunks c
+JOIN chunks_detailed_size('point_history') d USING (chunk_name)
+WHERE c.hypertable_name = 'point_history' ORDER BY c.range_start;
+```
+
+From the host: `docker compose exec postgres psql -U baler -c '...'` (or `-U
+timberdoodle` on a legacy install).
+
+## Changing `compress_after`
+
+Set `BALER_HISTORY_COMPRESS_AFTER` in `.env` to any Postgres interval (`3
+days`, `2 weeks`), then `docker compose up -d` so the services pick it up. The
+first service to open a new history connection replaces the policy. Check the
+`config` column above. An invalid interval is logged as an error, and the
+current policy stays as it is.
+
+A shorter interval saves disk sooner, but sends more late data down the slower
+path. A longer one keeps more raw rows uncompressed.
+
+To compress or decompress by hand, for example before a bulk rewrite of an old
+range:
+
+```sql
+SELECT compress_chunk(c, if_not_compressed => true)
+FROM show_chunks('point_history', older_than => now() - interval '7 days') c;
+SELECT decompress_chunk(c, if_compressed => true)
+FROM show_chunks('point_history', newer_than => '2026-01-01', older_than => '2026-02-01') c;
+```
+
+Turning compression off entirely means decompressing every chunk, which needs
+the uncompressed disk space back. Then `SELECT
+remove_compression_policy('point_history')` and `ALTER TABLE point_history SET
+(timescaledb.compress = false)`. A service that starts afterwards turns
+compression back on, so this is a manual, unsupported state.
+
+## Licence
+
+TimescaleDB's compression is under the [Timescale
+License](https://github.com/timescale/timescaledb/blob/main/tsl/LICENSE-TIMESCALE)
+(TSL), not Apache-2.0. It's free to use self-hosted, which is how Baler runs
+(the `timescale/timescaledb` image ships it). It isn't offered on hosted
+"Postgres + TimescaleDB Apache-only" services. The planned building export
+(Parquet, Baler#193) is the way out if that ever matters.
