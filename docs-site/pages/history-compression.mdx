@@ -102,6 +102,16 @@ and each process compare them with the database once at start
 only what differs, waiting at most 5 s for the lock. `python -m
 baler.history_chunks status` shows what the database has now.
 
+They're not a migration on purpose: a migration means the same thing on every
+database forever, and these are per deployment. Nothing they run reads history:
+`set_chunk_time_interval` and `alter_job` update one catalog row each, and the
+policy swap is two catalog calls, so the cost doesn't grow with history.
+Measured on a database with 6.5 M rows in 251 chunks, 248 of them compressed:
+the check alone 2–4 ms, changing the interval and the schedule 6–15 ms,
+replacing the policy for a new `compress_after` 9 ms, and the same change with
+a long read holding the hypertable open in another session 15 ms (it doesn't
+wait for readers; a concurrent write right after took 4 ms).
+
 **A small site sets nothing.** 50 points every 5 s is 10 rows/s: a 7-day chunk
 is about 1.5 GB raw, and its behaviour is exactly what it was before these
 settings existed.
