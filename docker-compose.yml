@@ -74,6 +74,7 @@ services:
     restart: "no"
 
   mosquitto:
+    restart: unless-stopped
     # 2.1.2 by digest: Docker Hub publishes no 2.1.2 (or 2.1) tag (#23)
     image: eclipse-mosquitto:2@sha256:75d6662dee52c947dc9dd9c29f1d8d7ffef78ddaf38001caa09755681e8bbc98
     entrypoint: ["/mosquitto/config/entrypoint.sh"]
@@ -112,6 +113,7 @@ services:
       start_interval: 2s
 
   oxigraph:
+    restart: unless-stopped
     # pinned (#23): holds the graph - tag and digest of what nash-srv runs
     image: ghcr.io/oxigraph/oxigraph:0.5.13@sha256:260454ee29c091d2cdb99dd156212594ff3127850627adb4cfdcd9b1e425d480
     command: serve -l /data -b 0.0.0.0:7878 --cors --union-default-graph
@@ -121,6 +123,7 @@ services:
       - "7878:7878"
 
   postgres:
+    restart: unless-stopped
     # pinned (#23): holds history and auth - tag and digest of what nash-srv runs
     image: timescale/timescaledb:2.30.0-pg16@sha256:322ae364eca3321cf2a48f1ef31213b87843413b3cf8feeebf54e999a26bb731
     command: postgres -c log_statement=all
@@ -143,6 +146,7 @@ services:
       retries: 20
 
   jaeger:
+    restart: unless-stopped
     # Jaeger v2 (OpenTelemetry Collector based; v1 all-in-one is superseded -
     # Baler#26). Same UI (16686) and OTLP HTTP (4318) ports. In-memory
     # storage needs a cap: uncapped, v1 hit 26GB (85% of nash-srv's RAM, on
@@ -201,6 +205,7 @@ services:
     depends_on: *daemon-depends-on
 
   ingest_api:
+    restart: unless-stopped
     build: .
     command: python -m baler.ingest_api
     environment: *daemon-env
@@ -251,6 +256,7 @@ services:
     depends_on: *daemon-depends-on
 
   derivation_api:
+    restart: unless-stopped
     build: .
     command: python -m baler.derivation_api
     environment:
@@ -279,6 +285,7 @@ services:
     depends_on: *daemon-depends-on
 
   validate_api:
+    restart: unless-stopped
     build: .
     command: python -m baler.validate_api
     environment: *daemon-env
@@ -290,6 +297,7 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8005/openapi.yaml')"]
 
   auth_api:
+    restart: unless-stopped
     build: .
     command: python -m baler.auth_api
     environment: *daemon-env
@@ -301,6 +309,7 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8006/openapi.yaml')"]
 
   ops_api:
+    restart: unless-stopped
     build: .
     command: python -m baler.ops_api
     environment:
@@ -358,6 +367,7 @@ services:
   # Haxall, nhaystack and pyhaystack clients point at. Also issues session
   # JWTs via Haystack SCRAM login, so it reads BALER_JWT_SECRET.
   haystack_api:
+    restart: unless-stopped
     build: .
     command: python -m baler.haystack_api
     environment: *daemon-env
@@ -369,6 +379,7 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8008/openapi.yaml')"]
 
   haystack_puller:
+    restart: unless-stopped
     build: .
     command: python -m baler.haystack_puller
     profiles: ["haystack-pull"]
@@ -387,6 +398,7 @@ services:
         condition: service_started
 
   sql_puller:
+    restart: unless-stopped
     build: .
     command: python -m baler.sql_puller
     profiles: ["sql-pull"]
@@ -404,6 +416,7 @@ services:
         condition: service_started
 
   energystar_puller:
+    restart: unless-stopped
     build: .
     command: python -m baler.energystar_puller
     profiles: ["energystar-pull"]
@@ -436,6 +449,7 @@ services:
     restart: unless-stopped
 
   openmeteo_puller:
+    restart: unless-stopped
     build: .
     command: python -m baler.openmeteo_puller
     profiles: ["openmeteo-pull"]
@@ -463,6 +477,7 @@ services:
   # `notebooks` volume, and baler_fn is baked into the image (rebuild with
   # --build after changing src/baler_fn). See docs-site/pages/code/notebooks.mdx.
   jupyter:
+    restart: unless-stopped
     build:
       context: .
       dockerfile: docker/notebook.Dockerfile
@@ -481,6 +496,7 @@ services:
       - notebooks:/home/jovyan/work
 
   gateway:
+    restart: unless-stopped
     image: nginx:1.31.8-alpine
     ports:
       - "8080:80"
