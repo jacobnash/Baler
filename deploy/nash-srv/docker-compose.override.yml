@@ -42,3 +42,46 @@ services:
   gateway:
     ports: !override
       - "127.0.0.1:8080:80"
+
+# nash-srv's data volumes predate the rename: they were created by the
+# `timberdoodle` compose project (BALER_VOLUME_PREFIX=timberdoodle and
+# WINDROW_STATE_VOLUME=fbf-state in nash-srv.env keep their names, see
+# deploy/MIGRATING-TO-BALER.md). Compose labels a volume with the project
+# that created it, so every deploy under project `baler` warned
+#   volume "timberdoodle_postgres-data" already exists but was created for
+#   project "timberdoodle" (expected "baler"). Use `external: true` ...
+# `external: true` tells compose the volume is managed outside this project:
+# it uses it as-is, skips the label check, and never creates or removes it
+# (`down -v` leaves it alone, which suits the one copy of the live data).
+#
+# Only these five, the ones that warning names on nash-srv. app-data and
+# gateway-logs were first created under project `baler`, so compose owns
+# them without complaint. `name:` repeats the base file's on purpose: an
+# external volume is looked up by that exact name, and the
+# ${BALER_VOLUME_PREFIX:-baler} / ${WINDROW_STATE_VOLUME:-windrow-state}
+# fallbacks must keep resolving the same way.
+#
+# Here and not in docker-compose.yml, because compose refuses to start with
+# a missing external volume and `external:` can't be made conditional on the
+# prefix (an empty value isn't a boolean). A fresh install has none of these
+# volumes and must keep creating its own, so the base file stays as it was.
+# A from-scratch nash-srv (no timberdoodle volumes) creates them once before
+# its first deploy; docs-site/pages/nash-srv-deploy.mdx has the command.
+# windrow-state is defined in docker-compose.windrow.yml, always loaded after
+# this file on nash-srv; compose merges the two definitions.
+volumes:
+  postgres-data:
+    name: ${BALER_VOLUME_PREFIX:-baler}_postgres-data
+    external: true
+  oxigraph-data:
+    name: ${BALER_VOLUME_PREFIX:-baler}_oxigraph-data
+    external: true
+  grafana-data:
+    name: ${BALER_VOLUME_PREFIX:-baler}_grafana-data
+    external: true
+  mosquitto-data:
+    name: ${BALER_VOLUME_PREFIX:-baler}_mosquitto-data
+    external: true
+  windrow-state:
+    name: ${BALER_VOLUME_PREFIX:-baler}_${WINDROW_STATE_VOLUME:-windrow-state}
+    external: true

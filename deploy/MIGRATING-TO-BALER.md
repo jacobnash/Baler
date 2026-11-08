@@ -6,7 +6,7 @@ The rename keeps your data where it is. Nothing is copied or re-keyed:
 |---|---|
 | `TIMBERDOODLE_*` env vars | Every `BALER_*` setting falls back to its old name under docker compose, so an old `.env` keeps working. |
 | Postgres role and database (`timberdoodle`) | Kept by setting `BALER_PG_USER` and `BALER_PG_DB`. |
-| Docker volumes (`timberdoodle_*`) | Kept by setting `BALER_VOLUME_PREFIX` (plus `WINDROW_STATE_VOLUME=fbf-state` for the nash-srv demo overlay). |
+| Docker volumes (`timberdoodle_*`) | Kept by setting `BALER_VOLUME_PREFIX` (plus `WINDROW_STATE_VOLUME=fbf-state` for the nash-srv demo overlay). On nash-srv, `deploy/nash-srv/docker-compose.override.yml` also marks the ones the `timberdoodle` project created `external: true`, so compose stops warning that they belong to another project. |
 | Graph vocabulary (`urn:timberdoodle:td#`, `haystack#`, `proj#`, the ontology graph) | Rewritten to `urn:baler:...` by the `migrate` compose service on the first `up`. It runs before every daemon, does nothing on later runs, and logs what it changed. |
 | Windrow `FBF_*` env vars and `fbf-*.json` state files | `FBF_*` still read. Old state files are moved to their `windrow-*` names on first start. |
 | MQTT topics `fbf/...`, point ids `urn:point:fbf/...` | **Unchanged on purpose.** Every point's history is keyed on them. |

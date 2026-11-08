@@ -1,7 +1,14 @@
 // R4: performance budgets, cold (right after a deploy) and warm (five minutes
 // later). Each route in budgets.json is fetched `runs` times through the
 // public gateway; the median and max time and the largest response are
-// judged against that phase's budget. evaluate() is pure (perf.test.mjs).
+// judged against that phase's budget. evaluate() is pure (checks.test.mjs).
+//
+// Each phase also records the load on the host running it (hostLoad): in the
+// Deploy workflow that's nash-srv itself (the self-hosted runner), so a slow
+// number can be read against a busy box.
+
+import { readFileSync } from "node:fs";
+import os from "node:os";
 
 export const median = (xs) => {
   if (!xs.length) return null;
@@ -22,6 +29,28 @@ export function stats(samples) {
     errors: samples.filter((s) => !(s.status >= 200 && s.status < 400)).map((s) => s.status || s.error || "no answer"),
   };
 }
+
+// Read-only and cheap: /proc/loadavg ("0.52 0.58 0.59 1/389 12345"), else
+// os.loadavg() (the same numbers, where there's no /proc). nproc is the CPUs
+// this process may use, like `nproc`.
+export function parseLoadavg(text) {
+  const [l1, l5, l15, procs] = String(text).trim().split(/\s+/);
+  const load = [l1, l5, l15].map(Number);
+  if (load.some((n) => !Number.isFinite(n))) return null;
+  const [running, total] = (procs || "").split("/").map(Number);
+  return { load, running: Number.isFinite(running) ? running : null, total: Number.isFinite(total) ? total : null };
+}
+
+export function hostLoad() {
+  let parsed = null;
+  try { parsed = parseLoadavg(readFileSync("/proc/loadavg", "utf8")); } catch { /* not Linux */ }
+  const load = parsed ? parsed.load : os.loadavg().map((n) => Math.round(n * 100) / 100);
+  const nproc = typeof os.availableParallelism === "function" ? os.availableParallelism() : os.cpus().length;
+  return { at: new Date().toISOString().replace(/\.\d+Z$/, "Z"), host: os.hostname(), load_1m: load[0], load_5m: load[1], load_15m: load[2],
+           nproc, running: parsed ? parsed.running : null, source: parsed ? "/proc/loadavg" : "os.loadavg" };
+}
+
+export const loadText = (h) => (h ? `${h.load_1m} / ${h.load_5m} / ${h.load_15m} (1/5/15 min), nproc ${h.nproc}` : "-");
 
 const kb = (b) => `${Math.round(b / 1000)} kB`;
 
@@ -74,6 +103,7 @@ async function pathFor(route, api) {
 }
 
 export async function run({ api, budgets, phase }) {
+  const host = { before: hostLoad(), after: null };
   const checks = [];
   const raw = [];
   let complete = true;
@@ -96,5 +126,7 @@ export async function run({ api, budgets, phase }) {
     checks.push(check);
     if (f) raw.push(f);
   }
-  return { scope: `perf:${phase}`, complete, checks, raw };
+  host.after = hostLoad();
+  for (const f of raw) f.rows.push(["Runner host load", `${host.before.host}: ${loadText(host.before)} before, ${loadText(host.after)} after`]);
+  return { scope: `perf:${phase}`, complete, checks, raw, host };
 }
