@@ -24,8 +24,12 @@
 #      `baler-verify` (not `baler`, so deploys never land on it), for the
 #      Deploy workflow's verify job (#260): verify then runs beside the
 #      deploy runner instead of occupying it, so the next deploy never waits
-#      on it. Same user, no sudo rule, no docker access; it only reads the
-#      live install over HTTPS. Once it's online, point the workflow at it:
+#      on it. It runs as the same `github-runner` user, so it adds no new
+#      privilege but has the same ones: no docker access, and that user's
+#      existing NOPASSWD sudoers rules (the deploy wrapper, plus any other
+#      rules on the host) apply to jobs on it too. Trust it exactly as much
+#      as the deploy runner. The verify job itself only reads the live
+#      install over HTTPS. Once it's online, point the workflow at it:
 #        gh variable set BALER_VERIFY_RUNNER --body baler-verify -R jacobnash/Baler
 #
 # Idempotent-ish: safe to re-run steps 1-5. Steps 6 and 8 each skip

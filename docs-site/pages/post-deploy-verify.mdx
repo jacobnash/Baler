@@ -76,8 +76,10 @@ repo variable `BALER_VERIFY_RUNNER` names the label the verify job asks for:
 - **`baler-verify`: a second runner instance** (`nash-srv-baler-verify`, label `baler-verify` and not
   `baler`, so deploys never land on it). Verification runs beside the deploy runner, so a deploy
   never waits on it at all, and the supersede check stops a verification as soon as the newer deploy
-  starts. It runs as the same `github-runner` user with its own workspace, no sudo rule and no
-  docker access.
+  starts. It runs as the same `github-runner` user with its own workspace. That adds no new
+  privilege, but it isn't less privileged either: that user has no docker access, and its existing
+  NOPASSWD sudoers rules (the deploy wrapper, and any others on the host) apply to jobs on this
+  runner too. Treat it with the same trust as the deploy runner.
 
 To set up the second runner, once, on nash-srv (needs sudo and a registration token from the repo's
 Settings, Actions, Runners, New self-hosted runner, valid about an hour):
