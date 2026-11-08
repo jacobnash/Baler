@@ -56,7 +56,7 @@ def test_values_match_point_kind():
 def _route(monkeypatch, topic, payload):
     calls = []
     for name in ("ingest_equip_tags", "ingest_tags", "ingest_reading", "link_point_to_equip"):
-        monkeypatch.setattr(mqtt_listener, name, lambda *a, _n=name: calls.append((_n, a)) or "urn:x")
+        monkeypatch.setattr(mqtt_listener, name, lambda *a, _n=name, **kw: calls.append((_n, a)) or "urn:x")
     monkeypatch.setattr(mqtt_listener, "link_equip_ref", lambda *a: None)
     monkeypatch.setattr(mqtt_listener, "_classify", lambda *a: None)
     on_message = mqtt_listener.make_on_message(store=object(), ts_conn=object())

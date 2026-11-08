@@ -127,9 +127,11 @@ def test_batch_write_matches_row_by_row(conn):
     t2 = datetime(2026, 1, 1, 0, 0, 5, tzinfo=timezone.utc)
     write_point_value(conn, "urn:test-ts:temp", 1.0, t1)  # overwritten by the batch
     rows = [("urn:test-ts:temp", 70.0, t1), ("urn:test-ts:temp", 71.5, t1, "°F"), ("urn:test-ts:temp", 72.0, t2),
-            ("urn:test-ts:fan", True, t1), ("urn:test-ts:mode", "active", t1), ("urn:test-ts:missing", None, t1)]
-    assert write_point_values(conn, rows) == 5  # two rows share (temp, t1)
-    assert write_point_values(conn, rows) == 5  # replay (a broker redelivery) changes nothing
+            ("urn:test-ts:fan", True, t1), ("urn:test-ts:mode", "active", t1), ("urn:test-ts:missing", None, t1),
+            ("urn:test-ts:flagged", 5.0, t1, None, None, "fault")]
+    assert write_point_values(conn, rows) == 6  # two rows share (temp, t1)
+    assert write_point_values(conn, rows) == 6  # replay (a broker redelivery) changes nothing
+    assert conn.execute("SELECT quality FROM point_history WHERE point_uri = 'urn:test-ts:flagged'").fetchone()[0] == "fault"
     assert read_range(conn, "urn:test-ts:temp", t1, t2) == [(t1, 71.5), (t2, 72.0)]
     assert conn.execute("SELECT unit FROM point_history WHERE point_uri = 'urn:test-ts:temp' AND ts = %s", (t1,)).fetchone()[0] == "°F"
     assert read_latest(conn, "urn:test-ts:fan") is True

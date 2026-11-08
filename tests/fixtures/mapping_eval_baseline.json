@@ -1,0 +1,356 @@
+{
+  "corpus": "mock_hospital (windrow 330cf9a, seed 42)",
+  "equipment": {
+    "accuracy": 0.0,
+    "auto_accepted": 0,
+    "auto_accepted_pct": 0.0,
+    "auto_accepted_wrong": 0,
+    "auto_accepted_wrong_pct": 0.0,
+    "correct": 0,
+    "partial": 0,
+    "per_class": {
+      "Air_Handling_Unit": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 5
+      },
+      "Boiler": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 2
+      },
+      "Chilled_Water_Pump": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 3
+      },
+      "Chiller": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 3
+      },
+      "Electrical_Meter": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 6
+      },
+      "Exhaust_Fan": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 8
+      },
+      "Hot_Water_Pump": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 3
+      },
+      "Variable_Air_Volume_Box": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 58
+      }
+    },
+    "review": 88,
+    "review_pct": 100.0,
+    "review_truth_in_top1": 0.773,
+    "review_truth_in_top3": 0.773,
+    "steps": {
+      "memory": {
+        "accuracy": null,
+        "correct": 0,
+        "partial": 0,
+        "pct": 0.0,
+        "points": 0,
+        "wrong": 0
+      },
+      "model": {
+        "accuracy": null,
+        "correct": 0,
+        "partial": 0,
+        "pct": 0.0,
+        "points": 0,
+        "wrong": 0
+      },
+      "review": {
+        "accuracy": null,
+        "correct": 0,
+        "partial": 0,
+        "pct": 100.0,
+        "points": 88,
+        "wrong": 0
+      },
+      "rules": {
+        "accuracy": null,
+        "correct": 0,
+        "partial": 0,
+        "pct": 0.0,
+        "points": 0,
+        "wrong": 0
+      }
+    },
+    "total": 88
+  },
+  "llm_calls": 0,
+  "mode": "rules only",
+  "patterns": 75,
+  "points": {
+    "accuracy": 0.484,
+    "auto_accepted": 340,
+    "auto_accepted_pct": 69.1,
+    "auto_accepted_wrong": 0,
+    "auto_accepted_wrong_pct": 0.0,
+    "correct": 238,
+    "partial": 102,
+    "per_class": {
+      "Chilled_Water_Return_Temperature_Sensor": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 3
+      },
+      "Chilled_Water_Supply_Temperature_Sensor": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 3
+      },
+      "Condenser_Water_Temperature_Sensor": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 3
+      },
+      "Damper_Position_Command": {
+        "precision": 1.0,
+        "predicted": 49,
+        "recall": 0.845,
+        "support": 58
+      },
+      "Damper_Position_Sensor": {
+        "precision": 1.0,
+        "predicted": 52,
+        "recall": 0.897,
+        "support": 58
+      },
+      "Electric_Energy_Sensor": {
+        "precision": 1.0,
+        "predicted": 4,
+        "recall": 0.667,
+        "support": 6
+      },
+      "Electric_Power_Sensor": {
+        "precision": 1.0,
+        "predicted": 6,
+        "recall": 0.667,
+        "support": 9
+      },
+      "Fan_Command": {
+        "precision": 1.0,
+        "predicted": 13,
+        "recall": 1.0,
+        "support": 13
+      },
+      "Fan_Status": {
+        "precision": 1.0,
+        "predicted": 12,
+        "recall": 0.923,
+        "support": 13
+      },
+      "Hot_Water_Return_Temperature_Sensor": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 2
+      },
+      "Hot_Water_Supply_Temperature_Sensor": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 2
+      },
+      "Mixed_Air_Temperature_Sensor": {
+        "precision": 1.0,
+        "predicted": 4,
+        "recall": 0.8,
+        "support": 5
+      },
+      "Motor_Speed_Sensor": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 6
+      },
+      "Occupied_Target_Zone_Air_Temperature_Setpoint": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 58
+      },
+      "Outside_Air_Temperature_Sensor": {
+        "precision": 1.0,
+        "predicted": 4,
+        "recall": 0.8,
+        "support": 5
+      },
+      "Pump_Command": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 6
+      },
+      "Pump_Status": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 6
+      },
+      "Return_Air_Temperature_Sensor": {
+        "precision": 1.0,
+        "predicted": 5,
+        "recall": 1.0,
+        "support": 5
+      },
+      "Run_Status": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 5
+      },
+      "Start_Stop_Command": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 5
+      },
+      "Supply_Air_Flow_Sensor": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 58
+      },
+      "Supply_Air_Static_Pressure_Sensor": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 5
+      },
+      "Supply_Air_Temperature_Sensor": {
+        "precision": 1.0,
+        "predicted": 5,
+        "recall": 1.0,
+        "support": 5
+      },
+      "Unoccupied_Target_Zone_Air_Temperature_Setpoint": {
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "support": 58
+      },
+      "Zone_Air_Humidity_Sensor": {
+        "precision": 1.0,
+        "predicted": 17,
+        "recall": 1.0,
+        "support": 17
+      },
+      "Zone_Air_Temperature_Sensor": {
+        "precision": 1.0,
+        "predicted": 51,
+        "recall": 0.879,
+        "support": 58
+      },
+      "Zone_Air_Temperature_Setpoint": {
+        "precision": 0.0,
+        "predicted": 102,
+        "recall": null,
+        "support": 0
+      },
+      "Zone_CO2_Level_Sensor": {
+        "precision": 1.0,
+        "predicted": 16,
+        "recall": 0.889,
+        "support": 18
+      }
+    },
+    "review": 152,
+    "review_pct": 30.9,
+    "review_truth_in_top1": 0.307,
+    "review_truth_in_top3": 0.827,
+    "steps": {
+      "memory": {
+        "accuracy": null,
+        "correct": 0,
+        "partial": 0,
+        "pct": 0.0,
+        "points": 0,
+        "wrong": 0
+      },
+      "model": {
+        "accuracy": null,
+        "correct": 0,
+        "partial": 0,
+        "pct": 0.0,
+        "points": 0,
+        "wrong": 0
+      },
+      "review": {
+        "accuracy": null,
+        "correct": 0,
+        "partial": 0,
+        "pct": 30.9,
+        "points": 152,
+        "wrong": 0
+      },
+      "rules": {
+        "accuracy": 0.7,
+        "correct": 238,
+        "partial": 102,
+        "pct": 69.1,
+        "points": 340,
+        "wrong": 0
+      }
+    },
+    "total": 492
+  },
+  "points_by_description": {
+    "no description": {
+      "accuracy": 0.274,
+      "auto_accepted_pct": 40.7,
+      "total": 135
+    },
+    "with description": {
+      "accuracy": 0.563,
+      "auto_accepted_pct": 79.8,
+      "total": 357
+    }
+  },
+  "points_by_style": {
+    "camel": {
+      "accuracy": 0.397,
+      "auto_accepted_pct": 62.0,
+      "total": 121
+    },
+    "cryptic": {
+      "accuracy": 0.413,
+      "auto_accepted_pct": 54.0,
+      "total": 126
+    },
+    "underscore": {
+      "accuracy": 0.667,
+      "auto_accepted_pct": 84.2,
+      "total": 114
+    },
+    "verbose": {
+      "accuracy": 0.473,
+      "auto_accepted_pct": 77.1,
+      "total": 131
+    }
+  }
+}

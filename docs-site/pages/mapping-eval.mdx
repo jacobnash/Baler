@@ -1,0 +1,141 @@
+---
+title: Mapping eval
+---
+
+`python -m baler.mapping_eval` scores Baler's tagging ladder against a site
+whose answers are known. A change to the tagging rules, the Brick mapping
+rules or the LLM fallback then comes with a number, not a guess. It is the
+first item of the messy-data-to-ontology work (#188) and every later item
+reports against it.
+
+## The corpus
+
+Windrow's `mock_hospital` site, read from the `windrow` submodule at its
+pinned commit: 492 points on 88 pieces of equipment (AHUs, VAVs, chillers,
+boilers, pumps, meters, exhaust fans). Each point name is rendered in one of
+four styles (`Discharge Air Temp`, `discharge_air_temp`, `DIS-AIR-TEM-12`,
+`DischargeAirTemp`), and about 70% get a description. The generator knows
+each point's true kind. The harness maps each kind to the Brick class a
+person would assign (`POINT_TRUTH` and `EQUIP_TRUTH` in
+`src/baler/mapping_eval.py`). Where Brick 1.4.4 offers two fair answers
+(a pump's `Pump_Status` or `Run_Status`), both count. Where it has none (a
+boiler's firing rate), the only right outcome is review.
+
+## What runs
+
+Everything a real BACnet job goes through, offline: no BACnet, MQTT or
+Oxigraph.
+
+1. Windrow's `bacnet_tagger.tag_point` over the label, object identifier
+   and description, plus the `writable` and `unit` tags Windrow's
+   connection manager adds.
+2. `ingest.ingest_tags` into an in-memory store.
+3. `mapping.classify_point`, then [the model step](/model-step) on what the
+   rules leave, as `autotag` does. The model step runs even with no model:
+   it then only ranks candidates for review.
+
+Each point ends on one ladder step:
+
+| Step | Meaning |
+|---|---|
+| `rules` | A direct rule match. Auto-accepted. |
+| `memory` | The nearest confirmed examples agreed ([memory](/memory)). Auto-accepted. |
+| `model` | Both model asks agreed on a real Brick class and nothing vetoed it. Auto-accepted. |
+| `review` | A mapping proposal with up to 3 candidates. A person decides. |
+
+Memory and site naming conventions (#185, #186) get their own steps when they
+exist.
+
+## How a point is scored
+
+| Verdict | When |
+|---|---|
+| correct | The class written is the true class or a Brick equivalent (`Discharge_Air_Temperature_Sensor` is `Supply_Air_Temperature_Sensor`). |
+| partial | The class written is a Brick ancestor of the true class. That is true, but less specific (`Zone_Air_Temperature_Setpoint` for an occupied zone setpoint). |
+| wrong | Anything else, including a class Brick doesn't have. |
+
+The report gives, for points and for equipment:
+
+- **accuracy**: exactly correct over all points, so review counts against it;
+- **auto-accepted**: the share decided without a person;
+- **auto-accepted but wrong**: the share nobody will look at that is wrong.
+  This must stay near zero;
+- **left for review**, and how often the true class is the proposal's top
+  candidate, or among its top 3: what a reviewer is shown;
+- the same per ladder step, per Brick class (precision and recall), per
+  naming style, and with or without a description;
+- every auto-accepted-but-wrong point by name.
+
+## Running it
+
+```bash
+python -m baler.mapping_eval            # rules only: no key, ~3 s
+python -m baler.mapping_eval --check    # also fail on a regression (CI runs this)
+python -m baler.mapping_eval --json out.json
+```
+
+It needs the submodule: `git submodule update --init windrow`. Without it,
+`tests/test_mapping_eval.py` skips its corpus tests.
+
+The model step costs money, so it runs only by hand, with whatever
+`BALER_LLM_PROVIDER` configures:
+
+```bash
+ANTHROPIC_API_KEY=... python -m baler.mapping_eval --llm --llm-record answers.json
+python -m baler.mapping_eval --llm-replay answers.json   # re-score for free
+```
+
+A replay answers from the recording, keyed by the exact prompt. A change
+after the model (the veto, the agreement rule) can be re-scored without
+paying again; a change to what the prompt contains (evidence, candidates)
+can't, and needs a new recording.
+
+`--memory-from-seed SEED` gives the ladder memory built from another seed
+of the mock hospital, with every review proposal there answered correctly:
+a stand-in for "the next building". See [memory](/memory) for what that
+measures and why it flatters.
+
+With no key at all, `--simulate inventing|echo|ranker` runs the model step
+with a stand-in (see `Simulated` in `mapping_eval.py`). They show what the
+ladder does with a kind of answer, not how good a model is.
+
+## The model step only writes real Brick classes
+
+A model will name a class Brick doesn't have, such as
+`Chilled_Water_Supply_Temp_Sensor`. Every answer is checked with
+`brick_vocab.canonical_class` (#181); anything else is dropped, and the
+point goes to review. With the `inventing` stand-in, which glues a class
+name out of each label, 148 of its answers named no Brick class; before
+the check they were written (30.1% of points auto-accepted but wrong),
+after it none are.
+
+## The baseline
+
+`tests/fixtures/mapping_eval_baseline.json` is the rules-only summary from
+the last change that moved the score. `--check` fails if exact accuracy
+falls or auto-accepted-but-wrong rises, for points or equipment. An
+improvement passes. Regenerate the file in the PR that makes the
+improvement, so the diff shows the before and after:
+
+```bash
+python -m baler.mapping_eval --json tests/fixtures/mapping_eval_baseline.json
+```
+
+At the first baseline (rules only, windrow `330cf9a`):
+
+| | Points (492) | Equipment (88) |
+|---|---|---|
+| Accuracy (exact class) | 48.4% | 0% |
+| Auto-accepted | 69.1% | 0% |
+| Auto-accepted but wrong | 0% | 0% |
+| Auto-accepted, less specific | 20.7% | 0% |
+| Left for review | 30.9% | 100% |
+
+Since #182 the baseline also records what review gets: the true class was
+the top candidate for 30.7% of review points and in the top 3 for 82.7%
+(equipment: 77.3% for both).
+
+Points without a description: 27.4% accuracy. With one: 56.3%. Every chiller,
+boiler and pump point and all 88 pieces of equipment go to review, because
+Windrow's tagger has no rule for their vocabulary and sends no equipment
+tags. That is the gap the later items aim at.

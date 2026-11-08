@@ -72,6 +72,10 @@ friends generate survives every redeploy.
    from GitHub's secret UI (write-only, so re-set rather than "view") if
    you need a reminder, or rotate them there directly.
 
+After the deploy, the workflow's `verify` job checks the live install (read-only) and files or
+closes `live-check` issues. It needs a credentials file on the runner, created once by hand: see
+[Post-deploy verification](/post-deploy-verify#one-time-setup-on-nash-srv).
+
 ## Demo data (mock hospital)
 
 Without this, the demo is just an empty app past login. `deploy/nash-srv/docker-compose.windrow.yml`
@@ -97,9 +101,9 @@ DEMO_ADMIN_EMAIL=<same as the GitHub secret> DEMO_ADMIN_PASSWORD=<same> \
 
 Provisions windrow.api against the mock device (~500 points across ~90
 equipment), waits for `mqtt_listener` to ingest some of it, runs `autotag
---no-llm` (rule engine only - no `ANTHROPIC_API_KEY` needed, some points
-stay unclassified without the LLM fallback but the rule engine covers the
-common cases), then seeds real Brick derivations/fault rules through the
+--no-llm` (rules only - no model key needed; what the rules can't place
+is left as mapping proposals with ranked candidates, see
+[the model step](/model-step)), then seeds real Brick derivations/fault rules through the
 gateway using the same demo account. Run as `jacob` (already in the
 `docker` group on this box) - not through the runner's sudoers wrapper,
 this needs `docker compose exec`, not just `up`.

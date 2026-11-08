@@ -20,11 +20,6 @@ tracer = tracing.get_tracer(__name__)
 DEFAULT_RULES_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "rules", "haystack_to_brick.yaml")
 EQUIP_RULES_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "rules", "haystack_equip_to_brick.yaml")
 
-# Below this, an LLM guess is discarded rather than asserted - see
-# classify_point_with_fallback. Not exposed as a config knob; there's
-# nothing here yet that justifies making it one.
-LLM_CONFIDENCE_THRESHOLD = 0.7
-
 
 def load_rules(path: str = DEFAULT_RULES_PATH) -> list[MappingRule]:
     with open(path) as f:
@@ -128,40 +123,12 @@ def classify_on_ingest(store, uri, rules: list[MappingRule]) -> str | None:
     return rule["brick_class"]
 
 
-def classify_point_with_fallback(store, point_uri, rules: list[MappingRule] | None = None, llm_classify=None) -> tuple[str, str | None]:
-    """classify_point, with an injectable LLM fallback for what the rule
-    engine can't place. Rule engine runs first, always - llm_classify (see
-    llm_classifier.classify_with_llm) is only ever consulted on a
-    "fallback"/"miss" outcome, and llm_classify=None (the default) means
-    this behaves exactly like classify_point - mapping.py itself has no
-    hard dependency on the LLM classifier module or the `anthropic`
-    package. A low-confidence LLM guess is never applied: whatever
-    classify_point already produced (a PROJ fallback class, or
-    TD.UnmappedPoint) is left untouched rather than silently overwritten."""
-    with tracer.start_as_current_span("mapping.classify_point_with_fallback") as span:
-        outcome, brick_class = classify_point(store, point_uri, rules)
-        span.set_attribute("rule_outcome", outcome)
-        if outcome == "direct" or llm_classify is None:
-            return outcome, brick_class
-
-        if rules is None:
-            rules = load_rules()
-        tags = read_tags(store, point_uri)
-        rows = store.query(f"SELECT ?topic WHERE {{ <{point_uri}> <{TD.sourceTopic}> ?topic }}")
-        label = next((str(r.topic) for r in rows), None)
-        known_classes = sorted({r["brick_class"] for r in rules})
-
-        result = llm_classify(tags, label, None, known_classes)
-        span.set_attribute("llm_brick_class", result.brick_class)
-        span.set_attribute("llm_confidence", result.confidence)
-        if result.confidence < LLM_CONFIDENCE_THRESHOLD:
-            span.set_attribute("outcome", outcome)
-            return outcome, brick_class
-
-        store.add_entity(point_uri, BRICK[result.brick_class])
-        store.add_relationship(point_uri, SKOS.definition, Literal(f"llm-classified: {result.reasoning}"))
-        span.set_attribute("outcome", "llm")
-        return "llm", result.brick_class
+def classify_point_with_fallback(store, point_uri, rules: list[MappingRule] | None = None) -> tuple[str, str | None]:
+    """classify_point, kept under this name for the pullers that call it.
+    It used to take an LLM callable for what the rules couldn't place; that
+    is now model_step.run, which batches by naming pattern, needs agreement
+    before it writes, and leaves the rest as mapping proposals (#182)."""
+    return classify_point(store, point_uri, rules)
 
 
 def reclassify(store, uri, rules: list[MappingRule] | None = None) -> tuple[str, str | None]:

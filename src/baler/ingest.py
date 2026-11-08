@@ -32,11 +32,13 @@ def topic_to_point_uri(topic: str) -> URIRef:
     return URIRef(f"urn:point:{topic}")
 
 
-def ingest_reading(store, ts_conn, topic: str, value, ts: float | None = None) -> URIRef:
+def ingest_reading(store, ts_conn, topic: str, value, ts: float | None = None, quality: str | None = None) -> URIRef:
     """Writes to both the graph (identity + raw topic, for Phase 2 to key
     off) and the time-series store (the actual value history). Idempotent
     on (point_uri, ts) - required because Windrow publishes with retain=True,
-    which replays the last message on every listener restart."""
+    which replays the last message on every listener restart. `quality` is
+    the sample's flag from the envelope (baler.quality.from_envelope; None
+    is ok); the value is stored as sent either way."""
     with tracer.start_as_current_span("ingest.reading") as span:
         point_uri = topic_to_point_uri(topic)
         span.set_attribute("point_uri", str(point_uri))
@@ -53,13 +55,13 @@ def ingest_reading(store, ts_conn, topic: str, value, ts: float | None = None) -
             _known_points.add(point_uri)
 
         with tracer.start_as_current_span("ingest.timeseries_write"):
-            timeseries.write_point_value(ts_conn, str(point_uri), value, dt)
+            timeseries.write_point_value(ts_conn, str(point_uri), value, dt, quality=quality)
 
         return point_uri
 
 
 def ingest_readings(store, ts_conn, readings) -> int:
-    """ingest_reading for many readings at once - (topic, value, ts) each -
+    """ingest_reading for many readings at once - (topic, value, ts[, quality]) each -
     as mqtt_listener's batches use it: one Oxigraph round trip for every
     point seen for the first time in the batch (none once they're all
     known), and one transaction for the rows (timeseries.write_point_values).
@@ -69,7 +71,9 @@ def ingest_readings(store, ts_conn, readings) -> int:
         rows = []
         new: dict[URIRef, str] = {}
         now = None
-        for topic, value, ts in readings:
+        for reading in readings:
+            topic, value, ts = reading[0], reading[1], reading[2]
+            quality = reading[3] if len(reading) > 3 else None
             point_uri = topic_to_point_uri(topic)
             if point_uri not in _known_points:
                 new[point_uri] = topic
@@ -78,7 +82,7 @@ def ingest_readings(store, ts_conn, readings) -> int:
                 dt = now
             else:
                 dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-            rows.append((str(point_uri), value, dt))
+            rows.append((str(point_uri), value, dt, None, None, quality))
         span.set_attribute("readings", len(rows))
         span.set_attribute("new_points", len(new))
         if new:

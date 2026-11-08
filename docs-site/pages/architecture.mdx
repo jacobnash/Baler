@@ -217,9 +217,10 @@ would just crash), so `postgres` has a `pg_isready` healthcheck and every
 daemon `depends_on` it with `condition: service_healthy`; oxigraph and
 mosquitto start fast enough in practice not to need the same treatment.
 
-Plus two one-shot tools that aren't daemons at all: `autotag.py` (rule
-engine + LLM-fallback sweep that proposes new mapping rules, never edits
-the live rule set) and the static `ui/` — served both by the gateway at
+Plus two one-shot tools that aren't daemons at all: `autotag.py` (rules,
+then the [model step](/model-step) on what they leave; what isn't settled
+becomes a mapping proposal for a person, and the rule files are never
+edited) and the static `ui/` — served both by the gateway at
 `/ui/` (no separate process) and, standalone, by
 `python -m baler.ui_server` on `:8004` for anyone not going
 through Docker. Either way it talks to `derivation_api.py`/`fault_api.py`

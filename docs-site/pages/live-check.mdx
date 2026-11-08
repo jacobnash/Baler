@@ -6,10 +6,16 @@ title: Live check (UI testing against a live install)
 (1440 px) and phone (390 px) width. It also opens the Cx project report and run report. Each finding
 goes into the GitHub issue log, with a fingerprint so it isn't filed twice.
 
-It is **read-only**: the browser aborts every request that isn't a GET. The only exception is the
-Connectors page's named edge-node reads (`list_devices`, `list_connections`,
-`modbus_list_connections`), which are POSTs by design. So it is safe to point at production, even
-with an operator account.
+It is **read-only**: every request that isn't a GET is refused, from the browser and from Node.
+The only exceptions are the login and the Connectors page's edge-node reads, which are POSTs by
+design: the actions in `READ_ACTIONS` in `src/baler/edges.py` (`list_devices`, `list_connections`,
+`modbus_list_connections`, `list_announced`), read from the checkout so the guard can't drift from
+the API. So it is safe to point at production, even with an operator account.
+
+After every deploy it also runs as the Deploy workflow's `verify` job, with performance budgets,
+data-flow, edge-node, phone-layout and deploy-window checks on top of the browser pass: see
+[Post-deploy verification](/post-deploy-verify) for those, the CLI options (`--phase`, `--only`) and
+the runbook.
 
 ## What it finds
 
@@ -51,7 +57,8 @@ account. A viewer sees fewer controls, so it checks less.
 | `LIVE_CHECK_REPO` | the checkout's repo | `owner/name` to file issues in |
 | `CHROME_PATH` | system Chrome | browser binary (e.g. `/opt/pw-browsers/chromium`) |
 
-Screenshots and `findings.json` land in `tools/live-check/out/`.
+Screenshots, `findings.json`, the summaries and the `live-verify-<sha>.json` artifact land in
+`tools/live-check/out/`.
 
 ## How it keeps the issue log tidy
 
@@ -59,9 +66,11 @@ Screenshots and `findings.json` land in `tools/live-check/out/`.
 - A finding that is already open is updated in place: *Last seen*, pages and viewports change, but *First
   seen* is kept. Editing a body doesn't notify anyone.
 - A closed issue whose finding comes back is reopened with a comment.
-- An open `live-check` issue that a **complete** run (signed in, every page and report loaded) no
-  longer sees is closed with a comment. An incomplete run (the site was down, a page failed to load,
-  axe failed) closes nothing.
+- An open `live-check` issue that a **complete** run of its check (signed in, every page and report
+  loaded) no longer sees is closed with a comment. An incomplete run (the site was down, a page failed
+  to load, axe failed) closes nothing.
+- An issue closed as "not planned" is never reopened, and one labelled `live-check:ignore` is never
+  touched.
 
 So the loop is: fix and deploy, run `npm run check`, and the issue closes itself if the fix worked.
 

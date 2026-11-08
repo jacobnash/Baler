@@ -20,12 +20,11 @@ the tables already found, and on `openai` only sees the text outside them.
 from __future__ import annotations
 
 import base64
-import json
 import os
-import re
 
 from baler import brick_vocab
 from baler.commissioning import llm, spec_pdf
+from baler.commissioning.llm import parse_json
 from baler.commissioning.spec import KINDS, MAX_PDF_BYTES, brick_class_for
 
 try:  # the `llm` extra; only the anthropic provider needs it
@@ -246,27 +245,6 @@ RESPONSE_FORMATS: list[dict | None] = [
 ]
 DEFAULT_MAX_CHARS = 12000  # per request: small local models have small contexts
 DEFAULT_MAX_TOKENS = 4096
-
-
-def parse_json(text: str):
-    """The JSON object (or list) in a reply that may wrap it in prose or
-    ```json fences. Raises ValueError."""
-    text = (text or "").strip()
-    m = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
-    if m:
-        text = m.group(1).strip()
-    try:
-        return json.loads(text)
-    except ValueError:
-        pass
-    for open_, close in (("{", "}"), ("[", "]")):
-        i, j = text.find(open_), text.rfind(close)
-        if 0 <= i < j:
-            try:
-                return json.loads(text[i:j + 1])
-            except ValueError:
-                continue
-    raise ValueError("no JSON in the reply")
 
 
 def _chunks(pages: list, limit: int) -> list[list]:

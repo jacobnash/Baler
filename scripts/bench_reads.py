@@ -18,6 +18,7 @@ import requests
 
 ROUTES = [
     ("readAll(equip) /ingest/his", "/ingest/his", {"expr": "readAll(equip).hisRead(today)"}),
+    ("readAll(equip) /ingest/his?compact=1", "/ingest/his", {"expr": "readAll(equip).hisRead(today)", "compact": "1"}),
     ("/api/read?filter=point", "/api/read", {"filter": "point"}),
     ("/api/read?filter=equip", "/api/read", {"filter": "equip"}),
     # the Equipment page's other two reads (ui/app.js)

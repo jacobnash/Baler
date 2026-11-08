@@ -155,7 +155,7 @@ With `mqtt_listener.py` ingesting:
 
 ```bash
 pip install -e ".[llm]"                    # anthropic + pydantic: autotag, and Cx 7/10 on BALER_LLM_PROVIDER=anthropic
-ANTHROPIC_API_KEY=... python -m baler.autotag   # rule engine + LLM fallback for what it can't place
+ANTHROPIC_API_KEY=... python -m baler.autotag   # rules, then the model step; the rest become mapping proposals
 BALER_ADMIN_EMAIL=<admin-email> BALER_ADMIN_PASSWORD=<admin-password> \
   python scripts/seed_derivations_and_faults.py         # Brick derivations + fault rules, writes through the gateway
 python -m baler.ui_server                         # browse equipment/points/charts at localhost:8004 (no-store, so edits show up on refresh)
@@ -212,12 +212,15 @@ viewer, changes and scans admin, site-restricted logins refused. See
 [`docs-site/pages/windrow-periodic-discovery.mdx`](docs-site/pages/windrow-periodic-discovery.mdx).
 The old `ui/devices.html` redirects there.
 
-`autotag.py` sweeps every point/equip with tags but no direct Brick match,
-runs `mapping.classify_point_with_fallback` on each (rule engine first,
-Claude Haiku fallback second), and appends high-confidence guesses that
-reuse an existing Brick class to `rules/haystack_to_brick.yaml`/
-`rules/haystack_equip_to_brick.yaml` as commented-out proposals for a
-human to review and promote - it never edits the live rule set itself.
+`autotag.py` sweeps every point/equip with tags but no direct Brick match:
+the rules first, then the model step (`model_step.py`) on what they leave.
+The model (`BALER_LLM_PROVIDER`, as for Cx) is asked twice per naming
+pattern, with the point's tags, unit, value stats and sibling points and a
+list of candidate Brick classes. A class is written only when both asks
+agree on a real Brick class and the unit/value veto passes; everything else
+becomes a mapping proposal in Postgres (`mapping_proposals`) for a person.
+It never edits the rule files. See
+[`docs-site/pages/model-step.mdx`](docs-site/pages/model-step.mdx).
 
 ## Infrastructure ports
 

@@ -22,7 +22,15 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from baler import bacnet_alarms, heartbeat, his_checks, json_store, mqtt_util, tracing
+from baler import (
+    bacnet_alarms,
+    heartbeat,
+    his_checks,
+    json_store,
+    mqtt_util,
+    quality,
+    tracing,
+)
 from baler.faults import (
     close_fault,
     close_orphaned_faults,
@@ -251,6 +259,12 @@ def make_on_message(fault_conn, rule_cache: RuleCache, webhooks_path: str, open_
                 outcome = bacnet_alarms.handle_alarm(fault_conn, msg.topic, value, payload.get("ts"), fire=fire)
                 span.set_attribute("outcome", outcome or "unchanged")
             return
+        # A reading the device itself flags (fault, overridden, out of
+        # service - #183) says nothing about the equipment: it neither opens
+        # nor resolves a fault. The open/closed state stays as it was until
+        # a good reading arrives.
+        if not quality.is_good(quality.from_envelope(payload.get("quality"))):
+            return
         handle_cur_reading(fault_conn, rule_cache, webhooks_path, msg.topic, value, open_faults)
 
     return on_message
@@ -259,9 +273,9 @@ def make_on_message(fault_conn, rule_cache: RuleCache, webhooks_path: str, open_
 def _evaluate_stuck(ts_conn, point_uri: str, stuck_seconds: float, now: datetime) -> bool:
     window_start = now - timedelta(seconds=stuck_seconds)
     n, distinct_values = ts_conn.execute(
-        """
+        f"""
         SELECT COUNT(*), COUNT(DISTINCT COALESCE(value::text, value_text, value_bool::text))
-        FROM point_history WHERE point_uri = %s AND ts >= %s
+        FROM point_history WHERE point_uri = %s AND ts >= %s AND {quality.GOOD_SQL}
         """,
         (point_uri, window_start),
     ).fetchone()
@@ -338,6 +352,8 @@ def main() -> None:
     parser.add_argument("--rules-file", default=json_store.data_file("rules.json"))
     parser.add_argument("--webhooks-file", default=json_store.data_file("webhooks.json"))
     parser.add_argument("--his-interval", type=float, default=30.0)
+    parser.add_argument("--quality-interval", type=float, default=300.0,
+                        help="seconds between quality sweeps (range, spike, unit flags - baler.quality); 0 turns them off")
     args = parser.parse_args()
 
     tracing.init_tracing("baler-fault-detector")
@@ -351,6 +367,7 @@ def main() -> None:
     heartbeat.ensure_schema(fault_conn_cur)
     fault_conn_his = connect()
     ts_conn = connect()
+    quality.ensure_schema(ts_conn)
     store = RemoteStore()  # same instance backs both Cur-mode roster resolution and the His-mode sweep below
 
     rule_cache = RuleCache(args.rules_file, store=store)
@@ -373,8 +390,17 @@ def main() -> None:
     client.loop_start()  # background thread - main thread stays free for the His-mode sweep
 
     print(f"fault detector listening on {args.topic_pattern}, His-mode sweep every {args.his_interval}s")
+    last_quality = 0.0
     try:
         while True:
+            # Flags first, so the His-mode rules below already skip what
+            # this sweep found.
+            if args.quality_interval and time.monotonic() - last_quality >= args.quality_interval:
+                last_quality = time.monotonic()
+                with tracer.start_as_current_span("fault_detector.quality_sweep") as span:
+                    counts = quality.sweep(ts_conn, store)
+                    for k, v in counts.items():
+                        span.set_attribute(k, v)
             open_faults.refresh(fault_conn_his)
             evaluate_his_rules(ts_conn, fault_conn_his, rule_cache.get(), args.webhooks_file, store=store,
                                open_faults=open_faults)

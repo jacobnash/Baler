@@ -17,7 +17,7 @@ from functools import lru_cache
 
 from opentelemetry import trace
 
-from baler import bacnet_alarms, mapping, mqtt_util, tracing
+from baler import bacnet_alarms, mapping, mqtt_util, quality, tracing
 from baler.ingest import (
     ingest_equip_tags,
     ingest_haystack_equip_tags,
@@ -129,8 +129,8 @@ class ReadingBatcher:
     def start(self) -> None:
         self.thread.start()
 
-    def put(self, msg, topic: str, value, ts) -> None:
-        self.queue.put((self.generation, msg.mid, msg.qos, topic, value, ts))
+    def put(self, msg, topic: str, value, ts, flag: str | None = None) -> None:
+        self.queue.put((self.generation, msg.mid, msg.qos, topic, value, ts, flag))
 
     def _run(self) -> None:
         try:
@@ -164,7 +164,7 @@ class ReadingBatcher:
     def flush(self, batch: list) -> None:
         with tracer.start_as_current_span("mqtt_listener.flush") as span:
             span.set_attribute("readings", len(batch))
-            ingest_readings(self.store, self.ts_conn, [(topic, value, ts) for _, _, _, topic, value, ts in batch])
+            ingest_readings(self.store, self.ts_conn, [(topic, value, ts, flag) for _, _, _, topic, value, ts, flag in batch])
             for gen, mid, qos, *_ in batch:
                 if qos and gen == self.generation:
                     self.client.ack(mid, qos)
@@ -280,10 +280,11 @@ def make_on_message(store, ts_conn, batcher: ReadingBatcher | None = None):
         if bacnet_alarms.is_alarm(msg.topic, value):
             return False
 
+        flag = quality.from_envelope(payload.get("quality"))
         if batcher is not None:
-            batcher.put(msg, msg.topic, binary_state(value), ts)
+            batcher.put(msg, msg.topic, binary_state(value), ts, flag)
             return True
-        ingest_reading(store, ts_conn, msg.topic, binary_state(value), ts)
+        ingest_reading(store, ts_conn, msg.topic, binary_state(value), ts, quality=flag)
         return False
 
     return on_message

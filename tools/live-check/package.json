@@ -2,7 +2,7 @@
   "name": "baler-live-check",
   "private": true,
   "type": "module",
-  "description": "Read-only browser check of a live Baler install; files findings as GitHub issues (label live-check).",
+  "description": "Read-only post-deploy verification of a live Baler install (browser pass, perf budgets, data flow, edge nodes, phone layout, deploy-window 5xx); files findings as GitHub issues (label live-check).",
   "scripts": {
     "check": "node live-check.mjs",
     "dry-run": "node live-check.mjs --dry-run",

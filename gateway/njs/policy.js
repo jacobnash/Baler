@@ -65,6 +65,11 @@ const ROUTES = [
 
   // ops_api
   ["GET",    /^\/ops\/status$/,                      "ops", "viewer"],
+  // Post-deploy verification (Baler#178, tools/live-check): read-only.
+  // Freshness is site-scoped by ops_api like /ops/status; the gateway's
+  // own 5xx log spans every org and site, so it is whole-org and operator.
+  ["GET",    /^\/ops\/freshness$/,                   "ops", "viewer"],
+  ["GET",    /^\/ops\/gateway-errors$/,              "gateway", "operator"],
   // source registry (Baler#20): settings include credentials - admin only
   ["GET",    /^\/ops\/sources$/,                     "ops", "admin"],
   ["GET",    /^\/ops\/sources\/kinds$/,               "ops", "admin"],
@@ -73,6 +78,13 @@ const ROUTES = [
   ["DELETE", /^\/ops\/sources\/[^/]+$/,                "ops", "admin"],
   ["GET",    /^\/ops\/orphans$/,                     "ops", "admin"],
   ["POST",   /^\/ops\/orphans\/remove$/,              "ops", "admin"],
+  // Mapping review queue (Baler#184): reading the queue and the "how much
+  // is understood" summary is viewer; answering (accept, escalate, site
+  // visit) writes classes and is operator. ops_api scopes both to the
+  // caller's sites.
+  ["GET",    /^\/ops\/mapping\/proposals$/,            "points", "viewer"],
+  ["GET",    /^\/ops\/mapping\/summary$/,              "points", "viewer"],
+  ["POST",   /^\/ops\/mapping\/decide$/,               "points", "operator"],
   // Connectors page: edge nodes and their devices/connections, local or
   // remote (baler.edges). Listing is read-only; every other action changes
   // an edge node (or scans its network) and is admin. Whole-org, like the
@@ -310,7 +322,7 @@ function jtiRevoked(claims, cached) {
 
 // Resources a site-restricted token can't reach at all: they span the
 // whole org and have no per-site filter to apply.
-const WHOLE_ORG = { devices: true };
+const WHOLE_ORG = { devices: true, gateway: true };
 
 /*
  * Whether these claims may reach a resource: site-restricted tokens

@@ -100,7 +100,7 @@ def test_bacnet_binary_states_are_stored_as_bools(monkeypatch):
     from baler import mqtt_listener
 
     written = []
-    monkeypatch.setattr(mqtt_listener, "ingest_reading", lambda store, conn, topic, value, ts: written.append(value))
+    monkeypatch.setattr(mqtt_listener, "ingest_reading", lambda store, conn, topic, value, ts, quality=None: written.append(value))
     on_message = mqtt_listener.make_on_message(store=None, ts_conn=None)
     for v in ("active", "inactive", "standby", 71.2, 1):
         on_message(None, None, _Msg("fbf/home/bacnet/fan_status", _envelope(v)))
@@ -187,7 +187,7 @@ def test_readings_are_queued_and_acked_only_after_their_batch_is_stored(monkeypa
         on_message(client, None, _QMsg(f"fbf/s/ahu/p{mid}", json.dumps({"point": "p", "value": value, "ts": 10.0 + mid}).encode(), mid))
     assert client.acks == [] and written == []  # queued, nothing acknowledged yet
     batcher.flush([batcher.queue.get_nowait() for _ in range(3)])
-    assert written == [[("fbf/s/ahu/p1", 70.5, 11.0), ("fbf/s/ahu/p2", True, 12.0), ("fbf/s/ahu/p3", 71.0, 13.0)]]
+    assert written == [[("fbf/s/ahu/p1", 70.5, 11.0, None), ("fbf/s/ahu/p2", True, 12.0, None), ("fbf/s/ahu/p3", 71.0, 13.0, None)]]
     assert client.acks == [(1, 1), (2, 1), (3, 1)]
 
 
@@ -233,3 +233,16 @@ def test_non_readings_are_handled_inline_and_acked(monkeypatch):
     on_message(client, None, _QMsg("fbf/s/a/p/tags", json.dumps({"value": json.dumps({"point": True})}).encode(), 9))
     on_message(client, None, _QMsg("fbf/s/a/p", b"not json", 10))  # skipped, but acked: never redelivered forever
     assert tagged == ["fbf/s/a/p"] and client.acks == [(9, 1), (10, 1)] and batcher.queue.empty()
+
+
+def test_a_flagged_readings_quality_survives_the_batch(monkeypatch):
+    """#183's per-sample flag travels with the reading into its batch."""
+    from baler.mqtt_listener import make_on_message
+
+    written: list = []
+    client, batcher = _batcher(monkeypatch, written)
+    on_message = make_on_message(None, None, batcher)
+    payload = {"point": "p", "value": 70.0, "ts": 5.0, "quality": {"status_flags": {"fault": True}}}
+    on_message(client, None, _QMsg("fbf/s/ahu/p", json.dumps(payload).encode(), 1))
+    batcher.flush([batcher.queue.get_nowait()])
+    assert written == [[("fbf/s/ahu/p", 70.0, 5.0, "fault")]]

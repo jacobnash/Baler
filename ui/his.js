@@ -114,7 +114,9 @@ async function run({ silent = false } = {}) {
   }
   // maxSamples: past ~200k values in total the server averages into
   // buckets instead of shipping raw samples a chart can't draw anyway.
-  const url = `${INGEST_API_URL}/his?expr=${encodeURIComponent(expr)}&tz=${encodeURIComponent(TZ)}&maxSamples=${MAX_SAMPLES}`;
+  // compact=1: history as parallel ts/value arrays (half the bytes, Baler#107),
+  // turned back into the {ts, value} rows the page draws from below.
+  const url = `${INGEST_API_URL}/his?expr=${encodeURIComponent(expr)}&tz=${encodeURIComponent(TZ)}&maxSamples=${MAX_SAMPLES}&compact=1`;
   try {
     const res = await fetch(url, { headers: authHeaders() });
     if (res.status === 401) {
@@ -128,6 +130,9 @@ async function run({ silent = false } = {}) {
       return;
     }
     errorEl.hidden = true;
+    for (const s of body.series || []) {
+      if (s.history && !Array.isArray(s.history)) s.history = s.history.ts.map((ts, i) => ({ ts, value: s.history.value[i] }));
+    }
     state.result = body;
     // Shareable: the address bar always holds the query that's on screen.
     history.replaceState(null, "", `?expr=${encodeURIComponent(expr)}`);

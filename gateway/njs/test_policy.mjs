@@ -87,6 +87,13 @@ check("haystack routes: both URL layouts, reads are viewer, writes are operator"
     assert.equal(policy.resolveRoute("GET", "/api/openapi.yaml").minRole, null);
 });
 
+check("mapping review: reading is viewer, answering is operator", () => {
+    assert.equal(policy.resolveRoute("GET", "/ops/mapping/proposals").minRole, "viewer");
+    assert.equal(policy.resolveRoute("GET", "/ops/mapping/summary").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/ops/mapping/decide").minRole, "operator");
+    assert.equal(policy.resolveRoute("POST", "/ops/mapping/proposals"), null);
+});
+
 check("bearerFromHeader accepts OAuth and Haystack forms only", () => {
     assert.equal(policy.bearerFromHeader("Bearer abc.def.ghi"), "abc.def.ghi");
     assert.equal(policy.bearerFromHeader("bearer abc.def.ghi"), "abc.def.ghi");
@@ -126,6 +133,17 @@ check("windrow (Devices page): reads for any role, every change admin-only", () 
     assert.equal(policy.resolveRoute("POST", "/windrow/discover"), null);
     assert.equal(policy.resolveRoute("POST", "/windrow/modbus/discover"), null);
     assert.equal(policy.resolveRoute("GET", "/windrow/openapi.yaml").minRole, null); // the public spec row
+});
+
+check("post-deploy verification reads (Baler#178): GET only, freshness for viewers, gateway 5xx for operators org-wide", () => {
+    assert.equal(policy.resolveRoute("GET", "/ops/freshness").minRole, "viewer");
+    assert.equal(policy.resolveRoute("GET", "/ops/freshness").resource, "ops");
+    assert.equal(policy.resolveRoute("GET", "/ops/gateway-errors").minRole, "operator");
+    assert.equal(policy.roleSatisfies("viewer", policy.resolveRoute("GET", "/ops/gateway-errors").minRole), false);
+    assert.equal(policy.scopeSatisfies("gateway", { site_ids: ["s1"] }), false);
+    assert.equal(policy.scopeSatisfies("gateway", {}), true);
+    assert.equal(policy.resolveRoute("POST", "/ops/freshness"), null);
+    assert.equal(policy.resolveRoute("DELETE", "/ops/gateway-errors"), null);
 });
 
 check("ops edges (Connectors page): listing for any role, changes and scans admin-only", () => {

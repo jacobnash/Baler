@@ -237,8 +237,238 @@ paths:
         "404": { description: No local Windrow configured }
         "502": { description: "The node errored or can't be reached" }
         "504": { description: "A remote node didn't answer in time (offline commands expire, never apply late)" }
+  /mapping/proposals:
+    get:
+      operationId: listMappingProposals
+      summary: The mapping review queue, grouped by naming pattern
+      description: >-
+        Held mapping proposals (proposed or escalated, from the tagging model step)
+        grouped by naming pattern and ranked by impact: tier 1 when a fault rule needs a
+        member (its topic_glob matches, or a candidate is a class a brick_class rule
+        targets), tier 2 when a member is on a site with an active Cx project, tier 3 the
+        rest; larger groups first within a tier. Scoped to the caller's sites.
+      responses:
+        "200":
+          description: Ranked groups.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/MappingGroup" }
+        "401":
+          description: Not through the gateway.
+  /mapping/summary:
+    get:
+      operationId: mappingSummary
+      summary: How much of the building Baler understands
+      description: >-
+        Points by state: classified by a rule, a site rule (an approved pattern), memory,
+        the model step or a person; proposed; escalated; unmapped. Scoped to the
+        caller's sites.
+      responses:
+        "200":
+          description: Counts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total, understood, understood_pct, states]
+                properties:
+                  total: { type: integer }
+                  understood: { type: integer }
+                  understood_pct: { type: number }
+                  states:
+                    type: object
+                    additionalProperties: { type: integer }
+                    description: rule, site_rule, memory, model, person, proposed, escalated, unmapped.
+        "401":
+          description: Not through the gateway.
+  /mapping/decide:
+    post:
+      operationId: decideMappingProposals
+      summary: Answer one proposal or a whole pattern group
+      description: >-
+        operator. `accept` writes `brick_class` (checked against Brick) to every proposal's
+        entity through the same path as a hand edit, logged in the record edit audit;
+        `save_rule` also saves each pattern as a site rule the model step applies to later
+        points. `escalate` assigns them to `assignee` and notifies through the webhook
+        registry (event `mapping.escalated`). `site_visit` records that the points need
+        identifying on site and opens a Cx issue on the active project covering them, if
+        there is one.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids, action]
+              properties:
+                ids: { type: array, items: { type: string } }
+                action: { type: string, enum: [accept, escalate, site_visit] }
+                brick_class: { type: string, description: "accept: the class, a candidate or any other Brick class." }
+                save_rule: { type: boolean, default: false }
+                assignee: { type: string, description: "escalate: who should answer." }
+                note: { type: string }
+      responses:
+        "200":
+          description: What was done.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [action, decided]
+                properties:
+                  action: { type: string }
+                  decided: { type: integer }
+                  brick_class: { type: string }
+                  site_rules: { type: array, items: { type: string } }
+                  assignee: { type: string }
+                  notified: { type: integer }
+                  cx_issue: { type: [string, "null"] }
+                  hint: { type: [string, "null"] }
+        "400":
+          description: Bad action, unknown Brick class, or no assignee to escalate to.
+        "401":
+          description: Not through the gateway.
+        "404":
+          description: A proposal id that doesn't exist or isn't on the caller's sites.
+        "409":
+          description: A proposal that was already decided.
+  /freshness:
+    get:
+      operationId: getFreshness
+      summary: Ingest rate and per-point freshness under a topic prefix
+      description: >-
+        Read-only, for post-deploy verification (tools/live-check, Baler#178)
+        so it needs no database access. rows_last_60s counts point_history
+        rows of the last 60 s; points lists every point under the prefix
+        that reported in the last 7 days, with when it last did. poll_s is
+        not stored anywhere Baler sees: it is the point's mean sample spacing
+        over its last hour of data (null with a single sample), which is the
+        poll interval for an ordinary point and longer for a COV one. Counts
+        and points are limited to the caller's sites. Viewer.
+      parameters:
+        - { name: prefix, in: query, required: true, schema: { type: string, example: fbf/home },
+            description: "A topic prefix: letters, digits, - _ . ~ separated by /" }
+      responses:
+        "200":
+          description: Freshness
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Freshness" }
+        "400": { description: Missing or malformed prefix }
+        "401": { description: Not through the gateway }
+  /gateway-errors:
+    get:
+      operationId: getGatewayErrors
+      summary: The gateway's 5xx answers in a time window
+      description: >-
+        Read-only, for post-deploy verification (Baler#178): every 5xx the
+        gateway answered between since and until, from the 5xx-only log
+        gateway/nginx.conf writes to the gateway-logs volume (path only, ids
+        folded to :id; never query strings or headers). available is false
+        when that log isn't there, which means "can't tell", not zero.
+        Operator; whole-org logins only (the log spans every org and site).
+      parameters:
+        - { name: since, in: query, schema: { type: string, format: date-time } }
+        - { name: until, in: query, schema: { type: string, format: date-time } }
+      responses:
+        "200":
+          description: 5xx answers in the window
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GatewayErrors" }
+        "400": { description: since or until isn't an ISO 8601 time }
+        "401": { description: Not through the gateway }
 components:
   schemas:
+    Freshness:
+      type: object
+      required: [prefix, generated_at, rows_last_60s, prefix_rows_last_60s, points]
+      properties:
+        prefix: { type: string }
+        generated_at: { type: string, format: date-time }
+        rows_last_60s: { type: integer, description: point_history rows of the last 60 s (caller's sites) }
+        prefix_rows_last_60s: { type: integer }
+        poll_s_source: { type: string }
+        points:
+          type: array
+          items:
+            type: object
+            required: [uri, last_ts, age_s, poll_s, samples_last_hour]
+            properties:
+              uri: { type: string }
+              last_ts: { type: string, format: date-time }
+              age_s: { type: number, description: Seconds since last_ts, by the database clock }
+              poll_s: { type: [number, "null"] }
+              samples_last_hour: { type: integer }
+    GatewayErrors:
+      type: object
+      required: [available, since, until, count, by_status, by_route, first, last, samples]
+      properties:
+        available: { type: boolean }
+        detail: { type: string }
+        since: { type: [string, "null"] }
+        until: { type: [string, "null"] }
+        count: { type: integer }
+        by_status: { type: object, additionalProperties: { type: integer } }
+        by_route:
+          type: array
+          items:
+            type: object
+            required: [route, status, count]
+            properties:
+              route: { type: string, example: "GET /api/read" }
+              status: { type: integer }
+              count: { type: integer }
+        first: { type: [string, "null"] }
+        last: { type: [string, "null"] }
+        samples:
+          type: array
+          items:
+            type: object
+            properties:
+              ts: { type: string }
+              status: { type: integer }
+              route: { type: string }
+              upstream_status: { type: [string, "null"] }
+    MappingGroup:
+      type: object
+      required: [pattern, label, kind, count, tier, candidates, refused_because, members]
+      properties:
+        pattern: { type: string, description: "kind|label shape|markers|unit - digits as {n}." }
+        label: { type: string }
+        kind: { type: string, enum: [point, equip] }
+        count: { type: integer }
+        tier: { type: integer, enum: [1, 2, 3] }
+        why_first: { type: string }
+        candidates:
+          type: array
+          items:
+            type: object
+            properties:
+              brick_class: { type: string }
+              reason: { type: string }
+              source: { type: string, description: "model, ranker or site rule." }
+        candidate_classes: { type: array, items: { type: string } }
+        refused_because: { type: string }
+        escalated: { type: integer }
+        assignee: { type: [string, "null"] }
+        evidence: { type: object, description: "What the model step saw for the first member: label, markers, values, siblings, value_stats." }
+        asks: { type: array, items: { type: object } }
+        members:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              uri: { type: string }
+              label: { type: string }
+              status: { type: string, enum: [proposed, escalated] }
+              assignee: { type: [string, "null"] }
+              note: { type: [string, "null"] }
+              unit: { type: [string, "null"] }
+              value_stats: { type: [object, "null"] }
     OrphanedPoint:
       type: object
       required: [id, kind, reason]

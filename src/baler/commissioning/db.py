@@ -638,6 +638,9 @@ class MemoryRepo:
         return [{**{k: _iso(v) for k, v in e.items() if k != "issue_id"}, "actor": "user" if e["user_sub"] else "system"}
                 for e in reversed(rows)]
 
+    def list_issue_events_many(self, issue_ids: list[str]) -> dict[str, list[dict]]:
+        return {i: self.list_issue_events(i) for i in issue_ids}
+
     def create_risk(self, risk: dict) -> None:
         with self._lock:
             self._issue_store()
@@ -701,6 +704,10 @@ class MemoryRepo:
         with self._lock:
             rows = [copy.deepcopy(r) for r in self.test_runs.values() if r["procedure_id"] == procedure_id]
         return sorted(rows, key=lambda r: r["requested_at"])[::-1][:limit]
+
+    def latest_completed_test_runs(self, procedure_ids: list[str], window: int = 20) -> dict[str, dict | None]:
+        return {pid: next((t for t in self.list_test_runs(pid, window) if t["status"] == "completed"), None)
+                for pid in procedure_ids}
 
     def fail_interrupted_test_runs(self, now: datetime) -> list[dict]:
         with self._lock:
@@ -1094,6 +1101,20 @@ class PgRepo:
         return [{"id": i, "ts": _iso(ts), "action": a, "user_sub": s, "user_email": e, "detail": d,
                  "actor": "user" if s else "system"} for i, ts, a, s, e, d in rows]
 
+    def list_issue_events_many(self, issue_ids: list[str]) -> dict[str, list[dict]]:
+        """list_issue_events for every issue at once: one query for a
+        report, not one per issue (#150)."""
+        out: dict[str, list[dict]] = {i: [] for i in issue_ids}
+        if not issue_ids:
+            return out
+        with self.pool.connection() as conn:
+            rows = conn.execute("SELECT issue_id, id, ts, action, user_sub, user_email, detail FROM cx_issue_events"
+                                " WHERE issue_id = ANY(%s) ORDER BY ts DESC, id DESC", (list(issue_ids),)).fetchall()
+        for issue_id, i, ts, a, s, e, d in rows:
+            out[issue_id].append({"id": i, "ts": _iso(ts), "action": a, "user_sub": s, "user_email": e, "detail": d,
+                                  "actor": "user" if s else "system"})
+        return out
+
     def create_risk(self, risk: dict) -> None:
         with self.pool.connection() as conn:
             conn.execute(f"INSERT INTO cx_risks ({', '.join(RISK_COLS)}) VALUES ({', '.join(['%s'] * len(RISK_COLS))})",
@@ -1181,6 +1202,24 @@ class PgRepo:
 
     def list_test_runs(self, procedure_id: str, limit: int = 50) -> list[dict]:
         return self._test_runs("procedure_id = %s ORDER BY requested_at DESC LIMIT %s", (procedure_id, limit))
+
+    def latest_completed_test_runs(self, procedure_ids: list[str], window: int = 20) -> dict[str, dict | None]:
+        """Per procedure, the newest completed run among its `window` newest
+        (what the report shows), in one query rather than one per procedure
+        (#150)."""
+        out: dict[str, dict | None] = {pid: None for pid in procedure_ids}
+        if not procedure_ids:
+            return out
+        cols = ", ".join(TEST_RUN_COLS)
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {cols} FROM (SELECT {cols}, row_number() OVER (PARTITION BY procedure_id ORDER BY requested_at DESC) AS rn"
+                " FROM cx_test_runs WHERE procedure_id = ANY(%s)) t WHERE rn <= %s AND status = 'completed' ORDER BY rn DESC",
+                (list(procedure_ids), window)).fetchall()
+        for r in rows:  # newest last, so it wins
+            row = dict(zip(TEST_RUN_COLS, r, strict=True))
+            out[row["procedure_id"]] = row
+        return out
 
     def fail_interrupted_test_runs(self, now: datetime) -> list[dict]:
         with self.pool.connection() as conn:

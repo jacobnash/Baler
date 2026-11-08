@@ -1,0 +1,13 @@
+{
+  "prefix": "fbf/home",
+  "generated_at": "2026-11-07T22:50:00+00:00",
+  "rows_last_60s": 1200,
+  "prefix_rows_last_60s": 12,
+  "points": [
+    { "uri": "urn:point:fbf/home/bacnet/av0", "last_ts": "2026-11-07T22:49:55+00:00", "age_s": 5.0, "poll_s": 10.0, "samples_last_hour": 360 },
+    { "uri": "urn:point:fbf/home/bacnet/av1", "last_ts": "2026-11-07T22:49:52+00:00", "age_s": 8.0, "poll_s": 10.0, "samples_last_hour": 360 },
+    { "uri": "urn:point:fbf/home/modbus/reg0", "last_ts": "2026-11-07T22:41:00+00:00", "age_s": 540.0, "poll_s": 5.0, "samples_last_hour": 600 },
+    { "uri": "urn:point:fbf/home/modbus/reg1", "last_ts": "2026-11-07T22:41:00+00:00", "age_s": 540.0, "poll_s": 5.0, "samples_last_hour": 600 },
+    { "uri": "urn:point:fbf/home/weather", "last_ts": "2026-11-07T22:45:00+00:00", "age_s": 300.0, "poll_s": 600.0, "samples_last_hour": 6 }
+  ]
+}
