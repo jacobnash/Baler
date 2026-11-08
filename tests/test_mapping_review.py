@@ -213,7 +213,7 @@ def test_summary_counts_points_by_who_classified_them():
 
     s = mapping_review.summary(store, rows, {str(pts["person"])})
 
-    assert s["states"] == {"rule": 1, "site_rule": 1, "memory": 0, "model": 1, "person": 1, "proposed": 1, "escalated": 1, "unmapped": 1}
+    assert s["states"] == {"convention": 0, "rule": 1, "site_rule": 1, "memory": 0, "model": 1, "person": 1, "proposed": 1, "escalated": 1, "unmapped": 1}
     assert (s["total"], s["understood"], s["understood_pct"]) == (7, 4, 57.1)
     assert mapping_review.summary(store, rows, set(), allows=lambda u: u.endswith("/rule"))["total"] == 1
 

@@ -1,0 +1,110 @@
+---
+title: Naming conventions
+---
+
+Integrators map a building by working out its naming convention, for
+example `AHU{n}-{point}` or `VAV-{flr}-{n}-{pt}`, usually in a spreadsheet.
+In Baler you do this once, in **Ops → Mapping review → Naming conventions**.
+You mark up one label, preview the result over every point, and apply it.
+It's the idea behind NREL BuildingMOTIF's label parser, reimplemented here
+without the dependency. Code: `src/baler/conventions.py`.
+
+## Annotating
+
+Write out a real label and wrap the parts that vary in `{role:text}`:
+
+```
+fbf/{equip_type:ahu}-{equip_id:1}/{point:DIS-AIR-TEM}-{ignore:12}
+```
+
+| Role | What it is |
+|---|---|
+| `equip_type` | the equipment kind's code, e.g. `ahu` or `chw-pump` |
+| `equip_id` | its number or name within the kind |
+| `point` | the point's code, e.g. `DIS-AIR-TEM` or `SAT` |
+| `ignore` | something that varies but means nothing, such as an instance number |
+
+Everything outside the braces is literal. The annotation compiles to an
+anchored pattern and runs against each point's source topic. A site with
+two label styles needs two annotations. They are tried in order, so list
+the more specific one first.
+
+Codes are normalised to lower case, letters and digits only. That makes
+`Discharge_Air_Temp`, `discharge_air_temp` and `DischargeAirTemp` the same
+code.
+
+## Saying what codes mean
+
+You list codes with their Brick class: `SAT = Supply_Air_Temperature_Sensor`
+for points, and `AHU = Air_Handling_Unit` for equipment. Each name is
+checked against Brick, and an unknown one is refused. **One entry covers
+every point with that code**, and that is where the leverage is.
+
+**Preview** writes nothing. It shows:
+- how many points match a template, and how many would be classified;
+- the **unknown codes ranked by how many points each would settle**, with
+  examples, so the next code to add is always the most useful one;
+- the equipment codes that are still unknown;
+- a sample of labels no template matched.
+
+By default it counts only points Baler hasn't classified yet.
+
+## Applying
+
+**Apply** classifies every point whose code is known and that has no
+class yet. A convention never overrides an existing class.
+- Each class is written the same way as a hand edit and logged in
+  `record_edits` with action `convention`.
+- The point's equipment gets the equip code's class when all of its
+  matched points agree.
+
+The summary counts these points as "By a naming convention".
+
+Saved conventions are also **rung 2 of the ladder**: `python -m baler.autotag`
+runs them before the rules. A matching point with a known code becomes
+`convention-classified`, and only the points that are left go on to the
+rules, memory and the model.
+
+A convention's **scope prefix** (`fbf/hospital-a`) limits it to one site's
+topics.
+
+## Measured
+
+The [mapping eval](/mapping-eval) simulates an integrator:
+
+```bash
+python -m baler.mapping_eval --convention-budget 20
+```
+
+The simulated integrator writes **2 annotations** for the mock hospital's
+two label styles (`fbf/vav-12/DAM-POS-345` and `fbf/vav-3/DamperPos`). It
+then gives a code for each of the 8 equipment kinds. After that it answers
+point codes one at a time, in the order the preview ranks them, until the
+budget runs out. Each answer is the code's true class; a person would get
+these from the drawings.
+
+| Point codes answered | Points exact | Points left for review | Settled by the convention | Equipment exact |
+|---|---|---|---|---|
+| none (rules only) | 48.4% | 30.9% | n/a | 0% |
+| 0 (only templates and 8 equip codes) | 48.4% | 30.9% | 0 | 100% |
+| 5 | 64.8% | 16.3% | 119 | 100% |
+| 10 | 79.1% | 12.2% | 214 | 100% |
+| 20 | 85.2% | 6.1% | 295 | 100% |
+| all 40 | 99.6% | 0.4% | 430 | 100% |
+
+Auto-accepted but wrong stays at 0 in every row.
+
+**What this shows, and what it doesn't:**
+- The answers are correct by construction, because the simulated person
+  doesn't make mistakes. The table measures **effort against coverage**:
+  2 annotations plus 28 short answers (8 equipment codes and 20 point
+  codes) settled 295 points and all 88 pieces of equipment.
+- It doesn't measure accuracy on a messy real site. There, codes collide
+  (`T` meaning temperature on one controller and a timer on another), and
+  conventions drift between integrators.
+- At "all 40", the 2 points left are the boilers' firing rate, which has
+  no Brick class. As intended, the person leaves those.
+
+openhay#7's shared tokenizer and abbreviation lexicon aren't built yet.
+Once they are, the preview can pre-fill unknown codes such as `SAT` and
+`RAT` from the lexicon instead of leaving them blank.
