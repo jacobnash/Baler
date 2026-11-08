@@ -403,19 +403,10 @@ def _site_of(store, uris: list[str]) -> dict[str, str]:
 
 
 def read_first_ts_many(conn, point_uris: list[str]) -> dict[str, datetime]:
-    """Each point's oldest sample time: one forward primary-key probe each."""
-    if not point_uris:
-        return {}
-    cur = conn.execute(
-        f"""
-        SELECT u.uri, h.ts FROM unnest(%s::text[]) AS u(uri)
-        CROSS JOIN LATERAL (
-            SELECT ts FROM point_history WHERE {timeseries._ONE_POINT} ORDER BY point_uri, ts LIMIT 1
-        ) h
-        """,
-        (point_uris,),
-    )
-    return dict(cur.fetchall())
+    """Each point's oldest sample time: one forward primary-key probe each
+    (timeseries.probe_points, which also keeps it cheap on compressed
+    chunks)."""
+    return {uri: row[0] for uri, row in timeseries.probe_points(conn, point_uris, "ts", [], [], newest=False).items()}
 
 
 # ------------------------------------------------------------ live-tag filters

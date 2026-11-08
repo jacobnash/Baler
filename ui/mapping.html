@@ -57,6 +57,35 @@
       <div class="toolbar"><button type="button" id="mapping-refresh">Refresh</button> <span id="mapping-status" class="hint"></span></div>
       <div id="mapping-groups"></div>
     </section>
+    <section id="relationships-section">
+      <h2>Equipment relationships</h2>
+      <p class="hint">Proposed from the data, never written until you accept: points with no equipment grouped by their topic, and an AHU that feeds a VAV (its supply air temperature tracks the VAV's discharge air temperature).</p>
+      <div id="relationships-list" class="hint">Nothing proposed.</div>
+    </section>
+
+    <section id="conventions-section">
+      <h2>Naming conventions</h2>
+      <p class="hint">Mark up one label and Baler parses every point on the site the same way: literal text, with <code>{role:text}</code> around the parts that vary. Roles: <code>equip_type</code>, <code>equip_id</code>, <code>point</code>, <code>ignore</code>. Example: <code>fbf/{equip_type:ahu}-{equip_id:1}/{point:SAT}</code>. Then say what each code means; one entry covers every point with that code. Preview writes nothing.</p>
+      <div class="conv-form">
+        <label>Name <input type="text" id="conv-name" placeholder="Hospital A, Siemens labels" /></label>
+        <label>Applies under topic prefix <input type="text" id="conv-scope" placeholder="fbf/hospital-a (empty: everything you can see)" /></label>
+        <label>Annotated labels, one per line, tried in order <textarea id="conv-templates" rows="3" spellcheck="false"></textarea></label>
+        <div class="conv-codes">
+          <label>Point codes (<code>code = Brick_Class</code> per line) <textarea id="conv-points" rows="8" spellcheck="false"></textarea></label>
+          <label>Equipment codes <textarea id="conv-equips" rows="8" spellcheck="false"></textarea></label>
+        </div>
+        <label class="inline"><input type="checkbox" id="conv-only-unclassified" checked /> Count only points Baler hasn't classified yet</label>
+        <div class="toolbar">
+          <button type="button" id="conv-preview">Preview</button>
+          <button type="button" id="conv-save">Save</button>
+          <span id="conv-status" class="hint"></span>
+        </div>
+        <p id="conv-error" class="field-error" hidden></p>
+      </div>
+      <div id="conv-result"></div>
+      <h3>Saved</h3>
+      <div id="conv-saved" class="hint">None yet.</div>
+    </section>
   </main>
 
   <dialog id="decide-dialog">
@@ -78,5 +107,7 @@
   <script src="auth.js"></script>
   <script src="chart.js"></script>
   <script src="mapping.js"></script>
+  <script src="conventions.js"></script>
+  <script src="relationships.js"></script>
 </body>
 </html>

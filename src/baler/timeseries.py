@@ -6,6 +6,7 @@ bool values today (e.g. Windrow's fan_status.presentValue = "active") - one
 float column would lose that.
 """
 
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -80,6 +81,88 @@ ROLLUP_DDL = (
 )
 
 
+# Native columnar compression (#192). Uncompressed, every sample costs ~150-220
+# bytes, most of it point_uri repeated in the row and again in the primary
+# key. Segmenting by point_uri stores the URI once per batch of up to 1000
+# samples, and ordering each batch by ts delta-encodes the timestamps and
+# values. Raw history is compressed, never downsampled: hunting and Cx need
+# the actual samples (todo/building-lifecycle-ubis.md §10.1, §15).
+#
+# unit and label are segment columns too, not just point_uri: they are
+# constant per point (only derivation_engine and hisWrite set them), so they
+# cost nothing in ratio, and read_point_labels' "newest row with a unit or
+# label" filter then runs on the stored segment values. Compressed in the
+# value columns instead, a raw point (never labelled) had every batch of its
+# whole history decompressed on each lookup: 4 ms -> 310 ms for 766 points
+# over half a day, growing with every year of history.
+#
+# A chunk is compressed once all of it is older than COMPRESS_AFTER. Writes
+# that land in an already-compressed chunk still work (TimescaleDB 2.11+
+# decompresses just the affected batch for an upsert, and the policy
+# recompresses the chunk on its next run), so this setting is about how much
+# late traffic takes that slower path, not about correctness. What arrives
+# late: retained MQTT replays (seconds), Windrow #13's trend backfill (hours),
+# an edge node's spool after an outage (a weekend, say). 7 days covers all
+# three with room. hisWrite and haystack_import can write any age; they
+# take the slower path.
+COMPRESS_AFTER_DEFAULT = "7 days"
+COMPRESS_AFTER = os.environ.get("BALER_HISTORY_COMPRESS_AFTER", "").strip() or COMPRESS_AFTER_DEFAULT
+
+# Present already? One catalog read, as for _READY_SQL. Compression that was
+# enabled some other way (by hand, with other settings) is left as it is;
+# only the policy's compress_after is kept in step with COMPRESS_AFTER.
+_COMPRESSION_STATE_SQL = """
+SELECT h.compression_enabled,
+       j.job_id IS NOT NULL,
+       COALESCE((j.config->>'compress_after')::interval = %s::interval, false)
+FROM timescaledb_information.hypertables h
+LEFT JOIN timescaledb_information.jobs j
+       ON j.proc_name = 'policy_compression' AND j.hypertable_name = h.hypertable_name
+WHERE h.hypertable_name = 'point_history'
+"""
+_ENABLE_COMPRESSION = """
+ALTER TABLE point_history SET (timescaledb.compress,
+    timescaledb.compress_segmentby = 'point_uri, unit, label', timescaledb.compress_orderby = 'ts DESC')
+"""
+# ALTER TABLE takes point_history's ACCESS EXCLUSIVE lock. Queued behind a
+# long read it would block every ingest write queued behind it in turn, so
+# it gives up instead and the next new connection tries again.
+_COMPRESSION_LOCK_TIMEOUT = "SET LOCAL lock_timeout = '5s'"
+
+log = logging.getLogger(__name__)
+
+
+def _ensure_compression(conn: psycopg.Connection) -> None:
+    """Enable compression and its policy on point_history, idempotently and
+    in place: a no-op catalog read once they're there, so it is safe on
+    every new connection of every service (as _READY_SQL is). Never fails
+    the connection: ingest matters more than when the next chunk shrinks."""
+    try:
+        row = conn.execute(_COMPRESSION_STATE_SQL, (COMPRESS_AFTER,)).fetchone()
+    except psycopg.errors.InvalidDatetimeFormat:
+        log.error("BALER_HISTORY_COMPRESS_AFTER=%r is not a Postgres interval; point_history "
+                  "compression left as it is", COMPRESS_AFTER)
+        return
+    if row is None:  # no point_history hypertable (yet)
+        return
+    enabled, has_policy, policy_matches = row
+    if enabled and policy_matches:
+        return
+    stmts: list[str | sql.Composable] = [_COMPRESSION_LOCK_TIMEOUT]
+    if not enabled:
+        stmts.append(_ENABLE_COMPRESSION)
+    if has_policy:  # compress_after changed: replace the policy
+        stmts.append("SELECT remove_compression_policy('point_history', if_exists => true)")
+    stmts.append(sql.SQL(
+        "SELECT add_compression_policy('point_history', compress_after => {}::interval, if_not_exists => true)"
+    ).format(sql.Literal(COMPRESS_AFTER)))
+    try:
+        ddl.run(conn, *stmts)
+    except psycopg.Error as exc:
+        log.warning("point_history compression setup skipped this time (retried on the next "
+                    "new connection): %s", exc)
+
+
 # Everything SCHEMA, create_hypertable and LABELS_INDEX make, present.
 # (Without TimescaleDB this errors, as create_hypertable always has.)
 _READY_SQL = """
@@ -129,6 +212,7 @@ def _setup(conn: psycopg.Connection, statement_timeout: str | None = None) -> No
         ddl.run(conn, SCHEMA, "SELECT create_hypertable('point_history', 'ts', if_not_exists => TRUE, migrate_data => TRUE)",
                 LABELS_INDEX, QUALITY_COLUMN)
     _ensure_rollup_views(conn)
+    _ensure_compression(conn)
     # synchronous_commit stays at the server's default (on): a reading the
     # broker was told is stored must survive a Postgres crash (Baler#190's
     # durability parity). This used to SET it off per connection to dodge an
@@ -304,8 +388,8 @@ def read_latest_many(
     empty rows doesn't walk its whole history."""
     if not point_uris:
         return {}
-    conds = [_ONE_POINT]
-    params: list = [point_uris]
+    conds: list[str] = []
+    params: list = []
     if before is not None:
         conds.append("ts <= %s")
         params.append(before)
@@ -316,20 +400,88 @@ def read_latest_many(
         conds.append("(value IS NOT NULL OR value_text IS NOT NULL OR value_bool IS NOT NULL)")
     if good_only:  # skip samples flagged bad (#183)
         conds.append(_GOOD)
-    cur = conn.execute(
-        f"""
-        SELECT u.uri, h.ts, h.value, h.value_text, h.value_bool
-        FROM unnest(%s::text[]) AS u(uri)
-        CROSS JOIN LATERAL (
-            -- one backward primary-key probe per point; DISTINCT ON sorted
-            -- every row of every point's history (>60s at 20M rows)
-            SELECT ts, value, value_text, value_bool FROM point_history
-            WHERE {" AND ".join(conds)} ORDER BY point_uri DESC, ts DESC LIMIT 1
-        ) h
-        """,
-        params,
-    )
-    return {uri: (ts, _row_to_value((v, vt, vb))) for uri, ts, v, vt, vb in cur.fetchall()}
+    rows = probe_points(conn, point_uris, "ts, value, value_text, value_bool", conds, params, newest=True)
+    return {uri: (ts, _row_to_value((v, vt, vb))) for uri, (ts, v, vt, vb) in rows.items()}
+
+
+# Where the compressed chunks end (#192): chunks wholly below this ts are
+# compressed. timescaledb_information.chunks is a catalog view, a few ms.
+_COMPRESSED_BELOW_SQL = """
+SELECT bool_or(is_compressed), min(range_start) FILTER (WHERE NOT is_compressed)
+FROM timescaledb_information.chunks
+WHERE hypertable_schema = 'public' AND hypertable_name = 'point_history'
+"""
+_ALL_COMPRESSED = datetime.max.replace(tzinfo=timezone.utc)
+
+
+def _compressed_below(conn: psycopg.Connection) -> datetime | None:
+    """None when no chunk is compressed; otherwise the oldest uncompressed
+    chunk's start (every chunk older than it is compressed), or
+    _ALL_COMPRESSED."""
+    try:
+        with conn.transaction():  # a savepoint: a failure mustn't abort the caller's transaction
+            row = conn.execute(_COMPRESSED_BELOW_SQL).fetchone()
+    except psycopg.Error:  # not TimescaleDB, or the view changed: one plain probe
+        return None
+    if not row or not row[0]:
+        return None
+    return row[1] or _ALL_COMPRESSED
+
+
+def probe_points(conn: psycopg.Connection, point_uris: list[str], cols: str, conds: list[str], params: list,
+                 newest: bool) -> dict[str, tuple]:
+    """Per point, `cols` of its newest (or oldest) row matching `conds`
+    (SQL with %s placeholders, filled from `params` in order): curVal,
+    hisStart and the Cx "latest as of" checks.
+
+    On uncompressed chunks this is #237's probe, point_uri as a range
+    ordered (point_uri, ts): one primary-key probe per chunk, never a walk
+    of a chunk's ts index (see _ONE_POINT). That order can't stop at the
+    first chunk with a row, though: it asks every chunk, and on a
+    compressed chunk the answer costs a sort of the point's compressed
+    batches (~20 ms a chunk a point, measured), so a curVal would grow
+    with every week of compressed history. So the probe is split at
+    _compressed_below. Below it, chunks are compressed and have no
+    full-size ts index to walk, so the plain `point_uri = u.uri ORDER BY
+    ts` probe is safe there and stops at the first chunk with a row
+    (~0.2 ms a point). The side nearest the answer goes first (the newest
+    rows for curVal, the oldest for hisStart), and only points it didn't
+    find go to the other side: the same rows a single probe returns."""
+    if not point_uris:
+        return {}
+    direction = "DESC" if newest else "ASC"
+
+    def run(uris: list[str], split: str | None, plain: bool) -> dict[str, tuple]:
+        where = ["point_uri = u.uri" if plain else _ONE_POINT, *conds]
+        extra: list = []
+        if split:
+            where.append(split)
+            extra.append(boundary)
+        order = f"ts {direction}" if plain else f"point_uri {direction}, ts {direction}"
+        cur = conn.execute(
+            f"""
+            SELECT u.uri, h.* FROM unnest(%s::text[]) AS u(uri)
+            CROSS JOIN LATERAL (
+                SELECT {cols} FROM point_history WHERE {" AND ".join(where)} ORDER BY {order} LIMIT 1
+            ) h
+            """,
+            [uris, *params, *extra],
+        )
+        return {r[0]: tuple(r[1:]) for r in cur.fetchall()}
+
+    boundary = _compressed_below(conn)
+    if boundary is None:
+        return run(list(point_uris), None, plain=False)
+    near: tuple[str, bool]
+    far: tuple[str, bool] | None
+    near, far = (("ts >= %s", False), ("ts < %s", True)) if newest else (("ts < %s", True), ("ts >= %s", False))
+    if boundary is _ALL_COMPRESSED:
+        near, far = ("ts < %s", True), None
+    found = run(list(point_uris), *near)
+    rest = [u for u in point_uris if u not in found]
+    if rest and far is not None:
+        found.update(run(rest, *far))
+    return found
 
 
 def read_range(conn: psycopg.Connection, point_uri: str, start_ts: datetime, end_ts: datetime, with_quality: bool = False,

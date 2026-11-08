@@ -1,0 +1,77 @@
+---
+title: Equipment inference
+---
+
+Once a building's points are classified, much of its equipment model
+follows. `src/baler/equip_inference.py` works that out, and **everything
+it finds is a proposal with its evidence**, for a person to confirm in
+[Mapping review](/mapping-review). Nothing is asserted silently.
+
+## Equipment type from its point set
+
+An equip with chilled water supply and return temperatures, a run status
+and a start/stop command is a chiller.
+- The signatures are Cx's own expected-point templates
+  (`ontology/cx-expected-points.ttl`): AHU, VAV, FCU, chiller, boiler and
+  pump. Two more cover kinds Cx doesn't template: electrical meters and
+  fans.
+- Each signature gets a score from two things: how many of its expected
+  points the equip has (a required point counts double), and how much of
+  the equip's point set the signature explains.
+- For an equipment proposal, the [model step](/model-step) lists the top
+  three as candidates, marked *points*, with a reason such as "has 4 of 4
+  expected points (chilled water supply temperature, …)".
+
+**Cx's expected-point check.** Suppose the ladder would auto-accept an
+equip (by memory, the model or a site rule) as a class whose required
+expected points are missing, such as an AHU with no fan status. That's
+suspicious, so it is **vetoed** and stays a proposal. The check runs only
+once every one of the equip's points is classified, because an
+unclassified point may be the missing one. In the measurement below, a
+looser threshold (80% classified) vetoed 6 correct answers on the mock
+hospital.
+
+## Relationships
+
+`python -m baler.autotag` ends by proposing relationships, which appear in
+the review page's **Equipment relationships** section:
+
+- **Grouping (`hasPoint`).** Points with no equipment are grouped by their
+  topic's parent (a device or prefix group), and each group is proposed as
+  one piece of equipment. Accepting creates the equipment and links its
+  points.
+- **`feeds`.** A VAV's discharge air temperature that tracks one AHU's
+  supply air temperature suggests that AHU feeds it.
+  - The test is Pearson's r over 5-minute means of the last 3 days.
+  - It proposes only when r ≥ 0.8 over at least 24 shared samples, and the
+    best AHU beats the next by at least 0.1.
+  - Accepting writes `brick:feeds` and `brick:isFedBy`.
+
+Accepted relationships are logged in `record_edits`. The API is
+`GET /ops/mapping/relationships` (viewer) and
+`POST /ops/mapping/relationships/decide` (operator).
+
+## Measured
+
+On the [mapping eval](/mapping-eval)'s mock hospital (88 pieces of
+equipment):
+
+| | Equipment: true class is the top candidate | Equipment exact, auto-accepted |
+|---|---|---|
+| Rules only, before | 77.3% | 0% |
+| Rules only, with point-set inference | **84.1%** | 0% (still proposals) |
+| With memory from seed 7 | n/a | 100%, 0 wrong (the Cx check vetoes nothing correct) |
+
+With the **true** point classes, inference alone gets the exact class for
+74 of 88 pieces of equipment and is never wrong. The other 14 come out
+less specific. Six pumps come out as `Pump` rather than `Chilled_Water_Pump`
+or `Hot_Water_Pump`, because their points are identical. Eight exhaust fans
+come out as `Fan` rather than `Exhaust_Fan`, because a fan status and
+command don't say exhaust. The label or a person settles those.
+
+**Not measured:** `feeds` and grouping on real data. The mock hospital
+has no VAV discharge temperatures, and its history is one reading per
+point. Every point there is already on a piece of equipment. Unit tests
+cover both with synthetic series and graphs: the right AHU is picked, a tie
+proposes nothing, and too few samples propose nothing. Their first real
+test is a site with history.

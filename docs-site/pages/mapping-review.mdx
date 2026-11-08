@@ -14,6 +14,7 @@ The page opens with a count of points by state:
 
 | State | Meaning |
 |---|---|
+| By a naming convention | A site [naming convention](/naming-conventions) settled it. |
 | By a rule | A rule in `rules/haystack_to_brick.yaml` matched. |
 | By a site rule | A pattern a person approved here; see below. |
 | By memory | The nearest confirmed examples agreed ([memory](/memory)). |
@@ -89,6 +90,13 @@ proposal or for a whole group. It needs the operator role.
 
 An answered proposal can't be answered again (409). The API only acts on
 proposals on your sites; for anyone else's it answers 404.
+
+## Equipment relationships
+
+Proposed equipment groupings and `feeds` edges from
+[equipment inference](/equipment-inference) are listed in their own
+section, with the evidence. **Accept** writes the edges (and creates the
+equipment for a grouping); **Reject** closes the proposal.
 
 ## Training data
 

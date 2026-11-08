@@ -94,6 +94,20 @@ check("mapping review: reading is viewer, answering is operator", () => {
     assert.equal(policy.resolveRoute("POST", "/ops/mapping/proposals"), null);
 });
 
+check("naming conventions: list and preview viewer, save/apply/delete operator", () => {
+    assert.equal(policy.resolveRoute("GET", "/ops/conventions").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/ops/conventions/preview").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/ops/conventions").minRole, "operator");
+    assert.equal(policy.resolveRoute("POST", "/ops/conventions/abc123/apply").minRole, "operator");
+    assert.equal(policy.resolveRoute("DELETE", "/ops/conventions/abc123").minRole, "operator");
+    assert.equal(policy.resolveRoute("POST", "/ops/conventions/preview").resource, "points");
+});
+
+check("relationship proposals: reading is viewer, deciding is operator", () => {
+    assert.equal(policy.resolveRoute("GET", "/ops/mapping/relationships").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/ops/mapping/relationships/decide").minRole, "operator");
+});
+
 check("bearerFromHeader accepts OAuth and Haystack forms only", () => {
     assert.equal(policy.bearerFromHeader("Bearer abc.def.ghi"), "abc.def.ghi");
     assert.equal(policy.bearerFromHeader("bearer abc.def.ghi"), "abc.def.ghi");
