@@ -41,6 +41,21 @@ def test_on_connect_resubscribes_on_every_call():
     assert client.subscribe_calls == [("fbf/#", 1), ("fbf/#", 1)]
 
 
+class _Flags:
+    def __init__(self, session_present):
+        self.session_present = session_present
+
+
+def test_a_resumed_session_is_not_resubscribed():
+    """Re-subscribing replays every retained message (all the tags) after
+    each restart, and readings queued behind that replay were dropped."""
+    client = FakeClient()
+    on_connect = make_on_connect("fbf/#")
+    on_connect(client, None, _Flags(False), 0, None)  # fresh session
+    on_connect(client, None, _Flags(True), 0, None)   # resumed after a restart
+    assert client.subscribe_calls == [("fbf/#", 1)]
+
+
 class _Msg:
     def __init__(self, topic, payload):
         self.topic = topic

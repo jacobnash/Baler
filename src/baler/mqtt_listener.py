@@ -70,14 +70,24 @@ def make_on_connect(topic_pattern, batcher: ReadingBatcher | None = None):
             batcher.generation += 1
         with tracer.start_as_current_span("mqtt_listener.on_connect") as span:
             span.set_attribute("reason_code", str(reason_code))
-            # Re-subscribing here (not just once before loop_forever()) is
-            # required: a reconnect gets a fresh broker-side session unless
-            # both sides agree on clean_session=False + a stable client_id,
-            # and even then re-issuing the subscribe is what actually
-            # restores delivery - on_connect fires on every reconnect, not
-            # just the first connect.
+            # Subscribing here (not just once before loop_forever()) is
+            # required whenever the broker has no session for us - first
+            # start, a broker that lost its state - since on_connect fires on
+            # every (re)connect. But only then: a SUBSCRIBE makes the broker
+            # resend every retained message under fbf/#, every point's tags
+            # included, and handling that replay after each listener restart
+            # held up readings until the broker's queue overflowed and it
+            # dropped them (Baler#190: most of the readings acknowledged
+            # during a kill -9 of the listener were lost). A resumed
+            # persistent session (clean_session=False, stable client id)
+            # still has its subscription and its queued backlog.
+            present = flags.get("session present") if isinstance(flags, dict) else getattr(flags, "session_present", False)
+            span.set_attribute("session_present", bool(present))
+            if present:
+                print(f"connected ({reason_code}), resumed session on {topic_pattern}", flush=True)
+                return
             client.subscribe(topic_pattern, qos=1)
-            print(f"connected ({reason_code}), subscribed to {topic_pattern}")
+            print(f"connected ({reason_code}), subscribed to {topic_pattern}", flush=True)
 
     return on_connect
 

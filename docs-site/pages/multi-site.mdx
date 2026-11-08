@@ -224,15 +224,16 @@ already be done by the time this page was checked against the code again
   command channel below where a dropped message means a scan silently
   never runs.
 - `mosquitto` now runs with a real mounted config (`mosquitto/mosquitto.conf`)
-  setting `persistence true` and `max_queued_messages 10000` (up from the
-  image default of 1000) — see `mosquitto/entrypoint.sh` for how the
+  setting `persistence true` and `max_queued_messages 200000` (up from the
+  image default of 1000; 10000 until the scale test (#190) showed a listener
+  restart overflowing it at 5k points) — see `mosquitto/entrypoint.sh` for how the
   password file is generated from `.env` at container start rather than
   committing hashed credentials.
 - `retain=True` is still not a history buffer — it only caches the latest
   value per topic for new subscribers. The queue depth above is what
   actually protects an outage window, not `retain`.
 
-1000 (now 10000) queued messages per client is still not unlimited — a
+200000 queued messages per client is still not unlimited — a
 busy multi-point site can still overflow it during a long enough outage.
 If that turns out to matter in practice, the next step is backfilling
 from BACnet/Modbus devices' own trend logs on reconnect rather than
