@@ -170,6 +170,8 @@ test("previousPhase reads the last complete run's breaches and per-route numbers
   assert.equal(p.host.before.load_1m, 15.2);
   assert.equal(previousPhase(doc, "cold"), null, "an incomplete phase is skipped, not read as a pass");
   assert.equal(previousPhase({ phases: {} }, "warm"), null);
+  const superseded = { ...doc, phases: { warm: { ...doc.phases.warm, run: { ...doc.phases.warm.run, superseded: "Deploy run #9 is deploying" } } } };
+  assert.equal(previousPhase(superseded, "warm"), null, "a superseded phase counts neither for nor against damping (#260)");
   // an artifact file can stand in for GitHub (LIVE_CHECK_PREVIOUS)
   const dir = mkdtempSync(path.join(os.tmpdir(), "live-check-prev-test-"));
   writeFileSync(path.join(dir, "prev.json"), JSON.stringify(doc));

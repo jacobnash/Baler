@@ -20,12 +20,14 @@ const MAX_LOOKBACK = 10;
 
 // doc: a live-verify-<sha>.json. -> null when that deploy has no complete
 // run of this phase's perf module (an incomplete run is skipped, not taken
-// as a pass), else {at, sha, scope, fps, routes}: fps are the perf-budget
+// as a pass) or that phase was superseded by a newer deploy, else {at, sha, scope, fps, routes}: fps are the perf-budget
 // fingerprints it breached, routes each route's numbers.
 export function previousPhase(doc, phase) {
   const p = doc && doc.phases && doc.phases[phase];
   const scope = `perf:${phase}`;
   if (!p || !Array.isArray(p.ran) || !p.ran.includes(scope)) return null;
+  // A superseded phase (#260) counts neither for nor against damping.
+  if (p.run?.superseded) return null;
   const fps = new Set((p.findings || []).filter((f) => f.kind === "perf-budget" && (f.scope || scope) === scope).map((f) => f.fp));
   const routes = {};
   for (const c of p.checks || []) {

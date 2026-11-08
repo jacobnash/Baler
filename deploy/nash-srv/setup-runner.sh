@@ -20,9 +20,18 @@
 #   4. Downloads, configures, and installs a second GitHub Actions runner
 #      instance (own directory, own systemd service) under github-runner,
 #      registered against jacobnash/baler with label `baler`.
+#   5. (step 8) A third instance, `nash-srv-baler-verify` with label
+#      `baler-verify` (not `baler`, so deploys never land on it), for the
+#      Deploy workflow's verify job (#260): verify then runs beside the
+#      deploy runner instead of occupying it, so the next deploy never waits
+#      on it. Same user, no sudo rule, no docker access; it only reads the
+#      live install over HTTPS. Once it's online, point the workflow at it:
+#        gh variable set BALER_VERIFY_RUNNER --body baler-verify -R jacobnash/Baler
 #
-# Idempotent-ish: safe to re-run steps 1-5. Step 6 skips itself if this
-# runner is already configured.
+# Idempotent-ish: safe to re-run steps 1-5. Steps 6 and 8 each skip
+# themselves if that runner is already configured, so adding the verify
+# runner to an existing install is just a re-run with a fresh token:
+#   sudo bash setup-runner.sh <RUNNER_REGISTRATION_TOKEN>
 
 set -euo pipefail
 
@@ -32,6 +41,7 @@ TOKEN="${1:-}"
 RUNNER_USER="github-runner"
 RUNNER_HOME="/home/${RUNNER_USER}"
 RUNNER_DIR="${RUNNER_HOME}/actions-runner-baler"
+VERIFY_RUNNER_DIR="${RUNNER_HOME}/actions-runner-baler-verify"
 WRAPPER="/usr/local/sbin/baler-deploy.sh"
 SUDOERS_FILE="/etc/sudoers.d/github-runner-baler"
 ENV_DIR="${RUNNER_HOME}/.config/baler"
@@ -199,16 +209,21 @@ mkdir -p /var/www/timberdoodle-docs
 chown "${RUNNER_USER}:${RUNNER_USER}" /var/www/timberdoodle-docs
 chmod 755 /var/www/timberdoodle-docs
 
-echo "==> 6. Installing the GitHub Actions runner"
-if [ -f "${RUNNER_DIR}/.runner" ]; then
-  echo "    ${RUNNER_DIR} is already configured - skipping (safe to re-run everything above)"
-else
+# install_runner DIR NAME LABELS: download, register and start one runner
+# instance under ${RUNNER_USER}, as its own systemd service. Skips itself
+# when DIR is already configured.
+install_runner() {
+  local dir="$1" name="$2" labels="$3"
+  if [ -f "${dir}/.runner" ]; then
+    echo "    ${dir} is already configured - skipping (safe to re-run everything above)"
+    return 0
+  fi
   if [ -z "$TOKEN" ]; then
     echo "registering a new runner needs a token: sudo bash setup-runner.sh <RUNNER_REGISTRATION_TOKEN>" >&2
-    exit 1
+    return 1
   fi
-  mkdir -p "$RUNNER_DIR"
-  chown "${RUNNER_USER}:${RUNNER_USER}" "$RUNNER_DIR"
+  mkdir -p "$dir"
+  chown "${RUNNER_USER}:${RUNNER_USER}" "$dir"
   case "$(uname -m)" in
     x86_64) RUNNER_ARCH="x64" ;;
     aarch64) RUNNER_ARCH="arm64" ;;
@@ -228,17 +243,20 @@ else
   fi
   runuser -u "$RUNNER_USER" -- bash -c "
     set -euo pipefail
-    cd '${RUNNER_DIR}'
+    cd '${dir}'
     curl -fsSL -o runner.tar.gz \
       'https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${ASSET_NAME}'
     echo '${RUNNER_SHA256}  runner.tar.gz' | sha256sum -c -
     tar xzf runner.tar.gz && rm runner.tar.gz
     ./config.sh --url https://github.com/jacobnash/baler \
-      --token '${TOKEN}' --name nash-srv-baler \
-      --labels nash-srv,baler --work _work --unattended --replace
+      --token '${TOKEN}' --name '${name}' \
+      --labels '${labels}' --work _work --unattended --replace
   "
-  (cd "$RUNNER_DIR" && ./svc.sh install "$RUNNER_USER" && ./svc.sh start)
-fi
+  (cd "$dir" && ./svc.sh install "$RUNNER_USER" && ./svc.sh start)
+}
+
+echo "==> 6. Installing the GitHub Actions runner (deploys)"
+install_runner "$RUNNER_DIR" nash-srv-baler nash-srv,baler
 
 echo "==> 7. MQTT/TLS for edge nodes (Baler#36): Caddy's cert, broker restarted on renewal"
 # mosquitto terminates TLS on 8883 with the cert Caddy already keeps for
@@ -279,6 +297,19 @@ else
   echo "    no Caddy cert at ${CADDY_CERT_DIR} - skipped (set MQTT_TLS_HOST=<host> to use another)"
 fi
 
+echo "==> 8. Installing the verify runner (the Deploy workflow's verify job, #260)"
+# Optional: without a token on an install that already has the deploy
+# runner, this is skipped rather than failing the re-run. Last, so that if
+# GitHub refuses a token step 6 just used, everything else is already done:
+# re-run with a fresh token.
+if [ -f "${VERIFY_RUNNER_DIR}/.runner" ] || [ -n "$TOKEN" ]; then
+  install_runner "$VERIFY_RUNNER_DIR" nash-srv-baler-verify nash-srv,baler-verify
+  VERIFY_RUNNER_READY=1
+else
+  echo "    skipped (no token). To add it: sudo bash setup-runner.sh <RUNNER_REGISTRATION_TOKEN>"
+  VERIFY_RUNNER_READY=0
+fi
+
 echo "==> Done. Next steps:"
 echo "  1. If you skipped it above: fill in ${ENV_FILE} with real secrets."
 echo "  2. Append the Caddy block from docs-site/pages/nash-srv-deploy.mdx to"
@@ -286,3 +317,7 @@ echo "     /etc/caddy/Caddyfile, then: sudo systemctl reload caddy"
 echo "  3. Add DNS CNAMEs for timberdoodle.nash.engineering and"
 echo "     docs.timberdoodle.nash.engineering (see the same doc)."
 echo "  4. Add DEMO_ADMIN_EMAIL / DEMO_ADMIN_PASSWORD as GitHub Actions repo secrets."
+if [ "$VERIFY_RUNNER_READY" = 1 ]; then
+  echo "  5. Point the verify job at the verify runner (once, from anywhere with gh):"
+  echo "     gh variable set BALER_VERIFY_RUNNER --body baler-verify -R jacobnash/Baler"
+fi
