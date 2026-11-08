@@ -146,6 +146,24 @@ def test_ref_encoding_roundtrips_and_is_haystack_safe(uri):
     assert ha.ref_to_uri("@" + ref) == uri
 
 
+def test_encode_grid_is_openhays_text(backend):
+    """haystack_api.encode_grid builds the Hayson itself (Baler#244); the
+    text must be exactly oh.encode_grid's, for records and odd values."""
+    import math
+    from datetime import date
+    from datetime import time as dtime
+
+    rows = backend.read_filter("point or equip or site", None)
+    odd = [{"id": oh.Ref("x"), "n": oh.Number(math.nan), "i": oh.Number(math.inf, "kW"), "m": oh.Number(-math.inf),
+            "z": oh.Number(-0.0), "big": oh.Number(2.0**60), "f": oh.Number(1.5, "%"), "b": True,
+            "l": [oh.Ref("a", "A"), oh.MARKER, oh.Number(3)], "d": {"x": oh.MARKER, "y": oh.Number(2, "s")},
+            "dt": T0, "u": oh.Uri("http://x"), "da": date(2026, 1, 2), "t": dtime(1, 2), "nul": None,
+            "s": 'q"\n\u00e9', "rm": oh.REMOVE, "na": oh.NA, "sym": oh.Symbol("x")}]
+    for fmt in ("zinc", "hayson", "json3", "trio"):
+        for grid in (ha._rows_grid(rows), ha._rows_grid(odd), ha._rows_grid([]), ha.err_grid("boom")):
+            assert ha.encode_grid(grid, fmt) == oh.encode_grid(grid, fmt), fmt
+
+
 # --- records / read -------------------------------------------------------
 
 

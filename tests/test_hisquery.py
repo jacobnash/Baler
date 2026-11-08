@@ -563,6 +563,37 @@ def test_positive_filters_start_from_their_leaf_sets_not_every_subject(graph):
         - set(h.match_entities(graph, h.parse_query("point").filter)))
 
 
+def test_ored_leaf_sets_are_answered_by_their_union(graph, monkeypatch):
+    """`point`, `equip`, `ahu or vav`: true exactly when some leaf set holds
+    ?s, so the union is the answer, with no flag joins and no join on every
+    candidate's triples (Baler#244). Same subjects as the general form, for
+    every filter case above and these, on rdflib and on Oxigraph."""
+    fast = h.compile_filter(h.parse_query("point").filter, h.graph_vocab(graph))
+    assert "OPTIONAL" not in fast and "?cp ?co" not in fast
+    # a leaf set that ends on ?s (siteRef's walk) still asks "is a subject"
+    assert "FILTER EXISTS { ?s ?cp ?co }" in h.compile_filter(h.parse_query("siteRef").filter, h.graph_vocab(graph))
+    assert "OPTIONAL" in h.compile_filter(h.parse_query("point and his").filter)  # not or'ed sets: general form
+    cases = [t for t, _ in test_compiled_filter_selects_the_right_entities.pytestmark[0].args[1]]
+    cases += ["point", "equip", "site", "ahu or vav", "siteRef", "equipRef or site", "discharge or fan or temp"]
+    vocab = h.graph_vocab(graph)
+    ox = None
+    try:
+        import pyoxigraph as ox
+        oxs = ox.Store()
+        oxs.load(graph.graph.serialize(format="nt").encode(), ox.RdfFormat.N_TRIPLES)
+    except ImportError:
+        pass
+    for text in cases:
+        node = h.parse_query(text).filter
+        q_fast = h.compile_filter(node, vocab)
+        with monkeypatch.context() as m:
+            m.setattr(h, "_any_flag", lambda expr: False)
+            q_general = h.compile_filter(node, vocab)
+        assert sorted(str(r.s) for r in graph.query(q_fast)) == sorted(str(r.s) for r in graph.query(q_general)), text
+        if ox is not None:
+            assert sorted(r["s"].value for r in oxs.query(q_fast)) == sorted(r["s"].value for r in oxs.query(q_general)), text
+
+
 def test_compact_series_is_the_same_history_as_parallel_arrays():
     result = {"series": [{"id": "a", "history": [{"ts": 1794009600.0, "value": 1.5}, {"ts": 1794009600.25, "value": None}]},
                          {"id": "b", "history": []}]}

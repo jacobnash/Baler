@@ -61,10 +61,13 @@ from __future__ import annotations
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from functools import lru_cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from opentelemetry import context as otel_context
 
 from baler import brick_vocab, tracing
 
@@ -650,6 +653,13 @@ def xeto_spec_for(markers, brick_class: str | None = None) -> str | None:
     Haystack markers, plus those its Brick class implies. Shared by
     haystack_api's `spec` tag and the commissioning inventory, so Brick
     and Haystack stay one model read two ways."""
+    return _spec_for(frozenset(markers), brick_class)
+
+
+@lru_cache(maxsize=8192)
+def _spec_for(markers: frozenset[str], brick_class: str | None) -> str | None:
+    """xeto_spec_for, memoized: records share a handful of marker sets, and
+    the scan over every spec was ~50 us a record (Baler#244)."""
     have = set(markers)
     if brick_class:
         have |= markers_of_brick_class().get(brick_class, frozenset())
@@ -1135,6 +1145,20 @@ def _false_without_flags(expr: str) -> bool:
     return not eval(py, {"__builtins__": {}}, {})  # only True/False/and/or/not/() can reach here
 
 
+_ANY_FLAG = re.compile(r"[()F|\s]*")
+# One triple pattern with ?s as its subject, optionally after one VALUES
+# block: what _has/_typed_as_any register for a tag, a class or a marker.
+_TERM = r'(?:\?\w+|<[^<>\s"{}]*>|[A-Za-z][\w-]*:[\w-]*|"(?:[^"\\]|\\.)*")'
+_SUBJECT_PATTERN = re.compile(r"(?:VALUES \?\w+ \{[^{}]*\} )?\?s (?:a|<[^<>\s]*>|[A-Za-z][\w-]*:[\w-]*) " + _TERM)
+
+
+def _any_flag(expr: str) -> bool:
+    """Whether a compiled filter expression is nothing but leaf-set
+    flags or'ed together, i.e. true exactly when any flag is bound."""
+    text = _BOUND.sub("F", expr)
+    return "F" in text and bool(_ANY_FLAG.fullmatch(text))
+
+
 def compile_filter(node, graph: GraphVocab | None = None, scope=None) -> str:
     """One SELECT over every subject in the graph. Each leaf test of the
     filter is a subject-set (see _Compiler), left-joined once; the whole
@@ -1159,6 +1183,23 @@ def compile_filter(node, graph: GraphVocab | None = None, scope=None) -> str:
     )
     # nested Dict nodes (urn:baler:dict:) are values, never records
     record = "FILTER(isIRI(?s) && !STRSTARTS(STR(?s), \"urn:baler:dict:\"))"
+    if compiler.flags and _any_flag(leaf_logic):
+        # Matches exactly when ?s is in some leaf set (`point`, `equip`,
+        # `ahu or vav`): the union of the sets is the answer, so neither
+        # the flag joins nor every candidate's triples (the ?s ?cp ?co
+        # join below, 136k rows for 10k points) are needed. 0.6 s -> 0.2 s
+        # for `point` at 10k points (Baler#244). Sets whose pattern binds
+        # ?s as a subject already say "is a subject"; any other set (a
+        # siteRef walk ends on ?s) asks it per candidate.
+        union = " UNION ".join(f"{{ {pattern} }}" for _, pattern in compiler.flags)
+        subject = "" if all(_SUBJECT_PATTERN.fullmatch(pattern) for _, pattern in compiler.flags) else \
+            " FILTER EXISTS { ?s ?cp ?co }"
+        scoped = f" FILTER({visible})" if visible else ""
+        return (
+            PREFIXES
+            + f"SELECT ?s WHERE {{\n  {{ SELECT DISTINCT ?s WHERE {{ {union} }} }}\n"
+            + f"  FILTER(isIRI(?s)) FILTER(!STRSTARTS(STR(?s), \"urn:baler:dict:\")){subject}{scoped}\n}}"
+        )
     if compiler.flags and _false_without_flags(leaf_logic):
         # Nothing outside every leaf set can match, so the candidates are
         # those sets' union instead of every subject in the graph - the
@@ -1421,6 +1462,28 @@ _DESCRIBE_PREDICATES = {
 _EQUIP_DIS = "urn:baler:describe:equipDis"
 
 
+def _describe_rows(store, query: str):
+    """describe_points' (point, predicate, object, equip) rows, objects
+    decoded as SparqlRow does. From Oxigraph as TSV when the store offers
+    it: for 10k points (156k rows) the JSON result and a SparqlRow per row
+    were most of a readAll(equip).hisRead(today) (Baler#244)."""
+    if hasattr(store, "iter_tsv"):
+        from baler.remote_store import parse_term, typed_value
+
+        for row in store.iter_tsv(query):
+            point, p, o = row[0][1:-1], row[1][1:-1], row[2]
+            if o[0] == "<" or o[-1] == '"' and "\\" not in o:
+                o = o[1:-1]
+            else:
+                v, kind, dt = parse_term(o)
+                o = typed_value(v, kind, dt)
+            e = row[3][1:-1] if len(row) > 3 and row[3] else None
+            yield point, p, o, e
+        return
+    for row in store.query(query):
+        yield str(row.point), str(row.p), row.o, (str(row.e) if getattr(row, "e", None) is not None else None)
+
+
 def describe_points(store, point_uris: list[str]) -> dict[str, dict]:
     if not point_uris:
         return {}
@@ -1430,7 +1493,7 @@ def describe_points(store, point_uris: list[str]) -> dict[str, dict]:
     # GROUP_CONCAT folded them back up: ~0.3 s of Oxigraph time for 800
     # points, a third of a whole readAll(equip).hisRead(today), Baler#107.)
     preds = " ".join(f"<{p}>" for p in _DESCRIBE_PREDICATES)
-    rows = store.query(
+    query = (
         PREFIXES
         + f"""SELECT ?point ?p ?o ?e WHERE {{
             VALUES ?point {{ {values} }}
@@ -1440,17 +1503,18 @@ def describe_points(store, point_uris: list[str]) -> dict[str, dict]:
         }}"""
     )
     found: dict[str, dict] = {}
-    for row in rows:
-        f = found.setdefault(str(row.point), {"types": set(), "tags": set(), "equips": set(), "equipDis": {}})
-        p = str(row.p)
+    for point, p, o, e in _describe_rows(store, query):
+        f = found.get(point)
+        if f is None:
+            f = found[point] = {"types": set(), "tags": set(), "equips": set(), "equipDis": {}}
         if p == _EQUIP_DIS:
-            f["equipDis"].setdefault(str(row.e), row.o)
+            f["equipDis"].setdefault(e, o)
             continue
         field_ = _DESCRIBE_PREDICATES.get(p)
         if field_ in ("types", "tags", "equips"):
-            f[field_].add(str(row.o))
+            f[field_].add(str(o))
         elif field_ is not None:
-            f.setdefault(field_, row.o)
+            f.setdefault(field_, o)
     out: dict[str, dict] = {}
     for uri, f in found.items():
         types = sorted(f["types"])
@@ -1550,47 +1614,14 @@ def _apply_post(series: list[dict], post: tuple, now: datetime, tz: str) -> list
     return series
 
 
-def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limit: int = DEFAULT_LIMIT, scope=None,
-              max_samples: int | None = None) -> dict:
-    """The whole read(...).hisRead(...).hisRollup(...) pipeline against
-    live stores. Raises HisQueryError for a `read` (singular) that matches
-    nothing - Axon's read() throws UnknownRecErr for the same case; a
-    readAll with no matches is an empty, successful result."""
+def _read_history(ts_conn, point_uris: list[str], date_span: Span, rollup_spec_in: Rollup | None, tz: str, limit: int,
+                  max_samples: int | None) -> tuple[dict, dict | None, int]:
+    """run_query's history half: (history by point, the rollup applied or
+    None, the per-point raw limit used)."""
     from baler import timeseries
 
-    date_span = resolve_span(query.span_text, now, tz)
-    with tracer.start_as_current_span("hisquery.graph_vocab"):
-        graph = graph_vocab(store)
-    with tracer.start_as_current_span("hisquery.match_entities") as sp:
-        # baler.scope.Scope: the caller's sites only, applied in the query
-        matched = match_entities(store, query.filter, graph, scope)
-        sp.set_attribute("matched", len(matched))
-    if query.mode == "read":
-        if not matched:
-            raise NoMatchError(f"read({query.filter_text}): no rec matches")
-        matched = matched[:1]
-
-    with tracer.start_as_current_span("hisquery.expand_to_points") as sp:
-        point_uris = expand_to_points(store, matched)
-        if scope is not None:
-            point_uris = scope.filter(point_uris)
-        sp.set_attribute("points", len(point_uris))
-    with tracer.start_as_current_span("hisquery.describe_points"):
-        meta = describe_points(store, point_uris)
-    # Computed points (derivation_engine) carry unit/label only on their
-    # history rows, never as graph tags - without this they'd chart as an
-    # unlabelled "mock-ahu-1" with no unit.
-    with tracer.start_as_current_span("hisquery.read_point_labels"):
-        labels = timeseries.read_point_labels(ts_conn, point_uris)
-    for uri, (unit, label) in labels.items():
-        info = meta[uri]
-        if not info["unit"] and unit:
-            info["unit"] = unit
-        if label and not info["_dis_from_tag"]:
-            info["dis"] = label
-
     rollup = None
-    rollup_spec = query.rollup
+    rollup_spec = rollup_spec_in
     auto_secs = None
     if rollup_spec is None and max_samples:
         auto_secs = auto_interval((date_span.end - date_span.start).total_seconds(), len(point_uris), max_samples)
@@ -1620,6 +1651,64 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
             if max_samples and point_uris:
                 limit = min(limit, max(_AUTO_MIN_PER_SERIES, max_samples // len(point_uris)))
             history = timeseries.read_range_many(ts_conn, point_uris, date_span.start, date_span.end, limit, with_quality=True)
+
+    return history, rollup, limit
+
+
+def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limit: int = DEFAULT_LIMIT, scope=None,
+              max_samples: int | None = None) -> dict:
+    """The whole read(...).hisRead(...).hisRollup(...) pipeline against
+    live stores. Raises HisQueryError for a `read` (singular) that matches
+    nothing - Axon's read() throws UnknownRecErr for the same case; a
+    readAll with no matches is an empty, successful result."""
+    from baler import timeseries
+
+    date_span = resolve_span(query.span_text, now, tz)
+    with tracer.start_as_current_span("hisquery.graph_vocab"):
+        graph = graph_vocab(store)
+    with tracer.start_as_current_span("hisquery.match_entities") as sp:
+        # baler.scope.Scope: the caller's sites only, applied in the query
+        matched = match_entities(store, query.filter, graph, scope)
+        sp.set_attribute("matched", len(matched))
+    if query.mode == "read":
+        if not matched:
+            raise NoMatchError(f"read({query.filter_text}): no rec matches")
+        matched = matched[:1]
+
+    with tracer.start_as_current_span("hisquery.expand_to_points") as sp:
+        point_uris = expand_to_points(store, matched)
+        if scope is not None:
+            point_uris = scope.filter(point_uris)
+        sp.set_attribute("points", len(point_uris))
+    # The points' graph metadata (Oxigraph) and their history (Postgres)
+    # don't depend on each other: describe_points runs on its own thread
+    # while this one reads labels and history, instead of one after the
+    # other (each was ~0.5-1 s of a 5k-point readAll(equip) under load,
+    # Baler#244).
+    parent = otel_context.get_current()
+
+    def describe():
+        with tracer.start_as_current_span("hisquery.describe_points", context=parent):
+            return describe_points(store, point_uris)
+
+    side = ThreadPoolExecutor(max_workers=1)
+    try:
+        meta_f = side.submit(describe)
+        # Computed points (derivation_engine) carry unit/label only on their
+        # history rows, never as graph tags - without this they'd chart as an
+        # unlabelled "mock-ahu-1" with no unit.
+        with tracer.start_as_current_span("hisquery.read_point_labels"):
+            labels = timeseries.read_point_labels(ts_conn, point_uris)
+        history, rollup, limit = _read_history(ts_conn, point_uris, date_span, query.rollup, tz, limit, max_samples)
+        meta = meta_f.result()
+    finally:
+        side.shutdown(wait=True)
+    for uri, (unit, label) in labels.items():
+        info = meta[uri]
+        if not info["unit"] and unit:
+            info["unit"] = unit
+        if label and not info["_dis_from_tag"]:
+            info["dis"] = label
 
     series = []
     for uri in point_uris:
