@@ -1,0 +1,23 @@
+# Scratch stack for the restore drill (scripts/restore_drill.py, #196):
+# applied on top of docker-compose.yml with its own project name and
+# BALER_VOLUME_PREFIX, so it runs beside a live stack without touching it.
+# Same postgres and oxigraph images as the live stack (the restore must be
+# into the same TimescaleDB version); only these differ:
+services:
+  postgres:
+    # Loopback only, on a free port Docker picks: no clash with the live
+    # stack's 5433. The drill asks `docker compose port` for it.
+    ports: !override
+      - "127.0.0.1::5432"
+    # A fresh volume every drill, so this only ever sets a throwaway
+    # password; the drill connects with it to run its checks.
+    environment:
+      POSTGRES_PASSWORD: restore-drill
+    # No TimescaleDB background jobs: a compression or refresh policy firing
+    # mid-check would move rows between chunks and make the exact
+    # "every table has the rows the dump has" comparison flaky. The drill
+    # refreshes the aggregates it checks itself.
+    command: postgres -c timescaledb.max_background_workers=0
+  oxigraph:
+    ports: !override
+      - "127.0.0.1::7878"

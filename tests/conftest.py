@@ -97,6 +97,7 @@ def _no_leaked_site_prefixes(request):
 # job log prints each file's line as it finishes.
 SLOW_FILES = {
     "tests/test_gateway_auth.py": 50.0,  # waits out the gateway's 30 s revocation poll
+    "tests/test_restore_drill.py": 40.0,  # measured locally (38 s): two scratch stacks, backup, restore, compare
     "tests/test_haystack_conformance.py": 17.0,
     "tests/test_his_route.py": 10.5,
     "tests/test_site_scoping_integration.py": 9.0,

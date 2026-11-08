@@ -1,0 +1,11 @@
+[Unit]
+Description=Run baler-restore-drill.service weekly
+
+[Timer]
+# EDIT ME: schedule (see `man systemd.time`). Weekly, a few hours after the
+# daily backup, so each drill restores a fresh one.
+OnCalendar=Sun *-*-* 05:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -296,9 +296,8 @@ are 19 real sites; check `metadata.csv`'s `site_id` column for names).
 ## Backup and restore
 
 `scripts/backup.py` dumps the two volumes that hold real state —
-`postgres-data` (via `docker compose exec postgres pg_dump -U baler
-baler` — that Postgres user/database name is fixed, not
-configurable, same as `POSTGRES_USER`/`POSTGRES_DB` in docker-compose.yml)
+`postgres-data` (via `docker compose exec postgres pg_dump`, as the
+container's `POSTGRES_USER`/`POSTGRES_DB`, i.e. `BALER_PG_USER`/`BALER_PG_DB`)
 and `oxigraph-data` (via the same bulk graph-store GET the SHACL
 validator uses) — into timestamped, gzip'd files under `backups/`
 (gitignored). `grafana-data` is regenerable dashboard config, out of
@@ -310,14 +309,18 @@ python scripts/backup.py                 # writes backups/postgres-<ts>.sql.gz, 
 python scripts/restore.py --postgres-file backups/postgres-<ts>.sql.gz --oxigraph-file backups/oxigraph-<ts>.ttl.gz
 ```
 
-`restore.py` assumes a fresh/empty postgres+oxigraph (disaster recovery,
-not a merge onto live data) — restoring onto tables that already exist
-exits non-zero (`psql -v ON_ERROR_STOP=1`) rather than silently
-succeeding. Both scripts default to this checkout's own docker-compose
-project and to `$OXIGRAPH_URL`/`http://localhost:7878`; `--help` on
-either documents `--compose-project-dir`/`--oxigraph-url`/`--out-dir` for
-pointing at a different target (e.g. a throwaway container while testing
-restore, rather than the live stack).
+`restore.py` restores into a fresh, empty postgres+oxigraph (disaster
+recovery, not a merge onto live data): start only those two on new volumes,
+with the same `.env`, then run it. It refuses a database that already has
+tables, and handles TimescaleDB itself (`timescaledb_pre_restore()`/
+`post_restore()` around the load, and the dump's extension version, #241).
+`python scripts/restore_drill.py` proves a backup restores: it restores the
+newest one into a scratch compose project beside the live stack, checks
+every table, the history (compressed chunks too), the continuous
+aggregates, the graph and a Cx report, then removes it (#196; CI runs it
+in `tests/test_restore_drill.py`). See
+[`docs-site/pages/backups.mdx`](docs-site/pages/backups.mdx) for the exact
+restore steps and the drill.
 
 ### Automating backups
 
@@ -336,7 +339,8 @@ sudo systemctl enable --now baler-backup.timer
 ```
 
 Both just call the same `backup.py` shown above on a schedule (default:
-daily) — nothing about the script changes. Backups accumulate in
+daily) — nothing about the script changes. `scripts/systemd/` also has a
+weekly `baler-restore-drill` timer. Backups accumulate in
 `backups/` indefinitely; there's no pruning/retention yet, so watch disk
 usage or clean the directory out yourself if that becomes a problem. See
 [`docs-site/pages/backups.mdx`](docs-site/pages/backups.mdx) for the full
