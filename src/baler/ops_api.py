@@ -27,6 +27,7 @@ from baler import (
     record_edit,
     sources,
     tracing,
+    warmup,
 )
 from baler.http_handler_base import BaseAPIHandler, respond_error, respond_json
 from baler.ops_status import collect_status, start_background_probes
@@ -395,7 +396,12 @@ def main() -> None:
         sources.ensure_schema(conn)
         record_edit.ensure_schema(conn)
         mapping_proposals.PgProposals(conn).ensure_schema()
-    start_background_probes()  # /status answers from the latest round (Baler#106)
+    # /status answers from the latest round (Baler#106). The first round runs
+    # before the API listens, along with the Building counts' queries: right
+    # after a deploy a request used to find no round yet and probe for
+    # itself, 2.3 s (Baler#172).
+    start_background_probes(prime=True)
+    warmup.run("ops building counts", lambda: collect_status(None))
     server = ThreadingHTTPServer((args.host, args.port), make_handler(ts_pool))
     print(f"ops API listening on {args.host}:{args.port}")
     server.serve_forever()

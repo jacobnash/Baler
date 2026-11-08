@@ -220,3 +220,13 @@ def test_a_stale_background_round_is_not_used():
     assert cache.latest() is not None
     cache._at -= 4 * cache._interval
     assert cache.latest() is None
+
+
+def test_a_primed_prober_has_a_round_before_start_returns():
+    """The first /status after a deploy found no round yet and probed for
+    itself (2.3 s, Baler#172): ops_api primes the first round before it
+    listens."""
+    cache = ops_status._ProbeCache()
+    with patch("baler.ops_status._probe_one", side_effect=_fake_probe):
+        cache.start(interval=3600, prime=True)
+        assert cache.latest() is not None

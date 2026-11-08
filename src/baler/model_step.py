@@ -518,6 +518,7 @@ def pg_stats(conn, days: int = 7) -> Callable[[list[str]], dict]:
             """SELECT point_uri, count(*), min(value), max(value), avg(value), count(DISTINCT COALESCE(value::text, value_text, value_bool::text)),
                       bool_and(value IS NULL AND (value_bool IS NOT NULL OR lower(value_text) IN ('active', 'inactive', 'on', 'off', 'true', 'false')))
                FROM point_history WHERE point_uri = ANY(%s) AND ts > now() - make_interval(days => %s)
+                 AND (quality IS NULL OR quality = 'ok')  -- flagged samples (#183) aren't evidence
                GROUP BY point_uri""",
             (uris, days),
         ).fetchall()

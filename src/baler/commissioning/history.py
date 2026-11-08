@@ -23,6 +23,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Protocol
 
+import psycopg
+
 from baler import timeseries
 
 Sample = tuple[datetime, object]
@@ -56,11 +58,12 @@ def coverage_pct(samples: int, covered: float, first: datetime | None, start: da
     return round(100.0 * min(covered, total) / total, 2)
 
 
-# Per point, the parts coverage_pct needs, over samples with a value in
-# [start, end): one ordered primary-key range scan each, folded in
-# Postgres. (The report used to fetch every raw sample - 1.9M rows for
-# 380 points over a day - and fold them in Python: ~4.5 s, Baler#150.)
-# date_part, not EXTRACT: float8 arithmetic rather than numeric.
+# Per point, the parts coverage_pct needs over [start, end), folded in
+# Postgres from one ordered primary-key range scan. (The report used to
+# fetch every raw sample - 1.9M rows for 380 points over a day - and fold
+# them in Python: ~4.5 s, Baler#150.) date_part, not EXTRACT: float8
+# arithmetic rather than numeric. {valued} is the "has a value" filter, or
+# nothing: see _availability_split.
 _AVAILABILITY_SQL = """
 SELECT u.uri, a.n, a.covered, a.first
 FROM unnest(%(uris)s::text[]) AS u(uri)
@@ -68,10 +71,51 @@ CROSS JOIN LATERAL (
     SELECT count(*) AS n, min(ts) AS first,
            sum(LEAST(date_part('epoch', COALESCE(nxt, %(end)s)) - date_part('epoch', ts), %(gap)s)) AS covered
     FROM (SELECT ts, lead(ts) OVER (ORDER BY ts) AS nxt FROM point_history
-          WHERE point_uri = u.uri AND ts >= %(start)s AND ts < %(end)s
-            AND (value IS NOT NULL OR value_text IS NOT NULL OR value_bool IS NOT NULL)) w
+          WHERE point_uri = u.uri AND ts >= %(start)s AND ts < %(end)s{valued}) w
 ) a
 """
+_EMPTY = "value IS NULL AND value_text IS NULL AND value_bool IS NULL"
+_VALUED_SQL = _AVAILABILITY_SQL.format(valued=f" AND NOT ({_EMPTY})")
+# Without the value test the scan reads only (point_uri, ts): an index-only
+# scan of the primary key, no heap. Live rows of one point are spread one
+# per heap page or so (every point's sample for an instant is written
+# together), so the heap scan touched ~46k pages per point-week against
+# ~1k index pages - the difference between a 3 s and a 10 s report once
+# the cache is cold after a deploy (#150).
+_INDEX_ONLY_SQL = _AVAILABILITY_SQL.format(valued="")
+
+# Rows with no value at all (a bridge that publishes null while it can't
+# reach the device, Baler#85), indexed on their own: few, so the index is
+# small, and it says which points the index-only scan above can't judge.
+# Built by ensure_empty_rows_index (commissioning_api, in the background);
+# until it is there and valid every point takes the heap scan.
+EMPTY_ROWS_INDEX = "point_history_empty"
+_EMPTY_ROWS_DDL = (f"CREATE INDEX IF NOT EXISTS {EMPTY_ROWS_INDEX} ON point_history (point_uri, ts) "
+                   f"WITH (timescaledb.transaction_per_chunk) WHERE {_EMPTY}")
+_EMPTY_ROWS_VALID = f"SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass('{EMPTY_ROWS_INDEX}')"
+_EMPTY_POINTS_SQL = (f"SELECT DISTINCT point_uri FROM point_history WHERE point_uri = ANY(%(uris)s) "
+                     f"AND ts >= %(start)s AND ts < %(end)s AND {_EMPTY}")
+_EMPTY_ROWS_LOCK = 0x62616C66  # one builder at a time (ddl.LOCK_KEY + 1)
+
+
+def ensure_empty_rows_index(conn) -> str:
+    """Build EMPTY_ROWS_INDEX if it's missing, or rebuild it if a build was
+    cut short (TimescaleDB leaves a per-chunk build's index invalid). One
+    chunk per transaction, so ingest waits for one chunk's build at most,
+    never the whole table's. `conn` must be in autocommit mode. Returns
+    what it did."""
+    if not conn.execute("SELECT pg_try_advisory_lock(%s)", (_EMPTY_ROWS_LOCK,)).fetchone()[0]:
+        return "another process is building it"
+    try:
+        row = conn.execute(_EMPTY_ROWS_VALID).fetchone()
+        if row and row[0]:
+            return "present"
+        if row:  # there, but invalid
+            conn.execute(f"DROP INDEX IF EXISTS {EMPTY_ROWS_INDEX}")
+        conn.execute(_EMPTY_ROWS_DDL)
+        return "built"
+    finally:
+        conn.execute("SELECT pg_advisory_unlock(%s)", (_EMPTY_ROWS_LOCK,))
 
 
 class PostgresHistory:
@@ -81,14 +125,16 @@ class PostgresHistory:
 
     def latest(self, point_uris: list[str], before: datetime | None = None) -> dict[str, Sample]:
         since = (before or datetime.now().astimezone()) - VALUE_LOOKBACK
-        return timeseries.read_latest_many(self.conn, list(point_uris), before=before, since=since, with_value=True)
+        # good_only: a sample the device or Baler flagged bad (#183) isn't
+        # evidence for a Cx check either way.
+        return timeseries.read_latest_many(self.conn, list(point_uris), before=before, since=since, with_value=True, good_only=True)
 
     def latest_raw(self, point_uris: list[str], before: datetime | None = None) -> dict[str, Sample]:
         return timeseries.read_latest_many(self.conn, list(point_uris), before=before)
 
     def window(self, point_uris: list[str], start: datetime, end: datetime,
                truncated: set[str] | None = None) -> dict[str, list[Sample]]:
-        raw = timeseries.read_range_many(self.conn, list(point_uris), start, end, self.per_point_limit)
+        raw = timeseries.read_range_many(self.conn, list(point_uris), start, end, self.per_point_limit, good_only=True)
         if truncated is not None:
             truncated.update(uri for uri, (_rows, cut) in raw.items() if cut)
         return {uri: rows for uri, (rows, _cut) in raw.items()}
@@ -99,8 +145,19 @@ class PostgresHistory:
         [start, end), every sample counted (no per_point_limit)."""
         if not point_uris:
             return {}
-        rows = self.conn.execute(_AVAILABILITY_SQL, {"uris": list(point_uris), "start": start, "end": end,
-                                                     "gap": max_gap.total_seconds()}).fetchall()
+        params = {"uris": list(point_uris), "start": start, "end": end, "gap": max_gap.total_seconds()}
+        outermost = self.conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+        with self.conn.transaction():  # one snapshot: which points have empty rows, and the scans
+            if outermost:  # inside a caller's transaction, its snapshot rules apply
+                self.conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            row = self.conn.execute(_EMPTY_ROWS_VALID).fetchone()
+            if row and row[0]:
+                empty = {u for (u,) in self.conn.execute(_EMPTY_POINTS_SQL, params)}
+                rows = self.conn.execute(_INDEX_ONLY_SQL, {**params, "uris": [u for u in point_uris if u not in empty]}).fetchall()
+                if empty:
+                    rows += self.conn.execute(_VALUED_SQL, {**params, "uris": sorted(empty)}).fetchall()
+            else:
+                rows = self.conn.execute(_VALUED_SQL, params).fetchall()
         return {uri: (n, coverage_pct(n, float(covered or 0.0), first, start, end, max_gap)) for uri, n, covered, first in rows}
 
 

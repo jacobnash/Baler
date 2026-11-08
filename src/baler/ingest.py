@@ -32,11 +32,13 @@ def topic_to_point_uri(topic: str) -> URIRef:
     return URIRef(f"urn:point:{topic}")
 
 
-def ingest_reading(store, ts_conn, topic: str, value, ts: float | None = None) -> URIRef:
+def ingest_reading(store, ts_conn, topic: str, value, ts: float | None = None, quality: str | None = None) -> URIRef:
     """Writes to both the graph (identity + raw topic, for Phase 2 to key
     off) and the time-series store (the actual value history). Idempotent
     on (point_uri, ts) - required because Windrow publishes with retain=True,
-    which replays the last message on every listener restart."""
+    which replays the last message on every listener restart. `quality` is
+    the sample's flag from the envelope (baler.quality.from_envelope; None
+    is ok); the value is stored as sent either way."""
     with tracer.start_as_current_span("ingest.reading") as span:
         point_uri = topic_to_point_uri(topic)
         span.set_attribute("point_uri", str(point_uri))
@@ -53,7 +55,7 @@ def ingest_reading(store, ts_conn, topic: str, value, ts: float | None = None) -
             _known_points.add(point_uri)
 
         with tracer.start_as_current_span("ingest.timeseries_write"):
-            timeseries.write_point_value(ts_conn, str(point_uri), value, dt)
+            timeseries.write_point_value(ts_conn, str(point_uri), value, dt, quality=quality)
 
         return point_uri
 

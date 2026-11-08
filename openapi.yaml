@@ -331,6 +331,15 @@ paths:
             type: integer
             minimum: 1
             maximum: 200000
+        - name: compact
+          in: query
+          description: >-
+            `1`: each series' `history` is two parallel arrays, `{"ts": [...], "value": [...]}`,
+            instead of one `{ts, value}` object per sample - the same data in about half the bytes
+            (Baler#107). Whole-second timestamps are integers. Omit for the default form.
+          schema:
+            type: string
+            enum: ["0", "1", "true"]
       responses:
         "200":
           description: One series per resolved point, each with its metadata and history for the span.
@@ -496,6 +505,18 @@ components:
           type: number
           description: Unix epoch seconds. Defaults to the ingest server's current time if omitted.
           example: 1786454667.103
+        quality:
+          description: >-
+            Optional sample quality (#183). A flag name (`fault`,
+            `overridden`, `out_of_service`, `out_of_range`, `spike`,
+            `unit_suspect`; `ok` or omitted means good), or BACnet's own
+            status as `{"status_flags": [...], "reliability": "..."}`.
+            The value is stored as sent either way; an unrecognised
+            quality is treated as good.
+          oneOf:
+            - type: string
+            - type: object
+          example: fault
       example: { "point": "fbf/mock-ahu-1/analogValue,1", "value": 71.0, "ts": 1786454667.103 }
     HistoryItem:
       type: object
@@ -511,6 +532,12 @@ components:
             - type: string
             - type: boolean
             - type: "null"
+        quality:
+          type: string
+          enum: [fault, overridden, out_of_service, out_of_range, spike, unit_suspect]
+          description: >-
+            Present only on a flagged sample (#183). The value is kept as
+            received; fault rules and Cx checks skip flagged samples.
     HisQueryResult:
       type: object
       required: [expr, mode, filter, span, rollup, limit, matched, matchedCount, hints, series]
@@ -600,9 +627,20 @@ components:
         equipDis:
           type: [string, "null"]
         history:
-          type: array
-          items:
-            $ref: "#/components/schemas/HistoryItem"
+          oneOf:
+            - type: array
+              items:
+                $ref: "#/components/schemas/HistoryItem"
+            - type: object
+              description: >-
+                The `compact=1` form - `ts[i]` goes with `value[i]`. `quality`
+                is present only when a sample in the series is flagged (#183):
+                `quality[i]` is that sample's flag, or null for ok.
+              required: [ts, value]
+              properties:
+                ts: { type: array, items: { type: number } }
+                value: { type: array, items: {} }
+                quality: { type: array, items: { type: [string, "null"] } }
         truncated:
           type: boolean
           description: True if the point had more raw samples in the span than `limit` allowed.

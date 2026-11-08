@@ -1606,7 +1606,7 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
                     uri: (rows, False)
                     for uri, rows in timeseries.read_rollup(
                         ts_conn, point_uris, date_span.start, date_span.end, rollup_spec.fold,
-                        interval.seconds, interval.months, tz,
+                        interval.seconds, interval.months, tz, epoch=True,
                     ).items()
                 }
         except ValueError as exc:
@@ -1619,7 +1619,7 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
             # raw read can't add up to millions of rows across many points (#33)
             if max_samples and point_uris:
                 limit = min(limit, max(_AUTO_MIN_PER_SERIES, max_samples // len(point_uris)))
-            history = timeseries.read_range_many(ts_conn, point_uris, date_span.start, date_span.end, limit)
+            history = timeseries.read_range_many(ts_conn, point_uris, date_span.start, date_span.end, limit, with_quality=True)
 
     series = []
     for uri in point_uris:
@@ -1629,8 +1629,12 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
         if rollup:
             info["kind"] = "Number"
         elif not info.get("kind"):
-            info["kind"] = _infer_kind(rows)
-        info["history"] = [{"ts": ts.timestamp(), "value": value} for ts, value in rows]
+            info["kind"] = _infer_kind((r[0], r[1]) for r in rows)
+        # rollup rows already carry Unix seconds (read_rollup epoch=True).
+        # Raw rows carry their quality flag (#183), shown only when set;
+        # rollups fold every sample, flagged or not (see docs/quality).
+        info["history"] = ([{"ts": ts, "value": value} for ts, value in rows] if rollup
+                           else [{"ts": ts.timestamp(), "value": value} | ({"quality": q} if q else {}) for ts, value, q in rows])
         info["truncated"] = truncated
         series.append(info)
     series.sort(key=lambda s: ((s["equipDis"] or ""), s["dis"], s["id"]))
@@ -1648,6 +1652,21 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
         "hints": hints_for_empty_result(query.filter, graph) if not matched else [],
         "series": series,
     }
+
+
+def compact_series(result: dict) -> dict:
+    """/his?compact=1: each series' history as two parallel arrays,
+    {"ts": [...], "value": [...]}, instead of one {"ts", "value"} object per
+    sample - the same data in about half the bytes (readAll(equip) for a day
+    is 3+ MB in the default form, Baler#107), and quicker to encode. Whole-
+    second timestamps go as integers. In place; returns `result`."""
+    for s in result["series"]:
+        hist = s["history"]
+        s["history"] = {"ts": [int(h["ts"]) if h["ts"] == int(h["ts"]) else h["ts"] for h in hist],
+                        "value": [h["value"] for h in hist]}
+        if any("quality" in h for h in hist):  # a third parallel array, only when something is flagged
+            s["history"]["quality"] = [h.get("quality") for h in hist]
+    return result
 
 
 # --- rollup intervals ------------------------------------------------------
