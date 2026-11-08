@@ -117,8 +117,9 @@ def compression_job(conn, job_id) -> dict:
     if job_id is None:
         return {}
     row = conn.execute("""
-        SELECT job_status, last_run_started_at, extract(epoch FROM last_run_duration), last_run_status,
-               total_runs, total_failures, next_start
+        SELECT job_status, CASE WHEN isfinite(last_run_started_at) THEN last_run_started_at END,
+               extract(epoch FROM last_run_duration), last_run_status,
+               total_runs, total_failures, CASE WHEN isfinite(next_start) THEN next_start END
         FROM timescaledb_information.job_stats WHERE job_id = %s""", (job_id,)).fetchone()
     if row is None:
         return {}
@@ -336,8 +337,15 @@ def cmd_soak(args) -> None:
         while time.time() - soak_start < args.duration:
             time.sleep(args.sample_every)
             now = time.time()
-            ch = chunks(conn, cfg["compress_after_s"])
-            job = compression_job(conn, cfg["job_id"])
+            try:
+                ch = chunks(conn, cfg["compress_after_s"])
+                job = compression_job(conn, cfg["job_id"])
+                disk_now, wm_now, writes_now = disk(conn), watermarks(conn), ladder.chunk_writes(conn)
+            except Exception as exc:  # noqa: BLE001 - one bad catalog read must not end a 6 h soak
+                print(f"  sample at t={now - soak_start:.0f}s skipped: {exc!r}", flush=True)
+                result.setdefault("sample_errors", []).append({"t": round(now - soak_start, 1), "error": repr(exc)[:300]})
+                conn = ladder.pg_connect(ep)
+                continue
             # a finished run: attribute the chunks that turned compressed since the last one
             newly = [n for n, c in ch["all"].items() if c["compressed"] and not seen.get(n, {}).get("compressed", True)]
             for n in newly:
@@ -356,12 +364,12 @@ def cmd_soak(args) -> None:
                 last_job = job
             seen = {n: dict(c, inserts=max(c["inserts"], seen.get(n, {}).get("inserts", 0))) for n, c in ch["all"].items()}
             st = ladder.read_stats(stats_file)
-            sample = {"t": round(now - soak_start, 1), "stored_total": ladder.chunk_writes(conn) - w0,
+            sample = {"t": round(now - soak_start, 1), "stored_total": writes_now - w0,
                       "gen_rate": round(st.get("sent_rate_10s", 0)), "gen_behind_s": round(st.get("behind_s", 0), 1),
-                      "disk": disk(conn), "oldest_hot_end_age_s": ch["oldest_hot_end_age_s"], "backlog": ch["backlog"],
+                      "disk": disk_now, "oldest_hot_end_age_s": ch["oldest_hot_end_age_s"], "backlog": ch["backlog"],
                       "chunks": len(ch["all"]), "job": {k: v for k, v in job.items() if k != "next_start"},
                       "compressing": state["running"] or job.get("status") == "Running",
-                      "watermark_age_s": watermarks(conn), "lag": canary.stats(soak_start),
+                      "watermark_age_s": wm_now, "lag": canary.stats(soak_start),
                       "docker": ladder.docker_stats() if args.docker_stats else {}}
             t1 = time.perf_counter()
             conn.execute("SELECT 1")
