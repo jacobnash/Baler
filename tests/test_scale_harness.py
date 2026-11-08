@@ -172,6 +172,8 @@ def test_evaluate_pass():
     ({"probes": [{"name": "p", "status": 502, "median_s": 0.1, "budget_s": 0.5, "bytes": 1, "source": "#178"}]}, "HTTP 502"),
     ({"containers": {"mqtt_listener": {"restarts_delta": 1, "oom_killed": True, "status": "running"}}}, "OOM"),
     ({"graph_timeout": 600}, "graph ingest"),
+    ({"rules": {"fault_detector": {"feed": {"missed_readings_delta": 5000, "lag_s_last": 0.3}}}}, "fault_detector missed 5000"),
+    ({"rules": {"derivation_engine": {"feed": {"missed_readings_delta": 0, "lag_s_last": 45.0}}}}, "behind on the reading feed"),
 ])
 def test_evaluate_fail(over, needle):
     status, reasons = ladder.evaluate(_good_step(**over))
