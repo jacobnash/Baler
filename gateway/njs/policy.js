@@ -85,6 +85,13 @@ const ROUTES = [
   ["GET",    /^\/ops\/mapping\/proposals$/,            "points", "viewer"],
   ["GET",    /^\/ops\/mapping\/summary$/,              "points", "viewer"],
   ["POST",   /^\/ops\/mapping\/decide$/,               "points", "operator"],
+  // Site naming conventions (Baler#186): listing and previewing (a dry run,
+  // POST for its body) are viewer; saving, applying and deleting are operator.
+  ["GET",    /^\/ops\/conventions$/,                    "points", "viewer"],
+  ["POST",   /^\/ops\/conventions\/preview$/,           "points", "viewer"],
+  ["POST",   /^\/ops\/conventions$/,                    "points", "operator"],
+  ["POST",   /^\/ops\/conventions\/[^/]+\/apply$/,      "points", "operator"],
+  ["DELETE", /^\/ops\/conventions\/[^/]+$/,             "points", "operator"],
   // Connectors page: edge nodes and their devices/connections, local or
   // remote (baler.edges). Listing is read-only; every other action changes
   // an edge node (or scans its network) and is admin. Whole-org, like the

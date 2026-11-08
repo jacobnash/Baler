@@ -334,6 +334,129 @@ paths:
           description: A proposal id that doesn't exist or isn't on the caller's sites.
         "409":
           description: A proposal that was already decided.
+  /conventions:
+    get:
+      operationId: listConventions
+      summary: Saved site naming conventions
+      responses:
+        "200":
+          description: Every saved convention.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Convention" }
+        "401":
+          description: Not through the gateway.
+    post:
+      operationId: saveConvention
+      summary: Save (create, or update by id) a naming convention
+      description: operator. Every code's class is checked against Brick; an unknown one is a 400.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Convention" }
+      responses:
+        "200":
+          description: The saved convention, codes normalised and classes in Brick's spelling.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Convention" }
+        "400":
+          description: A malformed annotation, or a class Brick doesn't have.
+        "401":
+          description: Not through the gateway.
+  /conventions/preview:
+    post:
+      operationId: previewConvention
+      summary: Dry-run a convention over the caller's points
+      description: >-
+        Writes nothing. How many points the templates match and classify, the unknown
+        point and equipment codes ranked by how many points each would settle (with
+        example labels), and a sample of labels no template matched.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/Convention"
+                - type: object
+                  properties:
+                    only_unclassified: { type: boolean, default: true, description: Count only points with no Brick class yet. }
+      responses:
+        "200":
+          description: What the convention would do.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [points, matched, classified, unknown_point_codes]
+                properties:
+                  points: { type: integer }
+                  matched: { type: integer }
+                  classified: { type: integer }
+                  by_template: { type: array, items: { type: integer } }
+                  unknown_point_codes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        code: { type: string }
+                        points: { type: integer }
+                        examples: { type: array, items: { type: string } }
+                  unknown_equip_codes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        code: { type: string }
+                        points: { type: integer }
+                  equipment: { type: integer }
+                  unmatched_sample: { type: array, items: { type: string } }
+        "400":
+          description: A malformed annotation, or a class Brick doesn't have.
+        "401":
+          description: Not through the gateway.
+  /conventions/{id}/apply:
+    post:
+      operationId: applyConvention
+      summary: Classify every point (and its equipment) a saved convention settles
+      description: >-
+        operator. Points with a known code and no Brick class yet get the code's class,
+        written like a hand edit and logged in the record edit audit (action
+        `convention`); their equipment gets the equip code's class when all its matched
+        points agree. Never overrides an existing class.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: How many were classified.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  points: { type: integer }
+                  equipment: { type: integer }
+        "401":
+          description: Not through the gateway.
+        "404":
+          description: No such convention.
+  /conventions/{id}:
+    delete:
+      operationId: deleteConvention
+      summary: Delete a saved convention (classes it wrote stay)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          description: Not through the gateway.
+        "404":
+          description: No such convention.
   /freshness:
     get:
       operationId: getFreshness
@@ -432,6 +555,28 @@ components:
               status: { type: integer }
               route: { type: string }
               upstream_status: { type: [string, "null"] }
+    Convention:
+      type: object
+      required: [templates]
+      properties:
+        id: { type: string, description: Omit to create. }
+        name: { type: string }
+        scope_prefix: { type: string, description: "The topic prefix it applies under; empty for every point you can see." }
+        templates:
+          type: array
+          items: { type: string }
+          description: >-
+            Annotated labels, tried in order: literal text with `{role:text}` fields,
+            roles equip_type, equip_id, point and ignore, e.g.
+            `fbf/{equip_type:ahu}-{equip_id:1}/{point:DIS-AIR-TEM}-{ignore:12}`.
+        point_codes:
+          type: object
+          additionalProperties: { type: string }
+          description: Point code (any case and punctuation) -> Brick class.
+        equip_codes:
+          type: object
+          additionalProperties: { type: string }
+          description: Equipment code -> Brick class.
     MappingGroup:
       type: object
       required: [pattern, label, kind, count, tier, candidates, refused_because, members]

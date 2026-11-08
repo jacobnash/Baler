@@ -289,7 +289,7 @@ def open_site_visit_issue(conn, cx_repo, store, rows: list[dict], user: dict, no
 
 # --- how much of the building Baler understands ---------------------------
 
-STATES = ("rule", "site_rule", "memory", "model", "person", "proposed", "escalated", "unmapped")
+STATES = ("convention", "rule", "site_rule", "memory", "model", "person", "proposed", "escalated", "unmapped")
 
 
 def summary(store, proposal_rows: list[dict], person_uris: set[str], allows=None) -> dict:
@@ -308,9 +308,10 @@ def summary(store, proposal_rows: list[dict], person_uris: set[str], allows=None
         PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
         SELECT ?p ?d WHERE { ?p skos:definition ?d .
           FILTER(STRSTARTS(STR(?p), "urn:point:") && (STRSTARTS(STR(?d), "model-classified") || STRSTARTS(STR(?d), "site-rule-classified")
-                 || STRSTARTS(STR(?d), "memory-classified"))) }"""):
+                 || STRSTARTS(STR(?d), "memory-classified") || STRSTARTS(STR(?d), "convention-classified"))) }"""):
         d = str(r.d)
-        by_def[str(r.p)] = "site_rule" if d.startswith("site-rule") else "memory" if d.startswith("memory") else "model"
+        by_def[str(r.p)] = ("site_rule" if d.startswith("site-rule") else "memory" if d.startswith("memory")
+                            else "convention" if d.startswith("convention") else "model")
     held = {r["entity_uri"]: r["status"] for r in proposal_rows if r["status"] in HELD}
     counts: Counter[str] = Counter()
     for p in points:
@@ -319,7 +320,7 @@ def summary(store, proposal_rows: list[dict], person_uris: set[str], allows=None
         else:
             counts[held.get(p, "unmapped")] += 1
     total = len(points)
-    understood = sum(counts[s] for s in ("rule", "site_rule", "memory", "model", "person"))
+    understood = sum(counts[s] for s in ("convention", "rule", "site_rule", "memory", "model", "person"))
     return {"total": total, "understood": understood, "understood_pct": round(100 * understood / total, 1) if total else 0.0,
             "states": {s: counts[s] for s in STATES}}
 

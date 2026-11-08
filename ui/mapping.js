@@ -10,6 +10,7 @@ const groupsEl = document.getElementById("mapping-groups");
 const mappingStatusEl = document.getElementById("mapping-status");
 
 const STATE_LABELS = {
+  convention: "By a naming convention",
   rule: "By a rule",
   site_rule: "By a site rule",
   memory: "By memory",
@@ -240,5 +241,7 @@ initAuth(async () => {
     await refresh();
   } catch (err) {
     statusEl.textContent = err.message;
+  } finally {
+    if (window.conventionsReady) window.conventionsReady(); // conventions.js
   }
 });

@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlparse
 
 from baler import (
     auth,
+    conventions,
     docs_ui,
     edges,
     gateway_auth,
@@ -179,6 +180,67 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
             span.set_attribute("decided", result["decided"])
             respond_json(self, 200, result)
 
+        # --- site naming conventions (Baler#186); policy.js rows
+
+        def _conv_user(self, conn, claims) -> dict:
+            sub = claims.get("sub")
+            user = auth.get_user(conn, sub) if sub and claims.get("kind") == "session" else None
+            return {"sub": sub, "email": user["email"] if user else sub}
+
+        def _conventions_get(self, span) -> None:
+            with ts_pool.connection() as conn:
+                conventions.ensure_schema(conn)
+                rows = [c.to_dict() for c in conventions.load_all(conn)]
+            respond_json(self, 200, rows)
+
+        def _conventions_preview(self, span) -> None:
+            body = self.read_json_body()
+            conv = conventions.from_body(body)
+            with ts_pool.connection() as conn:
+                scope = scope_for(conn, claims_from_header(self.headers.get("Authorization")) or {})
+            store = self._store()
+            labels = conventions.point_labels(store, scope.allows)
+            result = conventions.preview(conv, labels, conventions.brick_typed(store), bool(body.get("only_unclassified", True)))
+            span.set_attribute("matched", result["matched"])
+            respond_json(self, 200, result)
+
+        def _conventions_save(self, span) -> None:
+            body = self.read_json_body()
+            conv = conventions.from_body(body)
+            with ts_pool.connection() as conn:
+                conventions.ensure_schema(conn)
+                claims = claims_from_header(self.headers.get("Authorization")) or {}
+                conventions.save(conn, conv, self._conv_user(conn, claims)["email"])
+            respond_json(self, 200, conv.to_dict())
+
+        def _conventions_apply(self, conv_id: str, span) -> None:
+            store = self._store()
+            with ts_pool.connection() as conn:
+                conventions.ensure_schema(conn)
+                conv = conventions.get(conn, conv_id)
+                if conv is None:
+                    respond_error(self, 404, "no such convention")
+                    return
+                claims = claims_from_header(self.headers.get("Authorization")) or {}
+                scope = scope_for(conn, claims)
+                user = self._conv_user(conn, claims)
+
+                def edit(st, uri, cls):
+                    changed = record_edit.apply_edit(st, uri, {"brickClass": cls})
+                    mapping_review._drop_fallback_types(st, uri)
+                    record_edit.log_edit(conn, uri, "convention", user["sub"], user["email"], {**changed, "convention": conv.id})
+
+                result = conventions.apply(conv, store, conventions.point_labels(store, scope.allows), conventions.brick_typed(store), edit)
+            span.set_attribute("points", result["points"])
+            respond_json(self, 200, {"points": result["points"], "equipment": result["equipment"]})
+
+        def _conventions_delete(self, conv_id: str, span) -> None:
+            with ts_pool.connection() as conn:
+                conventions.ensure_schema(conn)
+                found = conventions.delete(conn, conv_id)
+            self.send_response(204 if found else 404)
+            self.end_headers()
+
         # --- edge nodes and connectors (Connectors page); policy.js rows
 
         def _edges_get(self, span) -> None:
@@ -295,6 +357,16 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
             if urlparse(self.path).path == "/mapping/decide":
                 self.handle_traced("ops_api.mapping_decide", self._mapping_decide)
                 return
+            if urlparse(self.path).path == "/conventions/preview":
+                self.handle_traced("ops_api.conventions_preview", self._conventions_preview)
+                return
+            if urlparse(self.path).path == "/conventions":
+                self.handle_traced("ops_api.conventions_save", self._conventions_save)
+                return
+            m = re.fullmatch(r"/conventions/([^/]+)/apply", urlparse(self.path).path)
+            if m:
+                self.handle_traced("ops_api.conventions_apply", lambda span: self._conventions_apply(m.group(1), span))
+                return
             self.send_response(404)
             self.end_headers()
 
@@ -314,6 +386,10 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
             m = re.fullmatch(r"/sources/([^/]+)", urlparse(self.path).path)
             if m:
                 self.handle_traced("ops_api.delete_source", lambda span: self._sources_delete(m.group(1), span))
+                return
+            m = re.fullmatch(r"/conventions/([^/]+)", urlparse(self.path).path)
+            if m:
+                self.handle_traced("ops_api.conventions_delete", lambda span: self._conventions_delete(m.group(1), span))
                 return
             self.send_response(404)
             self.end_headers()
@@ -344,6 +420,11 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
                 if not self._gateway():
                     return
                 self.handle_traced("ops_api.mapping_proposals", self._mapping_proposals_get)
+                return
+            if urlparse(self.path).path == "/conventions":
+                if not self._gateway():
+                    return
+                self.handle_traced("ops_api.conventions_get", self._conventions_get)
                 return
             if urlparse(self.path).path == "/mapping/summary":
                 if not self._gateway():

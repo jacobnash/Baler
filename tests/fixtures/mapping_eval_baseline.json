@@ -63,6 +63,14 @@
     "review_truth_in_top1": 0.773,
     "review_truth_in_top3": 0.773,
     "steps": {
+      "convention": {
+        "accuracy": null,
+        "correct": 0,
+        "partial": 0,
+        "pct": 0.0,
+        "points": 0,
+        "wrong": 0
+      },
       "memory": {
         "accuracy": null,
         "correct": 0,
@@ -284,6 +292,14 @@
     "review_truth_in_top1": 0.307,
     "review_truth_in_top3": 0.827,
     "steps": {
+      "convention": {
+        "accuracy": null,
+        "correct": 0,
+        "partial": 0,
+        "pct": 0.0,
+        "points": 0,
+        "wrong": 0
+      },
       "memory": {
         "accuracy": null,
         "correct": 0,
