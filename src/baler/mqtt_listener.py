@@ -15,6 +15,8 @@ import time
 import traceback
 from functools import lru_cache
 
+from opentelemetry import trace
+
 from baler import bacnet_alarms, mapping, mqtt_util, tracing
 from baler.ingest import (
     ingest_equip_tags,
@@ -181,89 +183,98 @@ def make_on_message(store, ts_conn, batcher: ReadingBatcher | None = None):
             client.ack(msg.mid, msg.qos)
 
     def _handle(msg):
+        # A span per reading was ~30% of the listener's CPU at 2,000
+        # readings/s (span creation plus the exporter encoding them, py-spy,
+        # Baler#190). With a batcher a reading is traced as part of its
+        # batch (mqtt_listener.flush); tags/equip messages keep their span.
+        if batcher is not None and not msg.topic.endswith("/tags"):
+            return _handle_in(msg, trace.INVALID_SPAN)
         with tracer.start_as_current_span("mqtt_listener.on_message") as span:
             span.set_attribute("topic", msg.topic)
+            return _handle_in(msg, span)
+
+    def _handle_in(msg, span):
+        try:
+            payload = json.loads(msg.payload.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            span.set_attribute("error", str(exc))
+            print(f"malformed payload on {msg.topic}: {exc!r}")
+            return
+        if not isinstance(payload, dict):
+            span.set_attribute("error", "payload is not a JSON object")
+            print(f"malformed payload on {msg.topic}: expected a JSON object, got {type(payload).__name__}")
+            return
+
+        value = payload.get("value")
+        ts = payload.get("ts")
+
+        # BACnet/Modbus-sourced equip: one message per connection,
+        # {"tags": {...}, "points": [label, ...]} - equip identity is
+        # the connection's own topic_prefix (see
+        # ingest.topic_prefix_to_equip_uri), hasPoint is asserted
+        # directly since the point list is already known at publish
+        # time (windrow's connection_manager._tag_points sibling call).
+        if msg.topic.endswith("/equip/tags"):
+            topic_prefix = msg.topic[: -len("/equip/tags")]
             try:
-                payload = json.loads(msg.payload.decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                data = json.loads(value)
+            except (json.JSONDecodeError, TypeError) as exc:
                 span.set_attribute("error", str(exc))
-                print(f"malformed payload on {msg.topic}: {exc!r}")
+                print(f"malformed equip payload on {msg.topic}: {exc!r}")
                 return
-            if not isinstance(payload, dict):
-                span.set_attribute("error", "payload is not a JSON object")
-                print(f"malformed payload on {msg.topic}: expected a JSON object, got {type(payload).__name__}")
+            equip_uri = ingest_equip_tags(store, topic_prefix, data.get("tags", {}))
+            for label in data.get("points", []):
+                link_point_to_equip(store, topic_to_point_uri(f"{topic_prefix}/{label}"), equip_uri)
+            _classify(store, equip_uri, mapping.EQUIP_RULES_PATH)
+            return
+
+        # Haystack-sourced equip: one message per equip/site rec,
+        # {topic_prefix}/equip/{haystackRef}/tags - equip identity is
+        # the rec's own Haystack id (see ingest.haystack_ref_to_equip_uri),
+        # matching link_equip_ref's resolution on the point side; no
+        # points list needed here since points link themselves via
+        # their own equipRef tag, not the equip side pushing membership.
+        if "/equip/" in msg.topic and msg.topic.endswith("/tags"):
+            ref = msg.topic[: -len("/tags")].rsplit("/equip/", 1)[1]
+            try:
+                tags = json.loads(value)
+            except (json.JSONDecodeError, TypeError) as exc:
+                span.set_attribute("error", str(exc))
+                print(f"malformed haystack equip payload on {msg.topic}: {exc!r}")
                 return
+            equip_uri = ingest_haystack_equip_tags(store, ref, tags)
+            _classify(store, equip_uri, mapping.EQUIP_RULES_PATH)
+            return
 
-            value = payload.get("value")
-            ts = payload.get("ts")
-
-            # BACnet/Modbus-sourced equip: one message per connection,
-            # {"tags": {...}, "points": [label, ...]} - equip identity is
-            # the connection's own topic_prefix (see
-            # ingest.topic_prefix_to_equip_uri), hasPoint is asserted
-            # directly since the point list is already known at publish
-            # time (windrow's connection_manager._tag_points sibling call).
-            if msg.topic.endswith("/equip/tags"):
-                topic_prefix = msg.topic[: -len("/equip/tags")]
-                try:
-                    data = json.loads(value)
-                except (json.JSONDecodeError, TypeError) as exc:
-                    span.set_attribute("error", str(exc))
-                    print(f"malformed equip payload on {msg.topic}: {exc!r}")
-                    return
-                equip_uri = ingest_equip_tags(store, topic_prefix, data.get("tags", {}))
-                for label in data.get("points", []):
-                    link_point_to_equip(store, topic_to_point_uri(f"{topic_prefix}/{label}"), equip_uri)
-                _classify(store, equip_uri, mapping.EQUIP_RULES_PATH)
+        if msg.topic.endswith("/tags"):
+            real_topic = msg.topic[: -len("/tags")]
+            try:
+                tags = json.loads(value)
+            except (json.JSONDecodeError, TypeError) as exc:
+                span.set_attribute("error", str(exc))
+                print(f"malformed tags payload on {msg.topic}: {exc!r}")
                 return
+            point_uri = ingest_tags(store, real_topic, tags, ts)
+            # No-op unless this point carries an equipRef and the
+            # matching equip's own tags have already landed - safe to
+            # call unconditionally on every tag message, not just the
+            # first one (a point re-tagged after its equip arrives
+            # should still get linked).
+            link_equip_ref(store, point_uri)
+            _classify(store, point_uri, mapping.DEFAULT_RULES_PATH)
+            return
 
-            # Haystack-sourced equip: one message per equip/site rec,
-            # {topic_prefix}/equip/{haystackRef}/tags - equip identity is
-            # the rec's own Haystack id (see ingest.haystack_ref_to_equip_uri),
-            # matching link_equip_ref's resolution on the point side; no
-            # points list needed here since points link themselves via
-            # their own equipRef tag, not the equip side pushing membership.
-            if "/equip/" in msg.topic and msg.topic.endswith("/tags"):
-                ref = msg.topic[: -len("/tags")].rsplit("/equip/", 1)[1]
-                try:
-                    tags = json.loads(value)
-                except (json.JSONDecodeError, TypeError) as exc:
-                    span.set_attribute("error", str(exc))
-                    print(f"malformed haystack equip payload on {msg.topic}: {exc!r}")
-                    return
-                equip_uri = ingest_haystack_equip_tags(store, ref, tags)
-                _classify(store, equip_uri, mapping.EQUIP_RULES_PATH)
-                return
-
-            if msg.topic.endswith("/tags"):
-                real_topic = msg.topic[: -len("/tags")]
-                try:
-                    tags = json.loads(value)
-                except (json.JSONDecodeError, TypeError) as exc:
-                    span.set_attribute("error", str(exc))
-                    print(f"malformed tags payload on {msg.topic}: {exc!r}")
-                    return
-                point_uri = ingest_tags(store, real_topic, tags, ts)
-                # No-op unless this point carries an equipRef and the
-                # matching equip's own tags have already landed - safe to
-                # call unconditionally on every tag message, not just the
-                # first one (a point re-tagged after its equip arrives
-                # should still get linked).
-                link_equip_ref(store, point_uri)
-                _classify(store, point_uri, mapping.DEFAULT_RULES_PATH)
-                return
-
-            # A controller alarm forwarded by Windrow (Baler#168) is not a
-            # reading: fault_detector raises/clears it as a fault. Storing it
-            # here would invent a `<label>/alarm` point with dicts for history.
-            if bacnet_alarms.is_alarm(msg.topic, value):
-                return False
-
-            if batcher is not None:
-                batcher.put(msg, msg.topic, binary_state(value), ts)
-                return True
-            ingest_reading(store, ts_conn, msg.topic, binary_state(value), ts)
+        # A controller alarm forwarded by Windrow (Baler#168) is not a
+        # reading: fault_detector raises/clears it as a fault. Storing it
+        # here would invent a `<label>/alarm` point with dicts for history.
+        if bacnet_alarms.is_alarm(msg.topic, value):
             return False
+
+        if batcher is not None:
+            batcher.put(msg, msg.topic, binary_state(value), ts)
+            return True
+        ingest_reading(store, ts_conn, msg.topic, binary_state(value), ts)
+        return False
 
     return on_message
 
