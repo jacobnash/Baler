@@ -213,15 +213,12 @@ def _setup(conn: psycopg.Connection, statement_timeout: str | None = None) -> No
                 LABELS_INDEX, QUALITY_COLUMN)
     _ensure_rollup_views(conn)
     _ensure_compression(conn)
-    # Real tradeoff, taken deliberately: every INSERT otherwise waits on a
-    # full WAL fsync before returning. Scoped to this connection only (a
-    # session-level SET, not a postgresql.conf edit) - other clients
-    # (Grafana reads, anything else) are unaffected. The risk this accepts:
-    # a write could be lost on an OS/DB crash within the tiny WAL-flush
-    # window between "client got 204" and "WAL synced to disk" - not a
-    # corruption risk, a durability-window risk, and one this point-history
-    # table (telemetry, not financial records) can afford.
-    conn.execute("SET synchronous_commit = off")
+    # synchronous_commit stays at the server's default (on): a reading the
+    # broker was told is stored must survive a Postgres crash (Baler#190's
+    # durability parity). This used to SET it off per connection to dodge an
+    # fsync per single-row INSERT; the hot paths now write in batches
+    # (write_point_values: mqtt_listener's batches, hisWrite's rows), so one
+    # fsync covers thousands of rows instead.
     if statement_timeout:
         conn.execute("SELECT set_config('statement_timeout', %s, false)", (statement_timeout,))
 
@@ -266,26 +263,20 @@ def iter_rows(cur):
         yield from batch
 
 
-def write_point_value(conn: psycopg.Connection, point_uri: str, value, ts: datetime, unit: str | None = None, label: str | None = None,
-                      quality: str | None = None) -> None:
-    """Dispatches on type(value) into the right nullable column. bool must
-    be checked before int/float - bool is a subclass of int in Python, the
-    same trap normalize_value() guards against in Windrow's bridges.
-    `quality` is the sample's flag (baler.quality; None is ok)."""
-    num, text, flag = None, None, None
+def _value_columns(value) -> tuple[float | None, str | None, bool | None]:
+    """(value, value_text, value_bool) for one reading. bool must be
+    checked before int/float - bool is a subclass of int in Python, the
+    same trap normalize_value() guards against in Windrow's bridges."""
     if isinstance(value, bool):
-        flag = value
-    elif isinstance(value, (int, float)):
-        num = float(value)
-    elif value is None:
-        pass
-    else:
-        text = str(value)
+        return None, None, value
+    if isinstance(value, (int, float)):
+        return float(value), None, None
+    if value is None:
+        return None, None, None
+    return None, str(value), None
 
-    conn.execute(
-        """
-        INSERT INTO point_history (point_uri, ts, value, value_text, value_bool, unit, label, quality)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+
+_UPSERT_SET = """
         ON CONFLICT (point_uri, ts) DO UPDATE SET
             value = EXCLUDED.value,
             value_text = EXCLUDED.value_text,
@@ -293,9 +284,56 @@ def write_point_value(conn: psycopg.Connection, point_uri: str, value, ts: datet
             unit = EXCLUDED.unit,
             label = EXCLUDED.label,
             quality = EXCLUDED.quality
-        """,
+"""
+
+
+def write_point_value(conn: psycopg.Connection, point_uri: str, value, ts: datetime, unit: str | None = None, label: str | None = None,
+                      quality: str | None = None) -> None:
+    """One reading into the right nullable column. Idempotent on
+    (point_uri, ts), last write wins. `quality` is the sample's flag
+    (baler.quality; None is ok). Many at once: write_point_values."""
+    num, text, flag = _value_columns(value)
+    conn.execute(
+        "INSERT INTO point_history (point_uri, ts, value, value_text, value_bool, unit, label, quality) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)" + _UPSERT_SET,
         (point_uri, ts, num, text, flag, unit, label, quality),
     )
+
+
+# A per-session staging table for write_point_values: COPY can't do ON
+# CONFLICT, so rows are COPYed here and upserted from here in one statement.
+# Emptied at every commit.
+_STAGE_DDL = """
+CREATE TEMP TABLE IF NOT EXISTS point_history_stage (
+    point_uri TEXT NOT NULL, ts TIMESTAMPTZ NOT NULL, value DOUBLE PRECISION,
+    value_text TEXT, value_bool BOOLEAN, unit TEXT, label TEXT, quality TEXT
+) ON COMMIT DELETE ROWS
+"""
+
+
+def write_point_values(conn: psycopg.Connection, rows) -> int:
+    """Many readings - (point_uri, value, ts[, unit[, label[, quality]]])
+    each - in one transaction: COPY into a staging table, then one upsert
+    into point_history. Same semantics as calling write_point_value per row
+    in order (idempotent on (point_uri, ts), the last row for a key wins),
+    at one round trip and one commit (one fsync) for the lot instead of one
+    each. Returns the number of distinct (point_uri, ts) rows written."""
+    latest: dict[tuple[str, datetime], tuple] = {}
+    for row in rows:
+        uri, value, ts = row[0], row[1], row[2]
+        extra = (tuple(row[3:6]) + (None, None, None))[:3]  # unit, label, quality
+        latest[(uri, ts)] = (uri, ts, *_value_columns(value), *extra)
+    if not latest:
+        return 0
+    cols = "point_uri, ts, value, value_text, value_bool, unit, label, quality"
+    with conn.transaction():
+        conn.execute(_STAGE_DDL)
+        with conn.cursor() as cur:
+            with cur.copy(f"COPY point_history_stage ({cols}) FROM STDIN") as copy:
+                for rec in latest.values():
+                    copy.write_row(rec)
+            cur.execute(f"INSERT INTO point_history ({cols}) SELECT {cols} FROM point_history_stage" + _UPSERT_SET)
+    return len(latest)
 
 
 def _row_to_value(row):

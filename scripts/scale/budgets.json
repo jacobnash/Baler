@@ -1,0 +1,18 @@
+{
+  "_comment": "Read probes the ladder times through the gateway after each soak (Baler#190 R3/R4). warm_median_s / max_bytes from #178's budgets where source is #178; 'provisional' ones have no #178 budget yet and are set by analogy - tighten them once nash-srv numbers exist. {cx_project} is filled in by the ladder.",
+  "runs": 5,
+  "probes": [
+    {"name": "read?filter=point", "path": "/api/read", "params": {"filter": "point"}, "warm_median_s": 1.5, "source": "#178"},
+    {"name": "Equipment tree: read?filter=equip", "path": "/api/read", "params": {"filter": "equip"}, "warm_median_s": 0.5, "source": "#178"},
+    {"name": "Equipment tree: sites/spaces", "path": "/api/read", "params": {"filter": "Site or Building or Floor or Zone"}, "warm_median_s": 0.5, "source": "provisional"},
+    {"name": "curVal, 100 points", "path": "/api/read", "params": {"filter": "scaleHis100"}, "warm_median_s": 0.5, "source": "provisional"},
+    {"name": "curVal, 1000 points", "path": "/api/read", "params": {"filter": "scaleHis1000"}, "warm_median_s": 1.0, "source": "provisional"},
+    {"name": "hisRead 1 point (today)", "path": "/ingest/his", "params": {"expr": "readAll(scaleHis1).hisRead(today)"}, "warm_median_s": 0.5, "source": "provisional"},
+    {"name": "hisRead 100 points (today)", "path": "/ingest/his", "params": {"expr": "readAll(scaleHis100).hisRead(today)"}, "warm_median_s": 2.0, "source": "provisional"},
+    {"name": "hisRead 1000 points (today)", "path": "/ingest/his", "params": {"expr": "readAll(scaleHis1000).hisRead(today)"}, "warm_median_s": 5.0, "source": "provisional"},
+    {"name": "readAll(equip) hisRead(today)", "path": "/ingest/his", "params": {"expr": "readAll(equip).hisRead(today)"}, "warm_median_s": 2.0, "source": "#178"},
+    {"name": "/ops/status", "path": "/ops/status", "params": {}, "warm_median_s": 1.0, "source": "#178"},
+    {"name": "/fault/faults", "path": "/fault/faults", "params": {}, "warm_median_s": 0.5, "max_bytes": 500000, "source": "#178"},
+    {"name": "Cx report, 500-point project", "path": "/cx/projects/{cx_project}/report", "params": {"format": "html"}, "warm_median_s": 2.0, "source": "#178", "needs": "cx_project"}
+  ]
+}

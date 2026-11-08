@@ -137,6 +137,66 @@ def _deliver_and_record(webhook: dict, payload: dict) -> None:
         conn.close()
 
 
+class OpenFaults:
+    """Which (rule_id, point_uri) pairs have an open fault, kept in memory
+    so a reading (or sweep result) that changes nothing costs nothing:
+    close_fault on every in-range reading was an UPDATE round trip per
+    reading per matching rule - ~1,200/s at 10k points, the bulk of
+    Postgres's statements (Baler#190) - to resolve faults that almost never
+    exist. Shared by the Cur-mode thread and the His-mode sweep, which
+    refreshes it from Postgres every cycle, so a fault opened or closed
+    elsewhere (a rule deleted through fault_api) is picked up within one
+    sweep; a stale "open" entry only costs one no-op UPDATE."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._open: set[tuple[str, str]] = set()
+        self._opened_during_refresh: set[tuple[str, str]] = set()
+
+    def refresh(self, conn) -> None:
+        with self._lock:
+            self._opened_during_refresh = set()
+        rows = {(r, p) for r, p in conn.execute("SELECT rule_id, point_uri FROM faults WHERE ended_at IS NULL")}
+        with self._lock:
+            # an open that committed after the SELECT's snapshot must survive
+            self._open = rows | self._opened_during_refresh
+
+    def is_open(self, rule_id: str, point_uri: str) -> bool:
+        with self._lock:
+            return (rule_id, point_uri) in self._open
+
+    def opened(self, rule_id: str, point_uri: str) -> None:
+        with self._lock:
+            self._open.add((rule_id, point_uri))
+            self._opened_during_refresh.add((rule_id, point_uri))
+
+    def closed(self, rule_id: str, point_uri: str) -> None:
+        with self._lock:
+            self._open.discard((rule_id, point_uri))
+            self._opened_during_refresh.discard((rule_id, point_uri))
+
+
+def _open_if_new(fault_conn, open_faults: OpenFaults | None, rule: dict, point_uri: str, now, detail) -> int | None:
+    """open_fault, skipped when it's known to be open already (it'd be a
+    no-op: ON CONFLICT DO NOTHING)."""
+    if open_faults is not None and open_faults.is_open(rule["id"], point_uri):
+        return None
+    fault_id = open_fault(fault_conn, rule["id"], point_uri, now, detail=detail, severity=rule.get("severity", "warning"))
+    if open_faults is not None:
+        open_faults.opened(rule["id"], point_uri)  # new, or already open in the DB: open either way
+    return fault_id
+
+
+def _close_if_open(fault_conn, open_faults: OpenFaults | None, rule_id: str, point_uri: str, now) -> int | None:
+    """close_fault, skipped when nothing is known to be open."""
+    if open_faults is not None and not open_faults.is_open(rule_id, point_uri):
+        return None
+    fault_id = close_fault(fault_conn, rule_id, point_uri, now)
+    if open_faults is not None:
+        open_faults.closed(rule_id, point_uri)
+    return fault_id
+
+
 def evaluate_range_rule(rule: dict, value) -> bool:
     """True means faulted. Non-numeric values never satisfy a range rule -
     reported as not-faulted, not an error; a read failure (value is None
@@ -147,7 +207,8 @@ def evaluate_range_rule(rule: dict, value) -> bool:
     return value < rule["min"] or value > rule["max"]
 
 
-def handle_cur_reading(fault_conn, rule_cache: RuleCache, webhooks_path: str, topic: str, value) -> None:
+def handle_cur_reading(fault_conn, rule_cache: RuleCache, webhooks_path: str, topic: str, value,
+                       open_faults: OpenFaults | None = None) -> None:
     point_uri = str(topic_to_point_uri(topic))
     now = datetime.now(timezone.utc)
 
@@ -168,20 +229,17 @@ def handle_cur_reading(fault_conn, rule_cache: RuleCache, webhooks_path: str, to
             span.set_attribute("faulted", faulted)
 
             if faulted:
-                fault_id = open_fault(
-                    fault_conn, rule["id"], point_uri, now,
-                    detail={"value": value, "min": rule["min"], "max": rule["max"]},
-                    severity=rule.get("severity", "warning"),
-                )
+                fault_id = _open_if_new(fault_conn, open_faults, rule, point_uri, now,
+                                        {"value": value, "min": rule["min"], "max": rule["max"]})
                 if fault_id is not None:
                     _fire_webhooks(webhooks_path, "fault.opened", rule["id"], point_uri, "open", {"value": value})
             else:
-                fault_id = close_fault(fault_conn, rule["id"], point_uri, now)
+                fault_id = _close_if_open(fault_conn, open_faults, rule["id"], point_uri, now)
                 if fault_id is not None:
                     _fire_webhooks(webhooks_path, "fault.resolved", rule["id"], point_uri, "resolved", {"value": value})
 
 
-def make_on_message(fault_conn, rule_cache: RuleCache, webhooks_path: str):
+def make_on_message(fault_conn, rule_cache: RuleCache, webhooks_path: str, open_faults: OpenFaults | None = None):
     def on_message(client, userdata, msg):
         try:
             payload = json.loads(msg.payload.decode("utf-8"))
@@ -207,7 +265,7 @@ def make_on_message(fault_conn, rule_cache: RuleCache, webhooks_path: str):
         # a good reading arrives.
         if not quality.is_good(quality.from_envelope(payload.get("quality"))):
             return
-        handle_cur_reading(fault_conn, rule_cache, webhooks_path, msg.topic, value)
+        handle_cur_reading(fault_conn, rule_cache, webhooks_path, msg.topic, value, open_faults)
 
     return on_message
 
@@ -230,7 +288,8 @@ def _evaluate_stale(ts_conn, point_uri: str, max_age_seconds: float, now: dateti
 
 
 def evaluate_his_rules(
-    ts_conn, fault_conn, rules: list[dict], webhooks_path: str, now: datetime | None = None, store=None
+    ts_conn, fault_conn, rules: list[dict], webhooks_path: str, now: datetime | None = None, store=None,
+    open_faults: OpenFaults | None = None,
 ) -> None:
     """Importable/callable synchronously - tests call this directly
     instead of waiting on a real sleep loop. Each His-mode rule's roster
@@ -276,11 +335,11 @@ def evaluate_his_rules(
                 span.set_attribute("faulted", faulted)
 
                 if faulted:
-                    fault_id = open_fault(fault_conn, rule["id"], point_uri, now, severity=rule.get("severity", "warning"))
+                    fault_id = _open_if_new(fault_conn, open_faults, rule, point_uri, now, None)
                     if fault_id is not None:
                         _fire_webhooks(webhooks_path, "fault.opened", rule["id"], point_uri, "open", None)
                 else:
-                    fault_id = close_fault(fault_conn, rule["id"], point_uri, now)
+                    fault_id = _close_if_open(fault_conn, open_faults, rule["id"], point_uri, now)
                     if fault_id is not None:
                         _fire_webhooks(webhooks_path, "fault.resolved", rule["id"], point_uri, "resolved", None)
 
@@ -322,8 +381,10 @@ def main() -> None:
         if closed:
             print(f"fault detector: resolved {closed} open fault(s) whose rule no longer exists")
 
+    open_faults = OpenFaults()
+    open_faults.refresh(fault_conn_his)
     client = mqtt_util.make_client()
-    client.on_message = make_on_message(fault_conn_cur, rule_cache, args.webhooks_file)
+    client.on_message = make_on_message(fault_conn_cur, rule_cache, args.webhooks_file, open_faults)
     client.connect(args.mqtt_host, args.mqtt_port)
     client.subscribe(args.topic_pattern)
     client.loop_start()  # background thread - main thread stays free for the His-mode sweep
@@ -340,7 +401,9 @@ def main() -> None:
                     counts = quality.sweep(ts_conn, store)
                     for k, v in counts.items():
                         span.set_attribute(k, v)
-            evaluate_his_rules(ts_conn, fault_conn_his, rule_cache.get(), args.webhooks_file, store=store)
+            open_faults.refresh(fault_conn_his)
+            evaluate_his_rules(ts_conn, fault_conn_his, rule_cache.get(), args.webhooks_file, store=store,
+                               open_faults=open_faults)
             heartbeat.beat(fault_conn_his, "fault_detector", {"interval_seconds": args.his_interval})
             time.sleep(args.his_interval)
     finally:

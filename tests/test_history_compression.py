@@ -276,6 +276,37 @@ def test_late_writes_into_compressed_chunks(conn, monkeypatch):
             assert a == pytest.approx(b, rel=1e-9, abs=1e-9)
 
 
+@pytest.mark.integration
+def test_batched_writes_into_compressed_chunks(conn):
+    """mqtt_listener's and hisWrite's batched path (write_point_values: COPY
+    into the staging table, one upsert) lands in compressed chunks like the
+    single-row path does: an overwrite wins, new rows go in, quality (#183)
+    rides along, and the connection still commits durably (#240)."""
+    start, end = _old_span()
+    _seed(conn, start, 6)
+    uris = [f"{PREFIX}p{p}" for p in range(3)]
+    assert _compress(conn, start, end)[0] > 0
+    assert conn.execute("SHOW synchronous_commit").fetchone()[0] == "on"
+    n0 = conn.execute("SELECT count(*) FROM point_history WHERE point_uri LIKE %s", (PREFIX + "%",)).fetchone()[0]
+
+    t = start + timedelta(hours=1)  # an existing (point, ts): replay overwrites
+    late = [start + timedelta(hours=2, seconds=30 * i + 7) for i in range(200)]  # new, between existing
+    rows = [(uris[0], 999.0, t, None, None, "stale")]
+    rows += [(uris[1], 500.0 + i, ts, None, None, "ok" if i % 2 else "bad") for i, ts in enumerate(late)]
+    assert timeseries.write_point_values(conn, rows) == 1 + len(late)
+
+    n1 = conn.execute("SELECT count(*) FROM point_history WHERE point_uri LIKE %s", (PREFIX + "%",)).fetchone()[0]
+    assert n1 == n0 + len(late)
+    assert timeseries.read_range(conn, uris[0], t, t) == [(t, 999.0)]
+    assert conn.execute("SELECT quality FROM point_history WHERE point_uri = %s AND ts = %s",
+                        (uris[0], t)).fetchone()[0] == "stale"
+    got = dict(timeseries.read_range(conn, uris[1], late[0], late[-1]))
+    assert all(got[ts] == 500.0 + i for i, ts in enumerate(late))
+    bad = conn.execute("SELECT count(*) FROM point_history WHERE point_uri = %s AND ts = ANY(%s) AND quality = 'bad'",
+                       (uris[1], late)).fetchone()[0]
+    assert bad == len(late) // 2
+
+
 # --- #237's per-point probes and empty-rows index, on compressed chunks ------
 
 

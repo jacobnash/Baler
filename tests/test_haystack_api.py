@@ -117,6 +117,11 @@ class FakeTS:
         self.rows.setdefault(uri, []).append((ts, val))
         self.rows[uri].sort(key=lambda r: r[0])
 
+    def write_many(self, conn, rows):
+        for row in rows:  # (uri, val, ts[, unit[, label]]), as timeseries.write_point_values
+            self.write(conn, row[0], row[1], row[2], *row[3:])
+        return len(rows)
+
 
 @pytest.fixture
 def backend(store, monkeypatch):
@@ -126,6 +131,7 @@ def backend(store, monkeypatch):
     monkeypatch.setattr(ha.timeseries, "read_point_labels", ts.labels)
     monkeypatch.setattr(ha.timeseries, "read_range_many", ts.range_many)
     monkeypatch.setattr(ha.timeseries, "write_point_value", ts.write)
+    monkeypatch.setattr(ha.timeseries, "write_point_values", ts.write_many)
     return ha.Backend(store, ts)
 
 

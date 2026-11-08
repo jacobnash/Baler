@@ -60,6 +60,40 @@ def ingest_reading(store, ts_conn, topic: str, value, ts: float | None = None, q
         return point_uri
 
 
+def ingest_readings(store, ts_conn, readings) -> int:
+    """ingest_reading for many readings at once - (topic, value, ts[, quality]) each -
+    as mqtt_listener's batches use it: one Oxigraph round trip for every
+    point seen for the first time in the batch (none once they're all
+    known), and one transaction for the rows (timeseries.write_point_values).
+    Same facts and the same idempotency as calling ingest_reading per
+    reading, in order. Returns the number of rows written."""
+    with tracer.start_as_current_span("ingest.readings") as span:
+        rows = []
+        new: dict[URIRef, str] = {}
+        now = None
+        for reading in readings:
+            topic, value, ts = reading[0], reading[1], reading[2]
+            quality = reading[3] if len(reading) > 3 else None
+            point_uri = topic_to_point_uri(topic)
+            if point_uri not in _known_points:
+                new[point_uri] = topic
+            if ts is None:
+                now = now or datetime.now(timezone.utc)
+                dt = now
+            else:
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            rows.append((str(point_uri), value, dt, None, None, quality))
+        span.set_attribute("readings", len(rows))
+        span.set_attribute("new_points", len(new))
+        if new:
+            with tracer.start_as_current_span("ingest.graph_write"):
+                store.add_many([t for uri, topic in new.items()
+                                for t in ((uri, RDF.type, TD.RawPoint), (uri, TD.sourceTopic, Literal(topic)))])
+            _known_points.update(new)
+        with tracer.start_as_current_span("ingest.timeseries_write"):
+            return timeseries.write_point_values(ts_conn, rows)
+
+
 def _write_tags(store, uri: URIRef, tags: dict) -> None:
     """Marker tags (value True) become HAYSTACK:hasTag triples; valued tags
     become HAYSTACK:<tagName> triples. Lossless and additive - never

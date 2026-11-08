@@ -742,6 +742,7 @@ class Backend:
             rec = build_records(self.store, conn, [uri]).get(uri, {})
             cur = rec.get("curVal")
             point_unit = rec.get("unit") or (cur.unit if isinstance(cur, oh.Number) else None)
+            batch = []
             for row in rows:
                 ts, val = row.get("ts"), row.get("val")
                 if not isinstance(ts, datetime):
@@ -754,7 +755,9 @@ class Backend:
                     val = val.val
                 elif val is not None and not isinstance(val, (bool, int, float, str)):
                     val = str(val)
-                timeseries.write_point_value(conn, uri, val, ts, unit=unit)
+                batch.append((uri, val, ts, unit))
+            # one transaction (one commit) for the whole grid, not one per row
+            timeseries.write_point_values(conn, batch)
 
 
 def _iana(tz: str) -> str:

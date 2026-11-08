@@ -1,0 +1,264 @@
+---
+title: Scale test (how far one server goes)
+---
+
+`scripts/scale/` measures Baler's real ceiling on one server, toward **1,000,000 points each
+reporting every 5 s** (200,000 readings/s). It is the harness for epic
+[#190](https://github.com/jacobnash/Baler/issues/190). The deliverable is a measured ceiling and
+the reason each step stopped, not a promise that 1M points fit on one box.
+
+A step passes only if Baler **doesn't choke**, which means three things:
+
+1. **No data loss.** Everything the broker acknowledged is stored (at least 99%), with no
+   growing backlog and no broker drops.
+2. **Responsive.** The UI/API read probes stay inside the [#178](https://github.com/jacobnash/Baler/issues/178)
+   budgets while the load runs.
+3. **Graceful under overload.** No container restarts or OOM kills, and lag stays visible
+   rather than turning into a crash.
+
+A step can also stop for a reason that is **not** a Baler ceiling, and the result says so
+(`inconclusive`). That happens when the generator couldn't offer the rate, the live install on
+the same host slowed down (live-safety), or the host disk ran low.
+
+## What it runs
+
+- **`loadgen.py`** simulates N points over real MQTT, in exactly the envelope Windrow publishes
+  (`windrow/mqtt_sink.py`): `{"point", "value", "ts"}` with QoS 1, retained. It sends each
+  equip's `{prefix}/equip/tags` (`{"tags", "points"}` as a JSON string) and every point's
+  `{prefix}/{label}/tags` first, so the graph grows the way it does for real equipment. Then it
+  sends readings for every point once per `--interval`, spread evenly across the interval. The
+  topics are `fbf/scale/s<site>/e<equip>/<label>`. It runs `--procs` processes and measures
+  itself: messages published, messages the broker acknowledged per second, and how far it
+  falls behind schedule.
+- **`ladder.py`** steps through the point counts. For each step it:
+  1. publishes tags for the new points and waits for them to reach Oxigraph;
+  2. runs readings for a warm-up (60 s), then a soak (15 min by default), sampling every 15 s;
+  3. runs the read probes and a Cx run and report, still under load;
+  4. stops the generator, waits for the lag canaries to drain, and compares what was stored
+     with what the broker acknowledged, second by second;
+  5. applies the pass conditions and writes the JSON result.
+
+  It stops at the first step that doesn't pass, unless `--continue-on-fail` is given.
+- **`compose.scale.yml`** is the override that makes the stack isolated (see below).
+- **`budgets.json`** holds the read probes and their budgets. The ones marked `#178` come from
+  that issue; the `provisional` ones have no #178 budget yet.
+
+Steps default to 10k, 25k, 50k, 100k, 250k, 500k and 1M. On a host with fewer than 4 CPUs
+they start at 1k, 2.5k and 5k first. `--steps 10k,25k` picks your own.
+
+## Isolation (never touches live)
+
+The scale stack is its own compose project, `-p scale`, with these differences from live:
+
+- volumes `scale_*` (`BALER_VOLUME_PREFIX=scale`);
+- every port moved off the live defaults onto `127.0.0.1` (`SCALE_*_PORT`; the defaults are
+  2xxxx, e.g. gateway 28080 and broker 21883);
+- its own secrets, and its own broker account (`scalegen`), in `scripts/scale/scale.env`,
+  which `ladder.py init` generates (mode 600, git-ignored).
+
+Before `up`, `run`, `crash` or `down`, `ladder.py` reads the effective `docker compose config`
+and **refuses** to continue if any of these hold:
+
+- the project is a live name (`baler`, `baler-deploy`, `timberdoodle`, …) or the checkout's
+  directory name;
+- any volume falls outside `scale_`;
+- any published port is a live default (1883, 8883, 7878, 5433, 16686, 4318, 3033, 8080, 8888,
+  8011, 47808, 47900);
+- the env file is the checkout's `.env`.
+
+`up` also refuses if another stack already holds the scale ports, and checks that one reading
+published as `scalegen` really reaches `point_history`. That check matters because mosquitto
+acknowledges publishes its ACL denies.
+
+**Resource caps.** Every scale container has a `cpus` and `mem_limit` (`SCALE_CPUS_<SERVICE>`,
+`SCALE_MEM_<SERVICE>`; the defaults are in `compose.scale.yml`, e.g. postgres 2 CPUs / 6 GB and
+mqtt_listener 1 CPU / 1 GB). `ladder.py` clamps CPU caps to the host's CPU count, because Docker
+refuses a cap above it. `SCALE_CPUSET=2-5` pins the whole stack to some host CPUs. Each
+container's log is capped at 3 × 50 MB, because postgres runs with `log_statement=all`.
+Everything else (images, commands, Postgres settings, durability) is exactly what
+`docker-compose.yml` runs.
+
+**Live-safety.** During a soak the ladder probes the live gateway with a cheap, read-only,
+unauthenticated GET (`--live-url`, default `http://127.0.0.1:8080/ui/`) and watches the host
+load average. It trips after 3 bad samples in a row, where bad means either:
+
+- live latency above 3× its pre-run baseline (and at least 0.5 s over it); or
+- load per CPU above 1.5× its baseline (and at least 2).
+
+The step then stops and is marked `inconclusive: live-safety`, never a Baler ceiling. Tune it
+with `--live-latency-factor` and `--live-load-factor`.
+
+## Running it on nash-srv
+
+Use a **separate checkout** of the branch, never `~/baler-deploy`:
+
+```sh
+git clone https://github.com/jacobnash/Baler.git ~/baler-scale
+cd ~/baler-scale && git checkout claude/scale-harness   # or main, once merged
+python3 -m venv ~/.venv-scale && ~/.venv-scale/bin/pip install -e .
+PY=~/.venv-scale/bin/python
+
+$PY scripts/scale/ladder.py init     # scripts/scale/scale.env, fresh secrets
+$PY scripts/scale/ladder.py guard    # prints project, volumes and ports, or refuses
+$PY scripts/scale/ladder.py up       # builds and starts the scale stack (5-10 min the first time)
+
+# The ladder. nash-srv sees 1 CPU today, so the steps start at 1k. Run it detached:
+nohup $PY scripts/scale/ladder.py run --no-up --procs 1 > ~/scale-ladder.log 2>&1 &
+tail -f ~/scale-ladder.log
+
+# Durability: kill -9 the listener, then postgres, mid-run; count acknowledged readings lost
+$PY scripts/scale/ladder.py crash --points 5000 --procs 1
+
+$PY scripts/scale/ladder.py table scripts/scale/results/*-ladder.json   # rows for the table below
+$PY scripts/scale/ladder.py down --rmi                                  # remove the stack, volumes, images
+```
+
+A ladder starts on a **clean** stack: the read probes scale with every point in the graph, so
+`run` refuses when the graph already has more scale points than the first step. To run it again,
+`down` then `up` first (`crash` reuses whatever is there, so run it after the ladder).
+
+Copy the result JSON files (`scripts/scale/results/<run-id>-ladder.json`) somewhere that
+outlives the checkout. Every result records:
+
+- the hardware: `nproc`, CPU model, the CPU affinity the run had, RAM, disk free, load at start;
+- the Baler and Windrow commits;
+- the Postgres durability settings, read live;
+- the CPU caps and cpuset;
+- the full command.
+
+So a 1-CPU run and a 12-CPU run are never compared without saying so.
+
+## What each metric means
+
+| Metric | Where it comes from | Meaning |
+|---|---|---|
+| `generator.achieved_rps`, `offered_ratio` | the generator's own PUBACK counts | What was actually offered. Below 99% of the target, the step is `inconclusive` (a generator limit). |
+| `ingest.acked` / `stored` / `stored_ratio` | PUBACKs per second of payload `ts` vs. `point_history` rows with `ts` in the same seconds | **Data loss.** Must be ≥ 99%. |
+| `ingest.stored_rps`, `stored_rate_ratio` | delta of `pg_stat_user_tables` inserts+updates on `point_history`'s chunks over the soak | Sustained write rate, independent of row timestamps. |
+| `ingest.stored_rps_per_host_cpu` | `stored_rps / nproc` | Comparable across machines. |
+| `ingest.broker_dropped_delta` | `$SYS/broker/publish/messages/dropped` | Deliveries mosquitto dropped because a subscriber's queue was full. It's broker-wide: if readings are missing it was the listener (data loss); if stored = acked, it was a QoS 0 subscriber (fault_detector, derivation_engine) whose Cur-mode rules or derivations silently missed readings. Must be 0. |
+| `lag.p50_s` / `p95_s` / `max_s` | canary reading every 2 s on `fbf/scale/canary/lag`, polled in `point_history` | **End-to-end lag**, publish to row stored, behind the same queue as the load. p95 must be under 30 s. |
+| `lag.first_third_median_s` → `last_third_median_s` | same | **Backlog growth.** Rising by more than 10 s over the soak fails the step. |
+| `lag.lost` | canaries never stored within 300 s | Lost data. |
+| `broker.*` | `$SYS/#` | Messages in/out, store count/bytes (queued + retained), load per minute, heap. |
+| `resources.<service>` | `docker stats` every sample | CPU % (100 = one core), memory against the cap, block I/O. |
+| `containers.<service>` | `docker inspect` | Restarts during the step, OOM kills, exit status. Any restart fails the step. |
+| `samples[].pg_roundtrip_s` | `SELECT 1` timed | Postgres responsiveness under load. |
+| `db.*` | `hypertable_detailed_size`, `approximate_row_count`, `timescaledb_information` | Chunks and chunk interval, table/index bytes, **bytes per row**, database size. Once a compression policy exists (#192), also `db.compression`: bytes before and after compression and the number of compressed chunks, so compressed and uncompressed bytes per row sit side by side. Raw history is never downsampled: compression only. |
+| `db.bytes_per_day_raw_at_this_rate`, `ingest.rows_per_day_at_this_rate` | bytes/row × stored rows/s × 86,400 | **Disk-growth math** at the rate measured. |
+| `graph.ingest_s`, `tags_per_s` | Oxigraph count of `scale` points after publishing a step's tags | How long the graph takes to absorb new equipment. |
+| `graph.triples`, `count_*_s` | SPARQL `COUNT` timed | Graph size and the time of a full scan. |
+| `probes[]` | timed GETs through the gateway as the test org's admin, 5 runs, warm median vs. `budgets.json` | **Responsiveness.** Any probe over budget, or not HTTP 200, fails the step. |
+| `rules.<service>.median_cycle_s` | `service_heartbeats` beat-to-beat | Fault detector and derivation engine cycle time, including their sleep (30 s and 10 s by default). |
+| `cx_run_s` | creating a 1 h Cx run over site 0 (500 points) and waiting for it | Commissioning verification time. |
+| `durability.comparable` | `SHOW fsync / synchronous_commit / full_page_writes` on the server **and** on an ingest-path connection (from inside the listener container) | `true` only if all three are on end to end. A non-durable run is never labelled comparable. |
+
+The ladder adds two rules to the test org, so per-point rule load is realistic: a Cur-mode
+`range` rule over every scale point, and a His-mode `stale` rule. Their bounds keep them
+from firing, so a fault storm doesn't distort the run.
+
+`crash` runs readings, kills each `--kill` service with `docker kill -s KILL` mid-run (default:
+`mqtt_listener`, then `postgres`), brings it back, drains, and reports `missing_acked`. That is
+the number of readings the broker acknowledged that never reached `point_history`. Batching
+and group commit are fine; losing acknowledged readings is not.
+
+## Results
+
+Fill this in from `ladder.py table`. Always note nproc, because a 1-CPU nash-srv run and a
+12-CPU run are different machines.
+
+### Local, first runs (dev VM, before nash-srv)
+
+A 4-vCPU Xeon @ 2.10 GHz VM with 15.7 GiB, **shared with two or three other agents' Baler stacks
+at the same time** (load average 5–14). Treat these as directional; nash-srv's runs replace them.
+Soak 300 s per step (not 15 min, for disk), on a clean stack. `--no-live-check`, since there's
+no live install on that host.
+
+**Before any fix** (main at `c9671c20`, ingest not durable):
+
+| Points | Status | Offered/s | Stored | Broker drops | p95 lag | Lost canaries | Listener CPU | First failure |
+|---|---|---|---|---|---|---|---|---|
+| 5,000 | fail | 1,000 | 99.69% | 935 | 11.08 s | 3 | 52% | listener can't keep up: broker queue overflow |
+
+**With the phase-1 fixes** (run `20261108T003311Z`, durable end to end: `durability.comparable = true`):
+
+| Points | Status | Offered/s | Stored/s | Stored/s per CPU | p95 lag | read?filter=point | readAll(equip) | Cx report | First failure |
+|---|---|---|---|---|---|---|---|---|---|
+| 1,000 | **pass** | 200 | 204 | 51 | 0.45 s | 0.31 s | 0.28 s | 0.72 s | - |
+| 2,500 | **pass** | 500 | 509 | 127 | 0.46 s | 0.89 s | 1.08 s | 1.76 s | - |
+| 5,000 | fail | 1,000 | 1,018 | 254 | 0.46 s | 1.80 s | 2.02 s | 3.31 s | reads over the #178 budgets |
+| 10,000 | fail | 2,000 | 2,034 | 509 | 0.59 s | 4.72 s | 5.82 s | 8.93 s | reads over budget |
+| 25,000 | fail | 5,000 | 5,040 | 1,260 | 4.4 s | 19.3 s | 45.0 s | 34.2 s | reads; 115,903 broker drops to the rule daemons |
+
+**Highest passing step: 2,500 points.** Ingest itself held up through 25,000 points: 100% of
+acknowledged readings were stored, zero lost canaries, and p95 lag stayed under 30 s at every step.
+
+**First bottleneck, before the fixes: ingest.** The listener did one INSERT round trip per
+reading, latency-bound at about 1,000 readings/s and about half a CPU. Past that, mosquitto's
+per-session queue overflowed and readings were dropped.
+
+**First bottleneck, after the fixes: reads.** Every list grows with the total number of
+points: `read?filter=point` is unpaged, `readAll(equip)` folds raw history, and the Cx report
+grows with history ([#244](https://github.com/jacobnash/Baler/issues/244)).
+
+**Next, at 25k points: the rule daemons.** `fault_detector` and `derivation_engine` take every
+reading over QoS 0, fall behind (cycle times of 81 s and 121 s) and silently miss readings
+([#243](https://github.com/jacobnash/Baler/issues/243)).
+
+The listener's own ceiling wasn't reached locally: it used 31% CPU at 5,040 readings/s.
+
+| Fix | Measured |
+|---|---|
+| Durable batched ingest (COPY per batch, acks after commit, `synchronous_commit` back on) | 5k points: p95 lag 11.08 → 0.50 s, drops 935 → 0, listener CPU 52 → 18%, postgres 46 → 26% |
+| fault_detector skips no-op writes (in-memory open faults) | 10k points: Postgres transactions/s 1,801 → 268 |
+| Readings traced per batch, not per message | 10k points: listener CPU about 44 → 13% |
+| Restarts resume the session; broker queue 200,000 | crash test below: missing readings → 0 |
+
+Batched writes cost almost nothing to make durable. At 1,000-row batches, `synchronous_commit=on`
+measured 17–25k rows/s against 15–21k for `off`; single-row writes pay the fsync (about 1.3×).
+
+### Crash durability (local, 5k points every 5 s, killed service down about 12 s)
+
+| Code | Killed | Acked | Stored | Missing (acked, not stored) |
+|---|---|---|---|---|
+| main `c9671c20` | mqtt_listener | 57,000 | 11,502 | **45,498** |
+| main `c9671c20` | postgres | 59,000 | 33,928 | **25,072** |
+| + durable batched ingest | mqtt_listener | 56,998 | 27,750 | 29,248 |
+| + durable batched ingest | postgres | 58,999 | 55,296 | 3,703 |
+| + session resume, queue 200,000 | mqtt_listener | 57,000 | 57,000 | **0** |
+| + session resume, queue 200,000 | postgres | 59,000 | 59,000 | **0** |
+| _nash-srv_ | | | | |
+
+Most of main's loss wasn't the async commit itself. After any listener restart, its
+re-subscribe replayed every retained tags message, which it handled at about 150/s. Readings
+queued behind that replay until mosquitto's 10,000-message queue overflowed.
+
+### nash-srv
+
+| Run | Host (nproc, model, RAM) | Durable | Points | Status | Offered/s | Stored/s | Stored/s per CPU | p95 lag | read?filter=point | readAll(equip) | Cx report | First failure |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| _nash-srv_ | | | | | | | | | | | | |
+
+**Max sustained points:** _(nash-srv)_ · **First bottleneck at each step:** _(nash-srv)_
+
+### Disk growth
+
+At 1M points every 5 s, that's 200,000 rows/s, or 17.3 billion rows/day. Bytes per row comes
+from `db.bytes_per_row` in each result (table plus index, uncompressed). On the first local
+runs it was 228–265 B/row (241 at 1k points, 265 at 25k). That works out to about **4.2 TB/day
+raw** at 1M points, which is why
+native compression ([#192](https://github.com/jacobnash/Baler/issues/192), under [#221](https://github.com/jacobnash/Baler/issues/221)) and a narrower row matter. Raw rows are kept, never downsampled. Fill in compressed bytes per row from `db.compression` once #192 lands.
+
+### Baler vs Haxall
+
+Same generator, steps, 5 s rate, probes and CPU/memory caps against Haxall, with durability on
+for both. Tracked as [#236](https://github.com/jacobnash/Baler/issues/236). **Not run yet.** The
+harness records Baler's side (durability read live, the crash test); the Haxall target, bridge
+and probes are #236's work.
+
+| Step | Baler stored/s | Haxall stored/s | Baler p95 lag | Haxall p95 lag | Baler read filter | Haxall read filter | Baler hisRead 1000 | Haxall hisRead 1000 | Baler RAM / disk | Haxall RAM / disk |
+|---|---|---|---|---|---|---|---|---|---|---|
+| | | | | | | | | | | |
+
+SkySpark is commercial, so no SkySpark runs or claims are made here. Check its licence before
+any public comparison.
