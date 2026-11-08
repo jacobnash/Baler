@@ -196,7 +196,7 @@ class LateWriter:
         self.c.disconnect()
 
     def run(self, conn, rate: float) -> dict:
-        """One reading per point from a slice of the newest compressed chunk:
+        """One reading per point from a slice near the end of the newest compressed chunk:
         each replayed as is (same ts, new value) and backfilled 1.23 s later,
         published at `rate` messages/s (the soak's own rate)."""
         chunk = conn.execute("""
@@ -206,7 +206,7 @@ class LateWriter:
         if chunk is None:
             return {"skipped": "no compressed chunk yet"}
         name, start, end = chunk
-        mid = start + (end - start) / 2
+        mid = end - timedelta(seconds=3 * self.interval)  # near its end: a chunk the soak began part-way into has data there
         t0 = time.time()
         rows = conn.execute(
             "SELECT DISTINCT ON (point_uri) point_uri, ts FROM point_history WHERE point_uri LIKE %s "
