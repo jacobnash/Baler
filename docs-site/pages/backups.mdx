@@ -251,12 +251,24 @@ python3 scripts/restore_drill.py --backup-dir /var/backups/baler --report /var/b
 ```
 
 On nash-srv the compose project's env file isn't `.env` in the checkout
-(`deploy/nash-srv/setup-runner.sh` passes `--env-file`). `backup.py` and
-`restore.py` work without it, because `docker compose exec` doesn't need the
-missing variables. To restore *onto* nash-srv itself, start postgres and
-oxigraph with the deploy's own `-f`/`--env-file` arguments so that
-`BALER_PG_USER` and the volume names match. Then run `restore.py` with
-`COMPOSE_ENV_FILES=<that env file>` and the same `COMPOSE_FILE`.
+(`deploy/nash-srv/setup-runner.sh` passes `--env-file`). **Point the scripts at
+it.** Without the env file, compose can't even resolve the base file there: it
+stops on the required `MQTT_PASSWORD` before it reaches `exec`. Run them with
+the live project's name and env file:
+
+```bash
+COMPOSE_PROJECT_NAME=baler COMPOSE_ENV_FILES=<the deploy's env file> \
+  python3 scripts/backup.py --out-dir /var/backups/baler
+```
+
+To restore *onto* nash-srv itself, start postgres and oxigraph with the
+deploy's own `-f`/`--env-file` arguments so that `BALER_PG_USER` and the volume
+names match. Then run `restore.py` with the same `COMPOSE_PROJECT_NAME`,
+`COMPOSE_ENV_FILES` and `COMPOSE_FILE`.
+
+What nash-srv runs today: a pinned, root-owned copy of `backup.py` makes the
+nightly backup at 03:30 UTC into `/var/backups/baler`. The weekly restore drill
+stays off until the host has finished its post-reboot soak.
 
 ### Either way
 
