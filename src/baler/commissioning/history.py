@@ -125,14 +125,16 @@ class PostgresHistory:
 
     def latest(self, point_uris: list[str], before: datetime | None = None) -> dict[str, Sample]:
         since = (before or datetime.now().astimezone()) - VALUE_LOOKBACK
-        return timeseries.read_latest_many(self.conn, list(point_uris), before=before, since=since, with_value=True)
+        # good_only: a sample the device or Baler flagged bad (#183) isn't
+        # evidence for a Cx check either way.
+        return timeseries.read_latest_many(self.conn, list(point_uris), before=before, since=since, with_value=True, good_only=True)
 
     def latest_raw(self, point_uris: list[str], before: datetime | None = None) -> dict[str, Sample]:
         return timeseries.read_latest_many(self.conn, list(point_uris), before=before)
 
     def window(self, point_uris: list[str], start: datetime, end: datetime,
                truncated: set[str] | None = None) -> dict[str, list[Sample]]:
-        raw = timeseries.read_range_many(self.conn, list(point_uris), start, end, self.per_point_limit)
+        raw = timeseries.read_range_many(self.conn, list(point_uris), start, end, self.per_point_limit, good_only=True)
         if truncated is not None:
             truncated.update(uri for uri, (_rows, cut) in raw.items() if cut)
         return {uri: rows for uri, (rows, _cut) in raw.items()}

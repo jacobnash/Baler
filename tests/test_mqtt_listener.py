@@ -85,7 +85,7 @@ def test_bacnet_binary_states_are_stored_as_bools(monkeypatch):
     from baler import mqtt_listener
 
     written = []
-    monkeypatch.setattr(mqtt_listener, "ingest_reading", lambda store, conn, topic, value, ts: written.append(value))
+    monkeypatch.setattr(mqtt_listener, "ingest_reading", lambda store, conn, topic, value, ts, quality=None: written.append(value))
     on_message = mqtt_listener.make_on_message(store=None, ts_conn=None)
     for v in ("active", "inactive", "standby", 71.2, 1):
         on_message(None, None, _Msg("fbf/home/bacnet/fan_status", _envelope(v)))

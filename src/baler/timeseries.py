@@ -28,9 +28,15 @@ CREATE TABLE IF NOT EXISTS point_history (
     value_bool BOOLEAN,
     unit       TEXT,
     label      TEXT,
+    quality    TEXT,
     PRIMARY KEY (point_uri, ts)
 );
 """
+
+# Per-sample quality (#183, baler.quality): NULL is ok. Added to tables
+# created before the column existed; cheap on a hypertable (no rewrite for
+# a nullable column without a default).
+QUALITY_COLUMN = "ALTER TABLE point_history ADD COLUMN IF NOT EXISTS quality TEXT"
 
 # read_point_labels' lookup: only derivation_engine sets unit/label, so on a
 # raw point "newest row with a unit or label" would otherwise walk its whole
@@ -81,6 +87,7 @@ SELECT to_regclass('point_history') IS NOT NULL
    AND to_regclass('point_history_labelled') IS NOT NULL
    AND EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')
    AND EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'point_history')
+   AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'point_history' AND column_name = 'quality')
 """
 
 
@@ -120,7 +127,7 @@ def _setup(conn: psycopg.Connection, statement_timeout: str | None = None) -> No
     row = conn.execute(_READY_SQL).fetchone()
     if not (row and row[0]):
         ddl.run(conn, SCHEMA, "SELECT create_hypertable('point_history', 'ts', if_not_exists => TRUE, migrate_data => TRUE)",
-                LABELS_INDEX)
+                LABELS_INDEX, QUALITY_COLUMN)
     _ensure_rollup_views(conn)
     # Real tradeoff, taken deliberately: every INSERT otherwise waits on a
     # full WAL fsync before returning. Scoped to this connection only (a
@@ -175,10 +182,12 @@ def iter_rows(cur):
         yield from batch
 
 
-def write_point_value(conn: psycopg.Connection, point_uri: str, value, ts: datetime, unit: str | None = None, label: str | None = None) -> None:
+def write_point_value(conn: psycopg.Connection, point_uri: str, value, ts: datetime, unit: str | None = None, label: str | None = None,
+                      quality: str | None = None) -> None:
     """Dispatches on type(value) into the right nullable column. bool must
     be checked before int/float - bool is a subclass of int in Python, the
-    same trap normalize_value() guards against in Windrow's bridges."""
+    same trap normalize_value() guards against in Windrow's bridges.
+    `quality` is the sample's flag (baler.quality; None is ok)."""
     num, text, flag = None, None, None
     if isinstance(value, bool):
         flag = value
@@ -191,16 +200,17 @@ def write_point_value(conn: psycopg.Connection, point_uri: str, value, ts: datet
 
     conn.execute(
         """
-        INSERT INTO point_history (point_uri, ts, value, value_text, value_bool, unit, label)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO point_history (point_uri, ts, value, value_text, value_bool, unit, label, quality)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (point_uri, ts) DO UPDATE SET
             value = EXCLUDED.value,
             value_text = EXCLUDED.value_text,
             value_bool = EXCLUDED.value_bool,
             unit = EXCLUDED.unit,
-            label = EXCLUDED.label
+            label = EXCLUDED.label,
+            quality = EXCLUDED.quality
         """,
-        (point_uri, ts, num, text, flag, unit, label),
+        (point_uri, ts, num, text, flag, unit, label, quality),
     )
 
 
@@ -233,6 +243,8 @@ def read_latest(conn: psycopg.Connection, point_uri: str):
 # chunk, sub-millisecond, whatever the history depth (#150/#107). Same
 # rows: for text, a >= b and a <= b is a = b (ties break bytewise).
 _ONE_POINT = "point_uri >= u.uri AND point_uri <= u.uri"
+# baler.quality.GOOD_SQL, inlined: timeseries stays import-free of it.
+_GOOD = "(quality IS NULL OR quality = 'ok')"
 
 
 def read_latest_many(
@@ -241,6 +253,7 @@ def read_latest_many(
     before: datetime | None = None,
     since: datetime | None = None,
     with_value: bool = False,
+    good_only: bool = False,
 ) -> dict[str, tuple[datetime, object]]:
     """Latest (ts, value) per point, in one query: haystack_api's curVal
     and the commissioning existence check both need it for hundreds of
@@ -263,6 +276,8 @@ def read_latest_many(
         params.append(since)
     if with_value:
         conds.append("(value IS NOT NULL OR value_text IS NOT NULL OR value_bool IS NOT NULL)")
+    if good_only:  # skip samples flagged bad (#183)
+        conds.append(_GOOD)
     cur = conn.execute(
         f"""
         SELECT u.uri, h.ts, h.value, h.value_text, h.value_bool
@@ -279,20 +294,26 @@ def read_latest_many(
     return {uri: (ts, _row_to_value((v, vt, vb))) for uri, ts, v, vt, vb in cur.fetchall()}
 
 
-def read_range(conn: psycopg.Connection, point_uri: str, start_ts: datetime, end_ts: datetime):
+def read_range(conn: psycopg.Connection, point_uri: str, start_ts: datetime, end_ts: datetime, with_quality: bool = False,
+               good_only: bool = False):
+    """[(ts, value)], or [(ts, value, quality)] with_quality (None is ok).
+    good_only leaves out samples flagged bad (#183)."""
     cur = conn.execute(
-        """
-        SELECT ts, value, value_text, value_bool FROM point_history
-        WHERE point_uri = %s AND ts >= %s AND ts <= %s
+        f"""
+        SELECT ts, value, value_text, value_bool, quality FROM point_history
+        WHERE point_uri = %s AND ts >= %s AND ts <= %s{" AND " + _GOOD if good_only else ""}
         ORDER BY ts ASC
         """,
         (point_uri, start_ts, end_ts),
     )
-    return [(ts, _row_to_value((value, value_text, value_bool))) for ts, value, value_text, value_bool in iter_rows(cur)]
+    if with_quality:
+        return [(ts, _row_to_value((v, vt, vb)), q) for ts, v, vt, vb, q in iter_rows(cur)]
+    return [(ts, _row_to_value((v, vt, vb))) for ts, v, vt, vb, _q in iter_rows(cur)]
 
 
 def read_range_many(
-    conn: psycopg.Connection, point_uris: list[str], start_ts: datetime, end_ts: datetime, limit: int
+    conn: psycopg.Connection, point_uris: list[str], start_ts: datetime, end_ts: datetime, limit: int,
+    with_quality: bool = False, good_only: bool = False,
 ) -> dict[str, tuple[list, bool]]:
     """Every point's raw history over [start_ts, end_ts) in one query, for
     hisquery's multi-point reads - one round trip for an AHU's 20 points
@@ -305,22 +326,25 @@ def read_range_many(
     # One primary-key range scan per point that stops at its limit.
     # (ROW_NUMBER() over every row in the span numbered and sorted all of
     # them first: >55s for a day of 614 points at 5s data on nash-srv.)
+    # with_quality: rows are (ts, value, quality); good_only: flagged
+    # samples are left out, and don't count against the limit (#183).
     cur = conn.execute(
-        """
-        SELECT u.uri, h.ts, h.value, h.value_text, h.value_bool
+        f"""
+        SELECT u.uri, h.ts, h.value, h.value_text, h.value_bool, h.quality
         FROM unnest(%s::text[]) AS u(uri)
         CROSS JOIN LATERAL (
-            SELECT ts, value, value_text, value_bool FROM point_history
-            WHERE point_uri >= u.uri AND point_uri <= u.uri AND ts >= %s AND ts < %s
+            SELECT ts, value, value_text, value_bool, quality FROM point_history
+            WHERE point_uri >= u.uri AND point_uri <= u.uri AND ts >= %s AND ts < %s{" AND " + _GOOD if good_only else ""}
             ORDER BY point_uri, ts LIMIT %s
         ) h
         """,
         (point_uris, start_ts, end_ts, limit + 1),
     )
     out: dict[str, tuple[list, bool]] = {uri: ([], False) for uri in point_uris}
-    for point_uri, ts, value, value_text, value_bool in iter_rows(cur):
+    for point_uri, ts, value, value_text, value_bool, quality in iter_rows(cur):
         rows, _ = out[point_uri]
-        rows.append((ts, _row_to_value((value, value_text, value_bool))))
+        value = _row_to_value((value, value_text, value_bool))
+        rows.append((ts, value, quality) if with_quality else (ts, value))
     for uri, (rows, _) in out.items():
         if len(rows) > limit:
             out[uri] = (rows[:limit], True)

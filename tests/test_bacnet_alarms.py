@@ -110,7 +110,7 @@ def test_mqtt_listener_does_not_store_an_alarm_as_a_reading(monkeypatch):
     from baler import mqtt_listener
 
     stored = []
-    monkeypatch.setattr(mqtt_listener, "ingest_reading", lambda *a: stored.append(a))
+    monkeypatch.setattr(mqtt_listener, "ingest_reading", lambda *a, **k: stored.append(a))
     on_message = mqtt_listener.make_on_message(store=None, ts_conn=None)
 
     class Msg:
