@@ -1,0 +1,329 @@
+"""
+The rule daemons' incremental path (Baler#243), without services:
+
+- fault_detector reads committed batches from the reading feed: a batch
+  gives the same transitions and webhooks, in the same order, as handling
+  each reading's MQTT message did; Cur-mode rules are matched through a
+  per-point index that follows rules.json and the Brick rosters;
+- the listener puts each batch (readings and controller alarms) into the
+  feed inside the batch's own transaction, acknowledging after;
+- derivation_engine's Cur mode runs each triggered row once per batch from
+  an index of the select's rows by input point, not a SPARQL query and a run
+  per reading;
+- falling behind or missing readings shows in /ops/status.
+"""
+
+import json
+import os
+import random
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
+
+from baler import (
+    derivation_engine,
+    fault_detector,
+    mqtt_listener,
+    ops_status,
+    reading_feed,
+)
+from baler.fault_detector import (
+    OpenFaults,
+    RuleCache,
+    handle_cur_reading,
+    handle_feed_batch,
+)
+
+T0 = datetime(2026, 11, 8, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def calls(monkeypatch):
+    log = []
+    monkeypatch.setattr(fault_detector, "open_fault", lambda conn, rid, uri, now, detail=None, severity="warning":
+                        log.append(("open", rid, uri, detail["value"])) or 1)
+    monkeypatch.setattr(fault_detector, "close_fault", lambda conn, rid, uri, now: log.append(("close", rid, uri)) or 1)
+    monkeypatch.setattr(fault_detector, "_fire_webhooks", lambda path, event, rid, uri, status, detail:
+                        log.append(("webhook", event, rid, uri)))
+    return log
+
+
+def _rules_file(tmp_path, rules):
+    path = tmp_path / "rules.json"
+    path.write_text(json.dumps(rules))
+    return path
+
+
+RULES = [
+    {"id": "hot", "mode": "cur", "type": "range", "applies_to": {"topic_glob": "fbf/s*/temp"}, "min": 0.0, "max": 100.0},
+    {"id": "any", "mode": "cur", "type": "range", "applies_to": {"topic_glob": "fbf/*"}, "min": -50.0, "max": 150.0},
+    {"id": "his", "mode": "his", "type": "stale", "applies_to": {"topic_glob": "fbf/*"}, "max_age_seconds": 60},
+]
+
+
+def _batch(readings, alarms=(), seq=1):
+    return reading_feed.Batch(seq, T0, [(f"urn:point:{t}", T0 + timedelta(seconds=i), v, q)
+                                        for i, (t, v, q) in enumerate(readings)], list(alarms))
+
+
+def test_a_feed_batch_gives_the_same_transitions_as_reading_by_reading(tmp_path, calls):
+    """Random readings across points and rules: the batch path and the
+    per-message path open, close and fire exactly the same, in order."""
+    rng = random.Random(243)
+    topics = ["fbf/s1/temp", "fbf/s2/temp", "fbf/x/flow", "other/s1/temp"]
+    readings = [(rng.choice(topics), rng.choice([50.0, 120.0, 200.0, -80.0, "active", True]), None) for _ in range(400)]
+    path = _rules_file(tmp_path, RULES)
+
+    open_a = OpenFaults()
+    for topic, value, _ in readings:
+        handle_cur_reading(None, RuleCache(str(path)), "w.json", topic, value, open_a)
+    by_message = list(calls)
+    calls.clear()
+
+    open_b = OpenFaults()
+    handle_feed_batch(None, RuleCache(str(path)), "w.json", _batch(readings), open_b)
+    assert calls == by_message
+    assert any(c[0] == "open" for c in calls) and any(c[0] == "close" for c in calls)
+
+
+def test_flagged_readings_neither_open_nor_resolve(tmp_path, calls):
+    path = _rules_file(tmp_path, RULES[:1])
+    open_faults = OpenFaults()
+    stats = handle_feed_batch(None, RuleCache(str(path)), "w.json",
+                              _batch([("fbf/s1/temp", 500.0, "fault"), ("fbf/s1/temp", 500.0, None),
+                                      ("fbf/s1/temp", 50.0, "overridden")]), open_faults)
+    assert calls == [("open", "hot", "urn:point:fbf/s1/temp", 500.0), ("webhook", "fault.opened", "hot", "urn:point:fbf/s1/temp")]
+    assert open_faults.is_open("hot", "urn:point:fbf/s1/temp")
+    assert stats == {"readings": 3, "evaluations": 1, "alarms": 0}
+
+
+def test_feed_alarms_go_to_the_alarm_handler(tmp_path, calls, monkeypatch):
+    handled = []
+    monkeypatch.setattr(fault_detector.bacnet_alarms, "handle_alarm",
+                        lambda conn, topic, event, ts, fire: handled.append((topic, event["to_state"], ts)))
+    path = _rules_file(tmp_path, RULES)
+    handle_feed_batch(None, RuleCache(str(path)), "w.json",
+                      _batch([], alarms=[["fbf/s1/temp/alarm", {"object": "ai,1", "to_state": "high-limit"}, 5.0]]))
+    assert handled == [("fbf/s1/temp/alarm", "high-limit", 5.0)] and calls == []
+
+
+def test_the_point_index_follows_rules_json(tmp_path):
+    path = _rules_file(tmp_path, RULES[:1])
+    cache = RuleCache(str(path))
+    cache.get()
+    assert [r["id"] for r in cache.cur_rules_for("urn:point:fbf/s1/temp")] == ["hot"]
+    assert cache.cur_rules_for("urn:point:fbf/x/flow") == ()
+    path.write_text(json.dumps(RULES))
+    os.utime(path, (1, 1))  # a different mtime, however fast the test runs
+    cache.get()
+    assert [r["id"] for r in cache.cur_rules_for("urn:point:fbf/x/flow")] == ["any"]
+    assert [r["id"] for r in cache.cur_rules_for("urn:point:fbf/s1/temp")] == ["hot", "any"]
+
+
+class RosterStore:
+    def __init__(self):
+        self.members = {"urn:point:a"}
+        self.queries = 0
+
+    def query(self, sparql):
+        self.queries += 1
+        return [SimpleNamespace(point=m) for m in self.members]
+
+
+def test_brick_rosters_refresh_on_their_ttl(tmp_path, monkeypatch):
+    """A point classified after the rules loaded is picked up within the
+    roster TTL, not only when rules.json changes."""
+    path = _rules_file(tmp_path, [{"id": "zt", "mode": "cur", "type": "range",
+                                    "applies_to": {"brick_class": "Zone_Air_Temperature_Sensor"}, "min": 0, "max": 1}])
+    store = RosterStore()
+    clock = [1000.0]
+    monkeypatch.setattr(fault_detector.time, "monotonic", lambda: clock[0])
+    cache = RuleCache(str(path), store=store, roster_ttl=300)
+    cache.get()
+    assert cache.cur_rules_for("urn:point:b") == ()
+    store.members.add("urn:point:b")
+    clock[0] += 100
+    cache.get()
+    assert cache.cur_rules_for("urn:point:b") == () and store.queries == 1
+    clock[0] += 250
+    cache.get()
+    assert [r["id"] for r in cache.cur_rules_for("urn:point:b")] == ["zt"] and store.queries == 2
+
+
+def test_glob_prefixes_narrow_his_queries():
+    assert fault_detector._glob_prefix("fbf/scale/s*/x") == "fbf/scale/s"
+    assert fault_detector._glob_prefix("fbf/[ab]/x") == "fbf/"
+    assert fault_detector._glob_prefix("*") == ""
+    assert fault_detector._prefix_filter(["urn:point:a", "urn:point:b", "urn:point:a"]) == (
+        " AND (starts_with(point_uri, %s) OR starts_with(point_uri, %s))", ["urn:point:a", "urn:point:b"])
+    assert fault_detector._prefix_filter(["urn:point:a", ""]) == ("", [])
+
+
+# --- the listener writes the feed --------------------------------------------
+
+
+class AckClient:
+    def __init__(self):
+        self.acks = []
+
+    def ack(self, mid, qos):
+        self.acks.append((mid, qos))
+
+
+class Msg:
+    def __init__(self, topic, value, mid):
+        self.topic, self.mid, self.qos = topic, mid, 1
+        self.payload = json.dumps({"value": value, "ts": 10.0}).encode()
+
+
+def test_the_listener_feeds_readings_and_alarms_in_the_batch_transaction(monkeypatch):
+    log = []
+
+    def ingest(store, conn, rows, then=None):
+        log.append(("write", [r[0] for r in rows]))
+        then("conn")  # inside write_point_values' transaction
+
+    monkeypatch.setattr(mqtt_listener, "ingest_readings", ingest)
+    monkeypatch.setattr(mqtt_listener.reading_feed, "append_from_stage", lambda conn, alarms: log.append(("feed", alarms)))
+    client = AckClient()
+    batcher = mqtt_listener.ReadingBatcher(client, store=None, ts_conn=None, feed=True)
+    on_message = mqtt_listener.make_on_message(None, None, batcher)
+    alarm = {"object": "analog-input,1", "to_state": "high-limit"}
+    on_message(client, None, Msg("fbf/s/ahu/zt", 71.0, 1))
+    on_message(client, None, Msg("fbf/s/ahu/zt/alarm", alarm, 2))
+    assert client.acks == []  # the alarm waits for the batch too
+    batcher.flush([batcher.queue.get_nowait() for _ in range(2)])
+    assert log == [("write", ["fbf/s/ahu/zt"]), ("feed", [["fbf/s/ahu/zt/alarm", alarm, 10.0]])]
+    assert client.acks == [(1, 1), (2, 1)]
+
+
+def test_without_the_feed_alarms_are_acked_inline_and_not_queued(monkeypatch):
+    client = AckClient()
+    batcher = mqtt_listener.ReadingBatcher(client, store=None, ts_conn=None, feed=False)
+    on_message = mqtt_listener.make_on_message(None, None, batcher)
+    on_message(client, None, Msg("fbf/s/ahu/zt/alarm", {"object": "ai,1", "to_state": "normal"}, 3))
+    assert batcher.queue.empty() and client.acks == [(3, 1)]
+
+
+def test_a_prune_failure_is_logged_not_fatal(monkeypatch, capsys):
+    def boom(conn, retention):
+        raise RuntimeError("feed table locked")
+
+    monkeypatch.setattr(mqtt_listener.reading_feed, "prune", boom)
+    mqtt_listener.ReadingBatcher(AckClient(), store=None, ts_conn=None, feed=True).prune()
+    assert "prune failed" in capsys.readouterr().out
+
+
+def test_a_prune_miss_is_logged_with_counts(monkeypatch, capsys):
+    monkeypatch.setattr(mqtt_listener.reading_feed, "prune", lambda conn, retention: (3, [["fault_detector", 15000, 3]]))
+    mqtt_listener.ReadingBatcher(AckClient(), store=None, ts_conn=None, feed=True, feed_retention_s=600).prune()
+    assert "fault_detector MISSED 15000 reading(s) in 3 batch(es)" in capsys.readouterr().out
+
+
+# --- derivation_engine's Cur mode --------------------------------------------
+
+
+class SelectStore:
+    def __init__(self, rows):
+        self.rows, self.queries = rows, 0
+
+    def query(self, sparql):
+        self.queries += 1
+        return self.rows
+
+
+def _row(target, a, b):
+    return SimpleNamespace(target=target, a=a, b=b)
+
+
+DERIVATION = {"id": "d1", "kind": "formula", "select": "SELECT ...", "target_var": "target", "input_vars": ["a", "b"],
+              "applies_to_topic_glob": "fbf/*", "fn_source": "def run(inputs, row):\n    return 1", "window_seconds": 60}
+
+
+def test_cur_mode_runs_each_triggered_row_once_per_batch(monkeypatch):
+    store = SelectStore([_row("urn:t1", "urn:point:fbf/a1", "urn:point:fbf/b1"),
+                         _row("urn:t2", "urn:point:fbf/a2", "urn:point:fbf/b2"),
+                         _row("urn:t3", "urn:point:fbf/a1", "urn:point:fbf/b3")])
+    ran = []
+    monkeypatch.setattr(derivation_engine, "_evaluate_formula",
+                        lambda store, ts, fc, hc, d, now, dry_run, rows=None: ran.append([r.target for r in rows]))
+    monkeypatch.setattr(derivation_engine, "_Snapshot", lambda fc, hc: None)
+    targets = derivation_engine.CurTargets(ttl=60)
+    # both inputs of t1 and one of t3 reported in this batch; t2's didn't
+    n = derivation_engine.evaluate_cur_points(store, None, None, None, [DERIVATION],
+                                             {"urn:point:fbf/a1", "urn:point:fbf/b1", "urn:point:other/x"}, targets)
+    assert ran == [["urn:t1", "urn:t3"]] and n == 2
+    derivation_engine.evaluate_cur_points(store, None, None, None, [DERIVATION], {"urn:point:fbf/b2"}, targets)
+    assert ran[-1] == ["urn:t2"]
+    assert store.queries == 1  # the select ran once, not per reading or per batch
+
+
+def test_cur_targets_rerun_the_select_when_it_changes_or_expires(monkeypatch):
+    store = SelectStore([_row("urn:t1", "urn:point:fbf/a1", "urn:point:fbf/b1")])
+    clock = [0.0]
+    monkeypatch.setattr(derivation_engine.time, "monotonic", lambda: clock[0])
+    targets = derivation_engine.CurTargets(ttl=60)
+    targets.rows_for(store, DERIVATION, {"urn:point:fbf/a1"})
+    targets.rows_for(store, {**DERIVATION, "select": "SELECT other"}, {"urn:point:fbf/a1"})
+    assert store.queries == 2
+    clock[0] = 61
+    targets.rows_for(store, {**DERIVATION, "select": "SELECT other"}, {"urn:point:fbf/a1"})
+    assert store.queries == 3
+
+
+def test_rollups_and_globless_derivations_have_no_cur_mode():
+    assert derivation_engine.cur_derivations([DERIVATION, {**DERIVATION, "id": "r", "kind": "rollup"},
+                                               {**DERIVATION, "id": "n", "applies_to_topic_glob": None}]) == [DERIVATION]
+
+
+class CountingStore:
+    def __init__(self):
+        self.writes = 0
+
+    def add_entity(self, *a):
+        self.writes += 1
+
+    def add_derived_from(self, *a):
+        self.writes += 1
+
+
+def test_lineage_is_written_once_per_process(monkeypatch):
+    monkeypatch.setattr(derivation_engine, "link_point_to_equip", lambda store, p, e: None)
+    monkeypatch.setattr(derivation_engine.timeseries, "write_point_value", lambda *a, **k: None)
+    store = CountingStore()
+    for _ in range(3):
+        derivation_engine._write_and_attach(store, None, "urn:point:computed/d/t", "urn:t", 1.0, T0, {}, ["urn:point:a"])
+    assert store.writes == 2  # one entity, one derivedFrom: not 6
+    derivation_engine._write_and_attach(store, None, "urn:point:computed/d/t", "urn:t", 1.0, T0, {}, ["urn:point:b"])
+    assert store.writes == 4  # new lineage is written
+
+
+# --- visible in /ops/status --------------------------------------------------
+
+
+def _iso(seconds_ago=0):
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat()
+
+
+def _building(**feed):
+    return {"heartbeats": {"fault_detector": _iso(), "derivation_engine": _iso()}, "open_faults": 0,
+            "reading_feed": {"fault_detector": {"lag_s": 0.4, "lag_readings": 10, "missed_readings": 0,
+                                                "last_missed_at": None, **feed}}}
+
+
+def test_ops_says_ok_while_a_rule_daemon_keeps_up():
+    assert ops_status._infer_faults(_building(), platform_ok=True) == ("ok", "running; 0 open fault(s)")
+
+
+def test_ops_degrades_a_rule_daemon_that_falls_behind():
+    state, detail = ops_status._infer_faults(_building(lag_s=95.0, lag_readings=190000), platform_ok=True)
+    assert state == "degraded" and "95 s (190000 readings)" in detail
+
+
+def test_ops_degrades_a_rule_daemon_that_missed_readings_lately():
+    state, detail = ops_status._infer_faults(_building(missed_readings=4200, last_missed_at=_iso(120)), platform_ok=True)
+    assert state == "degraded" and "missed 4200 reading(s)" in detail
+    old = _building(missed_readings=4200, last_missed_at=_iso(7200))
+    assert ops_status._infer_faults(old, platform_ok=True)[0] == "ok"
+    assert ops_status._infer_derivations(_building(), platform_ok=True)[0] == "ok"  # no feed row of its own yet

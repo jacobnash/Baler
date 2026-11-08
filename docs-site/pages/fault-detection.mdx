@@ -2,13 +2,13 @@
 title: Fault Detection
 ---
 
-Fault detection is `fault_detector.py`: a decoupled third MQTT subscriber
-plus a periodic sweep of `point_history`, evaluating rules you configure
-through the [Fault API](/api/fault) and recording open/resolved faults in
-Postgres. It doesn't hook into `ingest.py` at all — MQTT already fans
-one message out to every subscriber for free, so a second subscription
-gets a live copy of every reading with zero coupling to the ingest hot
-path.
+Fault detection is `fault_detector.py`: Cur-mode rules evaluated on every
+reading the listener stores, plus a periodic sweep for His-mode rules,
+recording open/resolved faults in Postgres. You configure the rules through
+the [Fault API](/api/fault). It doesn't run inside the ingest path: it reads
+the **reading feed**, the batches `mqtt_listener` commits, from a durable
+offset of its own (see [Scaling and missed readings](#scaling-and-missed-readings)
+below).
 
 ## Registering a rule
 
@@ -22,12 +22,12 @@ curl -X POST localhost:8080/fault/rules \
 [`POST /fault/rules`](/api/fault) for the full field reference and more
 `stuck`/`stale` examples.
 
-**Cur mode only sees MQTT traffic.** `fault_detector.py` subscribes to
-`fbf/#` directly and never touches `ingest_api.py` — so a reading pushed
-via `POST /ingest/ingest` (see [Architecture](/architecture)) is stored
-identically, but never evaluated by a Cur-mode rule, since it never
-crosses MQTT. To trigger one for testing, publish over MQTT yourself,
-same envelope `POST /ingest` uses:
+**Cur mode only sees readings that arrive over MQTT.** The reading feed is
+written by `mqtt_listener` alone, so a reading pushed via `POST /ingest/ingest`
+or hisWrite (see [Architecture](/architecture)) is stored identically but
+never evaluated by a Cur-mode rule. His-mode rules see every stored reading,
+whichever way it arrived. To trigger a Cur-mode rule for testing, publish over
+MQTT yourself, using the same envelope `POST /ingest` uses:
 
 ```bash
 mosquitto_pub -h localhost -t 'fbf/mock-ahu-1/analogValue,1' \
@@ -45,8 +45,9 @@ history — there's no such thing as a single reading being "stale."
 
 So rules declare a `mode`:
 
-- **`cur`** — evaluated in real time, directly off the MQTT message as it
-  arrives. Only `range` rules run in this mode.
+- **`cur`** — evaluated on every reading, in order, as soon as the batch it
+  arrived in is committed (typically well under a second). Only `range`
+  rules run in this mode.
 - **`his`** — evaluated periodically (every `--his-interval` seconds,
   default 30) against `point_history`. Only `stuck`/`stale` rules run in
   this mode.
@@ -97,11 +98,67 @@ that *stops* reporting after having reported at least once.
 ## The roster is live, not configured
 
 A His-mode rule's set of points to evaluate isn't a separate list you
-maintain — it's `SELECT DISTINCT point_uri FROM point_history` filtered
-by the rule's `topic_glob`. New points that start reporting are picked up
+maintain. It's every point with history (the `point_registry` table, which
+every writer to `point_history` keeps current) filtered by the rule's
+`topic_glob` or Brick class. New points that start reporting are picked up
 automatically, with zero additional configuration. The flip side is the
 same as the `stale` gap above: a point that's never reported never
 appears in any His-mode roster.
+
+A `brick_class` Cur-mode rule's points are re-read from the graph when
+`rules.json` changes and every `--roster-refresh` seconds (default 300), so a
+point classified after the rule was created starts being evaluated within
+five minutes.
+
+## Scaling and missed readings
+
+`fault_detector` has to keep up with every reading, so its work grows with
+the readings that arrive, not with how many points or rules exist (#243):
+
+- **Cur mode reads the reading feed, not MQTT.** `mqtt_listener` appends each
+  batch it commits to the `reading_feed` table, in the same transaction as
+  the batch's rows. That's one extra INSERT per batch, built from the
+  staging table, with no extra bytes on the wire. `fault_detector` reads the
+  batches after its offset in `reading_feed_consumers`, evaluates them and
+  moves the offset. It used to take its own QoS 0 subscription to `fbf/#`,
+  and the broker silently dropped what it couldn't deliver once the daemon
+  fell behind. Now:
+  - nothing can be dropped on the way;
+  - a restart resumes where it stopped;
+  - a Cur-mode rule sees exactly what was stored.
+
+  Controller alarms ride the same batches.
+- **A reading costs a dictionary lookup.** Each point's matching rules are
+  worked out once, the first time the point reports (a glob per rule), and
+  kept until `rules.json` or a Brick roster changes. Postgres is only
+  touched when a fault opens or resolves.
+- **The His sweep is set-based.**
+  - `stuck`: one `GROUP BY` per distinct `stuck_seconds`, over that window's
+    good samples.
+  - `stale`: candidates come from `point_registry`, whose `last_ts` is kept
+    coarse (moved forward only when it gains 30 s or more, so most writes
+    don't touch it). The candidates' real newest sample then decides, so
+    the verdict is exact.
+
+  The verdicts are the same as asking point by point. The sweep used to run
+  `SELECT DISTINCT point_uri FROM point_history` per rule and one query per
+  point.
+
+**Misses are counted, never silent.** The listener prunes feed batches once
+every consumer has read them. It also prunes any batch older than
+`BALER_FEED_RETENTION_S` (default 600 s), read or not. When a consumer hadn't
+read a pruned batch (it was down, or more than the retention behind), the
+pruner adds that batch's readings to the consumer's `missed_readings`, in the
+same transaction as the delete. You can see it in four places:
+
+| Where | What |
+|---|---|
+| `/ops/status` | The Fault detection card turns **degraded**: "behind on the reading feed by N s" past `OPS_FEED_LAG_DEGRADED_SECONDS` (60), or "missed N reading(s)" for an hour after a miss. `building.reading_feed` has the numbers per consumer. |
+| heartbeat `detail` | `feed` (readings consumed, `lag_readings`, `lag_s`, `missed_readings`), `cur_evaluations`, and `his` (the last sweep's `sweep_s`, rules and faulted points). |
+| logs | `fault_detector` logs readings/s, lag and misses every minute, plus a line whenever a sweep overruns `--his-interval`. The listener logs `<consumer> MISSED N reading(s)` when it prunes unread batches. |
+| `reading_feed_consumers` | Offset, `missed_readings`, `missed_batches` and `last_missed_at` per consumer. |
+
+The same applies to `derivation_engine`'s Cur mode (see [Derivations](/derivation)).
 
 ## Severity, acknowledging, and snoozing
 
@@ -159,7 +216,8 @@ each one into a fault. No rule is needed.
   - Otherwise, BACnet priority 0-63 is `critical`, and anything higher is `warning`.
 - **Alarms page.** The Rule column shows "BACnet alarm (controller)". The Detail column shows the
   transition, the controller's message text and the object.
-- **Not readings.** These messages aren't stored as readings; `mqtt_listener` skips them.
+- **Not readings.** These messages aren't stored as readings. `mqtt_listener` passes them to
+  `fault_detector` in the reading feed, with the batch they arrived in.
 - **Ack is Baler-only.** Acking in Baler doesn't acknowledge the alarm on the controller (Windrow
   has no AcknowledgeAlarm yet).
 

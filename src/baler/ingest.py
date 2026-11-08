@@ -60,13 +60,14 @@ def ingest_reading(store, ts_conn, topic: str, value, ts: float | None = None, q
         return point_uri
 
 
-def ingest_readings(store, ts_conn, readings) -> int:
+def ingest_readings(store, ts_conn, readings, then=None) -> int:
     """ingest_reading for many readings at once - (topic, value, ts[, quality]) each -
     as mqtt_listener's batches use it: one Oxigraph round trip for every
     point seen for the first time in the batch (none once they're all
     known), and one transaction for the rows (timeseries.write_point_values).
     Same facts and the same idempotency as calling ingest_reading per
-    reading, in order. Returns the number of rows written."""
+    reading, in order. Returns the number of rows written. `then` runs
+    in the rows' transaction (timeseries.write_point_values)."""
     with tracer.start_as_current_span("ingest.readings") as span:
         rows = []
         new: dict[URIRef, str] = {}
@@ -91,7 +92,7 @@ def ingest_readings(store, ts_conn, readings) -> int:
                                 for t in ((uri, RDF.type, TD.RawPoint), (uri, TD.sourceTopic, Literal(topic)))])
             _known_points.update(new)
         with tracer.start_as_current_span("ingest.timeseries_write"):
-            return timeseries.write_point_values(ts_conn, rows)
+            return timeseries.write_point_values(ts_conn, rows, then=then)
 
 
 def _write_tags(store, uri: URIRef, tags: dict) -> None:

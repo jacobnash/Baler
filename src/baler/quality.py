@@ -250,15 +250,31 @@ def sweep(ts_conn, store, now: datetime | None = None, lookback: timedelta = LOO
     if not meta:
         return counts
     uris = sorted(meta)
+    counts["rows"] = 0
+    # SWEEP_CHUNK points per query, not every point's hour in one fetchall:
+    # at 25k points every 5 s that was 3.7M rows held at once, and the OOM
+    # kill took fault_detector's reading-feed thread down with it (#243).
+    for i in range(0, len(uris), SWEEP_CHUNK):
+        _sweep_points(ts_conn, uris[i:i + SWEEP_CHUNK], meta, now, lookback, counts)
+    return counts
+
+
+# Points per query in sweep: ~100k rows at 5 s data over the hour.
+SWEEP_CHUNK = 150
+
+
+def _sweep_points(ts_conn, uris: list[str], meta: dict, now: datetime, lookback: timedelta, counts: dict) -> None:
     rows = ts_conn.execute(
         """SELECT point_uri, ts, value, value_text, value_bool, quality FROM point_history
            WHERE point_uri = ANY(%s) AND ts >= %s AND ts <= %s ORDER BY point_uri, ts""",
         (uris, now - lookback, now),
     ).fetchall()
+    counts["rows"] += len(rows)
     by_point: dict[str, list] = {}
     for uri, ts, v, vt, vb, q in rows:
         value = vb if vb is not None else (vt if vt is not None else v)
         by_point.setdefault(uri, []).append((ts, value, q))
+    del rows
     for uri, samples in by_point.items():
         counts["points"] += 1
         brick_class, unit = meta[uri]
@@ -272,7 +288,6 @@ def sweep(ts_conn, store, now: datetime | None = None, lookback: timedelta = LOO
         if suggestion is not None:
             suggest_unit(ts_conn, uri, unit, suggestion, now)
             counts["suggestions"] += 1
-    return counts
 
 
 def suggest_unit(conn, point_uri: str, current: str | None, suggestion: dict, now: datetime) -> None:

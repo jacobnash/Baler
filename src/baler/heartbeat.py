@@ -8,6 +8,7 @@ yet". One small upsert per loop.
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 
 from baler import schema
@@ -35,5 +36,41 @@ def beat(conn, service: str, detail: dict | None = None) -> None:
 def latest(conn) -> dict[str, datetime]:
     try:
         return {s: t for s, t in conn.execute("SELECT service, beat_at FROM service_heartbeats").fetchall()}
+    except Exception:  # noqa: BLE001 - table not created yet
+        return {}
+
+
+class Status:
+    """A daemon's heartbeat detail, written from more than one thread
+    (fault_detector's and derivation_engine's reading-feed thread and their
+    main loop, #243): each part updates its own key, and either thread's
+    beat carries the whole picture, so a stalled main loop still shows its
+    last cycle and a stalled feed thread its lag."""
+
+    def __init__(self, service: str, **detail):
+        self.service = service
+        self._lock = threading.Lock()
+        self.detail: dict = dict(detail)
+
+    def update(self, key: str, value) -> None:
+        with self._lock:
+            self.detail[key] = value
+
+    def add(self, key: str, n: int) -> None:
+        with self._lock:
+            self.detail[key] = self.detail.get(key, 0) + n
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return json.loads(json.dumps(self.detail, default=str))
+
+    def beat(self, conn) -> None:
+        beat(conn, self.service, self.snapshot())
+
+
+def details(conn) -> dict[str, dict]:
+    """Each service's last heartbeat detail ({} if none or no table)."""
+    try:
+        return {s: d for s, d in conn.execute("SELECT service, detail FROM service_heartbeats").fetchall() if d}
     except Exception:  # noqa: BLE001 - table not created yet
         return {}

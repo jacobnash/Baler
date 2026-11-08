@@ -48,7 +48,10 @@ they start at 1k, 2.5k and 5k first. `--steps 10k,25k` picks your own.
 
 ## Isolation (never touches live)
 
-The scale stack is its own compose project, `-p scale`, with these differences from live:
+The scale stack is its own compose project, `-p scale`, with these differences from live.
+(`SCALE_PROJECT=scale2` runs a second, separately named one beside it, with project, volume
+prefix and env file `scripts/scale/scale2.env` all following that name. The name must contain
+`scale`.)
 
 - volumes `scale_*` (`BALER_VOLUME_PREFIX=scale`);
 - every port moved off the live defaults onto `127.0.0.1` (`SCALE_*_PORT`; the defaults are
@@ -136,7 +139,7 @@ So a 1-CPU run and a 12-CPU run are never compared without saying so.
 | `ingest.acked` / `stored` / `stored_ratio` | PUBACKs per second of payload `ts` vs. `point_history` rows with `ts` in the same seconds | **Data loss.** Must be ≥ 99%. |
 | `ingest.stored_rps`, `stored_rate_ratio` | delta of `pg_stat_user_tables` inserts+updates on `point_history`'s chunks over the soak | Sustained write rate, independent of row timestamps. |
 | `ingest.stored_rps_per_host_cpu` | `stored_rps / nproc` | Comparable across machines. |
-| `ingest.broker_dropped_delta` | `$SYS/broker/publish/messages/dropped` | Deliveries mosquitto dropped because a subscriber's queue was full. It's broker-wide: if readings are missing it was the listener (data loss); if stored = acked, it was a QoS 0 subscriber (fault_detector, derivation_engine) whose Cur-mode rules or derivations silently missed readings. Must be 0. |
+| `ingest.broker_dropped_delta` | `$SYS/broker/publish/messages/dropped` | Deliveries mosquitto dropped because a subscriber's queue was full. It's broker-wide: if readings are missing it was the listener (data loss); if stored = acked, it was another subscriber. (Before #243 that meant fault_detector or derivation_engine, whose QoS 0 subscriptions silently missed readings. They now read the reading feed instead.) Must be 0. |
 | `lag.p50_s` / `p95_s` / `max_s` | canary reading every 2 s on `fbf/scale/canary/lag`, polled in `point_history` | **End-to-end lag**, publish to row stored, behind the same queue as the load. p95 must be under 30 s. |
 | `lag.first_third_median_s` → `last_third_median_s` | same | **Backlog growth.** Rising by more than 10 s over the soak fails the step. |
 | `lag.lost` | canaries never stored within 300 s | Lost data. |
@@ -149,7 +152,9 @@ So a 1-CPU run and a 12-CPU run are never compared without saying so.
 | `graph.ingest_s`, `tags_per_s` | Oxigraph count of `scale` points after publishing a step's tags | How long the graph takes to absorb new equipment. |
 | `graph.triples`, `count_*_s` | SPARQL `COUNT` timed | Graph size and the time of a full scan. |
 | `probes[]` | timed GETs through the gateway as the test org's admin, 5 runs, warm median vs. `budgets.json` | **Responsiveness.** Any probe over budget, or not HTTP 200, fails the step. |
-| `rules.<service>.median_cycle_s` | `service_heartbeats` beat-to-beat | Fault detector and derivation engine cycle time, including their sleep (30 s and 10 s by default). |
+| `rules.<service>.median_cycle_s` | `service_heartbeats` beat-to-beat | Fault detector and derivation engine cycle time, including their sleep (30 s and 10 s by default). Since #243 their reading-feed threads beat too (every 10 s), so this is the beat interval; the His sweep's own duration is `heartbeat.his.sweep_s`. |
+| `rules.<service>.feed` | `reading_feed_consumers` sampled every 15 s | **Rule-daemon misses and lag** (#243). `missed_readings_delta` counts readings pruned from the feed before the daemon read them (more than `BALER_FEED_RETENTION_S` behind) and must be 0. `lag_s_max`/`lag_s_last` show how far behind it ran; still over 30 s at the end of the soak fails the step. |
+| `rules.<service>.heartbeat` | `service_heartbeats.detail` | Readings consumed, Cur-mode evaluations (`cur_evaluations`) or rows run (`cur_rows`), and for fault_detector the last His sweep: `sweep_s`, rules, faulted points. |
 | `cx_run_s` | creating a 1 h Cx run over site 0 (500 points) and waiting for it | Commissioning verification time. |
 | `durability.comparable` | `SHOW fsync / synchronous_commit / full_page_writes` on the server **and** on an ingest-path connection (from inside the listener container) | `true` only if all three are on end to end. A non-durable run is never labelled comparable. |
 
@@ -274,9 +279,10 @@ per-session queue overflowed and readings were dropped.
 points: `read?filter=point` is unpaged, `readAll(equip)` folds raw history, and the Cx report
 grows with history ([#244](https://github.com/jacobnash/Baler/issues/244)).
 
-**Next, at 25k points: the rule daemons.** `fault_detector` and `derivation_engine` take every
-reading over QoS 0, fall behind (cycle times of 81 s and 121 s) and silently miss readings
-([#243](https://github.com/jacobnash/Baler/issues/243)).
+**Next, at 25k points: the rule daemons.** `fault_detector` and `derivation_engine` took every
+reading over QoS 0, fell behind (cycle times of 81 s and 121 s) and silently missed readings
+([#243](https://github.com/jacobnash/Baler/issues/243)). Fixed since: see
+[Rule daemons on the reading feed](#rule-daemons-on-the-reading-feed-243) below.
 
 The listener's own ceiling wasn't reached locally: it used 31% CPU at 5,040 readings/s.
 
@@ -332,6 +338,51 @@ first request after restart and warm-up, warm is the median of the next 5):
 | fault_detector skips no-op writes (in-memory open faults) | 10k points: Postgres transactions/s 1,801 → 268 |
 | Readings traced per batch, not per message | 10k points: listener CPU about 44 → 13% |
 | Restarts resume the session; broker queue 200,000 | crash test below: missing readings → 0 |
+
+### Rule daemons on the reading feed (#243)
+
+Same dev VM (4 vCPU), quieter this time: no other stacks running. Soak 300 s, clean stack,
+compose project `scale243` (`SCALE_PROJECT`). Before is main at `4f5b4ce` (run
+`20261108T192647Z`), after is this change (run `20261108T201511Z`).
+
+| | 10k before | 10k after | 25k before | 25k after |
+|---|---|---|---|---|
+| Readings the rule daemons missed | not counted | **0** (counted) | not counted | **0** (counted) |
+| Rule daemons' lag behind storage, max | unknown | 0.16 s / 0.24 s | unknown | 0.28 s / 0.28 s |
+| fault_detector CPU, mean | 37.0% | **1.0%** | 61.6% | **5.3%** |
+| derivation_engine CPU, mean | 25.5% | 4.0% | 46.5% | 13.8% |
+| fault_detector His cycle (interval 30 s) | 38.2 s | sweep 0.29 s | 77.4 s | sweep **0.80 s** |
+| derivation_engine tick (5 s) | 20.0 s | 18.1 s ¹ | 109.1 s | 18.6 s ¹ |
+| mqtt_listener CPU | 19.8% | 17.5% | 33.2% | 35.4% |
+| postgres CPU | 18.6% | 16.8% | 32.3% | 37.4% |
+| mosquitto CPU | 10.3% | 7.7% | 16.4% | 14.2% |
+| Broker drops | 0 | 0 | 0 ² | 0 |
+
+¹ The beat-to-beat median: both daemons now beat from their feed thread every 10 s as well, so
+this no longer measures a cycle. ² This quiet run happened to drop nothing. The first local
+run (above) dropped 115,903 deliveries to the rule daemons at 25k, and nothing in Baler could
+tell you either way. That is the point of the change.
+
+- **No QoS 0 subscriptions left.** Both daemons read `reading_feed`, so the broker fans each
+  reading out to the listener only. The listener appends each committed batch to the feed in
+  the same transaction. That's one more INSERT per batch, built server-side from the staging
+  table: about 5 points of Postgres CPU at 25k, including `point_registry` upkeep and the
+  daemons' reads.
+- **fault_detector is idle-cheap.** At 25k it evaluated 3.9M Cur-mode rule checks in the soak,
+  a dict lookup each. The His sweep (one `GROUP BY` per stuck window, registry candidates for
+  stale) took 0.8 s, against 77 s before.
+- **Misses are visible.** Checked live: with `BALER_FEED_RETENTION_S=20`, `fault_detector`
+  was stopped for 60 s at 2,000 readings/s. The listener logged `fault_detector MISSED …`
+  per prune, and `reading_feed_consumers` counted 80,840 readings in 137 batches. The
+  Fault detection card on `/ops/status` went degraded ("missed 80840 reading(s)…").
+- **The next wall in fault_detector is the quality sweep** ([#183](https://github.com/jacobnash/Baler/issues/183)'s
+  range/spike/unit checks). Every 5 minutes it re-judges the last hour of every classified
+  point in Python. At 25k it read 1.3M rows in 10.5 s; a 25k stack with a full hour of
+  history read 2.2M rows in 13 s. That's about 72M rows an hour at 100k points, longer than
+  its interval. It used to `fetchall` all of them at once, which OOM-killed the daemon
+  (1 GB cap) once a full hour of 25k-point history existed. It now reads 150 points at a
+  time, and its duration is in the heartbeat (`quality.sweep_s`), but it still has to become
+  incremental.
 
 Batched writes cost almost nothing to make durable. At 1,000-row batches, `synchronous_commit=on`
 measured 17–25k rows/s against 15–21k for `off`; single-row writes pay the fsync (about 1.3×).

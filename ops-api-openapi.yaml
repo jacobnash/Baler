@@ -764,6 +764,25 @@ components:
             open_faults: { type: integer }
             disabled_derivation_targets: { type: integer }
             needs_first_org: { type: boolean }
+            reading_feed:
+              type: object
+              description: >-
+                Each rule daemon's place in the reading feed (#243), by consumer
+                (fault_detector, derivation_engine): readings waiting for it, how old
+                the oldest is, and readings it missed because it fell more than the
+                feed's retention window behind (BALER_FEED_RETENTION_S). A miss, or
+                lag over OPS_FEED_LAG_DEGRADED_SECONDS, turns its card degraded.
+              additionalProperties:
+                type: object
+                properties:
+                  seq: { type: integer, description: The last feed batch it finished. }
+                  lag_batches: { type: integer }
+                  lag_readings: { type: integer }
+                  lag_s: { type: number, description: Age in seconds of the oldest batch it hasn't read. }
+                  missed_readings: { type: integer }
+                  missed_batches: { type: integer }
+                  last_missed_at: { type: ["string", "null"], format: date-time }
+                  updated_at: { type: string, format: date-time }
             cards:
               type: array
               description: >-

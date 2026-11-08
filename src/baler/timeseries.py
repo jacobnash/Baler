@@ -236,6 +236,28 @@ def write_point_value(conn: psycopg.Connection, point_uri: str, value, ts: datet
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)" + _UPSERT_SET,
         (point_uri, ts, num, text, flag, unit, label, quality),
     )
+    conn.execute(REGISTRY_UPSERT_SQL, (point_uri, ts))
+
+
+# point_registry (#243, migration 0002): every point with history and its
+# newest ts, coarsely - a writer moves last_ts forward only when it gains
+# more than REGISTRY_GRANULARITY_S, so a point reporting every 5 s is
+# rewritten once every ~30 s and the upsert is otherwise one index probe
+# that writes nothing. So for every point, last_ts <= its newest ts <
+# last_ts + REGISTRY_GRANULARITY_S (barring deletes). fault_detector's
+# stale rule takes candidates from it and confirms them exactly; the whole
+# table is its roster of points with history.
+REGISTRY_GRANULARITY_S = 30
+_REGISTRY_SET = f"""
+        ON CONFLICT (point_uri) DO UPDATE SET last_ts = EXCLUDED.last_ts
+        WHERE EXCLUDED.last_ts > point_registry.last_ts + interval '{REGISTRY_GRANULARITY_S} seconds'
+"""
+REGISTRY_UPSERT_SQL = "INSERT INTO point_registry (point_uri, last_ts) VALUES (%s, %s)" + _REGISTRY_SET
+# ORDER BY point_uri: concurrent writers (listener, hisWrite) lock registry
+# rows in one order, so they can't deadlock on them.
+_REGISTRY_STAGE_SQL = ("INSERT INTO point_registry (point_uri, last_ts) "
+                       "SELECT point_uri, max(ts) FROM point_history_stage GROUP BY point_uri ORDER BY point_uri"
+                       + _REGISTRY_SET)
 
 
 # A per-session staging table for write_point_values: COPY can't do ON
@@ -263,29 +285,39 @@ CREATE TEMP TABLE IF NOT EXISTS point_history_stage (
 _UNLIMITED_DECOMPRESSION = "SELECT set_config('timescaledb.max_tuples_decompressed_per_dml_transaction', '0', true)"
 
 
-def write_point_values(conn: psycopg.Connection, rows) -> int:
+def write_point_values(conn: psycopg.Connection, rows, then=None) -> int:
     """Many readings - (point_uri, value, ts[, unit[, label[, quality]]])
     each - in one transaction: COPY into a staging table, then one upsert
     into point_history. Same semantics as calling write_point_value per row
     in order (idempotent on (point_uri, ts), the last row for a key wins),
     at one round trip and one commit (one fsync) for the lot instead of one
-    each. Returns the number of distinct (point_uri, ts) rows written."""
+    each. Returns the number of distinct (point_uri, ts) rows written.
+
+    `then(conn)` runs inside the same transaction, after the upsert, with
+    the rows still in point_history_stage: mqtt_listener appends the batch
+    to the reading feed there (reading_feed.append_from_stage), so it
+    commits with the rows or not at all. Given `then`, the transaction
+    runs even for no rows."""
     latest: dict[tuple[str, datetime], tuple] = {}
     for row in rows:
         uri, value, ts = row[0], row[1], row[2]
         extra = (tuple(row[3:6]) + (None, None, None))[:3]  # unit, label, quality
         latest[(uri, ts)] = (uri, ts, *_value_columns(value), *extra)
-    if not latest:
+    if not latest and then is None:
         return 0
     cols = "point_uri, ts, value, value_text, value_bool, unit, label, quality"
     with conn.transaction():
         conn.execute(_UNLIMITED_DECOMPRESSION)
         conn.execute(_STAGE_DDL)
         with conn.cursor() as cur:
-            with cur.copy(f"COPY point_history_stage ({cols}) FROM STDIN") as copy:
-                for rec in latest.values():
-                    copy.write_row(rec)
-            cur.execute(f"INSERT INTO point_history ({cols}) SELECT {cols} FROM point_history_stage" + _UPSERT_SET)
+            if latest:
+                with cur.copy(f"COPY point_history_stage ({cols}) FROM STDIN") as copy:
+                    for rec in latest.values():
+                        copy.write_row(rec)
+                cur.execute(f"INSERT INTO point_history ({cols}) SELECT {cols} FROM point_history_stage" + _UPSERT_SET)
+                cur.execute(_REGISTRY_STAGE_SQL)
+        if then is not None:
+            then(conn)
     return len(latest)
 
 

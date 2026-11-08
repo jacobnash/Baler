@@ -923,6 +923,8 @@ def import_history(conn: psycopg.Connection, root: str, progress: Callable[[str]
                     "SELECT %s, ts, value, value_text, value_bool, unit, label, quality FROM export_stage" + upsert,
                     (point_uri,))
                 total += cur.rowcount
+                # point_registry (#243): the restored point has history now
+                conn.execute(timeseries.REGISTRY_UPSERT_SQL, (point_uri, last))
             if n % 500 == 0 or n == len(files):
                 progress(f"history: {n}/{len(files)} files")
     finally:

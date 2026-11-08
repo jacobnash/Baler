@@ -7,7 +7,7 @@ conversion, an aggregate across a whole equipment tree — and writes the result
 `point_history` as a real point, attached to its target entity with full
 `prov:wasDerivedFrom` lineage back to whatever it was computed from. `derivation_api.py` only
 ever CRUDs `derivations.json`; `derivation_engine.py` is the only process that actually evaluates
-one, on a periodic sweep and (for `cur`-mode formulas) on matching MQTT messages — the same
+one, on a periodic sweep and (for `cur`-mode formulas) whenever one of a formula's inputs reports — the same
 decoupled API/engine split [Fault Detection](/fault-detection) uses, for the same reason.
 
 The function that does the computing is plain Python — `def run(inputs, row): ...` — submitted as
@@ -133,6 +133,29 @@ this version. Do not expose `POST /derivations`, `POST /derivations/test`, or
 deployment boundary — one notch more dangerous than the webhook-URL SSRF posture
 [Fault Detection](/fault-detection)/[Webhooks](/webhooks) already document, since this is
 arbitrary code execution, not a fetch to an attacker-chosen URL.
+
+## Cur mode: re-running on new readings
+
+A `formula` with `applies_to_topic_glob` also re-runs when one of its inputs reports, between
+sweeps. `derivation_engine` reads the **reading feed**, the batches `mqtt_listener` commits, from
+a durable offset (`reading_feed_consumers`), the same way `fault_detector` does. See
+[Scaling and missed readings](/fault-detection#scaling-and-missed-readings). It used to subscribe
+to `#` over QoS 0, which the broker silently dropped from once the engine fell behind. Per batch:
+
+- the triggered points (those matching the glob) are looked up in an index of the `select`'s rows
+  by input point. The `select` runs again every `--select-refresh` seconds (default 60) or when
+  the derivation changes, not once per reading;
+- each triggered row runs **once per batch**, however many of its inputs reported in it, on inputs
+  that are already committed;
+- open masking faults and auto-disabled targets are read once per pass, not once per input and
+  per target;
+- a computed point's lineage triples are written to the graph once per process, not on every run.
+
+So the work is proportional to the rows whose inputs reported, not to the number of points. Lag
+and missed readings show in its heartbeat, on its `/ops/status` card and in
+`building.reading_feed.derivation_engine`, the same as for fault detection. Rollups have no Cur
+mode, as before. Readings that didn't arrive over MQTT (`POST /ingest`, hisWrite) are picked up
+by the next sweep.
 
 ## Failure isolation is per-(derivation, target), not per-derivation
 

@@ -33,6 +33,9 @@ x-daemon-env: &daemon-env
   # (baler.history_chunks, #245). Only high-rate sites set them.
   BALER_HISTORY_CHUNK_INTERVAL: ${BALER_HISTORY_CHUNK_INTERVAL:-}
   BALER_HISTORY_COMPRESS_SCHEDULE: ${BALER_HISTORY_COMPRESS_SCHEDULE:-}
+  # Blank-safe (blank = 600): how long the reading feed keeps a batch a
+  # rule daemon hasn't read yet (mqtt_listener prunes; #243).
+  BALER_FEED_RETENTION_S: ${BALER_FEED_RETENTION_S:-}
   # Blank-safe: only ops_api reads it (the Connectors page's local Windrow).
   WINDROW_API_URL: ${WINDROW_API_URL:-}
   # Only auth_api.py (issues tokens) actually needs this - blanket-added
