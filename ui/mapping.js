@@ -62,7 +62,11 @@ function evidenceHtml(g) {
     ? Object.entries(ev.value_stats).map(([k, v]) => `${escapeHtml(k)}=${escapeHtml(v)}`).join(", ")
     : "no history yet";
   const sibs = (ev.siblings || []).map((s) => escapeHtml(s.label) + (s.class ? ` <span class="hint">(${escapeHtml(s.class)})</span>` : "")).join("; ");
-  const asks = (g.asks || []).map((a) => {
+  const memoryAsk = (g.asks || []).find((a) => a.model === "memory");
+  const nearest = memoryAsk && (memoryAsk.neighbours || []).length
+    ? memoryAsk.neighbours.map((n) => `<li><code>${escapeHtml(n.label)}</code> → ${escapeHtml(n.brick_class)} <span class="hint">(${escapeHtml(n.scope)}, ${n.similarity})</span></li>`).join("")
+    : "";
+  const asks = (g.asks || []).filter((a) => a.model !== "memory").map((a) => {
     const said = (a.candidates || []).map((c) => escapeHtml(c.brick_class)).join(", ") || "nothing usable";
     const rej = (a.rejected || []).length ? ` - not Brick: ${a.rejected.map(escapeHtml).join(", ")}` : "";
     return `<li>${escapeHtml(a.model)}${a.variant !== undefined ? ` (ask ${a.variant + 1})` : ""}: ${said}${rej}</li>`;
@@ -73,6 +77,7 @@ function evidenceHtml(g) {
       <dt>Other tags</dt><dd>${values || "(none)"}</dd>
       <dt>Values</dt><dd>${stats}</dd>
       <dt>Same equipment</dt><dd>${sibs || "(none)"}</dd>
+      <dt>Nearest confirmed</dt><dd>${nearest ? `<ul>${nearest}</ul>` : "none yet (memory learns from your answers)"}</dd>
       <dt>Ladder</dt><dd>${asks ? `<ul>${asks}</ul>` : "no model asked"}<div>Not auto-accepted: ${escapeHtml(g.refused_because)}</div></dd>
     </dl>`;
 }

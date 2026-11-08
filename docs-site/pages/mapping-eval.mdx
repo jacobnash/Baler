@@ -39,6 +39,7 @@ Each point ends on one ladder step:
 | Step | Meaning |
 |---|---|
 | `rules` | A direct rule match. Auto-accepted. |
+| `memory` | The nearest confirmed examples agreed ([memory](/memory)). Auto-accepted. |
 | `model` | Both model asks agreed on a real Brick class and nothing vetoed it. Auto-accepted. |
 | `review` | A mapping proposal with up to 3 candidates. A person decides. |
 
@@ -88,6 +89,11 @@ A replay answers from the recording, keyed by the exact prompt. A change
 after the model (the veto, the agreement rule) can be re-scored without
 paying again; a change to what the prompt contains (evidence, candidates)
 can't, and needs a new recording.
+
+`--memory-from-seed SEED` gives the ladder memory built from another seed
+of the mock hospital, with every review proposal there answered correctly:
+a stand-in for "the next building". See [memory](/memory) for what that
+measures and why it flatters.
 
 With no key at all, `--simulate inventing|echo|ranker` runs the model step
 with a stand-in (see `Simulated` in `mapping_eval.py`). They show what the
