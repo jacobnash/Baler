@@ -13,12 +13,14 @@ advisory lock around all of it makes the services take turns.
 
 from __future__ import annotations
 
+from psycopg import sql as _sql
+
 # Arbitrary, fixed, and shared by every Baler process ("bale").
 LOCK_KEY = 0x62616C65
 
 
-def run(conn, *statements: str) -> None:
+def run(conn, *statements: str | _sql.Composable) -> None:
     with conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (LOCK_KEY,))
-        for sql in statements:
-            conn.execute(sql)
+        for stmt in statements:
+            conn.execute(stmt)

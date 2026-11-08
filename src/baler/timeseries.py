@@ -6,6 +6,7 @@ bool values today (e.g. Windrow's fan_status.presentValue = "active") - one
 float column would lose that.
 """
 
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -74,6 +75,88 @@ ROLLUP_DDL = (
 )
 
 
+# Native columnar compression (#192). Uncompressed, every sample costs ~150-220
+# bytes, most of it point_uri repeated in the row and again in the primary
+# key. Segmenting by point_uri stores the URI once per batch of up to 1000
+# samples, and ordering each batch by ts delta-encodes the timestamps and
+# values. Raw history is compressed, never downsampled: hunting and Cx need
+# the actual samples (todo/building-lifecycle-ubis.md §10.1, §15).
+#
+# unit and label are segment columns too, not just point_uri: they are
+# constant per point (only derivation_engine and hisWrite set them), so they
+# cost nothing in ratio, and read_point_labels' "newest row with a unit or
+# label" filter then runs on the stored segment values. Compressed in the
+# value columns instead, a raw point (never labelled) had every batch of its
+# whole history decompressed on each lookup: 4 ms -> 310 ms for 766 points
+# over half a day, growing with every year of history.
+#
+# A chunk is compressed once all of it is older than COMPRESS_AFTER. Writes
+# that land in an already-compressed chunk still work (TimescaleDB 2.11+
+# decompresses just the affected batch for an upsert, and the policy
+# recompresses the chunk on its next run), so this setting is about how much
+# late traffic takes that slower path, not about correctness. What arrives
+# late: retained MQTT replays (seconds), Windrow #13's trend backfill (hours),
+# an edge node's spool after an outage (a weekend, say). 7 days covers all
+# three with room. hisWrite and haystack_import can write any age; they
+# take the slower path.
+COMPRESS_AFTER_DEFAULT = "7 days"
+COMPRESS_AFTER = os.environ.get("BALER_HISTORY_COMPRESS_AFTER", "").strip() or COMPRESS_AFTER_DEFAULT
+
+# Present already? One catalog read, as for _READY_SQL. Compression that was
+# enabled some other way (by hand, with other settings) is left as it is;
+# only the policy's compress_after is kept in step with COMPRESS_AFTER.
+_COMPRESSION_STATE_SQL = """
+SELECT h.compression_enabled,
+       j.job_id IS NOT NULL,
+       COALESCE((j.config->>'compress_after')::interval = %s::interval, false)
+FROM timescaledb_information.hypertables h
+LEFT JOIN timescaledb_information.jobs j
+       ON j.proc_name = 'policy_compression' AND j.hypertable_name = h.hypertable_name
+WHERE h.hypertable_name = 'point_history'
+"""
+_ENABLE_COMPRESSION = """
+ALTER TABLE point_history SET (timescaledb.compress,
+    timescaledb.compress_segmentby = 'point_uri, unit, label', timescaledb.compress_orderby = 'ts DESC')
+"""
+# ALTER TABLE takes point_history's ACCESS EXCLUSIVE lock. Queued behind a
+# long read it would block every ingest write queued behind it in turn, so
+# it gives up instead and the next new connection tries again.
+_COMPRESSION_LOCK_TIMEOUT = "SET LOCAL lock_timeout = '5s'"
+
+log = logging.getLogger(__name__)
+
+
+def _ensure_compression(conn: psycopg.Connection) -> None:
+    """Enable compression and its policy on point_history, idempotently and
+    in place: a no-op catalog read once they're there, so it is safe on
+    every new connection of every service (as _READY_SQL is). Never fails
+    the connection: ingest matters more than when the next chunk shrinks."""
+    try:
+        row = conn.execute(_COMPRESSION_STATE_SQL, (COMPRESS_AFTER,)).fetchone()
+    except psycopg.errors.InvalidDatetimeFormat:
+        log.error("BALER_HISTORY_COMPRESS_AFTER=%r is not a Postgres interval; point_history "
+                  "compression left as it is", COMPRESS_AFTER)
+        return
+    if row is None:  # no point_history hypertable (yet)
+        return
+    enabled, has_policy, policy_matches = row
+    if enabled and policy_matches:
+        return
+    stmts: list[str | sql.Composable] = [_COMPRESSION_LOCK_TIMEOUT]
+    if not enabled:
+        stmts.append(_ENABLE_COMPRESSION)
+    if has_policy:  # compress_after changed: replace the policy
+        stmts.append("SELECT remove_compression_policy('point_history', if_exists => true)")
+    stmts.append(sql.SQL(
+        "SELECT add_compression_policy('point_history', compress_after => {}::interval, if_not_exists => true)"
+    ).format(sql.Literal(COMPRESS_AFTER)))
+    try:
+        ddl.run(conn, *stmts)
+    except psycopg.Error as exc:
+        log.warning("point_history compression setup skipped this time (retried on the next "
+                    "new connection): %s", exc)
+
+
 # Everything SCHEMA, create_hypertable and LABELS_INDEX make, present.
 # (Without TimescaleDB this errors, as create_hypertable always has.)
 _READY_SQL = """
@@ -122,6 +205,7 @@ def _setup(conn: psycopg.Connection, statement_timeout: str | None = None) -> No
         ddl.run(conn, SCHEMA, "SELECT create_hypertable('point_history', 'ts', if_not_exists => TRUE, migrate_data => TRUE)",
                 LABELS_INDEX)
     _ensure_rollup_views(conn)
+    _ensure_compression(conn)
     # Real tradeoff, taken deliberately: every INSERT otherwise waits on a
     # full WAL fsync before returning. Scoped to this connection only (a
     # session-level SET, not a postgresql.conf edit) - other clients
