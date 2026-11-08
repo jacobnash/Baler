@@ -147,8 +147,14 @@ def test_site_export_round_trips_into_a_fresh_install(seeded, tmp_path):
     out = str(tmp_path / "building-a")
     graph_before = _construct(s["mine"])
     # the export reads compressed history as well as uncompressed
-    conn.execute("SELECT compress_chunk(c, if_not_compressed => true) FROM show_chunks("
-                 "'point_history', older_than => %s, newer_than => %s) c",
+    # Compress every chunk overlapping the window, whatever its width.
+    # show_chunks(older_than=...) only takes chunks that END before the bound:
+    # with the default 7-day chunks (epoch-aligned, so 29 Jan - 5 Feb here)
+    # the chunk holding T0 ends after T0 + 4 days and was silently skipped,
+    # which failed CI while passing on databases with narrower chunks.
+    conn.execute("SELECT compress_chunk(format('%%I.%%I', chunk_schema, chunk_name)::regclass, "
+                 "if_not_compressed => true) FROM timescaledb_information.chunks "
+                 "WHERE hypertable_name = 'point_history' AND range_start < %s AND range_end > %s",
                  (T0 + timedelta(days=4), T0 - timedelta(days=7)))
     assert conn.execute("SELECT bool_and(is_compressed) FROM timescaledb_information.chunks WHERE "
                         "hypertable_name = 'point_history' AND range_start <= %s AND range_end > %s",
