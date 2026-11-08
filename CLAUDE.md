@@ -18,7 +18,8 @@ integrations). This file is gotchas only — don't duplicate those.
   load-bearing for the live nash-srv install, not leftovers: compose's
   `${BALER_X:-${TIMBERDOODLE_X}}` fallbacks, the `BALER_PG_USER`/`BALER_PG_DB`/
   `BALER_VOLUME_PREFIX` variables, and the `migrate` service
-  (`baler.migrate`, rewrites `urn:timberdoodle:` IRIs). The `fbf/` MQTT
+  (`baler.migrate`, rewrites `urn:timberdoodle:` IRIs, and now also applies
+  the Postgres schema migrations). The `fbf/` MQTT
   topic prefix and `urn:point:fbf/...` ids are deliberately unchanged
   (point identity). See `deploy/MIGRATING-TO-BALER.md` before touching any
   of these. A blanket `TIMBERDOODLE`->`BALER` find/replace will silently
@@ -52,6 +53,13 @@ integrations). This file is gotchas only — don't duplicate those.
   (`scripts/gen_function_index.py`, run by docs-site's `prebuild`/`predev`)
   reads only `baler.toml` and escapes it for MDX. Its output
   `docs-site/pages/code/functions.mdx` is generated and git-ignored.
+- **Schema changes are numbered migrations** (`src/baler/migrations/`,
+  `python -m baler.schema`, docs-site `schema-migrations.mdx`), never DDL in
+  a module: module `ensure_schema()`s just call `schema.ensure`, once per
+  process. Released migration files are hash-pinned in
+  `tests/test_schema.py`; add a new one, don't edit. TimescaleDB refuses
+  `ALTER COLUMN TYPE` on compressed chunks: use
+  `migrations.hypertable.with_decompressed`.
 - **Env vars**: `.env.example` at the repo root is the single source of
   truth for every var any process reads — check there before grepping
   source.

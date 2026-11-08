@@ -39,7 +39,7 @@ from datetime import datetime, timedelta, timezone
 
 from rdflib import URIRef
 
-from baler import brick_vocab, ddl
+from baler import brick_vocab, schema
 from baler.store import BRICK, TD
 
 TOP_N = 3
@@ -141,20 +141,8 @@ def cx_check(brick_class: str, point_classes: list[str | None], vocab: brick_voc
 
 # --- relationships ----------------------------------------------------------
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS relationship_proposals (
-    id         TEXT PRIMARY KEY,
-    subject    TEXT NOT NULL,            -- equip (feeds) or the proposed equip (isPointOf)
-    predicate  TEXT NOT NULL,            -- hasPoint | feeds
-    objects    JSONB NOT NULL,           -- the points (hasPoint) or the fed equip (feeds)
-    evidence   JSONB NOT NULL,
-    status     TEXT NOT NULL,            -- proposed | accepted | rejected
-    decided_by TEXT,
-    created_at TIMESTAMPTZ NOT NULL,
-    decided_at TIMESTAMPTZ
-);
-CREATE UNIQUE INDEX IF NOT EXISTS relationship_proposals_open ON relationship_proposals (subject, predicate) WHERE status = 'proposed';
-"""
+# Schema (relationship_proposals): baler/migrations/, from 0001 (#194). Change
+# it with a new migration there, not here.
 
 
 def unlinked_point_groups(store, min_points: int = 2) -> list[dict]:
@@ -259,7 +247,7 @@ class PgRelationships:
         self.conn = conn
 
     def ensure_schema(self) -> None:
-        ddl.run(self.conn, SCHEMA)
+        schema.ensure(self.conn)
 
     def propose(self, subject: str, predicate: str, objects: list[str], evidence: dict) -> None:
         now = datetime.now(timezone.utc)

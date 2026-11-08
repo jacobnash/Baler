@@ -102,13 +102,19 @@ PREV=\$(cat "\$MARKER" 2>/dev/null || true)
 # code or content the app containers bind-mount (.:/app) or read at
 # startup, restarting them is enough - no image rebuild, no recreate of
 # every container (~46s). Anything else (compose files, Dockerfile,
-# pyproject.toml, windrow/, no previous deploy recorded) takes the full path.
+# pyproject.toml, windrow/, no previous deploy recorded) takes the full path,
+# and so does a new schema migration (src/baler/migrations/): the full path
+# runs the migrate service before any service restarts, where the fast path
+# would leave it to whichever restarted service connects first (#194).
 FAST=0
 CHANGED=""
 if [ -n "\$PREV" ] && runuser -u "${RUNNER_USER}" -- git cat-file -e "\$PREV^{commit}" 2>/dev/null; then
   CHANGED=\$(runuser -u "${RUNNER_USER}" -- git diff --name-only "\$PREV" "\$HEAD_SHA")
   if [ -n "\$CHANGED" ] && ! printf '%s\\n' "\$CHANGED" | grep -qvE '^(src/|ui/|gateway/|rules/|ontology/|docs-site/|tests/|todo/|scripts/|[^/]*\\.md\$)'; then
     FAST=1
+  fi
+  if printf '%s\\n' "\$CHANGED" | grep -q '^src/baler/migrations/'; then
+    FAST=0
   fi
 fi
 # The HTTP APIs behind the gateway are replaced one at a time, each waited

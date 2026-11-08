@@ -10,19 +10,14 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from baler import ddl
+from baler import schema
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS service_heartbeats (
-    service TEXT PRIMARY KEY,
-    beat_at TIMESTAMPTZ NOT NULL,
-    detail  JSONB
-);
-"""
+# Schema (service_heartbeats): baler/migrations/, from 0001 (#194). Change it
+# with a new migration there, not here.
 
 
 def ensure_schema(conn) -> None:
-    ddl.run(conn, SCHEMA)
+    schema.ensure(conn)
 
 
 def beat(conn, service: str, detail: dict | None = None) -> None:

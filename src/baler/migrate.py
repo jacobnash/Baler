@@ -1,12 +1,16 @@
 """
-One-shot, idempotent data migration from the Timberdoodle era to Baler.
+One-shot, idempotent migrations, run by docker-compose's `migrate` service
+before any daemon starts (every daemon `depends_on` it completing):
 
-Run by docker-compose's `migrate` service before any daemon starts (every
-daemon `depends_on` it completing), so a deploy of a renamed install fixes
-its own stored data. On data that's already migrated - or on a fresh
-install - each step finds nothing to do and exits 0.
+  1. Postgres: baler.schema's numbered schema migrations (#194), whatever
+     is pending, under their lock. On a current database it does nothing.
+  2. Oxigraph: the Timberdoodle-to-Baler graph rewrite below.
 
-What it migrates, and only this:
+So a deploy brings its own schema and fixes its own stored data. On data
+that's already migrated - or on a fresh install - each step finds nothing
+to do and exits 0.
+
+What the graph step migrates, and only this:
 
   - Oxigraph default graph: every IRI (subject, predicate or object) that
     starts with `urn:timberdoodle:` is rewritten to `urn:baler:`. That's
@@ -17,9 +21,10 @@ What it migrates, and only this:
     `urn:baler:ontology`, unless the new graph already has data (then the
     old one is left alone for a human to look at, never merged).
 
-Postgres needs nothing: no stored value names the product, and the role and
-database keep their old names on migrated installs via BALER_PG_USER /
-BALER_PG_DB (see deploy/MIGRATING-TO-BALER.md).
+No Postgres value names the product, so the rename needs nothing there: the
+role and database keep their old names on migrated installs via
+BALER_PG_USER / BALER_PG_DB (see deploy/MIGRATING-TO-BALER.md), and the
+schema migrations connect through BALER_PG_DSN built from them.
 
     python -m baler.migrate          # what the compose service runs
 """
@@ -123,9 +128,12 @@ def _wait_for(store, attempts: int = 60) -> None:
 
 
 def main() -> int:
+    from baler import schema
     from baler.remote_store import RemoteStore
 
     tracing.init_tracing("baler-migrate")
+    with tracer.start_as_current_span("migrate.schema"):
+        schema.main(["upgrade"])
     store = RemoteStore()
     with tracer.start_as_current_span("migrate.timberdoodle_to_baler") as span:
         _wait_for(store)

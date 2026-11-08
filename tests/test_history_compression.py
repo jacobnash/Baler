@@ -6,8 +6,9 @@ and never fail a connection. Once a chunk is compressed, late writes,
 retained-message replays, overwrites and deletes into it must still work,
 and every history read must return exactly what it returned before.
 
-The unit tests drive _ensure_compression with a fake connection; the
-integration tests need docker-compose's TimescaleDB."""
+Migration 0001 enables it (#194); timeseries keeps the policy in step with
+the setting. The unit tests drive _ensure_compression with a fake
+connection; the integration tests need docker-compose's TimescaleDB."""
 
 import logging
 import math
@@ -16,8 +17,9 @@ from datetime import datetime, timedelta, timezone
 import psycopg
 import pytest
 
-from baler import ddl, timeseries
+from baler import ddl, schema, timeseries
 from baler.commissioning.history import _VALUED_SQL
+from baler.migrations import v0001_baseline as baseline
 
 PREFIX = "urn:point:test-compress/"
 
@@ -62,10 +64,17 @@ def test_no_hypertable_yet_does_nothing(monkeypatch):
     assert _ran(monkeypatch, None) == ""
 
 
-def test_fresh_database_enables_compression_and_adds_the_policy(monkeypatch):
-    ran = _ran(monkeypatch, (False, False, False))
-    assert "lock_timeout" in ran
-    assert "compress_segmentby = 'point_uri, unit, label'" in ran and "compress_orderby = 'ts DESC'" in ran
+def test_disabled_compression_is_left_alone(monkeypatch, caplog):
+    """Enabling it is migration 0001's job (#194); the settings sync only
+    keeps the policy in step and never turns compression back on."""
+    with caplog.at_level(logging.WARNING, logger="baler.timeseries"):
+        assert _ran(monkeypatch, (False, False, False)) == ""
+    assert "disabled" in caplog.text
+
+
+def test_missing_policy_is_added(monkeypatch):
+    ran = _ran(monkeypatch, (True, False, False))
+    assert "lock_timeout" in ran and "ALTER TABLE" not in ran
     assert "add_compression_policy" in ran and "if_not_exists => true" in ran
     assert "remove_compression_policy" not in ran
 
@@ -80,8 +89,8 @@ def test_changed_compress_after_replaces_the_policy(monkeypatch):
 
 def test_ddl_failure_never_fails_the_connection(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="baler.timeseries"):
-        _ran(monkeypatch, (False, False, False), fail=psycopg.errors.LockNotAvailable("busy"))
-    assert "retried on the next new connection" in caplog.text
+        _ran(monkeypatch, (True, True, False), fail=psycopg.errors.LockNotAvailable("busy"))
+    assert "retried at the next process start" in caplog.text
 
 
 def test_bad_interval_is_logged_not_raised(monkeypatch, caplog):
@@ -127,6 +136,8 @@ def test_connect_sets_up_compression(conn):
 @pytest.mark.integration
 def test_setup_is_a_no_op_when_present(conn, monkeypatch):
     monkeypatch.setattr(ddl, "run", lambda *a: pytest.fail("DDL ran although compression is set up"))
+    monkeypatch.setattr(schema, "upgrade", lambda *a, **k: pytest.fail("migrated although current"))
+    assert schema.plan(conn) == []
     timeseries._setup(conn)
     timeseries._ensure_compression(conn)
 
@@ -403,12 +414,12 @@ def test_add_nullable_column_beside_compression(conn, column_first):
     new column stays a compressed column, not a segment column."""
     t = "ph_compress_addcol"
     conn.execute(f"DROP TABLE IF EXISTS {t}")
-    legacy = timeseries.SCHEMA.replace("point_history", t).replace("    quality    TEXT,\n", "")
+    legacy = baseline.POINT_HISTORY.replace("point_history", t).replace("    quality    TEXT,\n", "")
     assert "quality" not in legacy  # a table from before #183
     conn.execute(legacy)
     conn.execute(f"SELECT create_hypertable('{t}', 'ts')")
-    add = timeseries.QUALITY_COLUMN.replace("point_history", t)
-    enable = timeseries._ENABLE_COMPRESSION.replace("point_history", t)
+    add = baseline.QUALITY_COLUMN.replace("point_history", t)
+    enable = baseline.ENABLE_COMPRESSION.replace("point_history", t)
     try:
         start, _ = _old_span()
         with conn.cursor() as cur:

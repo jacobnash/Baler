@@ -27,24 +27,10 @@ import json
 import os
 from datetime import datetime, timezone
 
-from baler import ddl, json_store
+from baler import json_store, schema
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS sources (
-    id           TEXT PRIMARY KEY,
-    kind         TEXT NOT NULL,
-    name         TEXT NOT NULL,
-    enabled      BOOLEAN NOT NULL DEFAULT false,
-    settings     JSONB NOT NULL DEFAULT '{}',
-    secrets      TEXT,                -- Fernet token of a JSON object
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_run_at  TIMESTAMPTZ,
-    last_ok_at   TIMESTAMPTZ,
-    last_error   TEXT,
-    last_result  JSONB
-);
-"""
+# Schema (sources): baler/migrations/, from 0001 (#194). Change it with a new
+# migration there, not here.
 
 
 def _field(name, label, *, required=False, secret=False, kind="str", default=None, help=""):
@@ -106,7 +92,7 @@ KINDS: dict[str, dict] = {
 
 
 def ensure_schema(conn) -> None:
-    ddl.run(conn, SCHEMA)
+    schema.ensure(conn)
 
 
 # --- secrets ---------------------------------------------------------------

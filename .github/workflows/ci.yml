@@ -132,6 +132,11 @@ jobs:
       BALER_ALLOW_PRIVATE_WEBHOOKS: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history and tags: tests/test_schema_upgrade.py builds a
+          # database with each release's own code (git archive <tag>) and
+          # upgrades it to this commit (#194).
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

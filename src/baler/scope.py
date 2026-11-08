@@ -38,16 +38,17 @@ from dataclasses import dataclass
 
 import jwt as pyjwt
 
-from baler import ddl
+from baler import schema
 
-SCHEMA = "ALTER TABLE sites ADD COLUMN IF NOT EXISTS topic_prefixes TEXT[] NOT NULL DEFAULT '{}'"
+# Schema (sites.topic_prefixes): baler/migrations/, from 0001 (#194). Change
+# it with a new migration there, not here.
 
 _KEYED_PREFIXES = ("urn:point:", "urn:equip:")
 _BEARER = re.compile(r"^bearer\s+(?:authToken=)?([^\s,]+)\s*$", re.IGNORECASE)
 
 
 def ensure_schema(conn) -> None:
-    ddl.run(conn, SCHEMA)
+    schema.ensure(conn)
 
 
 def entity_key(uri: str) -> str | None:

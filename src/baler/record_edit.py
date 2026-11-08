@@ -19,22 +19,12 @@ import re
 
 from rdflib import RDF, Literal, URIRef
 
-from baler import brick_vocab, ddl
+from baler import brick_vocab, schema
 from baler.ingest import _tag_triples
 from baler.store import BRICK, HAYSTACK, HTZ, HUNIT
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS record_edits (
-    id         BIGSERIAL PRIMARY KEY,
-    ts         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    entity_uri TEXT NOT NULL,
-    action     TEXT NOT NULL,      -- edit | delete
-    user_sub   TEXT,
-    user_email TEXT,
-    detail     JSONB NOT NULL
-);
-CREATE INDEX IF NOT EXISTS record_edits_entity ON record_edits (entity_uri, ts DESC);
-"""
+# Schema (record_edits): baler/migrations/, from 0001 (#194). Change it with a
+# new migration there, not here.
 
 # Derived from graph links or live history, or identity: not hand-editable.
 RESERVED_TAGS = frozenset({
@@ -46,7 +36,7 @@ _BRICK_NS = str(BRICK)
 
 
 def ensure_schema(conn) -> None:
-    ddl.run(conn, SCHEMA)
+    schema.ensure(conn)
 
 
 def exists(store, uri: str) -> bool:

@@ -24,42 +24,10 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from baler import ddl
+from baler import schema
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS mapping_proposals (
-    id              TEXT PRIMARY KEY,
-    entity_uri      TEXT NOT NULL,
-    pattern         TEXT NOT NULL,
-    candidates      JSONB NOT NULL,       -- [{brick_class, reason, source}], best first
-    refused_because TEXT NOT NULL,        -- why the ladder didn't auto-accept
-    evidence        JSONB NOT NULL,
-    asks            JSONB NOT NULL,       -- each model ask: model, variant, candidates, confidence, rejected
-    status          TEXT NOT NULL,        -- proposed | escalated | accepted | site_visit | auto-accepted
-    decided_class   TEXT,
-    decided_by      TEXT,
-    created_at      TIMESTAMPTZ NOT NULL,
-    updated_at      TIMESTAMPTZ NOT NULL,
-    decided_at      TIMESTAMPTZ
-);
-CREATE UNIQUE INDEX IF NOT EXISTS mapping_proposals_open ON mapping_proposals (entity_uri) WHERE status = 'proposed';
-CREATE INDEX IF NOT EXISTS mapping_proposals_pattern ON mapping_proposals (status, pattern);
--- The review queue (#184): who a proposal is escalated to, and the
--- reviewer's note. Added, not in CREATE TABLE, so a table #182 made gets them.
-ALTER TABLE mapping_proposals ADD COLUMN IF NOT EXISTS assignee TEXT;
-ALTER TABLE mapping_proposals ADD COLUMN IF NOT EXISTS note TEXT;
-
--- A pattern a person approved as a whole ("41 points like VAV-{n}-DA-T are
--- Discharge_Air_Temperature_Sensor"): the model step applies it to every
--- later entity with that pattern, without asking a model.
-CREATE TABLE IF NOT EXISTS mapping_site_rules (
-    pattern     TEXT PRIMARY KEY,
-    brick_class TEXT NOT NULL,
-    created_by  TEXT,
-    created_at  TIMESTAMPTZ NOT NULL,
-    proposal_id TEXT
-);
-"""
+# Schema (mapping_proposals, mapping_site_rules): baler/migrations/, from 0001
+# (#194). Change it with a new migration there, not here.
 
 # A person has been asked: the ladder refreshes the evidence but never
 # reopens, duplicates or auto-closes these.
@@ -75,7 +43,7 @@ class PgProposals:
         self.conn = conn
 
     def ensure_schema(self) -> None:
-        ddl.run(self.conn, SCHEMA)
+        schema.ensure(self.conn)
 
     def propose(self, entity_uri: str, pattern: str, candidates: list, refused_because: str, evidence: dict, asks: list) -> None:
         now = _now()

@@ -14,38 +14,15 @@ import psycopg
 from psycopg import sql
 from psycopg_pool import ConnectionPool
 
-from baler import ddl
+from baler import ddl, schema
 
 DEFAULT_DSN = os.environ.get(
     "BALER_PG_DSN", "postgresql://baler:baler@localhost:5433/baler"
 )
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS point_history (
-    point_uri  TEXT NOT NULL,
-    ts         TIMESTAMPTZ NOT NULL,
-    value      DOUBLE PRECISION,
-    value_text TEXT,
-    value_bool BOOLEAN,
-    unit       TEXT,
-    label      TEXT,
-    quality    TEXT,
-    PRIMARY KEY (point_uri, ts)
-);
-"""
-
-# Per-sample quality (#183, baler.quality): NULL is ok. Added to tables
-# created before the column existed; cheap on a hypertable (no rewrite for
-# a nullable column without a default).
-QUALITY_COLUMN = "ALTER TABLE point_history ADD COLUMN IF NOT EXISTS quality TEXT"
-
-# read_point_labels' lookup: only derivation_engine sets unit/label, so on a
-# raw point "newest row with a unit or label" would otherwise walk its whole
-# history to find nothing. Small: it indexes the labelled rows only.
-LABELS_INDEX = """
-CREATE INDEX IF NOT EXISTS point_history_labelled
-ON point_history (point_uri, ts DESC) WHERE unit IS NOT NULL OR label IS NOT NULL
-"""
+# The schema (point_history, its index, aggregates and compression) is
+# built by baler.schema's numbered migrations (baler/migrations/), once per
+# deploy, not here on every connection (#194).
 
 # Pre-folded rollups (#51/#54): TimescaleDB continuous aggregates of
 # point_history in 5-minute buckets, and 1-hour buckets built on those. Each
@@ -60,25 +37,9 @@ ON point_history (point_uri, ts DESC) WHERE unit IS NOT NULL OR label IS NOT NUL
 # backfill below it stayed invisible until the next refresh.)
 ROLLUP_VIEWS = (("point_history_1h", 3600), ("point_history_5m", 300))
 ROLLUP_WINDOW_DAYS = 30
-_V = "COALESCE(value, value_bool::int::float8)"
-ROLLUP_DDL = (
-    f"""CREATE MATERIALIZED VIEW IF NOT EXISTS point_history_5m
-    WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
-    SELECT point_uri, time_bucket(INTERVAL '5 minutes', ts) AS bucket,
-           sum({_V}) AS vsum, count({_V}) AS vcount, min({_V}) AS vmin, max({_V}) AS vmax
-    FROM point_history GROUP BY point_uri, bucket WITH NO DATA""",
-    """CREATE MATERIALIZED VIEW IF NOT EXISTS point_history_1h
-    WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
-    SELECT point_uri, time_bucket(INTERVAL '1 hour', bucket) AS bucket,
-           sum(vsum) AS vsum, sum(vcount) AS vcount, min(vmin) AS vmin, max(vmax) AS vmax
-    FROM point_history_5m GROUP BY point_uri, time_bucket(INTERVAL '1 hour', bucket) WITH NO DATA""",
-    f"""SELECT add_continuous_aggregate_policy('point_history_5m', if_not_exists => true,
-        start_offset => INTERVAL '{ROLLUP_WINDOW_DAYS + 5} days', end_offset => INTERVAL '5 minutes',
-        schedule_interval => INTERVAL '5 minutes')""",
-    f"""SELECT add_continuous_aggregate_policy('point_history_1h', if_not_exists => true,
-        start_offset => INTERVAL '{ROLLUP_WINDOW_DAYS + 5} days', end_offset => INTERVAL '1 hour',
-        schedule_interval => INTERVAL '30 minutes')""",
-)
+_V = "COALESCE(value, value_bool::int::float8)"  # the aggregates' value expression
+# (Defined in migration 0001: point_history_5m and _1h, 5-minute and
+# 1-hour buckets, refreshed over the last ROLLUP_WINDOW_DAYS + 5 days.)
 
 
 # Native columnar compression (#192). Uncompressed, every sample costs ~150-220
@@ -108,9 +69,11 @@ ROLLUP_DDL = (
 COMPRESS_AFTER_DEFAULT = "7 days"
 COMPRESS_AFTER = os.environ.get("BALER_HISTORY_COMPRESS_AFTER", "").strip() or COMPRESS_AFTER_DEFAULT
 
-# Present already? One catalog read, as for _READY_SQL. Compression that was
-# enabled some other way (by hand, with other settings) is left as it is;
-# only the policy's compress_after is kept in step with COMPRESS_AFTER.
+# compress_after is a setting, not schema: migration 0001 enabled
+# compression (segmented by point_uri, unit, label; ordered by ts) and added
+# the policy, and this keeps the policy's compress_after in step with
+# BALER_HISTORY_COMPRESS_AFTER. One catalog read. Compression disabled by
+# hand is left disabled.
 _COMPRESSION_STATE_SQL = """
 SELECT h.compression_enabled,
        j.job_id IS NOT NULL,
@@ -120,37 +83,33 @@ LEFT JOIN timescaledb_information.jobs j
        ON j.proc_name = 'policy_compression' AND j.hypertable_name = h.hypertable_name
 WHERE h.hypertable_name = 'point_history'
 """
-_ENABLE_COMPRESSION = """
-ALTER TABLE point_history SET (timescaledb.compress,
-    timescaledb.compress_segmentby = 'point_uri, unit, label', timescaledb.compress_orderby = 'ts DESC')
-"""
-# ALTER TABLE takes point_history's ACCESS EXCLUSIVE lock. Queued behind a
-# long read it would block every ingest write queued behind it in turn, so
-# it gives up instead and the next new connection tries again.
+# Queued behind a long read, the policy change would block the writes
+# queued behind it in turn, so it gives up instead; the next process start
+# tries again.
 _COMPRESSION_LOCK_TIMEOUT = "SET LOCAL lock_timeout = '5s'"
 
 log = logging.getLogger(__name__)
 
 
 def _ensure_compression(conn: psycopg.Connection) -> None:
-    """Enable compression and its policy on point_history, idempotently and
-    in place: a no-op catalog read once they're there, so it is safe on
-    every new connection of every service (as _READY_SQL is). Never fails
-    the connection: ingest matters more than when the next chunk shrinks."""
+    """Keep point_history's compression policy at COMPRESS_AFTER: a no-op
+    catalog read when it already is. Never raises: ingest matters more than
+    when the next chunk shrinks."""
     try:
         row = conn.execute(_COMPRESSION_STATE_SQL, (COMPRESS_AFTER,)).fetchone()
     except psycopg.errors.InvalidDatetimeFormat:
         log.error("BALER_HISTORY_COMPRESS_AFTER=%r is not a Postgres interval; point_history "
                   "compression left as it is", COMPRESS_AFTER)
         return
-    if row is None:  # no point_history hypertable (yet)
+    if row is None:  # no point_history hypertable
         return
     enabled, has_policy, policy_matches = row
-    if enabled and policy_matches:
+    if not enabled:
+        log.warning("point_history compression is disabled; left as it is (migration 0001 enables it)")
+        return
+    if policy_matches:
         return
     stmts: list[str | sql.Composable] = [_COMPRESSION_LOCK_TIMEOUT]
-    if not enabled:
-        stmts.append(_ENABLE_COMPRESSION)
     if has_policy:  # compress_after changed: replace the policy
         stmts.append("SELECT remove_compression_policy('point_history', if_exists => true)")
     stmts.append(sql.SQL(
@@ -159,30 +118,20 @@ def _ensure_compression(conn: psycopg.Connection) -> None:
     try:
         ddl.run(conn, *stmts)
     except psycopg.Error as exc:
-        log.warning("point_history compression setup skipped this time (retried on the next "
-                    "new connection): %s", exc)
+        log.warning("point_history compression policy left as it is this time (retried at the next "
+                    "process start): %s", exc)
 
 
-# Everything SCHEMA, create_hypertable and LABELS_INDEX make, present.
-# (Without TimescaleDB this errors, as create_hypertable always has.)
-_READY_SQL = """
-SELECT to_regclass('point_history') IS NOT NULL
-   AND to_regclass('point_history_labelled') IS NOT NULL
-   AND EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')
-   AND EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'point_history')
-   AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'point_history' AND column_name = 'quality')
-"""
+_synced: set[tuple] = set()
 
 
-def _ensure_rollup_views(conn: psycopg.Connection) -> None:
-    """Only on TimescaleDB, and only until they exist (a cheap catalog check
-    on every other connection)."""
-    row = conn.execute(
-        "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'), "
-        "to_regclass('point_history_1h') IS NOT NULL"
-    ).fetchone()
-    if row and row[0] and not row[1]:
-        ddl.run(conn, *ROLLUP_DDL)
+def sync_settings(conn: psycopg.Connection) -> None:
+    """Settings that live in the database but come from the environment
+    (today: the compression policy), once per process per database."""
+    key = (conn.info.host, conn.info.port, conn.info.dbname)
+    if key not in _synced:
+        _synced.add(key)
+        _ensure_compression(conn)
 
 
 # For pools serving requests through the gateway: below nginx's 60s proxy
@@ -192,27 +141,11 @@ GATEWAY_STATEMENT_TIMEOUT = os.environ.get("BALER_PG_STATEMENT_TIMEOUT", "55s")
 
 
 def _setup(conn: psycopg.Connection, statement_timeout: str | None = None) -> None:
-    """Runs on every fresh connection, pooled or not - idempotent, same as
-    CREATE TABLE IF NOT EXISTS."""
-    # The hypertable is why we run the TimescaleDB image - a plain
-    # CREATE TABLE gets none of its time-based chunking (faster inserts
-    # and time-range reads at volume as the table grows past what one
-    # unpartitioned btree handles well). migrate_data converts any rows
-    # that already exist under the plain-table schema; idempotent like
-    # the CREATE TABLE. Under ddl's lock: every service runs this on
-    # every new connection.
-    # Only when something is missing, though: the IF NOT EXISTS forms still
-    # lock before they check - CREATE INDEX takes a SHARE lock on
-    # point_history and every chunk, which waits for in-flight ingest and
-    # blocks new ingest meanwhile, and the advisory lock queues every
-    # service's new connections one behind another after a deploy
-    # (Baler#107). One catalog read answers "all there" instead.
-    row = conn.execute(_READY_SQL).fetchone()
-    if not (row and row[0]):
-        ddl.run(conn, SCHEMA, "SELECT create_hypertable('point_history', 'ts', if_not_exists => TRUE, migrate_data => TRUE)",
-                LABELS_INDEX, QUALITY_COLUMN)
-    _ensure_rollup_views(conn)
-    _ensure_compression(conn)
+    """Runs on every fresh connection, pooled or not. The schema check is
+    once per process (baler.schema.ensure: free after the first call), so
+    a new connection costs no catalog reads and takes no locks."""
+    schema.ensure(conn)
+    sync_settings(conn)
     # synchronous_commit stays at the server's default (on): a reading the
     # broker was told is stored must survive a Postgres crash (Baler#190's
     # durability parity). This used to SET it off per connection to dodge an
@@ -686,10 +619,10 @@ def _dirty_by_view(conn, views: list[str]) -> tuple[dict[str, list[tuple[int, in
     sizes = dict(ROLLUP_VIEWS)
     raw: dict[str, list[tuple[int, int]]] = {v: [] for v in wanted}
     tables: dict[str, tuple[str, str]] = {}
-    for v, schema, table, lo, hi in rows:
+    for v, nsp, table, lo, hi in rows:
         size = sizes[v] * _US
-        if schema is not None:  # the watermark row
-            tables[v] = (schema, table)
+        if nsp is not None:  # the watermark row
+            tables[v] = (nsp, table)
             raw[v].append((lo // size * size, 2**63))
         else:  # inclusive [lo, hi] -> every view bucket it touches
             raw[v].append((lo // size * size, (hi // size + 1) * size))

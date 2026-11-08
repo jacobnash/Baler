@@ -77,16 +77,11 @@ re-queried forever).
 
 import psycopg
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS <source>_pull_checkpoint (
-    point_uri      TEXT NOT NULL PRIMARY KEY,
-    last_pulled_ts DOUBLE PRECISION NOT NULL
-);
-"""
+from baler import schema
 
 
 def ensure_schema(conn: psycopg.Connection) -> None:
-    conn.execute(SCHEMA)
+    schema.ensure(conn)  # the table is a migration: see below
 
 
 def get_checkpoint(conn: psycopg.Connection, point_uri: str) -> float | None:
@@ -110,6 +105,26 @@ def set_checkpoint(conn: psycopg.Connection, point_uri: str, ts: float) -> None:
 
 Replace every `<source>` (including in the SQL table name) with your
 source's short name, e.g. `energy_star`.
+
+The table itself is a numbered migration, not DDL in this module (see
+[Schema migrations](/schema-migrations)). Add the next file in
+`src/baler/migrations/`, e.g. `v0002_<source>_pull_checkpoint.py`, and list it
+in `migrations/__init__.py`'s `ALL`:
+
+```python
+from baler.schema import Step
+
+VERSION = 2  # the next free number
+NAME = "<source>_pull_checkpoint"
+
+
+def plan(conn) -> list[Step]:
+    return [Step("""
+CREATE TABLE IF NOT EXISTS <source>_pull_checkpoint (
+    point_uri      TEXT NOT NULL PRIMARY KEY,
+    last_pulled_ts DOUBLE PRECISION NOT NULL
+)""", "<source>_pull_checkpoint")]
+```
 
 ### 3. `<source>_puller.py` — copy this, confirm the two marked spots
 
