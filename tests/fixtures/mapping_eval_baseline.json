@@ -60,8 +60,8 @@
     },
     "review": 88,
     "review_pct": 100.0,
-    "review_truth_in_top1": 0.773,
-    "review_truth_in_top3": 0.773,
+    "review_truth_in_top1": 0.841,
+    "review_truth_in_top3": 0.841,
     "steps": {
       "convention": {
         "accuracy": null,

@@ -304,7 +304,11 @@ def veto(ev: Evidence, brick_class: str, vocab: brick_vocab.Vocab) -> str | None
     unit and boolean-value checks the evidence supports today; the value
     range, spike and kind checks are #183's."""
     if ev.kind != "point":
-        return None
+        # Cx's expected points (#187): an AHU with no fan status is suspect,
+        # once all of its points are classified, so the absence means something.
+        from baler import equip_inference
+
+        return equip_inference.cx_check(brick_class, [sib["class"] for sib in ev.siblings], vocab)
     name_words = set(brick_class.split("_")) | set(vocab.effective_tags(brick_class))
     quantity = UNIT_QUANTITY.get(ev.unit or "")
     if quantity:
@@ -455,6 +459,12 @@ def decide_pattern(evs: list[Evidence], model: Model | None, vocab: brick_vocab.
                 merged.append({**c, "source": "model"})
     if vote is not None and vote.suggestion and all(not _same(vocab, m["brick_class"], vote.suggestion) for m in merged):
         merged.append({"brick_class": vote.suggestion, "reason": vote.why, "source": "memory"})
+    if evs[0].kind == "equip":  # what its point set says (#187)
+        from baler import equip_inference
+
+        for inf in equip_inference.infer([sib["class"] for sib in evs[0].siblings], vocab):
+            if all(not _same(vocab, m["brick_class"], inf["brick_class"]) for m in merged):
+                merged.append({"brick_class": inf["brick_class"], "reason": inf["reason"], "source": "points"})
     for name in cands:
         if all(not _same(vocab, m["brick_class"], name) for m in merged):
             merged.append({"brick_class": name, "reason": "names match the label, tags and unit", "source": "ranker"})

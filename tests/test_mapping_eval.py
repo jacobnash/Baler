@@ -103,7 +103,9 @@ def test_model_step_answers_are_scored_and_wrong_ones_counted(vocab):
     s = mapping_eval.summarize(report, vocab)
     assert s["points"]["steps"]["model"] == {"points": 2, "pct": 66.7, "correct": 1, "partial": 0, "wrong": 1, "accuracy": 0.5}
     assert s["points"]["auto_accepted_wrong"] == 1  # MYSTERY has no Brick class at all
-    assert s["equipment"]["accuracy"] == 1.0
+    # every point is classified and none is a fan status: Cx's expected-point
+    # check (#187) won't let the model's "Air_Handling_Unit" through
+    assert s["equipment"]["accuracy"] == 0.0 and report.equipment[0].refused_because.startswith("vetoed: Cx expects")
     assert report.llm_calls == 6  # three patterns asked twice; the direct rule match never reaches the model
     assert "AUTO-ACCEPTED BUT WRONG" in mapping_eval.format_summary(s, report)
 

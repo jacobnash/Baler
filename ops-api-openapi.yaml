@@ -334,6 +334,67 @@ paths:
           description: A proposal id that doesn't exist or isn't on the caller's sites.
         "409":
           description: A proposal that was already decided.
+  /mapping/relationships:
+    get:
+      operationId: listRelationshipProposals
+      summary: Open equipment relationship proposals
+      description: >-
+        Proposed equipment groupings (points with no equipment, grouped by their topic's
+        parent: predicate hasPoint) and feeds edges (an AHU whose supply air temperature a
+        VAV's discharge air temperature tracks), each with its evidence. Scoped to the
+        caller's sites.
+      responses:
+        "200":
+          description: Open proposals.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    subject: { type: string }
+                    predicate: { type: string, enum: [hasPoint, feeds] }
+                    objects: { type: array, items: { type: string } }
+                    evidence: { type: object }
+                    status: { type: string }
+        "401":
+          description: Not through the gateway.
+  /mapping/relationships/decide:
+    post:
+      operationId: decideRelationshipProposals
+      summary: Accept (write the edges) or reject relationship proposals
+      description: >-
+        operator. Accepting a hasPoint proposal creates the equipment and links its points;
+        a feeds proposal writes brick:feeds and brick:isFedBy. Logged in the record edit
+        audit.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids, action]
+              properties:
+                ids: { type: array, items: { type: string } }
+                action: { type: string, enum: [accept, reject] }
+      responses:
+        "200":
+          description: How many were decided.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  action: { type: string }
+                  decided: { type: integer }
+        "400":
+          description: Malformed body.
+        "401":
+          description: Not through the gateway.
+        "404":
+          description: A proposal that isn't open or isn't on the caller's sites.
   /conventions:
     get:
       operationId: listConventions
