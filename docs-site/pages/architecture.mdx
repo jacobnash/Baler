@@ -61,7 +61,8 @@ not as a direct edge between the two processes:
     FA -->|CRUD| FCFG[("rules.json /\\nwebhooks.json")]
     FA -->|"GET /faults"| PG[(postgres/timescale)]
 
-    MQ[(mosquitto)] -->|"Cur mode"| FD["fault_detector"]
+    ML["mqtt_listener"] -->|"reading_feed (per committed batch)"| PG
+    PG -->|"Cur mode: reading feed"| FD["fault_detector"]
     FD -->|reads| FCFG
     FD -->|"His mode, periodic sweep"| PG
     FD -->|"fault open/resolve"| WH(("webhook URLs"))
@@ -77,7 +78,7 @@ process that evaluates one:
     GW["gateway (nginx :8080)"] --> DA["derivation_api :8003"]
     DA -->|CRUD| DCFG[("derivations.json")]
 
-    MQ[(mosquitto)] -->|"cur-mode"| DE["derivation_engine"]
+    PG -->|"cur-mode: reading feed"| DE["derivation_engine"]
     DE -->|reads| DCFG
     DE -->|"sweep + rollups"| PG[(postgres/timescale)]
     DE -->|"lineage triples"| OX[(oxigraph)]
@@ -197,12 +198,12 @@ running a process bare-metal outside Docker.
 
 | Process | Reads from | Writes to | Port |
 |---|---|---|---|
-| `mqtt_listener.py` | mosquitto (`fbf/#`) | oxigraph, postgres | — |
+| `mqtt_listener.py` | mosquitto (`fbf/#`) | oxigraph, postgres (`point_history`, and each batch to `reading_feed` for the rule daemons) | — |
 | `ingest_api.py` | HTTP `POST /ingest` | oxigraph, postgres | 8000 |
 | `fault_api.py` | HTTP CRUD | `rules.json`/`webhooks.json`, postgres (`GET /faults`) | 8002 |
-| `fault_detector.py` | mosquitto (Cur), postgres (His, periodic sweep) | postgres (`faults` table), outbound webhooks | — |
+| `fault_detector.py` | postgres: the reading feed (Cur, alarms), `point_history`/`point_registry` (His, periodic sweep) | postgres (`faults` table), outbound webhooks | — |
 | `derivation_api.py` | HTTP CRUD, `POST /derivations/test`, `/dry-run` | `derivations.json`, postgres (health) | 8003 |
-| `derivation_engine.py` | mosquitto (cur-mode), postgres (sweep, His inputs), oxigraph (SPARQL select) | postgres (`point_history`), oxigraph (lineage triples) | — |
+| `derivation_engine.py` | postgres: the reading feed (cur-mode), `point_history` (sweep, inputs); oxigraph (SPARQL select) | postgres (`point_history`), oxigraph (lineage triples) | — |
 | `validate_api.py` | HTTP `POST /validate` (no body — always validates current live state) | oxigraph (read-only, via `RemoteStore`) | 8005 |
 | `auth_api.py` | HTTP CRUD (`/login`, `/orgs`, `/users`, `/sites`, `/api-keys`, `/logout`), gateway-internal `GET /internal/revoked-jtis` | postgres (orgs/sites/users/API keys/revoked JTIs) | 8006 |
 | `commissioning_api.py` | HTTP (`/cx/`): projects, phases, inventory, runs, issues and risks, procedures, spec and alignment, active tests, the agent - see `todo/commissioning-plan.md` | postgres (`cx_*` tables; writes `faults` when a project mirrors, `point_write_levels` in active tests, `record_edits` on spec write-back), oxigraph (scoped SPARQL; `record_edit` write-back), `point_history` (read), MQTT (`point_write`, active tests only), an LLM for spec PDFs and the agent - Claude or any OpenAI-compatible endpoint, `BALER_LLM_PROVIDER`, see [Commissioning models](/commissioning-llm) | 8009 |
