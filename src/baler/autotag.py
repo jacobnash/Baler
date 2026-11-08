@@ -1,13 +1,19 @@
 """
 One-shot sweep: find every point/equip entity with Haystack tags but no
-direct Brick classification yet, and run classify_point_with_fallback on
-each (rule engine first, LLM fallback second). Not a daemon - run it once
-after a batch of ingest, same shape as derivation_engine.py's --dry-run
-precedent for a runnable one-off tool.
+Brick class yet, run the rules on each, then the model step
+(model_step.run) on what the rules couldn't place. Not a daemon - run it
+once after a batch of ingest.
 
-Requires ANTHROPIC_API_KEY (see llm_classifier.classify_with_llm) unless
-run with --no-llm, in which case it's just a report of what the rule
-engine alone couldn't place.
+The model step asks the configured model (BALER_LLM_PROVIDER, see
+llm_classifier) twice per naming pattern and writes a class only when both
+asks agree and the unit veto passes. Everything else becomes a mapping
+proposal in Postgres (mapping_proposals) for a person to decide. With
+--no-llm, or BALER_LLM_PROVIDER=none, the proposals still carry the
+deterministic candidates.
+
+    python -m baler.autotag                 # rules, model, proposals
+    python -m baler.autotag --no-llm        # rules and proposals only
+    python -m baler.autotag --no-proposals  # don't touch Postgres
 """
 
 import argparse
@@ -17,8 +23,10 @@ import time
 import requests
 from rdflib import URIRef
 
-from baler import llm_classifier, mapping, tracing
+from baler import llm_classifier, mapping, model_step, tracing
+from baler.commissioning import llm
 from baler.remote_store import RemoteStore
+from baler.store import BRICK, TD
 
 tracer = tracing.get_tracer(__name__)
 
@@ -35,95 +43,115 @@ EQUIP_RULES_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "rules", 
 
 
 def find_unclassified(store) -> list[URIRef]:
-    """Entities with at least one hasTag triple but no rdf:type in the
-    Brick namespace - covers both the "miss" (TD.UnmappedPoint) and
-    "fallback" (PROJ:*) outcomes classify_point already produced, points
-    and equip alike (both are tagged the same way, see ingest.py).
+    """Points and equip with no rdf:type in the Brick namespace - covers
+    both the "miss" (TD.UnmappedPoint) and "fallback" (PROJ:*) outcomes
+    classify_point already produced. A point counts once it has a marker
+    tag or a reading (TD.RawPoint), and an equip once it has a marker tag
+    or a point: a BACnet `AI-17` with only a unit, or a Windrow equip with
+    no markers, is exactly what the model step is for, and used to be
+    skipped for having no hasTag triple (#182).
 
     URIRef, not bare str - RemoteStore treats a plain Python str as a
     Literal, not a URI (see remote_store._to_sparql_term), so every write
-    classify_point_with_fallback makes for one of these would silently
-    corrupt the subject position and 400. Confirmed live: this was
-    dropping ~99% of a real sweep on the floor before being caught here."""
-    rows = store.query("""
+    for one of these would silently corrupt the subject position and 400.
+    Confirmed live: this was dropping ~99% of a real sweep on the floor
+    before being caught here."""
+    rows = store.query(f"""
         PREFIX haystack: <urn:baler:haystack#>
-        SELECT DISTINCT ?entity WHERE {
-            ?entity haystack:hasTag ?tag .
-            FILTER NOT EXISTS {
+        SELECT DISTINCT ?entity WHERE {{
+            {{ ?entity haystack:hasTag ?tag }}
+            UNION {{ ?entity a <{TD.RawPoint}> }}
+            UNION {{ ?entity <{BRICK.hasPoint}> ?point }}
+            FILTER NOT EXISTS {{
                 ?entity a ?type .
                 FILTER(STRSTARTS(STR(?type), "https://brickschema.org/schema/Brick#"))
-            }
-        }
+            }}
+        }}
     """)
     return [URIRef(row.entity) for row in rows]
 
 
-def _classify_with_retries(store, uri, rules, llm_classify):
-    """Retries classify_point_with_fallback up to _MAX_ATTEMPTS times on
-    the transient failures _MAX_ATTEMPTS's own comment explains (a load/
-    timing hiccup, not a bad request). Returns None once attempts are
-    exhausted instead of raising, so run() reports and skips that one
-    entity rather than aborting the whole sweep."""
+def _kind(uri) -> str:
+    return "equip" if str(uri).startswith("urn:equip:") else "point"
+
+
+def _with_retries(what: str, fn):
+    """fn() up to _MAX_ATTEMPTS times on the transient failures above, and
+    on a model reply that can't be read. None once attempts run out, so
+    the sweep reports and skips rather than aborting."""
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
-            return mapping.classify_point_with_fallback(store, uri, rules=rules, llm_classify=llm_classify)
+            return fn()
         except (
             requests.exceptions.HTTPError,
             requests.exceptions.ConnectionError,
             llm_classifier.LLMClassificationError,
+            llm.LLMError,
         ) as exc:
             if attempt == _MAX_ATTEMPTS:
-                print(f"{uri}: FAILED after {_MAX_ATTEMPTS} attempts ({exc}) - skipping")
+                print(f"{what}: FAILED after {_MAX_ATTEMPTS} attempts ({exc}) - skipping")
             else:
                 time.sleep(_RETRY_DELAY_SECONDS)
     return None
 
 
-def _propose_rule_for_llm_classification(store, uri, brick_class: str, rules_path: str) -> None:
-    tags = mapping.read_tags(store, uri)
-    if llm_classifier.propose_rule(rules_path, tags, brick_class):
-        print(f"  proposed new rule for {sorted(tags)} -> {brick_class} in {rules_path}")
+class _RetryingModel:
+    def __init__(self, model):
+        self.model = model
+        self.name = model.name
+
+    def ask(self, prompt: str) -> dict:
+        reply = _with_retries("model ask", lambda: self.model.ask(prompt))
+        return reply if reply is not None else {}
 
 
-def _rules_for_entity(uri, point_rules, equip_rules, known_point_classes, known_equip_classes):
-    """Points and equip share the same tagging shape (see ingest.py) but
-    each has its own rule file/known-class-set - the only thing that
-    differs by uri's own urn:equip: vs urn:point: prefix."""
-    if uri.startswith("urn:equip:"):
-        return equip_rules, EQUIP_RULES_PATH, known_equip_classes
-    return point_rules, POINT_RULES_PATH, known_point_classes
-
-
-def run(store, llm_classify=None, propose_rules: bool = True) -> None:
+def run(store, model=None, proposals=None, stats=None, site_rules=None) -> list[model_step.Decision]:
     point_rules = mapping.load_rules(POINT_RULES_PATH)
     equip_rules = mapping.load_rules(EQUIP_RULES_PATH)
-    known_point_classes = {r["brick_class"] for r in point_rules}
-    known_equip_classes = {r["brick_class"] for r in equip_rules}
 
+    unresolved = []
     for uri in find_unclassified(store):
-        rules, rules_path, known_classes = _rules_for_entity(uri, point_rules, equip_rules, known_point_classes, known_equip_classes)
-
-        result = _classify_with_retries(store, uri, rules, llm_classify)
+        rules = equip_rules if _kind(uri) == "equip" else point_rules
+        result = _with_retries(str(uri), lambda uri=uri, rules=rules: mapping.classify_point(store, uri, rules))
         if result is None:
             continue
         outcome, brick_class = result
-        print(f"{uri}: {outcome}" + (f" -> {brick_class}" if brick_class else ""))
+        if outcome == "direct":
+            print(f"{uri}: direct -> {brick_class}")
+        else:
+            unresolved.append((uri, _kind(uri)))
 
-        if propose_rules and outcome == "llm" and brick_class in known_classes:
-            _propose_rule_for_llm_classification(store, uri, brick_class, rules_path)
+    model = _RetryingModel(model) if model is not None else None
+    decisions = model_step.run(store, unresolved, model, proposals=proposals, stats=stats, site_rules=site_rules)
+    for d in decisions:
+        if d.accepted:
+            print(f"{d.uri}: model -> {d.accepted}")
+        else:
+            top = ", ".join(c["brick_class"] for c in d.candidates) or "no candidates"
+            print(f"{d.uri}: proposed ({top}) - {d.refused_because}")
+    return decisions
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--no-llm", action="store_true", help="rule engine only, skip the LLM fallback")
-    parser.add_argument("--no-propose-rules", action="store_true", help="skip appending llm-proposed rule entries")
+    parser.add_argument("--no-llm", action="store_true", help="rules and proposals only, skip the model")
+    parser.add_argument("--no-proposals", action="store_true", help="don't write mapping proposals (no Postgres needed)")
     args = parser.parse_args()
 
     tracing.init_tracing("baler-autotag")
     store = RemoteStore()
 
-    llm_classify = None if args.no_llm else llm_classifier.classify_with_llm
-    run(store, llm_classify=llm_classify, propose_rules=not args.no_propose_rules)
+    model = None if args.no_llm else llm_classifier.model_from_env()
+    proposals = stats = site_rules = None
+    if not args.no_proposals:
+        from baler import mapping_proposals, timeseries
+
+        conn = timeseries.connect()
+        proposals = mapping_proposals.PgProposals(conn)
+        proposals.ensure_schema()
+        stats = model_step.pg_stats(conn)
+        site_rules = proposals.site_rules()
+    run(store, model=model, proposals=proposals, stats=stats, site_rules=site_rules)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ import json
 import os
 from functools import lru_cache
 
-from baler import bacnet_alarms, mapping, mqtt_util, tracing
+from baler import bacnet_alarms, mapping, mqtt_util, quality, tracing
 from baler.ingest import (
     ingest_equip_tags,
     ingest_haystack_equip_tags,
@@ -168,7 +168,7 @@ def make_on_message(store, ts_conn):
             if bacnet_alarms.is_alarm(msg.topic, value):
                 return
 
-            ingest_reading(store, ts_conn, msg.topic, binary_state(value), ts)
+            ingest_reading(store, ts_conn, msg.topic, binary_state(value), ts, quality=quality.from_envelope(payload.get("quality")))
 
     return on_message
 

@@ -30,16 +30,17 @@ Oxigraph.
    and description, plus the `writable` and `unit` tags Windrow's
    connection manager adds.
 2. `ingest.ingest_tags` into an in-memory store.
-3. `mapping.classify_point_with_fallback`: the rules, then the model step if
-   one is enabled. `autotag` runs the same function.
+3. `mapping.classify_point`, then [the model step](/model-step) on what the
+   rules leave, as `autotag` does. The model step runs even with no model:
+   it then only ranks candidates for review.
 
 Each point ends on one ladder step:
 
 | Step | Meaning |
 |---|---|
 | `rules` | A direct rule match. Auto-accepted. |
-| `model` | The LLM's answer at or above its confidence threshold. Auto-accepted. |
-| `review` | A `PROJ:` fallback class or `TD:UnmappedPoint`. A person decides. |
+| `model` | Both model asks agreed on a real Brick class and nothing vetoed it. Auto-accepted. |
+| `review` | A mapping proposal with up to 3 candidates. A person decides. |
 
 Memory and site naming conventions (#185, #186) get their own steps when they
 exist.
@@ -58,7 +59,8 @@ The report gives, for points and for equipment:
 - **auto-accepted**: the share decided without a person;
 - **auto-accepted but wrong**: the share nobody will look at that is wrong.
   This must stay near zero;
-- **left for review**;
+- **left for review**, and how often the true class is the proposal's top
+  candidate, or among its top 3: what a reviewer is shown;
 - the same per ladder step, per Brick class (precision and recall), per
   naming style, and with or without a description;
 - every auto-accepted-but-wrong point by name.
@@ -74,36 +76,32 @@ python -m baler.mapping_eval --json out.json
 It needs the submodule: `git submodule update --init windrow`. Without it,
 `tests/test_mapping_eval.py` skips its corpus tests.
 
-The model step costs money, so it runs only by hand:
+The model step costs money, so it runs only by hand, with whatever
+`BALER_LLM_PROVIDER` configures:
 
 ```bash
 ANTHROPIC_API_KEY=... python -m baler.mapping_eval --llm --llm-record answers.json
 python -m baler.mapping_eval --llm-replay answers.json   # re-score for free
 ```
 
-A replay answers from the recording, keyed by each call's label and tags. A
-change downstream of the model, such as the Brick-class check, can be
-measured again without paying again.
+A replay answers from the recording, keyed by the exact prompt. A change
+after the model (the veto, the agreement rule) can be re-scored without
+paying again; a change to what the prompt contains (evidence, candidates)
+can't, and needs a new recording.
+
+With no key at all, `--simulate inventing|echo|ranker` runs the model step
+with a stand-in (see `Simulated` in `mapping_eval.py`). They show what the
+ladder does with a kind of answer, not how good a model is.
 
 ## The model step only writes real Brick classes
 
 A model will name a class Brick doesn't have, such as
-`Chilled_Water_Supply_Temp_Sensor` for `Chilled_Water_Supply_Temperature_Sensor`.
-`classify_point_with_fallback` checks every answer with
-`brick_vocab.canonical_class` against the vendored ontology (#181). A real
-class is written in Brick's own spelling. Anything else is discarded, and
-the point keeps what the rules gave it, a `PROJ:` class or
-`TD:UnmappedPoint`, so it lands in review. The answer isn't mapped to a
-near match, because that would be a second guess nobody confirmed.
-
-To measure the check without a key, the harness was run with a simulated
-model that glues a class name out of each label (`CHW-SUP-TEM-7` becomes
-`Chw_Sup_Tem_Sensor`) at confidence 0.9. Before the check, 148 of its 240
-answers named no Brick class and were written: 30.1% of points were
-auto-accepted but wrong. With the check, none were written. Those 148
-points went to review, and auto-accepted but wrong was 0%. A real model
-invents far fewer names than this stand-in. The point is that what it does
-invent can no longer reach the graph.
+`Chilled_Water_Supply_Temp_Sensor`. Every answer is checked with
+`brick_vocab.canonical_class` (#181); anything else is dropped, and the
+point goes to review. With the `inventing` stand-in, which glues a class
+name out of each label, 148 of its answers named no Brick class; before
+the check they were written (30.1% of points auto-accepted but wrong),
+after it none are.
 
 ## The baseline
 
@@ -126,6 +124,10 @@ At the first baseline (rules only, windrow `330cf9a`):
 | Auto-accepted but wrong | 0% | 0% |
 | Auto-accepted, less specific | 20.7% | 0% |
 | Left for review | 30.9% | 100% |
+
+Since #182 the baseline also records what review gets: the true class was
+the top candidate for 30.7% of review points and in the top 3 for 82.7%
+(equipment: 77.3% for both).
 
 Points without a description: 27.4% accuracy. With one: 56.3%. Every chiller,
 boiler and pump point and all 88 pieces of equipment go to review, because

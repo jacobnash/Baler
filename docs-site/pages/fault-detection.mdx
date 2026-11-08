@@ -51,6 +51,12 @@ So rules declare a `mode`:
   default 30) against `point_history`. Only `stuck`/`stale` rules run in
   this mode.
 
+Both modes skip samples flagged bad. A reading the device marks as fault,
+overridden or out of service neither opens nor resolves a Cur-mode fault,
+and `stuck` counts only good samples. The same daemon also runs the
+quality sweep (range, spike, unit), by default every 5 minutes. See
+[Sample quality](/quality).
+
 One important asymmetry: a rule's `topic_glob` is matched against the
 **raw MQTT topic** in Cur mode, but against the **`urn:point:{topic}`
 URI** in His mode (since His-mode rules query `point_history`, which is

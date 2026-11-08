@@ -372,9 +372,11 @@ def test_add_nullable_column_beside_compression(conn, column_first):
     new column stays a compressed column, not a segment column."""
     t = "ph_compress_addcol"
     conn.execute(f"DROP TABLE IF EXISTS {t}")
-    conn.execute(timeseries.SCHEMA.replace("point_history", t))
+    legacy = timeseries.SCHEMA.replace("point_history", t).replace("    quality    TEXT,\n", "")
+    assert "quality" not in legacy  # a table from before #183
+    conn.execute(legacy)
     conn.execute(f"SELECT create_hypertable('{t}', 'ts')")
-    add = f"ALTER TABLE {t} ADD COLUMN IF NOT EXISTS quality TEXT"
+    add = timeseries.QUALITY_COLUMN.replace("point_history", t)
     enable = timeseries._ENABLE_COMPRESSION.replace("point_history", t)
     try:
         start, _ = _old_span()
