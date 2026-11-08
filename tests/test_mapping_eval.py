@@ -9,7 +9,6 @@ import json
 import pytest
 
 from baler import brick_vocab, mapping_eval
-from baler.llm_classifier import ClassificationResult
 from baler.mapping_eval import Corpus, CorpusEquip, CorpusPoint
 
 needs_windrow = pytest.mark.skipif(
@@ -83,27 +82,36 @@ def test_rules_only_puts_what_the_rules_cant_place_in_review(vocab):
     assert report.llm_calls == 0
 
 
+class _ByLabel:
+    """Answers by the pattern's first example label; same answer to both asks."""
+
+    name = "fake"
+
+    def __init__(self, answers, default="Air_Handling_Unit", confidence=0.9):
+        self.answers, self.default, self.confidence, self.calls = answers, default, confidence, 0
+
+    def ask(self, prompt):
+        self.calls += 1
+        line = next(x for x in prompt.splitlines() if x.startswith("Examples of the pattern: "))
+        label = line.split(": ", 1)[1].split(" (")[0].split(";")[0]
+        return {"candidates": [{"brick_class": self.answers.get(label, self.default), "reason": "r"}], "confidence": self.confidence}
+
+
 def test_model_step_answers_are_scored_and_wrong_ones_counted(vocab):
-    answers = {
-        "fbf/ahu-1/CHWS": ClassificationResult("Chilled_Water_Supply_Temperature_Sensor", 0.9, "chw supply"),
-        "fbf/ahu-1/MYSTERY": ClassificationResult("Zone_Air_Temperature_Sensor", 0.9, "a guess"),
-    }
-
-    def fake_llm(tags, label, description, known):
-        return answers.get(label, ClassificationResult("Air_Handling_Unit", 0.9, "equip"))
-
-    report = mapping_eval.evaluate(_tiny_corpus(), llm_classify=fake_llm, vocab=vocab)
+    model = _ByLabel({"fbf/ahu-1/CHWS": "Chilled_Water_Supply_Temperature_Sensor", "fbf/ahu-1/MYSTERY": "Zone_Air_Temperature_Sensor"})
+    report = mapping_eval.evaluate(_tiny_corpus(), model=model, vocab=vocab)
     s = mapping_eval.summarize(report, vocab)
     assert s["points"]["steps"]["model"] == {"points": 2, "pct": 66.7, "correct": 1, "partial": 0, "wrong": 1, "accuracy": 0.5}
     assert s["points"]["auto_accepted_wrong"] == 1  # MYSTERY has no Brick class at all
     assert s["equipment"]["accuracy"] == 1.0
-    assert report.llm_calls == 3  # the direct rule match never reaches the model
+    assert report.llm_calls == 6  # three patterns asked twice; the direct rule match never reaches the model
     assert "AUTO-ACCEPTED BUT WRONG" in mapping_eval.format_summary(s, report)
 
 
 def test_low_confidence_model_answers_stay_in_review(vocab):
-    report = mapping_eval.evaluate(_tiny_corpus(), llm_classify=lambda *a: ClassificationResult("Chiller", 0.2, "unsure"), vocab=vocab)
+    report = mapping_eval.evaluate(_tiny_corpus(), model=_ByLabel({}, default="Chiller", confidence=0.2), vocab=vocab)
     assert [r.step for r in report.points] == ["rules", "review", "review"]
+    assert all(r.candidates for r in report.points if r.step == "review" and r.uri.endswith("CHWS"))
 
 
 def test_compare_flags_only_regressions():
@@ -115,19 +123,26 @@ def test_compare_flags_only_regressions():
 
 
 def test_recorded_answers_replay_identically(vocab, tmp_path):
-    calls = []
-
-    def fake_llm(tags, label, description, known):
-        calls.append(label)
-        return ClassificationResult("Chilled_Water_Supply_Temperature_Sensor", 0.8, "r")
-
+    model = _ByLabel({"fbf/ahu-1/CHWS": "Chilled_Water_Supply_Temperature_Sensor"})
     answers: dict = {}
-    first = mapping_eval.evaluate(_tiny_corpus(), llm_classify=mapping_eval._recording(fake_llm, answers), vocab=vocab)
+    first = mapping_eval.evaluate(_tiny_corpus(), model=mapping_eval._Recording(model, answers), vocab=vocab)
     path = tmp_path / "answers.json"
     path.write_text(json.dumps(answers))
-    again = mapping_eval.evaluate(_tiny_corpus(), llm_classify=mapping_eval.replay(json.loads(path.read_text())), vocab=vocab)
-    assert mapping_eval.summarize(first, vocab) == mapping_eval.summarize(again, vocab)
-    assert len(calls) == 3
+    again = mapping_eval.evaluate(_tiny_corpus(), model=mapping_eval.Replay(json.loads(path.read_text())), vocab=vocab)
+    assert mapping_eval.summarize(first, vocab) | {"mode": ""} == mapping_eval.summarize(again, vocab) | {"mode": ""}
+    assert model.calls == 6
+
+
+@pytest.mark.parametrize("kind", mapping_eval.Simulated.KINDS)
+def test_simulated_models_only_ever_get_real_classes_written(vocab, kind):
+    report = mapping_eval.evaluate(_tiny_corpus(), model=mapping_eval.Simulated(kind), vocab=vocab)
+    assert all(vocab.canonical_class(r.predicted) == r.predicted for r in report.points + report.equipment if r.step == "model")
+
+
+def test_echo_model_never_agrees_with_itself_when_there_is_a_choice(vocab):
+    report = mapping_eval.evaluate(_tiny_corpus(), model=mapping_eval.Simulated("echo"), vocab=vocab)
+    chws = next(r for r in report.points if r.uri.endswith("CHWS"))
+    assert chws.step == "review" and "asked twice" in chws.refused_because
 
 
 @needs_windrow
@@ -153,20 +168,8 @@ def test_cli_check_exits_zero_against_the_committed_baseline(capsys):
     assert "no regression" in capsys.readouterr().out
 
 
-def _inventing_model(tags, label, description, known):
-    """A stand-in for a model that glues a plausible class name out of the
-    label (CHW-SUP-TEM-7 -> Chw_Sup_Tem_Sensor), confidently."""
-    import re
-
-    words = [w.capitalize() for w in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])", (label or "").rsplit("/", 1)[-1])]
-    name = "_".join(words) or "Equipment"
-    if not name.endswith(("Sensor", "Status", "Command", "Setpoint", "Equipment")):
-        name += "_Sensor"
-    return ClassificationResult(name, 0.9, "glued from the label")
-
-
 def test_a_model_answer_that_is_not_a_brick_class_goes_to_review(vocab):
-    report = mapping_eval.evaluate(_tiny_corpus(), llm_classify=_inventing_model, vocab=vocab)
+    report = mapping_eval.evaluate(_tiny_corpus(), model=mapping_eval.Simulated("inventing"), vocab=vocab)
     by_label = {r.uri.rsplit("/", 1)[1]: r for r in report.points}
     assert (by_label["CHWS"].step, by_label["CHWS"].predicted) == ("review", None)  # "Chws_Sensor"
     assert by_label["CHWS"].outcome == "fallback"  # keeps its PROJ class
@@ -174,9 +177,15 @@ def test_a_model_answer_that_is_not_a_brick_class_goes_to_review(vocab):
 
 @needs_windrow
 def test_nothing_an_inventing_model_says_reaches_the_graph_unless_brick_has_it(vocab):
-    """#181, measured on the whole corpus: before the check, this stand-in
-    model's invented names were 30% of points, auto-accepted and wrong."""
-    report = mapping_eval.evaluate(mapping_eval.load_mock_hospital(), llm_classify=_inventing_model, vocab=vocab)
+    """#181, measured on the whole corpus."""
+    report = mapping_eval.evaluate(mapping_eval.load_mock_hospital(), model=mapping_eval.Simulated("inventing"), vocab=vocab)
     written = [r.predicted for r in report.points + report.equipment if r.step == "model"]
     assert written and all(vocab.canonical_class(c) == c for c in written)
     assert mapping_eval.summarize(report, vocab)["points"]["auto_accepted_wrong"] == 0
+
+
+@needs_windrow
+def test_the_model_step_asks_once_per_pattern_twice_over(vocab):
+    report = mapping_eval.evaluate(mapping_eval.load_mock_hospital(), model=mapping_eval.Simulated("ranker"), vocab=vocab)
+    unresolved = sum(1 for r in report.points + report.equipment if r.step != "rules")
+    assert report.llm_calls == 2 * report.patterns < unresolved

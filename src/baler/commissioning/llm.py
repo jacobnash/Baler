@@ -21,13 +21,20 @@ no extra SDK is needed and every endpoint above takes the same request.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import time
 
 import requests
 
 PROVIDERS = ("anthropic", "openai", "none")
+# The Claude defaults, in one place: the current Opus for Cx (reading PDFs,
+# the agent), the current Haiku for the tagging model step, which asks
+# twice per naming pattern and needs a cheap, quick model rather than a
+# large one. Bump both together when a new generation ships.
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5"
+DEFAULT_ANTHROPIC_TAG_MODEL = "claude-haiku-5-5"
 DEFAULT_TIMEOUT = 300.0  # seconds; a CPU-only Ollama is slow
 RETRIES = 3  # on 429/503 - free tiers rate-limit hard
 
@@ -145,3 +152,24 @@ class OpenAIChat:
                 raise LLMError(f"{self.base_url} answered without choices: {str(data)[:300]}")
             return data
         raise LLMError("unreachable")  # pragma: no cover
+
+
+def parse_json(text: str):
+    """The JSON object (or list) in a reply that may wrap it in prose or
+    ```json fences. Raises ValueError."""
+    text = (text or "").strip()
+    m = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+    if m:
+        text = m.group(1).strip()
+    try:
+        return json.loads(text)
+    except ValueError:
+        pass
+    for open_, close in (("{", "}"), ("[", "]")):
+        i, j = text.find(open_), text.rfind(close)
+        if 0 <= i < j:
+            try:
+                return json.loads(text[i:j + 1])
+            except ValueError:
+                continue
+    raise ValueError("no JSON in the reply")
