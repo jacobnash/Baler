@@ -69,6 +69,7 @@ always wins. It's idempotent.
 | Fault rules, `stuck` | Counts only good samples: a spike doesn't count as "the value moved". |
 | Fault rules, `stale` | Unchanged. A flagged sample still arrived. |
 | Cx checks (`commissioning.history`) | Latest-value checks and windows read good samples only. |
+| The tagging [model step](/model-step) | The value stats it shows a model come from good samples only. |
 | `GET /history` | Returns every sample. A flagged one has a `quality` key; an ok one looks exactly as before. |
 | `GET /his` (his queries, raw reads) | Same: `quality` on flagged samples. In `compact=1`, a parallel `quality` array appears only when something in the series is flagged. |
 
