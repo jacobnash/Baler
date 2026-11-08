@@ -21,7 +21,7 @@ from typing import Any
 
 import psycopg
 
-from baler import heartbeat, timeseries
+from baler import heartbeat, reading_feed, timeseries
 
 COMPONENTS: list[dict[str, Any]] = [
     {
@@ -216,6 +216,9 @@ def _building_signals(scope=None) -> dict[str, Any]:
             out["heartbeats"] = {s: t.astimezone(timezone.utc).isoformat()
                                  for s, t in heartbeat.latest(conn).items()}
             conn.rollback()  # latest() may have hit a missing table
+            # The rule daemons' place in the reading feed (#243): lag, misses.
+            out["reading_feed"] = reading_feed.consumer_status(conn)
+            conn.rollback()
             try:
                 org_row = conn.execute("SELECT COUNT(*) FROM orgs").fetchone()
                 out["org_count"] = int(org_row[0]) if org_row else 0
@@ -255,12 +258,37 @@ def _heartbeat_state(building: dict[str, Any], service: str) -> tuple[str, str] 
     return None
 
 
+# A rule daemon this far behind the reading feed is degraded (#243), and one
+# that missed readings (fell more than the feed's retention behind, so
+# batches were pruned unread) stays degraded for FEED_MISS_WINDOW_SECONDS.
+FEED_LAG_DEGRADED_SECONDS = float(os.environ.get("OPS_FEED_LAG_DEGRADED_SECONDS", "60"))
+FEED_MISS_WINDOW_SECONDS = 3600
+
+
+def _feed_state(building: dict[str, Any], consumer: str) -> tuple[str, str] | None:
+    """("degraded", why) when the daemon missed readings lately or is
+    behind on the reading feed; None when it's keeping up."""
+    feed = (building.get("reading_feed") or {}).get(consumer)
+    if not feed:
+        return None
+    last = feed.get("last_missed_at")
+    if last and (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() < FEED_MISS_WINDOW_SECONDS:
+        return "degraded", (f"missed {feed['missed_readings']} reading(s) in all, the last at {last}: "
+                            "fell more than the reading feed's retention behind")
+    if feed.get("lag_s", 0) > FEED_LAG_DEGRADED_SECONDS:
+        return "degraded", f"behind on the reading feed by {feed['lag_s']:.0f} s ({feed.get('lag_readings', 0)} readings)"
+    return None
+
+
 def _infer_faults(building: dict[str, Any], *, platform_ok: bool) -> tuple[str, str | None]:
     if not platform_ok:
         return "down", "historian unreachable"
     stale = _heartbeat_state(building, "fault_detector")
     if stale:
         return stale
+    behind = _feed_state(building, "fault_detector")
+    if behind:
+        return behind
     n = building.get("open_faults", 0)
     return "ok", f"running; {n} open fault(s)"
 
@@ -271,6 +299,9 @@ def _infer_derivations(building: dict[str, Any], *, platform_ok: bool) -> tuple[
     stale = _heartbeat_state(building, "derivation_engine")
     if stale:
         return stale
+    behind = _feed_state(building, "derivation_engine")
+    if behind:
+        return behind
     disabled = building.get("disabled_derivation_targets", 0)
     if disabled:
         return "degraded", f"{disabled} target(s) auto-disabled"
@@ -476,6 +507,7 @@ def collect_status(scope=None) -> dict[str, Any]:
             "open_faults": building.get("open_faults", 0),
             "disabled_derivation_targets": building.get("disabled_derivation_targets", 0),
             "needs_first_org": building.get("org_count", 0) == 0,
+            "reading_feed": building.get("reading_feed", {}),
             "cards": cards,
         },
         "platform": [c for c in ordered if c["layer"] == "platform"],
