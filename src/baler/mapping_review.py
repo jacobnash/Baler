@@ -14,8 +14,9 @@ them:
   * decide(): a person's answer, for one proposal or a whole group -
       accept   a candidate or any other class (vocab-checked), written
                through record_edit like a hand edit and logged in
-               record_edits; for a group, also saved as a site rule the
-               model step applies to later points with that pattern;
+               record_edits, and stored as a memory example (#185); for a
+               group, also saved as a site rule the model step applies to
+               later points with that pattern;
       escalate to a named specialist (the site's controls contractor or
                MSI, or our expert), notified through the webhook path;
                they answer on the same screen;
@@ -193,6 +194,11 @@ def decide(proposals, store, conn, ids: list[str], action: str, user: dict, bric
                 record_edit.log_edit(conn, uri, "mapping", user.get("sub"), user.get("email"),
                                      {**changed, "proposal": r["id"], "pattern": r["pattern"]})
             proposals.decide(r["id"], "accepted", cls, by, note=note)
+        if conn is not None:  # every answer is an example for memory (#185), in its own org
+            from baler import memory
+
+            memory.ensure_schema(conn)
+            memory.add_examples(conn, rows, cls, by)
         patterns = sorted({r["pattern"] for r in rows})
         if save_rule:
             for pat in patterns:
@@ -301,8 +307,10 @@ def summary(store, proposal_rows: list[dict], person_uris: set[str], allows=None
     for r in store.query("""
         PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
         SELECT ?p ?d WHERE { ?p skos:definition ?d .
-          FILTER(STRSTARTS(STR(?p), "urn:point:") && (STRSTARTS(STR(?d), "model-classified") || STRSTARTS(STR(?d), "site-rule-classified"))) }"""):
-        by_def[str(r.p)] = "site_rule" if str(r.d).startswith("site-rule") else "model"
+          FILTER(STRSTARTS(STR(?p), "urn:point:") && (STRSTARTS(STR(?d), "model-classified") || STRSTARTS(STR(?d), "site-rule-classified")
+                 || STRSTARTS(STR(?d), "memory-classified"))) }"""):
+        d = str(r.d)
+        by_def[str(r.p)] = "site_rule" if d.startswith("site-rule") else "memory" if d.startswith("memory") else "model"
     held = {r["entity_uri"]: r["status"] for r in proposal_rows if r["status"] in HELD}
     counts: Counter[str] = Counter()
     for p in points:

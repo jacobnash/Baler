@@ -63,7 +63,7 @@ little here. A class is auto-accepted only when all of these hold:
 
    The range, spike and stuck checks are #183's.
 
-When memory (#185) exists, it becomes another voice that has to agree.
+[Memory](/memory) (#185) comes first: when the nearest confirmed examples agree, no model is asked, and when they only suggest, the model's first answer matching that suggestion is agreement enough.
 
 An auto-accepted class is written with a `skos:definition` that gives the
 model's reason. Everything else becomes a proposal.

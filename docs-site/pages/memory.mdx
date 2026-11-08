@@ -1,0 +1,92 @@
+---
+title: Mapping memory
+---
+
+Every point a person confirms in [Mapping review](/mapping-review) is a
+labelled example. Memory (`src/baler/memory.py`) reuses those examples so
+the next building needs fewer answers. Both the Scrabble work and
+Brick-DICL found that this reuse is what makes the next building cheap.
+
+## What's stored
+
+When a person accepts a proposal, `mapping_examples` gets one row per
+entity. The row holds the evidence the reviewer saw (label, marker tags,
+unit, value kind, the label's equipment part; plus description and object
+type once Windrow#19 sends them), the class they chose, and the entity's
+**org and site**. The org and site come from the site topic prefix that
+covers the entity. Answering an entity again replaces its row.
+
+**Examples never cross organisations.** A lookup only sees examples from
+the entity's own org. On a single-tenant install with no site prefixes,
+that means the unscoped examples. There is no consent switch for sharing
+between orgs, so there is no sharing.
+
+## How it's used
+
+Memory runs in the model step, before any model is asked:
+
+1. **Nearest neighbour.** Each example becomes a vector of tokens.
+   - The tokens are the label's words plus each word's first three letters,
+     so `TEM` meets `Temp` and `SUP` meets `Supply`. They also include the
+     marker tags, the unit, the equipment type, and on/off vs analog.
+     Numbers are dropped, because they're instance ids.
+   - Vectors are weighted by TF-IDF and compared by cosine similarity.
+   - The **site's own examples** are tried first, then the org's.
+   - If at least 2 of the 5 nearest have similarity ≥ 0.6 and they all name
+     the same class (or a Brick equivalent), memory takes that class. No
+     model is called. The neighbours are recorded with the proposal as the
+     evidence, and the point's `skos:definition` says `memory-classified`.
+   - The unit and value veto still applies.
+2. **A second voice.** When the neighbours don't agree, their most common
+   class is memory's suggestion. If the model's first answer matches it,
+   that counts as agreement and there's no re-ask. Otherwise the model is
+   asked twice, as before.
+3. **Few-shot examples.** The nearest examples go into the model's prompt
+   as "Confirmed points from this organisation".
+
+Review shows the nearest confirmed examples for each group. The Ops summary
+counts memory-classified points under "By memory".
+
+`python -m baler.autotag` loads the org's examples from Postgres on each
+run.
+
+## Measured
+
+The [mapping eval](/mapping-eval) simulates the next building:
+
+```bash
+python -m baler.mapping_eval --seed 7 --memory-from-seed 42
+```
+
+Seed 42 of the mock hospital is "building A". The harness answers every
+proposal that reaches review there with its true class, as a careful
+reviewer would. Points with no Brick class get no answer. Those answers
+become memory. Then building B, a different seed with different naming
+styles, descriptions and instance numbers, runs the ladder with that
+memory. No model is used.
+
+| Building B (memory from) | Points accuracy | Points auto-accepted but wrong | Points left for review | Equipment accuracy |
+|---|---|---|---|---|
+| seed 7, no memory | 48.4% | 0 | 32.4% | 0% |
+| seed 7 (seed 42) | 75.2% | 0 | 5.6% | 100% |
+| seed 42, no memory | 48.4% | 0 | 30.9% | 0% |
+| seed 42 (seed 7) | 75.2% | 0 | 4.1% | 100% |
+| seed 123, no memory | 48.6% | 0 | 32.5% | 0% |
+| seed 123 (seed 42) | 72.0% | 0 | 9.1% | 100% |
+
+**Read these numbers with care. They're optimistic:**
+- Both "buildings" come from the same generator. They share one point
+  vocabulary and one equipment naming scheme (`fbf/vav-12`), and only the
+  rendering style differs. A real second building, from another
+  integrator, will match less often.
+- The 0.6 similarity threshold was chosen by a sweep over 0.5, 0.6 and 0.7
+  on these same three pairs. At 0.5, one point (`DischargeAirTemp` on an
+  AHU) was auto-accepted wrong as a zone air temperature: there was no
+  discharge example in memory, and the zone ones were the nearest. At 0.7,
+  one other pair had a wrong auto-accept.
+- The simulated reviewer never makes a mistake.
+
+TF-IDF is the starting point the issue asked for. Embeddings are only worth
+trying if a less flattering corpus shows TF-IDF leaving accuracy behind.
+That needs real, hand-labelled points from a second site, which is the
+next thing the eval needs.

@@ -45,6 +45,7 @@ points, so a point left for review counts against it.
   python -m baler.mapping_eval --llm --llm-record answers.json   # costs money
   python -m baler.mapping_eval --llm-replay answers.json         # free re-run
   python -m baler.mapping_eval --simulate inventing              # no key, see SIMULATED
+  python -m baler.mapping_eval --seed 7 --memory-from-seed 42    # memory from a reviewed building (#185)
 
 CI runs the `--check` form: deterministic, rules only, a few seconds.
 """
@@ -75,8 +76,8 @@ DEFAULT_WINDROW_DIR = os.path.join(REPO_ROOT, "windrow")
 DEFAULT_BASELINE = os.path.join(REPO_ROOT, "tests", "fixtures", "mapping_eval_baseline.json")
 
 # Ladder steps in order. A point's step is the one that decided it.
-STEPS = ("rules", "model", "review")
-AUTO_STEPS = ("rules", "model")
+STEPS = ("rules", "memory", "model", "review")
+AUTO_STEPS = ("rules", "memory", "model")
 
 # mock_hospital point kind (its token list) -> the Brick 1.4.4 classes a
 # person would accept, preferred first. Every name is checked against the
@@ -207,6 +208,7 @@ class Report:
     equipment: list[Result] = field(default_factory=list)
     llm_calls: int = 0
     patterns: int = 0
+    evidence: dict = field(default_factory=dict)  # uri -> what the model step saw (for building memory)
 
 
 # --- corpus ---------------------------------------------------------------
@@ -336,7 +338,10 @@ def evaluate(
     point_rules_path: str = mapping.DEFAULT_RULES_PATH,
     equip_rules_path: str = mapping.EQUIP_RULES_PATH,
     mode: str | None = None,
+    memory=None,
 ) -> Report:
+    """`memory` (memory.Memory): confirmed examples the model step may
+    recall (#185), as if a person had reviewed another building."""
     vocab = vocab or brick_vocab.load()
     point_rules = mapping.load_rules(point_rules_path)
     equip_rules = mapping.load_rules(equip_rules_path)
@@ -385,14 +390,20 @@ def evaluate(
                 for u in uris if u in values and values[u] is not None}
 
     counted = _CountingModel(model, report) if model is not None else None
-    decisions = model_step.run(store, unresolved, counted, proposals=mapping_proposals.MemoryProposals(), stats=stats, vocab=vocab)
+    from baler import memory as memory_mod
+
+    recall = memory_mod.recall_for(memory) if memory is not None else None
+    decisions = model_step.run(store, unresolved, counted, proposals=mapping_proposals.MemoryProposals(), stats=stats, vocab=vocab,
+                               recall=recall)
     report.patterns = len({d.pattern for d in decisions})
     for d in decisions:
         r = results[d.uri]
         r.candidates = [c["brick_class"] for c in d.candidates]
         r.refused_because = d.refused_because
+        report.evidence[d.uri] = d.evidence.to_dict()
         if d.accepted is not None:
-            r.step, r.outcome, r.predicted, r.verdict = "model", "model", d.accepted, judge(vocab, d.accepted, r.truth)
+            step = "memory" if d.source == "memory" else "model"
+            r.step, r.outcome, r.predicted, r.verdict = step, step, d.accepted, judge(vocab, d.accepted, r.truth)
 
     report.points = [results[str(u)] for u, k, _, _ in entities if k == "point"]
     report.equipment = [results[str(u)] for u, k, _, _ in entities if k == "equip"]
@@ -569,6 +580,27 @@ def compare(summary: dict, baseline: dict) -> list[str]:
     return problems
 
 
+# --- memory from a reviewed building -----------------------------------------
+
+
+def reviewed_memory(reference: Corpus, vocab: brick_vocab.Vocab | None = None):
+    """Memory as if a person had answered every review proposal of
+    `reference` correctly (its first true class; points with no Brick class
+    get no example, as their answer would be a site visit). The rules-only
+    ladder decides what reaches review, so memory holds exactly the points a
+    reviewer would have been asked about."""
+    from baler import memory as memory_mod
+
+    vocab = vocab or brick_vocab.load()
+    rep = evaluate(reference, vocab=vocab)
+    examples = []
+    for r in rep.points + rep.equipment:
+        if r.step == "review" and r.truth and r.uri in rep.evidence:
+            ev = {**rep.evidence[r.uri], "kind": r.kind}
+            examples.append(memory_mod.Example(r.uri, r.kind, r.truth[0], memory_mod.tokens(ev), label=ev.get("label", "")))
+    return memory_mod.Memory(examples, vocab), len(examples)
+
+
 # --- model step: real, recorded, replayed, simulated -----------------------
 
 
@@ -658,6 +690,8 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--llm-replay", metavar="FILE", help="enable the model step from answers recorded with --llm-record")
     group.add_argument("--simulate", choices=Simulated.KINDS, help="enable the model step with a stand-in model (no key; see Simulated)")
     parser.add_argument("--llm-record", metavar="FILE", help="with --llm: save the model's answers for --llm-replay")
+    parser.add_argument("--memory-from-seed", type=int, metavar="SEED",
+                        help="give the model step memory (#185): mock_hospital at SEED, with every review proposal answered correctly")
     parser.add_argument("--json", metavar="FILE", help="write the summary as JSON")
     parser.add_argument("--check", metavar="BASELINE", nargs="?", const=DEFAULT_BASELINE, help="exit 1 on a regression against this baseline JSON")
     parser.add_argument("--no-per-class", action="store_true", help="leave the per-class table out of the text report")
@@ -682,7 +716,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--llm-record needs --llm")
 
     corpus = load_mock_hospital(args.windrow, args.seed)
-    report = evaluate(corpus, model=model)
+    mem, mode = None, None
+    if args.memory_from_seed is not None:
+        mem, n = reviewed_memory(load_mock_hospital(args.windrow, args.memory_from_seed))
+        mode = (f"rules + memory ({n} examples from seed {args.memory_from_seed})"
+                + (f" + model ({model.name})" if model else ""))
+    report = evaluate(corpus, model=model, memory=mem, mode=mode)
     summary = summarize(report)
     print(format_summary(summary, report, per_class=not args.no_per_class))
 
