@@ -489,11 +489,18 @@ def test_e2e_derivation_averages_bacnet_and_modbus_sourced_sensors_over_real_bro
             and _is_tagged(modbus_point)
         )
 
-    for _ in range(30):  # up to ~3s, no arbitrary long sleep
+    # Poll until both readings and both tag sets are in, up to 20 s (CI
+    # runners under load took over the old 3 s), and fail here if they never
+    # arrive rather than at the classify asserts below with a misleading "miss".
+    deadline = time.monotonic() + 20
+    ingested = False
+    while time.monotonic() < deadline:
         listener.loop(timeout=0.1)
         if _both_ingested():
+            ingested = True
             break
     listener.disconnect()
+    assert ingested, "both points and both tag sets should be ingested within 20 s"
 
     assert read_latest(ts_conn, str(bacnet_point)) == 70.0
     assert read_latest(ts_conn, str(modbus_point)) == 74.0

@@ -39,7 +39,8 @@ export = ["pyarrow>=15"]
 offsite = ["boto3>=1.34", "pyrage>=1.2"]
 # haystack_api.py (Project Haystack HTTP API). Built from source with
 # maturin until openhay ships wheels to PyPI - needs a Rust toolchain.
-haystack = ["openhay @ git+https://github.com/jacobnash/openhay@main#subdirectory=crates/openhay-py"]
+# Pinned to an openhay commit; bump together with the Dockerfile's OPENHAY_REF.
+haystack = ["openhay @ git+https://github.com/jacobnash/openhay@dd6fe357cba3e1de694dec3134f2c569ebaf9884#subdirectory=crates/openhay-py"]
 
 [build-system]
 requires = ["setuptools>=68"]
