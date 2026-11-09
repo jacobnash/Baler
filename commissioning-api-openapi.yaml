@@ -38,6 +38,7 @@ tags:
   - name: Spec
   - name: Faults
   - name: Active tests
+  - name: Packs
   - name: Agent
 paths:
   /projects:
@@ -1737,6 +1738,151 @@ paths:
       summary: Interactive docs for this API
       responses:
         "200": { description: HTML }
+  /pack-schema:
+    get:
+      tags: [Packs]
+      operationId: getCxPackSchema
+      summary: Engines, phases, operators and quantities a pack row may use
+      responses:
+        "200":
+          description: The vocabulary
+          content:
+            application/json:
+              schema: { type: object, required: [engines, quantities], properties: { engines: { type: array, items: { type: string } }, quantities: { type: object } } }
+  /packs:
+    get:
+      tags: [Packs]
+      operationId: listCxPacks
+      summary: Your org's requirement pack versions (rows omitted)
+      parameters:
+        - { name: pack_id, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Pack versions
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Pack" } }
+    post:
+      tags: [Packs]
+      operationId: importCxPack
+      summary: Import a pack document as a draft version (operator)
+      description: Rows carry citations (ref, page), never quoted standard text. Values may be blank.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PackDocument" }
+      responses:
+        "201":
+          description: The draft
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pack" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+  /packs/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Packs]
+      operationId: getCxPack
+      summary: A pack version with its rows and history
+      responses:
+        "200":
+          description: The pack
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pack" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /packs/{id}/requirements/{rid}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+      - { name: rid, in: path, required: true, schema: { type: string } }
+    patch:
+      tags: [Packs]
+      operationId: setCxPackValues
+      summary: Enter or change a draft row's values; clears its confirmation (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                value: { type: [number, string, "null"] }
+                min: { type: [number, "null"] }
+                max: { type: [number, "null"] }
+                op: { type: string }
+                unit: { type: string }
+      responses:
+        "200":
+          description: The pack
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pack" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /packs/{id}/requirements/{rid}/confirm:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+      - { name: rid, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Packs]
+      operationId: confirmCxPackRow
+      summary: A person confirms a row's numbers for the pack's edition (operator)
+      responses:
+        "200":
+          description: The pack
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pack" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /packs/{id}/publish:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Packs]
+      operationId: publishCxPack
+      summary: Freeze a draft version (admin)
+      responses:
+        "200":
+          description: The pack
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pack" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/packs:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Packs]
+      operationId: listCxProjectPacks
+      summary: The pack versions this project is judged by
+      responses:
+        "200":
+          description: Adoptions
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/PackAdoption" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Packs]
+      operationId: adoptCxPack
+      summary: Adopt a published pack version; replaces an older version of the same pack (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [pack], properties: { pack: { type: string } } }
+      responses:
+        "201":
+          description: The adoption
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PackAdoption" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
 components:
   parameters:
     ProjectId:
@@ -1772,6 +1918,107 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    PackRow:
+      type: object
+      required: [id, title, citation, applies_to, criterion, evidence, check]
+      properties:
+        id: { type: string }
+        title: { type: string, maxLength: 160 }
+        citation:
+          type: object
+          required: [ref]
+          additionalProperties: false
+          properties:
+            ref: { type: string, description: "Table, section or clause" }
+            page: { type: [integer, string, "null"] }
+        applies_to:
+          type: object
+          properties:
+            space_type: { type: array, items: { type: string } }
+            equip_class: { type: array, items: { type: string } }
+            phase: { type: array, items: { type: string } }
+        criterion:
+          type: object
+          properties:
+            quantity: { type: [string, "null"] }
+            op: { type: [string, "null"], enum: [">=", "<=", ">", "<", between, "==", null] }
+            value: { type: [number, string, "null"] }
+            min: { type: [number, "null"] }
+            max: { type: [number, "null"] }
+            unit: { type: [string, "null"] }
+        evidence:
+          type: object
+          properties:
+            point_class: { type: [string, "null"] }
+            window_hours: { type: number }
+            coverage: { type: number }
+        check:
+          type: object
+          required: [engine]
+          properties:
+            engine: { type: string, enum: [cx, procedure, shacl, gl36] }
+            check_id: { type: string }
+            criterion: { type: string }
+            template: { type: string }
+            item: { type: string }
+        verified_by: { type: [object, "null"] }
+        note: { type: [string, "null"] }
+    PackDocument:
+      type: object
+      required: [pack_id, version, title, source]
+      properties:
+        pack_id: { type: string }
+        version: { type: string }
+        title: { type: string }
+        source:
+          type: object
+          required: [standard, edition]
+          properties:
+            standard: { type: string }
+            edition: { type: string }
+            publisher: { type: [string, "null"] }
+            kind: { type: [string, "null"] }
+        jurisdiction: { type: array, items: { type: string } }
+        notice: { type: [string, "null"] }
+        requirements: { type: array, items: { $ref: "#/components/schemas/PackRow" } }
+    Pack:
+      allOf:
+        - { $ref: "#/components/schemas/PackDocument" }
+        - type: object
+          required: [id, org_id, status, summary, created_at]
+          properties:
+            id: { type: string }
+            org_id: { type: string }
+            status: { type: string, enum: [draft, published, retired] }
+            history: { type: array, items: { type: object } }
+            summary:
+              type: object
+              properties:
+                rows: { type: integer }
+                confirmed: { type: integer }
+                blank: { type: integer }
+                active: { type: integer }
+            created_by: { type: [string, "null"] }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+            published_by: { type: [string, "null"] }
+            published_at: { type: [string, "null"], format: date-time }
+    PackAdoption:
+      type: object
+      required: [adoption, pack]
+      properties:
+        adoption:
+          type: object
+          properties:
+            id: { type: string }
+            project_id: { type: string }
+            pack_ref: { type: string }
+            pack_id: { type: string }
+            version: { type: string }
+            adopted_by: { type: [string, "null"] }
+            adopted_at: { type: string, format: date-time }
+            retired_at: { type: [string, "null"] }
+        pack: { $ref: "#/components/schemas/Pack" }
     Error:
       type: object
       required: [error]
