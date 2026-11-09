@@ -9,8 +9,9 @@ samples, years later.
 
 ## What is compressed, and how
 
-TimescaleDB stores `point_history` in time chunks (7 days each by default). A
-compressed chunk holds its rows as batches of up to 1,000 samples per point:
+TimescaleDB stores `point_history` in time chunks (7 days each unless
+`BALER_HISTORY_CHUNK_INTERVAL` says otherwise, see
+[below](#chunk-interval-and-compress_after-at-high-ingest-rates)). A compressed chunk holds its rows as batches of up to 1,000 samples per point:
 
 - **segmented by `point_uri, unit, label`**: the point URI is stored once per
   batch instead of in every row and every primary-key entry. `unit` and `label`
@@ -46,7 +47,8 @@ is logged and never stops the process.
 A background job, added with `add_compression_policy`, compresses each chunk
 once **all** of it is older than `BALER_HISTORY_COMPRESS_AFTER` (default
 `7 days`). With 7-day chunks, raw data stays uncompressed for 7 to 14 days. The
-job runs every 12 hours.
+job runs every 12 hours. A high-rate site shortens all three (next section but
+two).
 
 Why 7 days: data that arrives late should usually land in an uncompressed
 chunk, because that path is the cheapest. Late data comes from:
@@ -64,11 +66,120 @@ this path. `tests/test_history_compression.py` covers all of these against the
 pinned image.
 
 One limit: by default one transaction may decompress at most 100,000 compressed
-rows (`timescaledb.max_tuples_decompressed_per_dml_transaction`). Baler's own
-writers commit every row on its own, so this never applies to them. A bulk SQL
-load that rewrites a large old range in **one** statement or transaction should
-decompress the chunk first (below), or `SET
+rows (`timescaledb.max_tuples_decompressed_per_dml_transaction`). An insert of a
+*new* timestamp doesn't count against it, but an overwrite of an existing
+`(point, ts)` decompresses that point's whole batch, up to 1,000 rows. Baler's
+batched writers (`timeseries.write_point_values`: mqtt_listener, hisWrite,
+haystack_import) lift the cap for their own transaction only (Baler#245). It
+used to apply to them: a 2,000-point retained replay into compressed chunks
+failed at 101,000 decompressed rows, and because mqtt_listener exits on a failed
+batch and the broker redelivers it, ingest stopped in a restart loop. A listener
+restart replays every retained reading, and a point quiet for longer than
+`compress_after` has its retained reading in a compressed chunk, so the short
+`compress_after` a large site wants would have made that routine.
+`tests/test_history_chunks.py` writes a batch like that (2,000 points, each
+overwriting a row and adding a new one) into compressed chunks.
+
+A bulk SQL load of your own that rewrites a large old range in **one**
+statement or transaction should decompress the chunk first (below), or `SET
 timescaledb.max_tuples_decompressed_per_dml_transaction = 0` for that session.
+
+## Chunk interval and `compress_after` at high ingest rates
+
+Three settings decide how much history sits uncompressed (the "hot window"):
+
+> hot window ≈ `compress_after` + one chunk interval + the policy's schedule (+ how long a run takes)
+
+| Setting | Blank (default) | What it does |
+|---|---|---|
+| `BALER_HISTORY_CHUNK_INTERVAL` | left as it is: **7 days** on every install so far | length of each **new** chunk |
+| `BALER_HISTORY_COMPRESS_AFTER` | 7 days | a chunk compresses once all of it is older than this |
+| `BALER_HISTORY_COMPRESS_SCHEDULE` | half a chunk (12 h from 1-day chunks up) once the chunk interval is set; otherwise left as it is (12 h) | how often the compression policy runs |
+
+All three are settings, not schema. Like `compress_after`, the `migrate` service
+and each process compare them with the database once at start
+(`baler/history_chunks.py`, called from `timeseries.sync_settings`) and change
+only what differs, waiting at most 5 s for the lock. `python -m
+baler.history_chunks status` shows what the database has now.
+
+They're not a migration on purpose: a migration means the same thing on every
+database forever, and these are per deployment. Nothing they run reads history:
+`set_chunk_time_interval` and `alter_job` update one catalog row each, and the
+policy swap is two catalog calls, so the cost doesn't grow with history.
+Measured on a database with 6.5 M rows in 251 chunks, 248 of them compressed:
+the check alone 2–4 ms, changing the interval and the schedule 6–15 ms,
+replacing the policy for a new `compress_after` 9 ms, and the same change with
+a long read holding the hypertable open in another session 15 ms (it doesn't
+wait for readers; a concurrent write right after took 4 ms).
+
+**A small site sets nothing.** 50 points every 5 s is 10 rows/s: a 7-day chunk
+is about 1.5 GB raw, and its behaviour is exactly what it was before these
+settings existed.
+
+**A large one needs hours, not days.** At 100,000 points every 5 s (20,000
+rows/s, about 250 B a row raw) a 7-day chunk would be about 3 TB, written for a
+week before any of it compresses, and a compression run over it would take
+days. The sizing rule (Baler#245): one chunk plus its indexes in about 25% of
+Postgres' memory, `compress_after` a few chunk intervals, and the policy run
+about every half chunk. `recommend` applies it:
+
+```bash
+python -m baler.history_chunks recommend --points 100000 --pg-memory 32g
+# 20,000 rows/s, 32.0 GB for Postgres, 250 B/row raw
+# chunk 1 hour ~18.00 GB raw; compress after 3 hours; policy every 30 minutes; hot window up to ~81.0 GB raw
+# note: even a 1-hour chunk (18.0 GB) is over 25% of 32.0 GB: more memory for Postgres, or a narrower row (#245), before shorter chunks
+BALER_HISTORY_CHUNK_INTERVAL=1 hour
+BALER_HISTORY_COMPRESS_AFTER=3 hours
+BALER_HISTORY_COMPRESS_SCHEDULE=
+```
+
+It never goes below 1-hour chunks: shorter ones multiply the chunk count (8,760
+a year at 1 hour already), which every query plan pays for. Past that point the
+row has to get narrower (`point_id int` instead of the URI text, #245's last
+step), not the chunks shorter.
+
+What a short `compress_after` costs: Windrow's trend backfill (hours late) and
+an edge node's spool replay land in compressed chunks. That works (above), it's
+just the slower write path. `ladder.py soak` writes both kinds into compressed
+chunks during every soak and checks each row landed once.
+
+**Changing the chunk interval never rewrites a chunk.** `set_chunk_time_interval`
+applies to chunks created after it: the chunk open at the time keeps its range,
+and the new length starts at its end. Rows keep landing in the old chunk until
+then.
+
+### Moving a live install to short chunks
+
+On nash-srv (13 M+ rows, compressed 7-day chunks, `BALER_HISTORY_COMPRESS_AFTER`
+already in `~/.config/baler/nash-srv.env`):
+
+1. Deploying this code changes nothing on its own: with the chunk settings blank
+   the database is left exactly as it is (`status` shows 7-day chunks, the policy
+   every 12 h).
+2. Size it: `python -m baler.history_chunks recommend --points <expected points>
+   --pg-memory <what Postgres gets>`.
+3. Put the result in `nash-srv.env` (for example `BALER_HISTORY_CHUNK_INTERVAL=1
+   hour`, `BALER_HISTORY_COMPRESS_AFTER=3 hours`) and deploy. The `migrate`
+   service applies it before any service starts; check with `docker compose run
+   --rm migrate python -m baler.history_chunks status`.
+4. What happens next:
+   - the open 7-day chunk stays 7 days and takes rows until its end; 1-hour
+     chunks start there;
+   - on its next run (within 30 minutes) the policy compresses every
+     uncompressed chunk whose end is more than 3 hours ago: on nash-srv that's
+     the previous week's 7-day chunk, if it isn't compressed already. At
+     the measured ~33,000 rows/s on the 1-CPU box, 22 M rows take about 11
+     minutes, in one background worker (one CPU) while ingest carries on.
+     Compression needs no extra disk beyond the compressed copy, and frees the
+     uncompressed chunk at the end;
+   - the open 7-day chunk compresses 3 hours after its end, the same way; after
+     that every chunk is an hour long and compresses 3 to 4 hours after it closes.
+5. To go back, set the values explicitly (`BALER_HISTORY_CHUNK_INTERVAL=7 days`,
+   `BALER_HISTORY_COMPRESS_AFTER=7 days`): blank means "leave it as it is",
+   not "put back 7 days". Chunks already made keep their length either way.
+
+Measured results, the long soak that proves the hot window plateaus, and
+compression throughput are on [Scale test](/scale-test#long-soak-disk-and-compression-245).
 
 ## What it saves
 

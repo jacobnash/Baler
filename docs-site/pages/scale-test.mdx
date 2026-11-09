@@ -18,7 +18,11 @@ A step passes only if Baler **doesn't choke**, which means three things:
 
 A step can also stop for a reason that is **not** a Baler ceiling, and the result says so
 (`inconclusive`). That happens when the generator couldn't offer the rate, the live install on
-the same host slowed down (live-safety), or the host disk ran low.
+the same host slowed down (live-safety), or the disk holding Docker's data ran low.
+
+The point count is not the goal: the ladder exists to find bottlenecks. Every step, passing or
+not, names what limited it (or, when it passed, what is closest to its limit next), with the
+evidence captured while it ran.
 
 ## What it runs
 
@@ -36,7 +40,8 @@ the same host slowed down (live-safety), or the host disk ran low.
   3. runs the read probes and a Cx run and report, still under load;
   4. stops the generator, waits for the lag canaries to drain, and compares what was stored
      with what the broker acknowledged, second by second;
-  5. applies the pass conditions and writes the JSON result.
+  5. applies the pass conditions, names the step's **limiter** from the evidence sampled during
+     the soak (see [Reading the limiter](#reading-the-limiter-269)), and writes the JSON result.
 
   It stops at the first step that doesn't pass, unless `--continue-on-fail` is given.
 - **`compose.scale.yml`** is the override that makes the stack isolated (see below).
@@ -131,6 +136,151 @@ outlives the checkout. Every result records:
 
 So a 1-CPU run and a 12-CPU run are never compared without saying so.
 
+## Reading the limiter (#269)
+
+Every step result has a `limiter`, `ladder.py run` prints it after each step and in its summary,
+and `ladder.py table` has a column for it:
+
+```
+limiter per step:
+      1,000  pass          none found; next: read?filter=point 0.21 s of 1.5 s (haystack.read.build_records 51%)
+      5,000  fail          ingest listener: mqtt_listener CPU-capped (throttled 38%) [high]
+max passing step: 1,000 points
+```
+
+`limiter.limiter` names the part that stopped the step and the number that says so.
+`limiter.evidence` lists the symptoms (drops, lag, missed readings, slow probes) and then every
+candidate part with how far past its threshold it ran (`[1.90x threshold]`). `limiter.also` lists
+other parts that were also at their limit. `limiter.confidence` is:
+
+- **high**: one part at its limit and the symptoms point at it;
+- **medium**: several parts at their limit (the most saturated is named, the others are in
+  `also`), or the cause was inferred from one side only, for example the listener writing all the
+  time with nothing in Postgres to show why;
+- **low**: there are symptoms but nothing was at its limit (`unattributed`). Something the
+  sampler doesn't see is the limit. Look at `evidence.ticks` and the logs.
+
+A step that passed has `limiter: "none found"` and a `next_suspect`: the part closest to its
+limit, from `limiter.headroom` (every measured part, as a ratio to its threshold, highest
+first). When a step passes, that is where the next step will most likely fail.
+
+**The rules** (`scripts/scale/limiter.py`, tested on recorded samples in
+`tests/test_scale_limiter.py`). They run in this order, and the first that applies names the limiter:
+
+| # | When | Limiter |
+|---|---|---|
+| 1 | live-safety tripped; the Docker data root (DockerRootDir, not the checkout's disk) below `--min-free-gb`; the generator more than one interval behind schedule during the soak (`generator.behind_soak_max_s`), or offering under 99% of the target | `live-safety`, `disk space (…)`, `generator-bound (behind_s max 12.3 > 5 s, …)`. None of these is a Baler ceiling. |
+| 2 | a container restarted or was OOM-killed | `fault_detector OOM-killed (memory 99% of cap)` |
+| 3 | the graph didn't take a step's tags in time | `graph ingest (…)` |
+| 4 | ingest symptoms: broker drops, < 99% stored, p95 lag ≥ 30 s or growing, lost canaries, listener queue past 80% of its cap, broker queue growing | the most saturated part of the ingest chain: `ingest listener: mqtt_listener CPU-capped (throttled 38%)`, `… CPU-bound (busiest thread 96% of a core)`, `broker: mosquitto …`, `postgres CPU-capped (…)`, `postgres write-bound (IO:WALSync 55%, …)`, `postgres locks (…)`, `disk (util p90 98%, 240 MB/s written)`; `broker drops (N; subscriber unattributed)` if none is at its limit |
+| 5 | a rule daemon missed readings from the reading feed, or ended the soak > 30 s behind | `fault_detector behind on the reading feed: CPU-bound (…)` |
+| 6 | a read probe over budget or not HTTP 200 | the worst probe (median / budget), the span that took most of its median request, and its API's CPU during the probes: `reads: read?filter=point (2.1 s > 1.5 s) haystack.encode 48%` |
+| 7 | anything else `evaluate()` failed the step for | `unattributed: <reason>` |
+
+A part is **at its limit** when it reaches its threshold (all of them are constants at the top of
+`limiter.py`):
+
+| Part | Threshold | From |
+|---|---|---|
+| A container's CPU cap | throttled in ≥ 20% of its CFS periods while its CPU p90 is ≥ 60% of the cap, or CPU p90 ≥ 90% of the cap | cgroup `cpu.stat` (`nr_throttled`/`nr_periods`) and CPU usage |
+| One core (single-threaded services: the Python daemons and APIs, and mosquitto) | busiest thread ≥ 85% of a core, or one process ≥ 90% | `/proc/<pid>/task/*/stat` |
+| Memory | peak ≥ 95% of the cap | cgroup memory minus inactive file cache, which is what `docker stats` shows |
+| Disk (the device holding Docker's data root) | utilisation p90 ≥ 90% | `/proc/diskstats` `io_ticks` |
+| Postgres waits | ≥ 40% of non-idle backend samples waiting on IO or WAL/buffer LWLocks, with at least 1 active backend per sample | `pg_stat_activity`, sampled every `--evidence-every` seconds |
+| Postgres locks | ≥ 1 ungranted lock per sample on average | `pg_locks` |
+| The listener's writer | inside `flush()` ≥ 80% of the time | `mqtt_listener`'s heartbeat |
+
+The threshold for throttling has a busy condition because a nearly idle API under a 0.25-CPU cap
+is throttled in about 45% of its few CFS periods by its own healthcheck. Locally `auth_api`,
+`derivation_api` and `validate_api` did exactly that at 4% CPU.
+
+Consequences never outrank their cause. The listener writing all the time is explained by
+anything else at its limit, and Postgres IO waits by a saturated disk. Each probe's limit is its
+budget.
+
+**What the sampler records.** `evidence.Sampler` runs from the end of the warm-up to the end of
+the probes, every `--evidence-every` seconds (default 5). It reads files on the host and runs one
+small Postgres query per tick, plus a few at each end of the step:
+
+- `evidence.phases.soak` / `.probes`: per container, CPU (mean, p90) against its cap,
+  throttled share and seconds, memory peak against its cap, and the busiest processes. Postgres
+  backends are grouped by their process title (`postgres client baler`, `postgres:
+  checkpointer`). Also the disk (utilisation, MB/s written, write await, free space on Docker's
+  root), the broker (`queued` = `$SYS` store count minus retained, and drops per tick), Postgres
+  (wait-event shares by backend type, lock waits) and the listener (queue depth and peak against
+  its cap of 50,000, and its write-busy share).
+- `evidence.pg_delta`: per-step deltas of `pg_stat_wal`, `pg_stat_bgwriter`, `pg_stat_io` (by
+  backend type, object and context) and `pg_stat_database`. `evidence.pg_writes` summarises them
+  (see the write gap below).
+- `evidence.pg_top_statements`: `pg_stat_statements` top 10 by total time over the step. It is
+  reset at the step's start, and loaded in the scale stack only (`compose.scale.yml`).
+- `evidence.ticks`: every raw sample, so the verdict can be worked out again (or the rules
+  changed and re-run) once the stack is gone.
+- `evidence.overhead`: the sampler's own cost. That is its thread's CPU (`cpu_share_of_one_core`),
+  wall time per tick, the time its Postgres queries took, and the time the ladder spent in
+  `docker stats` (0 when the cgroups are readable: it is skipped then, because each call costs
+  about 2 s of wall time and 0.2 CPU-s of dockerd).
+
+The listener now writes a heartbeat (`service_heartbeats`, service `mqtt_listener`, every 5 s)
+with `queue`, `queue_peak`, `queue_max`, `rows`, `batches` and `flush_s`, the seconds spent
+writing. Without it the queue depth was only in a log line once a minute.
+
+Each probe has a `trace`. The ladder pulls the probe's API spans from Jaeger for the probe's own
+time window and works out each span's self time (its duration minus its children's). The
+breakdown is the median over the probe's requests, against the median request
+(`root_median_s`). `outside_spans_s` is the probe's median minus that: gateway, network, and
+anything the API does outside a span.
+
+**What it can't see.** On a host where Docker's cgroups aren't readable (rootless or remote
+Docker), there's no per-container throttling, threads or memory. `resources` falls back to
+`docker stats`, and verdicts that need those numbers come out `low` or `unattributed`. On cgroup
+v1, per-container block I/O doesn't include buffered writes, so disk writes are judged at the
+device. Device numbers include everything else on that disk, other stacks included.
+
+### The Postgres write gap (875 GB of block writes)
+
+At the end of the 100k step on nash-srv, `docker stats` showed 875 GB of block writes for
+Postgres. `pg_stat_wal` stood at 17 GB after 50k, and the table plus indexes were 9 GB. Part of the
+gap is how Docker counts, and part is real disk traffic:
+
+1. **Counter effect: Docker's number is cumulative.** `docker stats` BlockIO counts from the
+   container's start: every step before 100k, every graph phase and every probe round, not just
+   the 100k soak. `pg_stat_wal` and the table size don't include the data pages Postgres rewrote
+   along the way. On cgroup v2 Docker also sums `io.stat` over every device listed. On LVM or
+   device-mapper storage, the same write can appear on the `dm-N` device and on the disk below it,
+   which can double the count. Check with
+   `cat /sys/fs/cgroup/system.slice/docker-<id>.scope/io.stat`.
+2. **Real traffic: Postgres writes each row several times.** Measured locally at 5k points
+   (1,017 rows/s, run `20261109T002820Z`, `evidence.pg_writes` and `pg_delta`). The window is the
+   step's soak and probes, about 225 s and 229k stored rows:
+
+   | Writes | Bytes | Per stored row |
+   |---|---|---|
+   | WAL (`pg_stat_wal.wal_bytes`, including 3,459 full-page images) | 134 MB | ~585 B |
+   | New heap and index pages (`pg_stat_io`, client backend extends) | 50 MB | ~220 B |
+   | The listener's TEMP staging table, `point_history_stage` (`temp relation` extends) | 30 MB | ~130 B |
+   | Checkpointer page writes | 12 MB | ~55 B |
+   | The stored row itself, table plus indexes (`db.bytes_per_row`) | | 225 B |
+
+   That is about 4.4× the stored bytes. The ratio grows with the point count. `point_history` has
+   three indexes led by `point_uri`, two of them substantial (the primary key and
+   `point_history_labelled`), so every point's next reading goes to that point's own leaf page.
+   At 100k points that is about 100k hot leaf pages per index, or roughly 1.6 GB for the two. The
+   scale stack's `shared_buffers` is 1.5 GB: 25% of its 6 GB cap, which the image's tuning sets at
+   init. So hot pages start being written out between touches, and every checkpoint is followed by a
+   full-page image (8 kB of WAL) for each leaf's first change. With `max_wal_size` at 1 GB, those
+   images alone fill the WAL quickly enough to *request* the next checkpoint. 240 MB/s at
+   20,000 rows/s is 12 kB per row, about one page write plus one page of WAL per row. That fits
+   this mechanism, and it is real disk traffic.
+
+   This is an estimate from the 5k measurement plus the index arithmetic. The 100k step hasn't
+   been re-run with the new evidence yet. When it is, `evidence.pg_writes` gives the answer
+   directly: `checkpoints_requested` > 0, `wal_fpi` close to one per row, and
+   `buffers_checkpoint` plus `buffers_backend` growing faster than rows confirm it. A step limited
+   this way names `postgres write-bound (…)` or `disk (…)`, and its evidence lists the requested
+   checkpoints. Levers, in order of cost: `max_wal_size` (fewer checkpoints means fewer full-page
+   images), `wal_compression`, `shared_buffers`, and the row and index shape that #245 is changing.
+
 ## What each metric means
 
 | Metric | Where it comes from | Meaning |
@@ -144,7 +294,7 @@ So a 1-CPU run and a 12-CPU run are never compared without saying so.
 | `lag.first_third_median_s` → `last_third_median_s` | same | **Backlog growth.** Rising by more than 10 s over the soak fails the step. |
 | `lag.lost` | canaries never stored within 300 s | Lost data. |
 | `broker.*` | `$SYS/#` | Messages in/out, store count/bytes (queued + retained), load per minute, heap. |
-| `resources.<service>` | `docker stats` every sample | CPU % (100 = one core), memory against the cap, block I/O. |
+| `resources.<service>` | the evidence sampler's cgroup reads (`docker stats` when cgroups aren't readable from the host) | CPU % (100 = one core) and memory against the cap. |
 | `containers.<service>` | `docker inspect` | Restarts during the step, OOM kills, exit status. Any restart fails the step. |
 | `samples[].pg_roundtrip_s` | `SELECT 1` timed | Postgres responsiveness under load. |
 | `db.*` | `hypertable_detailed_size`, `approximate_row_count`, `timescaledb_information` | Chunks and chunk interval, table/index bytes, **bytes per row**, database size. Once a compression policy exists (#192), also `db.compression`: bytes before and after compression and the number of compressed chunks, so compressed and uncompressed bytes per row sit side by side. Raw history is never downsampled: compression only. |
@@ -152,10 +302,11 @@ So a 1-CPU run and a 12-CPU run are never compared without saying so.
 | `graph.ingest_s`, `tags_per_s` | Oxigraph count of `scale` points after publishing a step's tags | How long the graph takes to absorb new equipment. |
 | `graph.triples`, `count_*_s` | SPARQL `COUNT` timed | Graph size and the time of a full scan. |
 | `probes[]` | timed GETs through the gateway as the test org's admin, 5 runs, warm median vs. `budgets.json` | **Responsiveness.** Any probe over budget, or not HTTP 200, fails the step. |
-| `rules.<service>.median_cycle_s` | `service_heartbeats` beat-to-beat | Fault detector and derivation engine cycle time, including their sleep (30 s and 10 s by default). Since #243 their reading-feed threads beat too (every 10 s), so this is the beat interval; the His sweep's own duration is `heartbeat.his.sweep_s`. |
 | `rules.<service>.feed` | `reading_feed_consumers` sampled every 15 s | **Rule-daemon misses and lag** (#243). `missed_readings_delta` counts readings pruned from the feed before the daemon read them (more than `BALER_FEED_RETENTION_S` behind) and must be 0. `lag_s_max`/`lag_s_last` show how far behind it ran; still over 30 s at the end of the soak fails the step. |
 | `rules.<service>.heartbeat` | `service_heartbeats.detail` | Readings consumed, Cur-mode evaluations (`cur_evaluations`) or rows run (`cur_rows`), and for fault_detector the last His sweep: `sweep_s`, rules, faulted points. |
 | `cx_run_s` | creating a 1 h Cx run over site 0 (500 points) and waiting for it | Commissioning verification time. |
+| `limiter`, `evidence` | the evidence sampler during the soak and probes, Jaeger after them | What limited the step, and why: see [Reading the limiter](#reading-the-limiter-269). |
+| `probes[].trace` | Jaeger's `/api/v3/traces` for the probe's API, over the probe's own time window | Per-span self time of the median request, its share of the request, and the time outside any span (gateway, network). |
 | `durability.comparable` | `SHOW fsync / synchronous_commit / full_page_writes` on the server **and** on an ingest-path connection (from inside the listener container) | `true` only if all three are on end to end. A non-durable run is never labelled comparable. |
 
 The ladder adds two rules to the test org, so per-point rule load is realistic: a Cur-mode
@@ -166,6 +317,82 @@ from firing, so a fault storm doesn't distort the run.
 `mqtt_listener`, then `postgres`), brings it back, drains, and reports `missing_acked`. That is
 the number of readings the broker acknowledged that never reached `point_history`. Batching
 and group commit are fine; losing acknowledged readings is not.
+
+## Long soak: disk and compression (#245)
+
+The ladder's steps are 15 minutes long, too short for a compression cycle. `ladder.py soak` holds
+one point count for hours and answers [#245](https://github.com/jacobnash/Baler/issues/245)'s
+question: once compression keeps up, does `point_history`'s disk stop growing at the raw rate, and
+do lag, reads, the continuous aggregates and late writes stay fine through compression cycles?
+
+Set the chunking under test in the scale env file **before** `up`, so every service agrees on it
+(each keeps the policy in step with its own environment at start, see
+[History compression](/history-compression#chunk-interval-and-compress_after-at-high-ingest-rates)):
+
+```sh
+# scripts/scale/scale.env (or <SCALE_PROJECT>.env)
+BALER_HISTORY_CHUNK_INTERVAL=1 hour
+BALER_HISTORY_COMPRESS_AFTER=3 hours
+```
+
+`soak` refuses to run on 7-day chunks unless `--allow-default-chunks` is given. It then runs the
+generator at `--points` for `--duration` seconds (default 6 h) and records:
+
+| Every | What | From |
+|---|---|---|
+| `--sample-every` (30 s) | disk: `point_history` total, **hot** (uncompressed chunks) and compressed bytes and chunk counts, before/after compression bytes, WAL, database | `chunks_detailed_size`, `hypertable_compression_stats`, `pg_ls_waldir` |
+| | the oldest uncompressed chunk's age past its end, and the **backlog** (chunks old enough to compress that aren't yet) | `timescaledb_information.chunks` |
+| | each compression run: duration, chunks, rows (the chunks' inserts while hot), **rows/s** | `job_stats`, `pg_stat_user_tables` |
+| | whether a compression run is in progress (polled every 2 s) | `pg_stat_activity` |
+| | the 5m/1h aggregates' watermark age; canary lag; restarts | catalog, canary, `docker inspect` |
+| `--probe-every` (600 s) | every read probe in `budgets.json` plus its `soak_probes`: history over the last hour and across the hot/compressed boundary, `hisRead(pastWeek)` for 100 and 1,000 points. Rounds that overlapped a compression run are marked | gateway |
+| `--late-every` (1800 s) | late data into the newest compressed chunk, over MQTT at the soak's own rate: every point's reading there **replayed** (same ts, new value: a spool or retained replay) and a new reading **backfilled** 1.23 s after it (Windrow's trend backfill). Then each must be stored exactly once, with the new value | generator account |
+
+At the end it compares stored with acknowledged readings over the soak (minus its own backfill),
+checks `point_history_5m` against the raw fold over the newest compressed hour, and writes
+`results/<run>-soak.json`. `summary` holds the numbers; `status`/`reasons` the verdict.
+
+**Pass** needs all of these (`soak.evaluate_soak`, tested in `tests/test_scale_soak.py`). The
+steady phase starts after `compress_after` + 2 chunks + one schedule:
+
+- **Hot window bounded:** hot bytes in the second half of the steady phase at most 1.25× the
+  first half's; no chunk uncompressed longer past its end than `compress_after` + chunk + 2 ×
+  schedule + the longest run; the backlog not growing.
+- **Disk grows at the compressed rate:** total bytes per stored row, between two samples a whole
+  number of chunk intervals apart (the same point of the hot sawtooth), at most 2× the measured
+  compressed bytes per row.
+- **Compression keeps up:** no failed run. `compression_margin` reports median compression rows/s
+  over ingest rows/s (one background worker).
+- **Ingest:** ≥ 99% stored, no lost canaries, p95 lag under 30 s overall and in the samples taken
+  during compression, no growing backlog, no restarts.
+- **Reads:** every probe round in budget, and at least one round during a compression run
+  (otherwise `inconclusive`).
+- **Aggregates:** the 5-minute aggregate equals the raw fold over a compressed hour; watermarks no
+  further behind than their offset plus two schedules (20 min for 5m, 2 h 10 min for 1h).
+- **Late data:** at least one late round, every replay and backfill stored once.
+- At least 2 chunk intervals and 2 compression cycles in the steady phase, or the verdict is
+  `inconclusive: soak too short`.
+
+On nash-srv, the real one (6 h at 100k points, after `init`):
+
+```sh
+cd ~/baler-scale && git pull
+PY=~/.venv-scale/bin/python
+$PY -m baler.history_chunks recommend --points 100000 --pg-memory 6g   # the scale stack's postgres cap
+printf 'BALER_HISTORY_CHUNK_INTERVAL=1 hour\nBALER_HISTORY_COMPRESS_AFTER=3 hours\n' >> scripts/scale/scale.env
+$PY scripts/scale/ladder.py down && $PY scripts/scale/ladder.py up
+nohup $PY scripts/scale/ladder.py soak --no-up --points 100000 --duration 21600 --procs 4 \
+  --sample-every 60 --probe-every 900 --late-every 3600 > ~/scale-soak.log 2>&1 &
+tail -f ~/scale-soak.log
+```
+
+Disk at 100k: about 18 GB raw per 1-hour chunk and a hot window up to about 80 GB, plus about
+9 GB/day compressed at 5 B/row. Keep `--min-free-gb` (default 5) where it is; the soak stops
+(`inconclusive`) rather than fill the disk. Like `run`, it watches the disk holding Docker's data
+root (`docker info --format '{{.DockerRootDir}}'`), which on nash-srv is a separate disk from the
+checkout's. It falls back to the checkout's disk, with a warning, only when that root can't be
+read or isn't visible from the host. Raise `SCALE_MEM_POSTGRES` if the box has the
+memory: the sizing rule wants a chunk in 25% of it.
 
 ## Results
 
@@ -395,6 +622,27 @@ tell you either way. That is the point of the change.
 Batched writes cost almost nothing to make durable. At 1,000-row batches, `synchronous_commit=on`
 measured 17–25k rows/s against 15–21k for `off`; single-row writes pay the fsync (about 1.3×).
 
+### Limiter evidence, local (#269)
+
+Proving the evidence is captured: the same 4-vCPU dev VM, with another agent's scale stack running
+beside it (load per CPU 1.0–1.7). Project `scale269`, 120–180 s soaks, `--procs 1`. Not a
+ceiling measurement.
+
+| Run | Points | Status | Limiter (or next suspect) | Sampler CPU | Tick wall (median) |
+|---|---|---|---|---|---|
+| `20261109T002820Z` | 1,000 | pass | none found; next: `validate_api` CPU, p90 0.06 cores of its 0.25-core cap (its healthcheck; every Baler path was further from its limit) | 0.14% of a core | 9 ms |
+| `20261109T002820Z` | 5,000 | pass | none found; next: `readAll(equip) hisRead(today)` 1.71 s of 2.0 s (`hisquery.describe_points` 64%) | 0.15% | 13 ms |
+| `20261109T003913Z` | 5,000 (`--reuse`) | pass | none found; next: p95 lag 29.4 s (the listener replaying the step's 5,500 tags messages before the readings queued behind them; broker queue peaked at 46k) | 0.15% | 12 ms |
+| `20261109T004240Z` | 5,000, `SCALE_CPUS_MQTT_LISTENER=0.1` | fail | **ingest listener: mqtt_listener CPU-capped (throttled 95%) [high]**. Evidence: p95 lag 250 s, broker queue 18,946 → 128,999, Postgres, disk and mosquitto all under 0.11× their thresholds | 0.15% | 14 ms |
+
+The sampler's own cost was 0.15% of one core, plus 0.16–0.30 s of Postgres query time per step.
+Skipping `docker stats`, which the cgroup reads replace, took away 25–26 s of the ladder's own
+sampling time per 195 s soak (about 2 s per call). The first local run with these samples
+already showed things that weren't visible before. The 0.25-CPU APIs (`auth_api`,
+`derivation_api`, `validate_api`) are CFS-throttled in about 45% of their periods by their own
+healthcheck. With the listener capped, its writer sat idle (`flush_busy` 0) while its message
+thread worked through retained tags messages at 0.1 CPU, which is why it stored 16 readings/s.
+
 ### Crash durability (local, 5k points every 5 s, killed service down about 12 s)
 
 | Code | Killed | Acked | Stored | Missing (acked, not stored) |
@@ -418,6 +666,42 @@ queued behind that replay until mosquitto's 10,000-message queue overflowed.
 | _nash-srv_ | | | | | | | | | | | | |
 
 **Max sustained points:** _(nash-srv)_ · **First bottleneck at each step:** _(nash-srv)_
+
+### Long soak, local proxy (#245)
+
+**A proxy, not the acceptance run.** Same 4-vCPU dev VM as above (load average 5.6 at start,
+postgres capped at 2 CPUs / 6 GB), run `20261108T235904Z`: 2,000 points every 5 s (400 rows/s),
+with everything scaled down so several compression cycles fit in under an hour: 5-minute chunks,
+`compress_after` 10 minutes, policy every 2.5 minutes (derived). 45-minute soak after a 60 s
+warm-up; the steady phase (after `compress_after` + 2 chunks + a schedule) was the last 22.5
+minutes, 4 compression cycles. Verdict: **pass**.
+
+| | Measured |
+|---|---|
+| Hot (uncompressed) bytes, max in first / second half of the steady phase | 85.1 MB / 84.8 MB: flat |
+| Oldest uncompressed chunk past its end, max | 669 s (bound 1,202 s); backlog never above 1 chunk |
+| Disk growth, phase-aligned over 1,208 s | **15.1 B per row**, against 220 B raw: 521 MB/day at this rate instead of 7.6 GB |
+| Compressed bytes per row / ratio | 15.7 B / 13.3× (small batches: 60 rows per point per 5-minute chunk; nash-srv's 7-day chunks measured 5 B) |
+| Compression runs | 19 (7 with a chunk), each 0.5–2.2 s, median **198,000 rows/s** in one background worker, 495× the ingest rate |
+| Ingest | 1,084,801 acknowledged, 1,084,801 stored; canary p95 0.48 s, max 1.17 s, none lost; no restarts |
+| Reads | 8 probe rounds, all in budget. Slowest median: `readAll(equip) hisRead(today)` 1.81 s (budget 2.0 s); `hisRead(pastWeek)` for 1,000 points at most 1.43 s (budget 10 s); history across the compressed boundary 4–6 ms |
+| Late writes into compressed chunks | 4 rounds × ~2,000 points, each a replay (same ts) and a backfill (new ts), at 400 msg/s: every row stored once, new values, 0 duplicates, landed in 15 s |
+| Aggregates | `point_history_5m` equal to the raw fold over a compressed hour; its watermark at most 814 s behind |
+
+What the proxy does **not** show, and the nash-srv run has to:
+
+- Compression at the real chunk size. Runs here took under 2.3 s, so only 1 of 8 probe rounds and
+  none of the 15 s lag samples overlapped one (`lag_p95_during_compression_max` is empty). At 100k
+  points a 1-hour chunk is about 72 M rows: at nash-srv's earlier ~33,000 rows/s that would be 36
+  minutes per hour in one worker, so whether it keeps up there is exactly the open question
+  (`compression_margin` answers it).
+- The 1-hour aggregate: with its 1-hour end offset its watermark never moved inside this soak.
+- Read probes at 100k points, which the ladder already shows are the first wall (above).
+
+Earlier local finding, from the same work: a 2,000-point overwrite batch into compressed chunks
+failed TimescaleDB's 100,000-row decompression cap and would have put mqtt_listener into a
+restart loop; writers now lift that cap per transaction
+([History compression](/history-compression)).
 
 ### Disk growth
 

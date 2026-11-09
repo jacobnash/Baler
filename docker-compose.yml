@@ -28,6 +28,11 @@ x-daemon-env: &daemon-env
   # Blank-safe (blank = 7 days): when point_history chunks get compressed.
   # The migrate service and every process keep the policy in step at start.
   BALER_HISTORY_COMPRESS_AFTER: ${BALER_HISTORY_COMPRESS_AFTER:-}
+  # Blank-safe (blank = left as it is: 7-day chunks, policy every 12 h):
+  # point_history's chunk length and the compression policy's schedule
+  # (baler.history_chunks, #245). Only high-rate sites set them.
+  BALER_HISTORY_CHUNK_INTERVAL: ${BALER_HISTORY_CHUNK_INTERVAL:-}
+  BALER_HISTORY_COMPRESS_SCHEDULE: ${BALER_HISTORY_COMPRESS_SCHEDULE:-}
   # Blank-safe (blank = 600): how long the reading feed keeps a batch a
   # rule daemon hasn't read yet (mqtt_listener prunes; #243).
   BALER_FEED_RETENTION_S: ${BALER_FEED_RETENTION_S:-}
