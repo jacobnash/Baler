@@ -35,6 +35,7 @@ from baler.migrations import (
     v0015_deferred,
     v0016_bench,
     v0017_doc_proposals,
+    v0018_spares,
 )
 
 ALL = (
@@ -55,4 +56,5 @@ ALL = (
     v0015_deferred,
     v0016_bench,
     v0017_doc_proposals,
+    v0018_spares,
 )

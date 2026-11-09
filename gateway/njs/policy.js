@@ -158,6 +158,11 @@ const ROUTES = [
   ["GET",    /^\/ops\/pm\/tasks\/[^/]+\/completions$/,    "assets", "viewer"],
   ["GET",    /^\/ops\/pm\/due$/,                         "assets", "viewer"],
   ["GET",    /^\/ops\/pm\/due\/export$/,                  "assets", "viewer"],
+  // COBie import/export and spares (#204). Import is a dry run unless commit.
+  ["POST",   /^\/ops\/cobie\/import$/,                   "assets", "operator"],
+  ["GET",    /^\/ops\/cobie\/export$/,                   "assets", "viewer"],
+  ["GET",    /^\/ops\/spares$/,                          "assets", "viewer"],
+  ["POST",   /^\/ops\/spares$/,                          "assets", "operator"],
   // Deferred maintenance, service-life references, FCI (#200): closed, never deleted.
   ["GET",    /^\/ops\/deferred$/,                        "assets", "viewer"],
   ["POST",   /^\/ops\/deferred$/,                        "assets", "operator"],
