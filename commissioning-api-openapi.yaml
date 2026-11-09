@@ -1524,6 +1524,7 @@ paths:
                 type: object
                 properties:
                   aborted: { type: array, items: { type: string } }
+                  fleets: { type: array, items: { type: string }, description: Fleet runs stopped (Baler#275) }
                   relinquished: { type: array, items: { type: string } }
         "403": { description: Not an admin }
   /projects/{id}/active-runs:
@@ -1646,6 +1647,136 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ActiveRun" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/fleet-runs:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Active tests]
+      operationId: listCxFleetRuns
+      summary: The project's fleet runs, newest first (Baler#275)
+      responses:
+        "200":
+          description: Fleet runs
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/FleetRun" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Active tests]
+      operationId: planCxFleetRun
+      summary: Plan one active test across many equipment - the fleet dry run (admin)
+      description: >-
+        Members are `equip_uris`, every equipment of `equip_class`, or the
+        members that failed in the finished fleet `retest_of` (its test
+        again, retest-failures-only). Each member's steps are compiled and
+        validated exactly as for one active run; each gets a system (the
+        equipment that feeds it) and a slot that keeps at most
+        concurrency_per_system of a system and max_concurrent in all
+        running, `stagger_seconds` apart. Lists every write across the
+        fleet and commands nothing. Refused if the fleet doesn't fit the
+        window (at most 8 h).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [window_start, window_end]
+              properties:
+                window_start: { type: string, format: date-time }
+                window_end: { type: string, format: date-time }
+                equip_uris: { type: array, items: { type: string } }
+                equip_class: { type: string, description: A Brick class; subclasses match }
+                retest_of: { type: string, description: A finished fleet run; only its failed members are planned }
+                kind: { type: string, enum: [command_response, library], default: command_response }
+                test: { type: string, description: "kind library: a test id from GET /active/library" }
+                response_minutes: { type: number, default: 2 }
+                concurrency_per_system: { type: integer, minimum: 1, maximum: 50, default: 1 }
+                max_concurrent: { type: integer, minimum: 1, maximum: 50, default: 10 }
+                stagger_seconds: { type: integer, minimum: 0, maximum: 3600, default: 30 }
+                max_failures: { type: integer, minimum: 1, default: 3, description: Stop the fleet when this many members failed }
+      responses:
+        "201":
+          description: The planned fleet (status planned)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/FleetRun" }
+                  - type: object
+                    properties:
+                      writes_allowed: { type: boolean }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: Not an admin }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /fleet-runs/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Active tests]
+      operationId: getCxFleetRun
+      summary: A fleet run, its members and their outcomes
+      responses:
+        "200":
+          description: The fleet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FleetRun" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /fleet-runs/{id}/confirm:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Active tests]
+      operationId: confirmCxFleetRun
+      summary: Start a planned fleet (admin, inside its window, with the switch on)
+      description: >-
+        The body repeats the fleet's plan_hash. 403 when
+        BALER_CX_ALLOW_WRITES isn't 1; 400 for any other confirmation; 409
+        outside the window, if the fleet isn't planned, or if the plan
+        changed since it was listed (the stored plan no longer hashes to
+        plan_hash, or a member no longer validates against the inventory).
+        Members then start in plan order, never before their slot, within
+        the limits; each is an ordinary active run (its before-state
+        captured before its first write). The fleet stops by itself when
+        max_failures members have failed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: string, description: This fleet's plan_hash }
+      responses:
+        "202":
+          description: Confirmed and starting
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FleetRun" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: "Not an admin, or active tests are switched off" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { description: No point_write route configured }
+  /fleet-runs/{id}/abort:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Active tests]
+      operationId: abortCxFleetRun
+      summary: Stop a fleet (operator) - no member starts again, every level its members hold is relinquished now; a planned fleet is cancelled
+      responses:
+        "202":
+          description: The fleet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FleetRun" }
         "404": { $ref: "#/components/responses/NotFound" }
   /projects/{id}/agent/sessions:
     parameters:
@@ -2803,6 +2934,77 @@ components:
         results: { type: array, items: { type: object } }
         error: { type: [string, "null"] }
         abort_requested: { type: boolean }
+        fleet_id: { type: [string, "null"], description: The fleet run this run is a member of (Baler#275) }
+    FleetRun:
+      type: object
+      required: [id, project_id, kind, params, members, plan, plan_hash, status, window_start, window_end, failures, tally]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        kind: { type: string, description: "command_response or library:<test id>" }
+        params:
+          type: object
+          properties:
+            kind: { type: string, enum: [command_response, library] }
+            test: { type: [string, "null"] }
+            response_minutes: { type: number }
+            concurrency_per_system: { type: integer }
+            max_concurrent: { type: integer }
+            stagger_seconds: { type: integer }
+            max_failures: { type: integer }
+        members:
+          type: array
+          items:
+            type: object
+            required: [equip_uri, system, steps, slot_start, slot_end, state]
+            properties:
+              equip_uri: { type: string }
+              dis: { type: [string, "null"] }
+              system: { type: string, description: "The equipment that feeds it (brick:feeds / isFedBy), or (no system)" }
+              steps: { type: array, items: { type: object } }
+              minutes: { type: number }
+              slot_start: { type: string, format: date-time, description: Never started before this }
+              slot_end: { type: string, format: date-time }
+              state: { type: string, enum: [pending, started, done, skipped, not_run] }
+              run_id: { type: [string, "null"], description: Its own active run, once started }
+              outcome: { type: [string, "null"], enum: [pass, fail, inconclusive, aborted, null] }
+              started_at: { type: [string, "null"] }
+              note: { type: [string, "null"] }
+        skipped:
+          type: array
+          description: Equipment named that can't take the test, and why
+          items: { type: object, properties: { equip_uri: { type: string }, reason: { type: string } } }
+        plan:
+          type: array
+          description: The dry run - every write across the fleet
+          items:
+            type: object
+            properties:
+              equip_uri: { type: string }
+              step: { type: string }
+              point: { type: string }
+              value: { type: number }
+              level: { type: integer }
+              hold_minutes: { type: number }
+              not_before: { type: string, format: date-time }
+              expires_at: { type: string, format: date-time }
+        plan_hash: { type: string, description: "sha256 of the plan; the typed confirmation repeats it" }
+        status: { type: string, enum: [planned, confirmed, running, completed, stopped, aborted, expired, failed, cancelled] }
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
+        retest_of: { type: [string, "null"] }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        confirmed_by: { type: [string, "null"] }
+        confirmed_at: { type: [string, "null"], format: date-time }
+        started_at: { type: [string, "null"], format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+        heartbeat_at: { type: [string, "null"], format: date-time }
+        failures: { type: integer }
+        stop_reason: { type: [string, "null"] }
+        error: { type: [string, "null"] }
+        abort_requested: { type: boolean }
+        tally: { type: object, additionalProperties: { type: integer }, description: Members by outcome (or state while not finished) }
     AgentSession:
       type: object
       required: [id, project_id, status, transcript]
