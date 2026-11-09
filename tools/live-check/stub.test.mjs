@@ -25,6 +25,7 @@ function stub({ freshness, slowFaults = 0 }) {
     if (url.pathname === "/cx/projects") return json([{ id: "p1", name: "Home Edge Pilot" }]);
     if (url.pathname === "/fault/faults") return setTimeout(() => json([]), slowFaults);
     if (url.pathname === "/ops/freshness") return json(JSON.parse(fx(freshness)));
+    if (url.pathname === "/ops/metrics") { res.writeHead(200, { "content-type": "text/plain; version=0.0.4" }); return res.end("baler_ingest_newest_reading_age_seconds 3\nbaler_listener_queue_oldest_age_seconds 0.2\n"); }
     if (url.pathname === "/ops/edges") return json(JSON.parse(fx("edges-ok.json")));
     if (url.pathname === "/ops/gateway-errors") return json({ available: true, count: 0, by_status: {}, by_route: [], first: null, last: null, samples: [] });
     const announce = JSON.parse(fx("announce-ok.json"));

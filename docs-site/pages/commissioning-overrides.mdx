@@ -1,0 +1,126 @@
+---
+title: Passive override tests
+---
+
+# Passive override tests
+
+Every time someone overrides a setpoint or a command, the building runs a
+functional test for free: did the equipment get there? Baler watches for
+those overrides in the history it already has and judges each one, without
+writing anything to a controller (Baler#212).
+
+Turn it on per Cx project:
+
+```json
+PATCH /cx/projects/{id}
+{"settings": {"overrides": {"enabled": true, "tz": "America/Chicago"}}}
+```
+
+From then on every verification run (and every procedure test run) adds an
+`override:<pair>` result per overridden point. They are ordinary Cx
+results, so issues, phase gates, fault mirroring, reports and procedures
+treat them like any other: a procedure step with the criterion
+`{"check": "override:"}` passes only if every override its equipment saw
+in the window was answered.
+
+## What counts as an override
+
+The pairs are the ladder's (`commissioning/ladder.py`): a setpoint whose
+sensor should track it (zone and supply air temperature, duct static
+pressure, airflow), or a command whose status should follow it (fan, pump,
+run/enable). For each, Baler looks at the setpoint's or command's own
+history for a **step that then holds**:
+
+| Rule | Setting (default) |
+|---|---|
+| The value moves by at least the pair's step (1 °F for temperatures, 0.1 in. w.c. static, 10 % airflow; any on/off change for a command) | `min_step` per pair |
+| and stays there at least this long, so a reset sequence that moves every few minutes doesn't count | `min_hold_minutes` (10) |
+| It isn't Baler's own write: an active-test (Cx 9) write or a Haystack `pointWrite`/timed override within the slack | `baler_slack_minutes` (2) |
+| It isn't the schedule: no transition of a BACnet Schedule controlling that point within the slack | `schedule_slack_minutes` (5) |
+| It isn't the release of the previous step (the value going back to what it was) | |
+
+Where Windrow reports the controller's priority array, the override is
+annotated with the level a writer other than Baler held (a level numbered
+below 16, the level a controller's own program and schedules usually write
+at). `"basis": "priority_array"` counts
+only overrides an observation confirms; the default `"any"` counts steps
+from history too.
+
+## How it is judged
+
+The controlled variable must come within the pair's tolerance of the new
+value (1 °F zone, 1.5 °F supply air, 0.1 in. w.c., 10 % airflow; a status
+must equal the command) within `within_minutes` (30).
+
+| Status | When |
+|---|---|
+| pass | it got there in time; the evidence says how long it took |
+| fail | the time ran out and it never got there; the symptom gives both values |
+| inconclusive | no samples of the controlled variable, or the override was released before the time ran out |
+| not_applicable | a **setpoint** override while the equipment was scheduled unoccupied |
+| (no result) | the time hasn't run out and it hasn't got there yet: pending, judged by a later run |
+
+**Schedule-aware.** "It didn't reach the setpoint" isn't confused with "the
+schedule had it unoccupied". The equipment counts as unoccupied when a
+BACnet Schedule controlling one of its points (other than the overridden
+one) commanded an unoccupied value while the override stood, or when its
+own `Occupancy_Command` / `Occupancy_Status` point read unoccupied.
+Unoccupied values default to `0`, `false`, `inactive`, `off`, `unoccupied`,
+`unocc` and `standby` (`unoccupied_values`). A commanded fan, pump or run
+isn't exempt: the operator's level beats the schedule's, so the status
+should follow regardless.
+
+A point overridden several times in one window gets the status of its
+latest judged override; the evidence lists them all (newest 20) with what
+was excluded and why.
+
+## Schedules and priority arrays from Windrow
+
+**Schedules.** `POST /cx/projects/{id}/schedules/refresh` (operator) reads
+the Schedule and Calendar objects of every in-scope connection on each
+Windrow instance on the command channel, using Windrow's
+`connection_schedules` command. That covers the weekly schedule,
+exceptions by priority, calendars, the effective period, and the points
+each schedule controls. They are stored in `bacnet_schedules`.
+
+- The refresh only reads; it never writes.
+- With `refresh_minutes` (default 15) it also runs on the scheduler tick for
+  every project that has override tests enabled. `0` means on request only.
+- `GET /cx/projects/{id}/schedules` shows what was last read and what each
+  schedule commands now.
+
+**Priority arrays.** These come with the readings themselves (Windrow#25,
+Windrow PR #34). A commandable point's reading carries an optional key:
+
+```json
+{"point": "zone-temp-sp", "value": 75.0, "ts": 1762700000.0,
+ "priority": {"active": 8, "levels": {"8": 75.0, "16": 72.0}}}
+```
+
+- Windrow re-reads the array every 60 s, and publishes at once when an
+  override is made or released.
+- `mqtt_listener` logs each point's levels into `point_priority_arrays`,
+  but only when they change, so the steady re-reads cost nothing and the
+  table answers "level 8 was held from T" for the past.
+- Windrow doesn't know who wrote a level. Baler's own writes are excluded
+  by the detector, so any other held level counts as someone else's.
+- A Windrow without this key, or a non-commandable point, publishes exactly
+  what it did before. The detector then works from history alone.
+
+Schedules are evaluated as ANSI/ASHRAE 135 describes (clause 12.24.4):
+each day starts at the schedule default, the latest time-value at or before
+the moment applies, a null relinquishes, exceptions apply highest priority
+first, and nothing is scheduled outside the effective period. Times are the
+controller's wall clock in `tz`.
+
+## Limits
+
+- A schedule snapshot is the schedule *now*: an override from before a
+  schedule was edited is judged against the edited one. `read_at` on each
+  schedule says how old the snapshot is.
+- `point_write_levels` keeps only the current level per point, so a Haystack
+  `pointWrite` that has since been replaced isn't excluded as Baler's own;
+  Cx active-run writes always are (their log is kept on the run).
+- Detection needs the setpoint or command to be trended. A controller that
+  overrides internally, without the value changing on the network, is
+  invisible here until Windrow reports its priority array.

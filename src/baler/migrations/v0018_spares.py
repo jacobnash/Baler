@@ -1,5 +1,5 @@
 """
-0006 spare parts by asset type (#204, epic #221): COBie's Spare sheet,
+0018 spare parts by asset type (#204, epic #221): COBie's Spare sheet,
 which some Cx tools skip, kept as the operator's spares list.
 """
 
@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 6
+VERSION = 18
 NAME = "lifecycle spares"
 
 SPARES = """

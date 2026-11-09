@@ -1,7 +1,7 @@
 // Assets page (#197): the lifecycle record's assets and install/remove
 // history, over ops_api's /ops/assets and /ops/positions routes. Plain
 // globals, no build step, like every other page here.
-const OPS_URL = new URLSearchParams(location.search).get("ops") || "/ops";
+const OPS_URL = apiBase("ops", "/ops");  // same-origin paths only (apibase.js)
 const statusEl = document.getElementById("status");
 let currentAsset = null;
 
@@ -69,6 +69,9 @@ async function showAsset(id) {
   const { history, ...fields } = a;
   document.getElementById("detail-fields").textContent = JSON.stringify(fields, null, 2);
   fill("#history-table tbody", history, ["position_uri", (h) => h.installed_at, "install_reason", (h) => h.removed_at || "still installed", "remove_reason"]);
+  const tests = await api(`/assets/${encodeURIComponent(id)}/bench-tests`);
+  fill("#bench-table tbody", tests, [(t) => t.tested_at.slice(0, 16), (t) => t.procedure.name, "verdict",
+    (t) => (t.before_install ? "yes" : "no"), (t) => (t.baseline ? "baseline" : ""), "technician"]);
   const ws = await api(`/assets/${encodeURIComponent(id)}/warranties`);
   fill("#warranty-table tbody", ws, ["kind", "provider", "starts_on", "ends_on", "status",
     (w) => (w.source ? `doc ${w.source.document_id || "?"} p. ${w.source.page || "?"}` : "")]);
@@ -81,6 +84,24 @@ function onSubmit(id, fn) {
     ev.preventDefault();
     try { await fn(ev.target); } catch (err) { say(`error: ${err.message}`); }
   });
+}
+
+async function loadProcedures() {
+  const procs = await api("/bench/procedures");
+  const sel = document.getElementById("bench-procedure");
+  sel.replaceChildren(...procs.filter((p) => p.status === "active").map((p) =>
+    Object.assign(document.createElement("option"), { value: p.id, textContent: p.name })));
+}
+
+async function loadDeferred() {
+  const [items, f, life] = await Promise.all([api("/deferred?status=open,planned"), api("/deferred/fci"), api("/service-life/assets")]);
+  document.getElementById("fci-summary").textContent = f.fci == null
+    ? `Open deferred cost ${f.deferred_cost}; no replacement values yet, so no FCI.`
+    : `FCI ${(f.fci * 100).toFixed(1)}%: ${f.deferred_cost} deferred / ${f.replacement_value} replacement value. ${f.note}`;
+  fill("#deferred-table tbody", items, ["title", "risk", "cost", "target_year", "status", (i) => i.asset_id || i.position_uri]);
+  fill("#life-table tbody", life, [(r) => `${r.asset.tag || r.asset.serial || r.asset_id} (${r.asset.asset_type || ""})`, "installed_on",
+    "age_years", "expected_life_years", "remaining_years", "replacement_value",
+    (r) => (r.reference ? `${r.reference.source_title} (read ${r.reference.retrieved_on})` : "")]);
 }
 
 async function loadPM() {
@@ -120,6 +141,40 @@ async function loadAlerts() {
 
 initAuth(() => {
   loadAssets().catch((err) => say(`error: ${err.message}`));
+  loadProcedures().catch((err) => say(`error: ${err.message}`));
+  onSubmit("bench-form", async (f) => {
+    const body = formJSON(f);
+    body.measurements = body.measurements ? JSON.parse(body.measurements) : {};
+    const t = await api(`/assets/${encodeURIComponent(currentAsset.id)}/bench-tests`, { method: "POST", body: JSON.stringify(body) });
+    say(`bench test recorded: ${t.verdict}`);
+    f.reset();
+    await showAsset(currentAsset.id);
+  });
+  loadDeferred().catch((err) => say(`error: ${err.message}`));
+  onSubmit("deferred-form", async (f) => {
+    const body = formJSON(f);
+    body.cost = Number(body.cost);
+    if (body.target_year) body.target_year = parseInt(body.target_year, 10);
+    await api("/deferred", { method: "POST", body: JSON.stringify(body) });
+    f.reset();
+    await loadDeferred();
+  });
+  onSubmit("life-form", async (f) => {
+    const body = formJSON(f);
+    body.median_years = Number(body.median_years);
+    await api("/service-life", { method: "POST", body: JSON.stringify(body) });
+    f.reset();
+    await loadDeferred();
+  });
+  onSubmit("value-form", async (f) => {
+    const body = formJSON(f);
+    const id = body.asset_id;
+    delete body.asset_id;
+    body.replacement_value = Number(body.replacement_value);
+    await api(`/assets/${encodeURIComponent(id)}/values`, { method: "POST", body: JSON.stringify(body) });
+    f.reset();
+    await loadDeferred();
+  });
   loadPM().catch((err) => say(`error: ${err.message}`));
   document.getElementById("cobie-export").addEventListener("click", (ev) => { ev.preventDefault(); downloadCSV("/cobie/export", "cobie.xlsx"); });
   onSubmit("cobie-form", async (f) => {

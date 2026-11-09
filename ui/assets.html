@@ -75,6 +75,20 @@
         <thead><tr><th>Position</th><th>Installed</th><th>Why</th><th>Removed</th><th>Why</th></tr></thead>
         <tbody></tbody>
       </table>
+      <h3>Bench tests</h3>
+      <p class="hint">The earliest passing bench test before install is the asset's first baseline.
+        <a href="/docs/bench-tests" target="_blank" rel="noopener">Docs</a>.</p>
+      <table id="bench-table">
+        <thead><tr><th>Tested</th><th>Procedure</th><th>Verdict</th><th>Before install</th><th>Baseline</th><th>Technician</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <form id="bench-form" class="inline-form">
+        <select name="procedure_id" id="bench-procedure"></select>
+        <input name="tested_at" type="datetime-local" />
+        <input name="technician" placeholder="technician" />
+        <textarea name="measurements" rows="2" cols="50" placeholder='measurements: {"stroke-time": 88, "stroke-open": true}'></textarea>
+        <button type="submit">Record bench test</button>
+      </form>
       <form id="install-form" class="inline-form">
         <input name="position_uri" placeholder="position URI (urn:equip:…)" size="40" />
         <input name="at" type="datetime-local" />
@@ -137,6 +151,45 @@
     </section>
 
     <section>
+      <h2>Deferred maintenance and FCI</h2>
+      <p class="hint">FCI = open deferred cost / replacement value of the installed assets that have one.
+        Expected service life per type is entered by you, with the reference and the date you read it
+        (Baler ships no values). <a href="/docs/deferred-maintenance" target="_blank" rel="noopener">Docs</a>.</p>
+      <p id="fci-summary"></p>
+      <table id="deferred-table">
+        <thead><tr><th>Title</th><th>Risk</th><th>Cost</th><th>Target year</th><th>Status</th><th>Asset / position</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <form id="deferred-form" class="inline-form">
+        <input name="title" placeholder="deferred work" required />
+        <input name="position_uri" placeholder="position URI" size="30" />
+        <input name="cost" placeholder="cost" size="8" inputmode="decimal" required />
+        <select name="risk"><option>low</option><option selected>medium</option><option>high</option><option>critical</option></select>
+        <input name="target_year" placeholder="target year" size="6" inputmode="numeric" />
+        <button type="submit">Add</button>
+      </form>
+      <h3>Service life</h3>
+      <table id="life-table">
+        <thead><tr><th>Asset</th><th>Installed</th><th>Age</th><th>Expected</th><th>Remaining</th><th>Replacement value</th><th>Reference</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <form id="life-form" class="inline-form">
+        <input name="asset_type" placeholder="asset type" required />
+        <input name="median_years" placeholder="years" size="5" inputmode="decimal" required />
+        <input name="source_title" placeholder="reference (title)" required />
+        <input name="source_url" placeholder="URL" />
+        <input name="retrieved_on" type="date" required title="the date you read it" />
+        <button type="submit">Set expected life</button>
+      </form>
+      <form id="value-form" class="inline-form">
+        <input name="asset_id" placeholder="asset id" required />
+        <input name="replacement_value" placeholder="replacement value" inputmode="decimal" required />
+        <input name="basis" placeholder="basis (quote, estimate…)" />
+        <button type="submit">Record replacement value</button>
+      </form>
+    </section>
+
+    <section>
       <h2>COBie</h2>
       <p class="hint">Import a COBie handover workbook (Type, Component, Spare, Job; warranties from Type) to seed
         assets, warranties, PM tasks and spares. It's a dry run first: check what it would write and skip, then commit.
@@ -176,6 +229,7 @@
       </table>
     </section>
   </main>
+  <script src="apibase.js"></script>
   <script src="auth.js"></script>
   <script src="assets.js"></script>
 </body>

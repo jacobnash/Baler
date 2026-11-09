@@ -1,5 +1,5 @@
 """
-0004 preventive maintenance schedules (#199, epic #221).
+0014 preventive maintenance schedules (#199, epic #221).
 
 - lc_pm_tasks: a PM task for one asset, or for every installed asset of a
   type. Triggered by the calendar (interval_days), by run hours counted
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 4
+VERSION = 14
 NAME = "lifecycle pm schedules"
 
 TASKS = """

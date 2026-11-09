@@ -18,7 +18,7 @@ point's key starts with (urn:equip:fbf/s/ahu-1 owns urn:point:fbf/s/ahu-1/sat),
 the same key scheme scope.py uses.
 
 This computes alerts on request (GET /ops/warranties/alerts). Pushing them
-(webhooks, email) is not built yet. Schema: migration 0004.
+(webhooks, email) is not built yet. Schema: migration 0013.
 """
 
 from __future__ import annotations
