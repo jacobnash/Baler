@@ -7,7 +7,7 @@
 # floor is no newer than the runtime image's.
 FROM rust:1-slim-bookworm AS openhay
 # Pinned to an openhay commit; bump together with pyproject.toml's haystack extra.
-ARG OPENHAY_REF=dd6fe357cba3e1de694dec3134f2c569ebaf9884
+ARG OPENHAY_REF=8c3b7c31e7bfdfb8545a9da5bfe90782ba65c2f6
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip \
     && pip3 install --break-system-packages --no-cache-dir "maturin>=1.5,<2"
 # BuildKit resolves the ref to a commit and caches this layer by that commit:
