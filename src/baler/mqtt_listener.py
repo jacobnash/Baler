@@ -405,8 +405,9 @@ class RetainedSnapshot:
     ones go to the shared group and are skipped here), stored through a
     batcher like any others, until none has arrived for `idle_s`."""
 
-    def __init__(self, args, store, idle_s: float = 3.0):
-        self.args, self.store, self.idle_s = args, store, idle_s
+    def __init__(self, args, idle_s: float = 3.0):
+        self.args, self.idle_s = args, idle_s
+        self.store = RemoteStore()  # its own HTTP session: this is another thread
         self.thread = threading.Thread(target=self._run, name="retained-snapshot", daemon=True)
 
     def start(self) -> None:
@@ -466,7 +467,7 @@ def run_worker(index: int, args) -> None:
     client_id = worker_client_id(index)
     client, batcher = _session(client_id, args, store, connect(), prune=index == 0)
     client.on_disconnect = make_on_disconnect(batcher)
-    on_fresh = (lambda c: RetainedSnapshot(args, store).start()) if index == 0 and args.retained_snapshot else None
+    on_fresh = (lambda c: RetainedSnapshot(args).start()) if index == 0 and args.retained_snapshot else None
     client.on_connect = make_on_connect(shared(args.topic_pattern, args.share_group), batcher, on_fresh=on_fresh)
     batcher.start()
     threading.Thread(target=_heartbeats, args=(f"mqtt_listener/{index}", client_id, batcher), daemon=True,

@@ -193,3 +193,84 @@ def test_stuck_matches_the_per_point_verdict(conn, values, stuck):
     _his(conn, [rule], now)
     assert _open(conn, rule["id"]) == ({p} if stuck else set())
     assert _evaluate_stuck(conn, p, 120, now) is stuck  # the per-point reference agrees
+
+
+# --- #233: several listener workers, and tags riding the feed ---------------
+
+
+def test_tags_ride_the_batch_and_each_consumer_sees_only_its_part(conn):
+    """A batch with tags stores {"alarms", "tags"} in the feed row; the rule
+    daemons still get just the alarms list, tag_ingest just the tags."""
+    tag = _tag()
+    rules = reading_feed.FeedConsumer(timeseries.connect(), f"test:{tag}")
+    tags = reading_feed.FeedConsumer(timeseries.connect(), f"test:{tag}:tags", tags_only=True)
+    rules.start()
+    tags.start()
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    alarm = [f"fbf/{tag}/a/alarm", {"object": "ai,1"}, 1.0]
+    tag_msg = [f"fbf/{tag}/a/tags", '{"point": true}', 2.0]
+    timeseries.write_point_values(conn, [(f"urn:point:fbf/{tag}/a", 1.0, now)],
+                                  then=lambda c: reading_feed.append_from_stage(c, [alarm], [tag_msg]))
+    timeseries.write_point_values(conn, [], then=lambda c: reading_feed.append_from_stage(c, [], [tag_msg]))  # tags only
+    readings, alarms = _drain(rules, f"urn:point:fbf/{tag}")
+    assert len(readings) == 1 and alarms == [alarm]
+    got = []
+    for _ in range(50):
+        batches = tags.poll()
+        if not batches:
+            break
+        got += [t for b in batches for t in b.tags if t[0].startswith(f"fbf/{tag}/")]
+        assert all(b.readings == [] and b.alarms == [] for b in batches)
+        tags.commit(batches)
+    assert got == [tag_msg, tag_msg]
+
+
+def test_concurrent_writers_append_one_row_per_batch_in_commit_order(conn):
+    """N listener workers commit batches concurrently, overlapping points
+    included: each committed batch is exactly one feed row, seq order is
+    commit order (a consumer that has read seq N never later sees a smaller
+    seq commit), and none deadlocks on point_registry or point_history."""
+    import threading
+    import time
+
+    tag = _tag()
+    consumer = reading_feed.FeedConsumer(timeseries.connect(), f"test:{tag}")
+    consumer.start()
+    base = datetime.now(timezone.utc).replace(microsecond=0)
+    writers, batches_each, points = 4, 10, 50
+    errors: list = []
+
+    def worker(w):
+        c = timeseries.connect()
+        try:
+            for b in range(batches_each):
+                ts = base + timedelta(seconds=b * writers + w)
+                rows = [(f"urn:point:fbf/{tag}/p{i}", float(w), ts + timedelta(seconds=40 * (i % 2))) for i in range(points)]
+                timeseries.write_point_values(c, rows, then=lambda cc, w=w, b=b: reading_feed.append_from_stage(
+                    cc, [[f"fbf/{tag}/w{w}/alarm", {"batch": b}, 0.0]]))
+        except Exception as exc:  # noqa: BLE001 - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(w,)) for w in range(writers)]
+    for t in threads:
+        t.start()
+    seen_seqs: list[int] = []
+    mine = []
+    while True:  # read while they write: a smaller seq must never show up after a bigger one
+        alive = any(t.is_alive() for t in threads)
+        batches = consumer.poll()
+        seen_seqs += [b.seq for b in batches]
+        mine += [a for b in batches for a in b.alarms if a[0].startswith(f"fbf/{tag}/")]
+        consumer.commit(batches)
+        if not batches:
+            if not alive:
+                break
+            time.sleep(0.02)
+    for t in threads:
+        t.join()
+    assert not errors
+    assert seen_seqs == sorted(seen_seqs) and len(set(seen_seqs)) == len(seen_seqs)
+    assert sorted((a[0], a[1]["batch"]) for a in mine) == sorted(
+        (f"fbf/{tag}/w{w}/alarm", b) for w in range(writers) for b in range(batches_each))
+    n = conn.execute("SELECT count(*) FROM point_history WHERE point_uri LIKE %s", (f"urn:point:fbf/{tag}/%",)).fetchone()[0]
+    assert n == writers * batches_each * points

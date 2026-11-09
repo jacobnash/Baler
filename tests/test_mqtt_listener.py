@@ -6,6 +6,7 @@ reconnect, and there's no other code path that restores it.
 """
 
 import json
+import typing
 
 import pytest
 from rdflib import RDF, URIRef
@@ -325,3 +326,48 @@ def test_a_flagged_readings_quality_survives_the_batch(monkeypatch):
     on_message(client, None, _QMsg("fbf/s/ahu/p", json.dumps(payload).encode(), 1))
     batcher.flush([batcher.queue.get_nowait()])
     assert written == [[("fbf/s/ahu/p", 70.0, 5.0, "fault")]]
+
+
+def test_the_supervisor_restarts_a_dead_child_with_backoff_and_counts_it(monkeypatch):
+    """A worker that exits is restarted (1 s, then 2 s, ...) and counted -
+    the count is in the 'mqtt_listener' heartbeat, which fails a ladder
+    step like a container restart. The retire sweep exiting 0 is just done."""
+    from baler import mqtt_listener
+
+    class Proc:
+        made: typing.ClassVar[list] = []
+
+        def __init__(self, target, args, name, daemon):
+            self.name, self.alive, self.exitcode, self.pid = name, True, None, len(Proc.made) + 100
+            Proc.made.append(self)
+
+        def start(self):
+            pass
+
+        def is_alive(self):
+            return self.alive
+
+        def die(self, code):
+            self.alive, self.exitcode = False, code
+
+    clock = [1000.0]
+    monkeypatch.setattr(mqtt_listener.time, "monotonic", lambda: clock[0])
+    sup = mqtt_listener.Supervisor(mqtt_listener.parse_args(["--workers", "2"]))
+    sup.ctx = type("Ctx", (), {"Process": Proc})()
+    sup.spawn("retire", "retire", retire_ids=["baler-mqtt-listener"])
+    sup.spawn("worker-0", "worker", 0)
+    sup.spawn("worker-1", "worker", 1)
+    Proc.made[0].die(0)
+    Proc.made[2].die(1)
+    sup.tick()
+    assert "retire" not in sup.children and sup.restarts == {"worker-1": 1}
+    clock[0] += 0.5
+    sup.tick()
+    assert len(Proc.made) == 3  # still backing off
+    clock[0] += 0.6
+    sup.tick()
+    assert len(Proc.made) == 4 and Proc.made[3].name == "worker-1"
+    Proc.made[3].die(1)
+    sup.tick()
+    assert sup.restarts == {"worker-1": 2} and sup.children["worker-1"]["due"] == clock[0] + 2.0
+    assert sup.pids() == {"worker-0": 101}

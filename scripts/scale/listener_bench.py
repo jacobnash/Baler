@@ -153,10 +153,10 @@ def run_one(args, workers: int, conn) -> dict:
         # point_history rows written (its chunks' pg_stat counters): cheap
         # enough to poll, unlike a count(*) over the run's rows, which cost
         # Postgres more CPU than some of the workers did.
-        return conn.execute("""
+        return int(conn.execute("""
             SELECT coalesce(sum(s.n_tup_ins + s.n_tup_upd), 0) FROM pg_stat_user_tables s
             JOIN timescaledb_information.chunks c ON c.chunk_schema = s.schemaname AND c.chunk_name = s.relname
-            WHERE c.hypertable_name = 'point_history'""").fetchone()[0]
+            WHERE c.hypertable_name = 'point_history'""").fetchone()[0])
 
     w0 = writes()
     env = dict(os.environ, PYTHONPATH=str(common.REPO / "src"))

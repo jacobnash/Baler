@@ -132,6 +132,9 @@ def cmd_init(args) -> None:
         "# Pin the whole stack to some host CPUs, e.g. 2-5 (blank: no pinning).",
         "SCALE_CPUSET=",
         "# Per-container caps: SCALE_CPUS_<SERVICE>=1.5, SCALE_MEM_<SERVICE>=4g (defaults in compose.scale.yml).",
+        "# Listener worker processes (#233; blank = 1). Give the listener about a CPU each:",
+        "# BALER_LISTENER_WORKERS=4 with SCALE_CPUS_MQTT_LISTENER=4.5 and SCALE_MEM_MQTT_LISTENER=2g.",
+        "BALER_LISTENER_WORKERS=",
     ]
     common.ENV_FILE.write_text("\n".join(lines) + "\n")
     common.ENV_FILE.chmod(0o600)
