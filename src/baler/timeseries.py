@@ -14,7 +14,7 @@ import psycopg
 from psycopg import sql
 from psycopg_pool import ConnectionPool
 
-from baler import ddl, schema
+from baler import ddl, history_chunks, schema
 
 DEFAULT_DSN = os.environ.get(
     "BALER_PG_DSN", "postgresql://baler:baler@localhost:5433/baler"
@@ -127,11 +127,16 @@ _synced: set[tuple] = set()
 
 def sync_settings(conn: psycopg.Connection) -> None:
     """Settings that live in the database but come from the environment
-    (today: the compression policy), once per process per database."""
+    (the compression policy's compress_after, the chunk interval and the
+    policy's schedule: baler.history_chunks), once per process per
+    database."""
     key = (conn.info.host, conn.info.port, conn.info.dbname)
     if key not in _synced:
         _synced.add(key)
         _ensure_compression(conn)
+        # After the policy: a policy it just replaced comes back with
+        # TimescaleDB's default schedule, which this then aligns.
+        history_chunks.ensure(conn)
 
 
 # For pools serving requests through the gateway: below nginx's 60s proxy
@@ -278,6 +283,20 @@ CREATE TEMP TABLE IF NOT EXISTS point_history_stage (
 """
 
 
+# A batch that overwrites rows in a compressed chunk decompresses one batch
+# of up to 1,000 rows per point it touches, and TimescaleDB refuses a
+# transaction past 100,000 decompressed rows by default
+# (max_tuples_decompressed_per_dml_transaction). Measured (#245): a
+# 2,000-point retained replay into 7-day compressed chunks failed at 101,000
+# - and mqtt_listener exits on a failed batch, the broker redelivers the
+# same batch, and ingest stops in a restart loop. A listener restart replays
+# every retained reading, and a point that has gone quiet for longer than
+# compress_after has its retained one in a compressed chunk, so the shorter
+# compress_after a large site needs makes this routine. The cap is for
+# runaway bulk SQL; these batches are bounded by the listener's batch size.
+_UNLIMITED_DECOMPRESSION = "SELECT set_config('timescaledb.max_tuples_decompressed_per_dml_transaction', '0', true)"
+
+
 def write_point_values(conn: psycopg.Connection, rows, then=None) -> int:
     """Many readings - (point_uri, value, ts[, unit[, label[, quality]]])
     each - in one transaction: COPY into a staging table, then one upsert
@@ -300,6 +319,7 @@ def write_point_values(conn: psycopg.Connection, rows, then=None) -> int:
         return 0
     cols = "point_uri, ts, value, value_text, value_bool, unit, label, quality"
     with conn.transaction():
+        conn.execute(_UNLIMITED_DECOMPRESSION)
         conn.execute(_STAGE_DDL)
         with conn.cursor() as cur:
             if latest:
