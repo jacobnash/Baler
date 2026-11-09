@@ -157,6 +157,21 @@ and missed readings show in its heartbeat, on its `/ops/status` card and in
 mode, as before. Readings that didn't arrive over MQTT (`POST /ingest`, hisWrite) are picked up
 by the next sweep.
 
+**How often a Cur-mode formula is swept.** A Cur-mode formula re-runs on every reading of its
+inputs, so its sweep over every row is only a backstop. Without `interval_seconds` it is swept
+every `--cur-sweep-seconds` (default 300), not every `--tick-seconds` (5) as other derivations
+are. Before [#273](https://github.com/jacobnash/Baler/issues/273) it was swept every tick as well,
+and the scale ladder's 1-minute profile measured that as 6.5 times the configured derivation work,
+all of it recomputing values the reading feed had just computed. Set `interval_seconds` to sweep
+a Cur-mode formula more often, for example when most of its inputs arrive by `POST /ingest`.
+
+**Writes are batched per derivation.** Each derivation's output rows from one sweep or one feed
+batch are written in one transaction (`timeseries.write_point_values`), not as an INSERT and a
+`point_registry` upsert per row, each with its own commit. A target's health row is written on
+its first success and after each failure, not again on every success. A derivation that depends
+on another still reads the other's rows from the same sweep, because each derivation's batch is
+committed before the next derivation runs.
+
 ## Failure isolation is per-(derivation, target), not per-derivation
 
 A single row failing inside a `formula` derivation (or a single node inside a `rollup` tree)
