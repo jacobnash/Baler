@@ -116,3 +116,40 @@ on each active procedure's latest test run:
 
 For example: "220 of 220 tested: 220 automatically, 12 manually, 12
 witnessed".
+
+## The standard active-test library
+
+`GET /cx/active/library` lists the standard active tests, stored as data
+in `commissioning/test_library.py`:
+
+| id | Equipment | What it proves |
+|---|---|---|
+| `vav_reheat` | VAV | The damper opens and airflow rises by at least 50 cfm; the reheat valve opens and the discharge air warms by at least 5 F |
+| `ahu_basic` | AHU | The supply fan's status follows its command; the supply air comes within 2 F of a setpoint stepped 3 F lower |
+| `chw_loop` | Chilled-water system | The pump's status follows its command; the chilled water supply comes within 1.5 F of a setpoint stepped 2 F lower |
+
+**What each test states, written against Brick classes:**
+
+- the equipment class it applies to;
+- its steps: the writes, which are absolute or an offset from the latest
+  value, and the expectations: equals / min / max, near the setpoint it
+  wrote, or a rise or fall from the latest value;
+- its **safety limits**: the range every commanded value must stay
+  within, and the longest any step may hold (never more than Cx 9's 60
+  min);
+- its **expected result**, in words, for the report.
+
+**Planning a test:** send
+`POST /cx/projects/{id}/active-runs {"kind": "library", "test": "ahu_basic", ...}`.
+
+- The test is compiled for that equipment against its latest values, so
+  the dry run lists the exact numbers that will be written and expected.
+- If a resolved value falls outside the test's limits, the plan is
+  refused.
+- From there the run is a Cx 9 active run like any other: admin only,
+  `BALER_CX_ALLOW_WRITES`, a window, expiring writes, typed confirmation,
+  guaranteed relinquish, sweeper and kill switch, all unchanged.
+
+**Judging a procedure step:** a step with
+`"active": {"kind": "library", "test": "ahu_basic"}` is judged by the
+newest such run on its equipment.

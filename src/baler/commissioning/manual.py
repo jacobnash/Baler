@@ -226,6 +226,12 @@ def active_outcomes(active_runs: list[dict], since: datetime) -> dict[tuple[str,
     return out
 
 
+def run_kind(spec: dict) -> str:
+    """The cx_active_runs kind a step's `active` spec is judged by:
+    command_response, or library:<test id> (test_library, slice c)."""
+    return f"library:{spec.get('test')}" if spec.get("kind") == "library" else str(spec.get("kind") or "")
+
+
 def _public_manual(m: dict) -> dict:
     return {"id": m["id"], "status": m["status"], "note": m.get("note"), "witness": m.get("witness"),
             "attachments": len(m.get("attachments") or []), "recorded_by": m.get("recorded_by"),
@@ -251,7 +257,7 @@ def apply(per_equip: list[dict], proc: dict, methods: dict[str, str], manual_row
             crit = st.get("criteria") or []
             machine = procedures.worst(c["status"] for c in crit) if crit else None
             m = mine.get((e["equip_uri"], st["id"]))
-            a = act.get((e["equip_uri"], (spec.get("active") or {}).get("kind", ""))) if "active" in procedures.step_methods(spec) else None
+            a = act.get((e["equip_uri"], run_kind(spec.get("active") or {}))) if "active" in procedures.step_methods(spec) else None
             st["method"] = method
             st["machine_status"] = machine
             st["manual"] = _public_manual(m) if m else None

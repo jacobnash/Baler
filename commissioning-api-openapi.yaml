@@ -1566,7 +1566,8 @@ paths:
                 equip_uri: { type: string }
                 window_start: { type: string, format: date-time }
                 window_end: { type: string, format: date-time }
-                kind: { type: string, enum: [command_response, custom], default: command_response }
+                kind: { type: string, enum: [command_response, custom, library], default: command_response }
+                test: { type: string, description: "kind library: a standard test id from GET /active/library (Baler#275)" }
                 response_minutes: { type: number }
                 steps: { type: array, items: { type: object } }
       responses:
@@ -1979,6 +1980,36 @@ paths:
                     procedures: { type: array, items: { type: object } }
                     summary: { type: string, description: "e.g. 220 of 220 tested: 220 automatically, 12 witnessed" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /active/library:
+    get:
+      tags: [Active tests]
+      operationId: listCxActiveLibrary
+      summary: The standard active tests, as data (Baler#275)
+      description: >-
+        VAV reheat, AHU, chilled-water loop. Each states its equipment
+        class, the safety limits on every value it may command, its steps
+        (writes and expectations by Brick class; relative values resolve
+        against the latest samples when a run is planned) and its expected
+        result. Plan one with POST /projects/{id}/active-runs
+        {"kind": "library", "test": id}: every Cx 9 safeguard applies.
+      responses:
+        "200":
+          description: The library
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, name, equip_class, limits, steps, expected]
+                  properties:
+                    id: { type: string }
+                    name: { type: string }
+                    equip_class: { type: string }
+                    description: { type: string }
+                    limits: { type: object }
+                    steps: { type: array, items: { type: object } }
+                    expected: { type: string }
   /projects/{id}/writes:
     parameters:
       - { $ref: "#/components/parameters/ProjectId" }
@@ -2618,7 +2649,9 @@ components:
                 description: "Baler#275: how the step can be judged (default [passive]); a test run picks one"
               active:
                 type: object
-                properties: { kind: { type: string, enum: [command_response] } }
+                properties:
+                  kind: { type: string, enum: [command_response, library] }
+                  test: { type: string, description: "kind library: the standard test's id" }
                 description: The Cx 9 active test whose outcome judges the step (methods include active)
               witness_required: { type: boolean, description: A manual result for this step needs a witness }
     Procedure:
@@ -2742,7 +2775,7 @@ components:
         id: { type: string }
         project_id: { type: string }
         equip_uri: { type: string }
-        kind: { type: string, enum: [command_response, custom] }
+        kind: { type: string, description: "command_response, custom, or library:<test id>" }
         steps: { type: array, items: { type: object } }
         plan:
           type: array

@@ -173,6 +173,7 @@ const ROUTES = [
   // backend re-checks admin, and BALER_CX_ALLOW_WRITES gates it all.
   ["GET",    /^\/cx\/active\/status$/,                         "commissioning", "viewer"],
   ["POST",   /^\/cx\/active\/kill$/,                           "commissioning", "admin"],
+  ["GET",    /^\/cx\/active\/library$/,                        "commissioning", "viewer"],
   ["GET",    /^\/cx\/projects\/[^/]+\/active-runs$/,            "commissioning", "viewer"],
   ["POST",   /^\/cx\/projects\/[^/]+\/active-runs$/,            "commissioning", "admin"],
   ["GET",    /^\/cx\/active-runs\/[^/]+$/,                     "commissioning", "viewer"],

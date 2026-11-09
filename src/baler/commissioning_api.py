@@ -62,6 +62,7 @@ from baler.commissioning import (
     report,
     runner,
     spec,
+    test_library,
 )
 from baler.commissioning import schedules as sched_eval
 from baler.commissioning import templates as tpl
@@ -227,6 +228,8 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 return "active_status", self._active_status
             if path == "/active/kill" and method == "POST":
                 return "active_kill", self._active_kill
+            if path == "/active/library" and method == "GET":
+                return "active_library", self._active_library
             m = _PROJECT_SUB.fullmatch(path)
             if m:
                 pid, sub = m.group(1), m.group(2)
@@ -1823,8 +1826,18 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 steps = active.validate_steps(steps, equip)
             elif kind == "custom":
                 steps = active.validate_steps(body.get("steps"), equip)
+            elif kind == "library":
+                # a standard test (Baler#275 slice c), compiled to concrete steps
+                # against the latest values, then validated like any other
+                test = body.get("test")
+                if not test_library.applies(str(test), equip):
+                    raise ValueError(f"test must be a library test for this equipment's class (library: {', '.join(test_library.BY_ID)})")
+                with repo.history() as h:
+                    latest = h.latest([p_["id"] for p_ in equip["points"]])
+                steps = active.validate_steps(test_library.compile_steps(test, equip, latest), equip)
+                kind = f"library:{test}"
             else:
-                raise ValueError("kind is command_response or custom")
+                raise ValueError("kind is command_response, custom or library")
             run = active.new_run(pid, equip["id"], kind, steps, start, end, claims.get("sub"), now_fn())
             repo.put_rows("cx_active_runs", [run])
             self._event(pid, "active_run.plan", claims, {"active_run_id": run["id"], "equip_uri": equip["id"], "writes": len(run["plan"])})
@@ -1885,6 +1898,11 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 repo.update_row("cx_active_runs", rid, {"abort_requested": True})
             self._event(project["id"], "active_run.abort", claims, {"active_run_id": rid, "was": run["status"]})
             respond_json(self, 202, db.public_row(repo.get_row("cx_active_runs", rid) or run))
+
+        def _active_library(self, span, claims) -> None:
+            """The standard active tests, with their limits and expected
+            results (Baler#275 slice c)."""
+            respond_json(self, 200, [test_library.public(t) for t in test_library.TESTS])
 
         def _active_kill(self, span, claims) -> None:
             """Every running active run in the caller's org stops, and
