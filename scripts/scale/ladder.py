@@ -618,10 +618,18 @@ class LiveSafety:
     """Watches the live install sharing this host: its gateway's latency on
     a cheap read-only, unauthenticated GET, and the host load. Trips when
     either degrades well past its pre-run baseline - the run then stops for
-    live-safety, which is never reported as a Baler ceiling."""
+    live-safety, which is never reported as a Baler ceiling.
 
-    def __init__(self, url: str | None, load_factor: float, latency_factor: float, enabled: bool = True):
+    "Degrades" means for three checks in a row, or, with `sustain_s`, for
+    that many seconds without a good check in between (the soak's 5 min:
+    its checks are a sample apart, and a 6 h soak shouldn't stop for one
+    slow minute). The ladder and the soak share this one implementation."""
+
+    def __init__(self, url: str | None, load_factor: float, latency_factor: float, enabled: bool = True,
+                 sustain_s: float | None = None, clock=time.monotonic):
         self.enabled = enabled
+        self.sustain_s, self.clock = sustain_s, clock
+        self.bad_since: float | None = None
         self.url = url if enabled else None
         self.nproc = os.cpu_count() or 1
         self.load_factor, self.latency_factor = load_factor, latency_factor
@@ -659,13 +667,44 @@ class LiveSafety:
             lat = self._probe() or 0.0
             sample["live_latency_s"] = round(lat, 3)
             bad = bad or lat > max(self.baseline_latency * self.latency_factor, self.baseline_latency + 0.5)
-        self.strikes = self.strikes + 1 if bad else 0
-        return self.strikes >= 3, sample
+        return self.judge(bad), sample
+
+    def judge(self, bad: bool) -> bool:
+        """One check's verdict into the trip decision (pure but for the clock)."""
+        now = self.clock()
+        if not bad:
+            self.strikes, self.bad_since = 0, None
+            return False
+        self.strikes += 1
+        if self.bad_since is None:
+            self.bad_since = now
+        if self.sustain_s is not None:
+            return now - self.bad_since >= self.sustain_s
+        return self.strikes >= 3
+
+    def bad_for_s(self) -> float:
+        return round(self.clock() - self.bad_since, 1) if self.bad_since is not None else 0.0
 
     def describe(self) -> dict:
         return {"enabled": self.enabled, "live_url": self.url, "baseline_latency_s": self.baseline_latency,
                 "baseline_load_per_cpu": round(self.baseline_load, 2), "load_factor": self.load_factor,
-                "latency_factor": self.latency_factor, "note": self.note}
+                "latency_factor": self.latency_factor, "sustain_s": self.sustain_s, "note": self.note}
+
+
+def add_live_args(p, sustain_default: float | None) -> None:
+    """The live-safety options, for `run` and `soak` alike."""
+    p.add_argument("--live-url", default="http://127.0.0.1:8080/ui/", help="the live gateway, probed read-only for live-safety")
+    p.add_argument("--no-live-check", action="store_true", help="no live install on this host: no live latency or host-load watch")
+    p.add_argument("--live-load-factor", type=float, default=1.5)
+    p.add_argument("--live-latency-factor", type=float, default=3.0)
+    p.add_argument("--live-sustain", type=float, default=sustain_default,
+                   help="stop once live has been degraded this many seconds without a good check"
+                        + (" (default: three checks in a row)" if sustain_default is None else ""))
+
+
+def live_safety(args) -> LiveSafety:
+    return LiveSafety(args.live_url, args.live_load_factor, args.live_latency_factor, enabled=not args.no_live_check,
+                      sustain_s=args.live_sustain)
 
 
 # ----------------------------------------------------------------- generator
@@ -1110,7 +1149,7 @@ def cmd_run(args) -> None:
         # a 1k step on a graph left with 10k points times 10k-point reads.
         raise SystemExit(f"the stack already has {existing:,} scale points, more than the first step ({steps[0]:,}): "
                          "`ladder.py down` then `up` for a clean ladder, or --reuse to measure on top of them")
-    safety = LiveSafety(args.live_url, args.live_load_factor, args.live_latency_factor, enabled=not args.no_live_check)
+    safety = live_safety(args)
     result = run_header(ep, args)
     result.update(steps=[], live_safety=safety.describe())
     outdir = common.RESULTS / result["run_id"]
@@ -1310,10 +1349,7 @@ def main(argv=None) -> None:
     p.add_argument("--no-up", action="store_true", help="the stack is already up")
     p.add_argument("--no-build", action="store_true", help="up without rebuilding the images")
     p.add_argument("--reuse", action="store_true", help="allow a stack that already has more scale points than the first step")
-    p.add_argument("--live-url", default="http://127.0.0.1:8080/ui/", help="the live gateway, probed read-only for live-safety")
-    p.add_argument("--no-live-check", action="store_true", help="no live install on this host: no live latency or host-load watch")
-    p.add_argument("--live-load-factor", type=float, default=1.5)
-    p.add_argument("--live-latency-factor", type=float, default=3.0)
+    add_live_args(p, sustain_default=None)
     p = sub.choices["crash"]
     p.add_argument("--points", type=int, default=10_000)
     p.add_argument("--kill", default="mqtt_listener,listener_worker,postgres",
