@@ -20,6 +20,9 @@
     "stale_factor": 3,
     "min_stale_s": 30,
     "default_poll_s": 60,
+    "max_ingest_lag_s": 120,
+    "max_queue_age_s": 30,
+    "max_broker_drops": 0,
     "prefixes": [
       { "prefix": "fbf/home", "min_points": 1, "expect_groups": [] }
     ]

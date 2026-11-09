@@ -33,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 import psycopg
 from opentelemetry import context as otel_context
@@ -54,6 +55,8 @@ from baler.commissioning import (
     llm,
     manual,
     mirror,
+    operator_writes,
+    overrides,
     phases,
     procedures,
     report,
@@ -61,6 +64,7 @@ from baler.commissioning import (
     spec,
     test_library,
 )
+from baler.commissioning import schedules as sched_eval
 from baler.commissioning import templates as tpl
 from baler.http_handler_base import BaseAPIHandler, respond_error, respond_json
 from baler.remote_store import RemoteStore
@@ -74,7 +78,7 @@ PORT = 8009
 RUN_STATEMENT_TIMEOUT = "10min"
 
 _PROJECT = re.compile(r"/projects/([^/]+)")
-_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|gate|report|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|agent/sessions|agent/proposals|coverage)")
+_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|gate|report|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|agent/sessions|agent/proposals|writes|schedule-writes|schedule-targets|schedules|schedules/refresh|coverage)")
 _PROJECT_ISSUES = re.compile(r"/projects/([^/]+)/issues/(import|export)")
 _RUN_ISSUES = re.compile(r"/runs/([^/]+)/issues")
 _ISSUE = re.compile(r"/issues/([^/]+)")
@@ -95,6 +99,7 @@ _ACTIVE_RUN = re.compile(r"/active-runs/([^/]+)")
 _AGENT_SESSION = re.compile(r"/agent-sessions/([^/]+)")
 _AGENT_SESSION_MSG = re.compile(r"/agent-sessions/([^/]+)/messages")
 _PROPOSAL_SUB = re.compile(r"/agent-proposals/([^/]+)/(accept|reject)")
+_WRITE_SUB = re.compile(r"/writes/([^/]+)/(relinquish|revert)")
 _ACTIVE_RUN_SUB = re.compile(r"/active-runs/([^/]+)/(confirm|abort)")
 _RUN = re.compile(r"/runs/([^/]+)")
 _RUN_REPORT = re.compile(r"/runs/([^/]+)/report")
@@ -134,6 +139,8 @@ def _check_settings(settings) -> dict:
         economizer.validate_settings(settings["economizer"])
     if "fault_mirroring" in settings:
         mirror.validate_settings(settings["fault_mirroring"])
+    if "overrides" in settings:
+        overrides.validate_settings(settings["overrides"])
     if "phase_gates" in settings:
         gates.validate_mode(settings["phase_gates"])
     if "acceptance" in settings:
@@ -155,11 +162,15 @@ engine_kwargs = runner.engine_kwargs
 log = logging.getLogger(__name__)
 
 
-def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None):
+def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None, commander=None):
     now_fn = clock or (lambda: datetime.now(timezone.utc))
     worker = worker or runner.RunWorker(repo, now_fn)
     # Active tests (Cx 9) need a point_write route; without an executor
     # (no MQTT commander configured) planning works and confirming is 503.
+    # `commander` carries audited operator point and schedule writes
+    # (Baler#213); without one those answer 503.
+    # `commander` (point_write.Commander) reads schedules and priority
+    # arrays from Windrow for the override tests (Baler#212); never writes.
 
     class CommissioningHandler(BaseAPIHandler):
         TRACER = tracer
@@ -244,6 +255,12 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                     ("GET", "agent/sessions"): ("list_agent_sessions", self._list_agent_sessions),
                     ("POST", "agent/sessions"): ("start_agent_session", self._start_agent_session),
                     ("GET", "agent/proposals"): ("list_agent_proposals", self._list_agent_proposals),
+                    ("GET", "writes"): ("list_operator_writes", self._list_operator_writes),
+                    ("POST", "writes"): ("operator_point_write", self._operator_point_write),
+                    ("POST", "schedule-writes"): ("operator_schedule_write", self._operator_schedule_write),
+                    ("GET", "schedule-targets"): ("schedule_targets", self._schedule_targets),
+                    ("GET", "schedules"): ("list_schedules", self._list_schedules),
+                    ("POST", "schedules/refresh"): ("refresh_schedules", self._refresh_schedules),
                     ("GET", "coverage"): ("coverage", self._coverage),
                 }
                 hit = table.get((method, sub))
@@ -261,6 +278,8 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                               ("POST", "risk"): ("accept_risk", self._accept_risk)}),
                 (_PROPOSAL_SUB, {("POST", "accept"): ("accept_proposal", self._accept_proposal),
                                  ("POST", "reject"): ("reject_proposal", self._reject_proposal)}),
+                (_WRITE_SUB, {("POST", "relinquish"): ("relinquish_operator_write", self._relinquish_operator_write),
+                              ("POST", "revert"): ("revert_operator_write", self._revert_operator_write)}),
                 (_ACTIVE_RUN_SUB, {("POST", "confirm"): ("confirm_active_run", self._confirm_active_run),
                                    ("POST", "abort"): ("abort_active_run", self._abort_active_run)}),
             ):
@@ -1911,6 +1930,237 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                             relinquished.append(f"FAILED {point}: {exc}")
             respond_json(self, 200, {"aborted": stopped, "relinquished": relinquished})
 
+        # ------------------------------------------ operator writes (Baler#213)
+
+        def _require_person(self, claims: dict, role: str) -> bool:
+            """A person's session at `role` or above: an API key can't make
+            an operator write, and nobody writes on someone else's behalf."""
+            rank = {"viewer": 1, "operator": 2, "admin": 3}
+            if claims.get("kind") != "session" or not claims.get("sub"):
+                respond_error(self, 403, "operator writes are made by a signed-in person, not an API key")
+                return False
+            if rank.get(str(claims.get("role")), 0) < rank[role]:
+                respond_error(self, 403, f"this write needs the {role} role")
+                return False
+            return True
+
+        def _writes_project(self, pid: str, claims: dict) -> dict | None:
+            p = self._project(pid, claims)
+            if p is None:
+                return None
+            if p.get("archived_at"):
+                respond_error(self, 409, "project is archived")
+                return None
+            if commander is None:
+                respond_error(self, 503, "no Windrow command channel is configured on this server")
+                return None
+            return p
+
+        def _list_operator_writes(self, span, claims, pid) -> None:
+            """Every operator write on the project, newest first, and with
+            ?point= Baler's priority array for that point."""
+            if self._project(pid, claims) is None:
+                return
+            scope = repo.scope_for(claims)
+            rows = [db.public_row(r) for r in reversed(repo.find_rows(operator_writes.TABLE, project_id=pid))
+                    if r["kind"] != "point" or scope.allows(r["target"])]
+            out: dict = {"writes": rows, "levels": list(operator_writes.LEVELS),
+                         "max_hold_minutes": operator_writes.MAX_HOLD.total_seconds() / 60}
+            point = parse_qs(urlparse(self.path).query).get("point", [None])[0]
+            if point:
+                if not scope.allows(point):
+                    respond_error(self, 404, "no such point")
+                    return
+                out["priority_array"] = repo.point_levels(point)
+            respond_json(self, 200, out)
+
+        def _visible_write(self, wid: str, claims: dict) -> tuple[dict, dict] | None:
+            row = repo.get_row(operator_writes.TABLE, wid)
+            project = repo.get_project(row["project_id"]) if row else None
+            if row is None or project is None or not self._visible(project, claims) or (
+                    row["kind"] == "point" and not repo.scope_for(claims).allows(row["target"])):
+                respond_error(self, 404, "no such write")
+                return None
+            return row, project
+
+        def _operator_point_write(self, span, claims, pid) -> None:
+            if not self._require_person(claims, "operator"):
+                return
+            p = self._writes_project(pid, claims)
+            if p is None:
+                return
+            body = self.read_json_body()
+            scopes, _ = self._scopes(p, claims)
+            now = now_fn()
+            req = operator_writes.point_write(body, inventory.build(repo.store, scopes), now)
+            with repo.history() as h:
+                got = h.latest([req["point"]]).get(req["point"])
+            latest = {"ts": got[0].isoformat(), "value": got[1] if isinstance(got[1], (int, float, str, bool)) else str(got[1])} if got else None
+            row = operator_writes.new_row(pid, "point", req["point"], claims, repo.user_email(claims.get("sub")), req["reason"], now,
+                                          equip_uri=req["equip_uri"], level=req["level"], value=req["value"],
+                                          expires_at=req["expires_at"])
+            try:
+                row = operator_writes.write_point(repo, commander, row, req["replace"], now, latest)
+            except operator_writes.Conflict as exc:
+                respond_error(self, 409, str(exc))
+                return
+            except Exception as exc:  # noqa: BLE001 - the site refused or didn't answer; recorded on the row
+                self._event(pid, "operator_write.failed", claims, {"write_id": row["id"], "point": req["point"], "error": str(exc)[:300]})
+                respond_error(self, 502, f"the write wasn't applied: {exc}")
+                return
+            self._event(pid, "operator_write.point", claims, {"write_id": row["id"], "point": req["point"], "value": req["value"],
+                                                               "level": req["level"], "reason": req["reason"],
+                                                               "expires_at": req["expires_at"].isoformat()})
+            respond_json(self, 201, db.public_row(row))
+
+        def _relinquish_operator_write(self, span, claims, wid) -> None:
+            if not self._require_person(claims, "operator"):
+                return
+            hit = self._visible_write(wid, claims)
+            if hit is None:
+                return
+            row, project = hit
+            if row["kind"] != "point":
+                respond_error(self, 400, "a schedule or calendar write is reverted: POST /writes/{id}/revert")
+                return
+            if row["status"] != operator_writes.ACTIVE:
+                respond_error(self, 409, f"write is {row['status']}")
+                return
+            if commander is None:
+                respond_error(self, 503, "no Windrow command channel is configured on this server")
+                return
+            why = operator_writes.reason(self.read_json_body())
+            try:
+                row = operator_writes.relinquish(repo, commander, row, now_fn(), claims.get("sub"), why)
+            except Exception as exc:  # noqa: BLE001 - logged on the row; the sweeper retries at expiry
+                respond_error(self, 502, f"the relinquish wasn't applied (the sweeper retries): {exc}")
+                return
+            self._event(project["id"], "operator_write.relinquished", claims, {"write_id": wid, "reason": why})
+            respond_json(self, 200, db.public_row(row))
+
+        def _schedule_targets(self, span, claims, pid) -> None:
+            """The schedule and calendar objects on the project's
+            connections, read live (?site=&instance=)."""
+            p = self._writes_project(pid, claims)
+            if p is None:
+                return
+            q = parse_qs(urlparse(self.path).query)
+            site, instance = q.get("site", [None])[0], q.get("instance", [None])[0]
+            if not site or not instance:
+                raise ValueError("site and instance name the Windrow instance")
+            scopes, _ = self._scopes(p, claims)
+            out = []
+            for c in commander.command(site, instance, "list_connections", {}, timeout=operator_writes.COMMAND_TIMEOUT_S) or []:
+                if not isinstance(c, dict) or not all(s.allows(f"urn:point:{c.get('topic_prefix')}/x") for s in scopes):
+                    continue
+                snap = commander.command(site, instance, operator_writes.READ_SCHEDULES, {"id": c["id"]},
+                                         timeout=operator_writes.COMMAND_TIMEOUT_S) or {}
+                out.append({"connection_id": c["id"], "topic_prefix": c.get("topic_prefix"),
+                            "schedules": snap.get("schedules") or [], "calendars": snap.get("calendars") or []})
+            respond_json(self, 200, out)
+
+        def _operator_schedule_write(self, span, claims, pid) -> None:
+            if not self._require_person(claims, "admin"):
+                return
+            p = self._writes_project(pid, claims)
+            if p is None:
+                return
+            now = now_fn()
+            req = operator_writes.schedule_write(self.read_json_body(), now)
+            scopes, _ = self._scopes(p, claims)
+            conn = operator_writes.connection(commander, req["site"], req["instance"], req["connection_id"])
+            if conn is None or not all(s.allows(f"urn:point:{conn.get('topic_prefix')}/x") for s in scopes):
+                respond_error(self, 404, "no such connection in this project")
+                return
+            target = f"{req['site']}/{req['instance']}/{req['connection_id']}/{req['object']}"
+            row = operator_writes.new_row(pid, req["kind"], target, claims, repo.user_email(claims.get("sub")), req["reason"], now,
+                                          site=req["site"], instance=req["instance"], connection_id=req["connection_id"],
+                                          value={"kind": req["kind"], "object": req["object"], "fields": req["fields"]},
+                                          expires_at=req["revert_at"])
+            try:
+                row = operator_writes.write_schedule(repo, commander, row, now)
+            except ValueError:  # the object isn't on that connection: a 400, nothing sent
+                raise
+            except Exception as exc:  # noqa: BLE001 - recorded on the row
+                self._event(pid, "operator_write.failed", claims, {"write_id": row["id"], "target": target, "error": str(exc)[:300]})
+                respond_error(self, 502, f"the write wasn't applied: {exc}")
+                return
+            self._event(pid, f"operator_write.{req['kind']}", claims,
+                        {"write_id": row["id"], "target": target, "fields": sorted(req["fields"]), "reason": req["reason"],
+                         "revert_at": req["revert_at"].isoformat() if req["revert_at"] else None, "permanent": req["permanent"]})
+            respond_json(self, 201, db.public_row(row))
+
+        def _revert_operator_write(self, span, claims, wid) -> None:
+            if not self._require_person(claims, "admin"):
+                return
+            hit = self._visible_write(wid, claims)
+            if hit is None:
+                return
+            row, project = hit
+            if row["kind"] == "point":
+                respond_error(self, 400, "a point write is relinquished: POST /writes/{id}/relinquish")
+                return
+            if row["status"] not in (operator_writes.ACTIVE, "permanent"):
+                respond_error(self, 409, f"write is {row['status']}")
+                return
+            if commander is None:
+                respond_error(self, 503, "no Windrow command channel is configured on this server")
+                return
+            why = operator_writes.reason(self.read_json_body())
+            try:
+                row = operator_writes.revert_schedule(repo, commander, row, now_fn(), claims.get("sub"), why)
+            except Exception as exc:  # noqa: BLE001 - logged on the row
+                respond_error(self, 502, f"the revert wasn't applied: {exc}")
+                return
+            self._event(project["id"], f"operator_write.{row['status']}", claims, {"write_id": wid, "reason": why})
+            respond_json(self, 200, db.public_row(row))
+
+        # ------------------------------------------- override tests (Baler#212)
+
+        def _project_tz(self, p: dict):
+            cfg = overrides.effective((p.get("settings") or {}).get("overrides"))
+            return ZoneInfo(cfg["tz"]) if cfg.get("tz") else ZoneInfo("UTC"), cfg
+
+        def _list_schedules(self, span, claims, pid) -> None:
+            """The BACnet schedules and calendars last read from the
+            project's connections, each with what it commands now."""
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            scopes, _ = self._scopes(p, claims)
+            tz, cfg = self._project_tz(p)
+            now = now_fn()
+            rows = [r for r in repo.list_schedules() if all(s.allows(f"urn:point:{r['topic_prefix']}/x") for s in scopes)]
+            cals: dict[tuple, dict] = {}
+            for r in rows:
+                if r["kind"] == "calendar":
+                    cals.setdefault((r["site"], r["instance"], r["connection_id"]), {})[r["object"]] = r["body"]
+            out = []
+            for r in rows:
+                item = {k: r[k] for k in ("id", "kind", "object", "name", "topic_prefix", "points")}
+                item["read_at"] = db._iso(r["read_at"])
+                item["body"] = r["body"]
+                if r["kind"] == "schedule":
+                    got = sched_eval.value_at(r["body"], now, tz, cals.get((r["site"], r["instance"], r["connection_id"])))
+                    item["now"] = {**got, "unoccupied": sched_eval.is_unoccupied(got["value"], cfg["unoccupied_values"])}
+                out.append(item)
+            respond_json(self, 200, {"tz": str(tz), "schedules": out})
+
+        def _refresh_schedules(self, span, claims, pid) -> None:
+            """Read schedules and calendars from Windrow now (reads only -
+            nothing is written to a controller)."""
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            if commander is None:
+                respond_error(self, 503, "no Windrow command channel is configured on this server")
+                return
+            scopes, _ = self._scopes(p, claims)
+            got = overrides.refresh(repo, commander, scopes, now_fn())
+            self._event(pid, "schedules.refresh", claims, {k: got[k] for k in ("schedules", "calendars")}
+                        | {"errors": got["errors"][:10]})
+            respond_json(self, 200, got)
+
         # ------------------------------------------------------- agent (Cx 10)
 
         def _agent_available(self) -> bool:
@@ -2155,8 +2405,19 @@ def main() -> None:
     for r in repo.find_rows("cx_active_runs", status="running") + repo.find_rows("cx_active_runs", status="confirmed"):
         repo.update_row("cx_active_runs", r["id"], {"status": "failed", "error": db.INTERRUPTED, "finished_at": now})
     active.sweep(repo, writer, now)
-    runner.Scheduler(repo, worker, clock, extra=[lambda t: active.sweep(repo, writer, t)])
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(repo, worker=worker, executor=executor))
+    # Operator writes (Baler#213): relinquish expired point writes and revert
+    # schedule writes on time - now (whatever a restart interrupted) and
+    # every tick.
+    operator_writes.sweep(repo, writer.commander, now)
+    # Override tests (Baler#212): re-read schedules and priority arrays for
+    # projects that have them enabled, every settings.overrides.refresh_minutes.
+    refresher = overrides.Refresher(repo, writer.commander,
+                                    lambda p: runner.project_scopes(repo, p, {"org_id": p["org_id"], "site_ids": []})[0])
+    runner.Scheduler(repo, worker, clock, extra=[lambda t: active.sweep(repo, writer, t),
+                                                 lambda t: operator_writes.sweep(repo, writer.commander, t),
+                                                 refresher.tick])
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(repo, worker=worker, executor=executor,
+                                                                      commander=writer.commander))
     print(f"commissioning API listening on {args.host}:{args.port}")
     server.serve_forever()
 

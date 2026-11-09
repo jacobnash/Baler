@@ -1,0 +1,5 @@
+# pip-audit (security.yml, #279): advisories accepted as risks, one id per
+# line (PYSEC-..., GHSA-... or CVE-...), each with a comment above it: why it
+# doesn't apply or what mitigates it, who decided, and a date to look again.
+# Keep the reasoning general; exploit details go in a private advisory
+# (SECURITY.md), never here.

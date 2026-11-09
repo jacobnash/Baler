@@ -16,6 +16,11 @@ version from the versions the image ships, restores, then updates the
 extension to the image's own version - TimescaleDB's documented
 procedure. Compressed chunks and continuous aggregates come back as they
 were: the drill (scripts/restore_drill.py) checks both.
+
+Off-site (#276): --from-offsite [STAMP] fetches a set from the
+BALER_BACKUP_S3_* bucket instead of naming local files, checks it against
+its manifest and decrypts it with BALER_BACKUP_AGE_IDENTITY_FILE (or
+--identity-file) into a private temporary directory, removed afterwards.
 """
 
 import argparse
@@ -180,11 +185,67 @@ def main() -> None:
         help="When the dump is from an older TimescaleDB than the image's, leave the restored database on the dump's version "
         "instead of running ALTER EXTENSION timescaledb UPDATE after the load.",
     )
+    parser.add_argument("--from-offsite", nargs="?", const="latest", metavar="STAMP",
+                        help="Restore a set from the off-site bucket (BALER_BACKUP_S3_*): the newest complete one, "
+                             "or the one with this timestamp (e.g. 20260825T120000Z). Restores both files unless "
+                             "--only names one.")
+    parser.add_argument("--only", choices=["postgres", "oxigraph"], help="With --from-offsite: restore just this one.")
+    parser.add_argument("--identity-file", help="age identity (private key) file for --from-offsite "
+                                                "(default: $BALER_BACKUP_AGE_IDENTITY_FILE).")
+    parser.add_argument("--download-dir", help="Where --from-offsite downloads and decrypts to (a private temporary "
+                                               "directory under it, removed afterwards; default: the system's temp "
+                                               "directory). Needs room for the set twice over.")
     args = parser.parse_args()
 
+    if args.from_offsite:
+        if args.postgres_file or args.oxigraph_file:
+            parser.error("--from-offsite fetches the files itself: don't also pass --postgres-file/--oxigraph-file")
+        restore_from_offsite(args)
+        return
     if not args.postgres_file and not args.oxigraph_file:
-        parser.error("pass --postgres-file and/or --oxigraph-file")
+        parser.error("pass --postgres-file and/or --oxigraph-file, or --from-offsite")
+    restore_files(args)
 
+
+def offsite_modules():
+    try:
+        from baler import backup_offsite
+    except ImportError:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+        from baler import backup_offsite
+    return backup_offsite
+
+
+def fetch_offsite(stamp: str, dest_dir: str, identity_file: str | None = None) -> dict[str, str]:
+    """kind -> decrypted local path of an off-site set; RestoreError on any
+    failure (configuration, transfer, integrity, wrong key)."""
+    offsite = offsite_modules()
+    target = None
+    try:
+        target = offsite.target_from_env()
+        if target is None:
+            raise offsite.OffsiteError("BALER_BACKUP_S3_BUCKET isn't set: no off-site target configured")
+        identity_file = identity_file or offsite.identity_file_from_env()
+        if not identity_file:
+            raise offsite.OffsiteError("no age identity: set BALER_BACKUP_AGE_IDENTITY_FILE or pass --identity-file")
+        print(f"fetching {'the newest set' if stamp == 'latest' else stamp} from {target.describe()}", flush=True)
+        return offsite.fetch_set(target, offsite.read_identities(identity_file), dest_dir, stamp)
+    except offsite.OffsiteError as exc:
+        raise RestoreError(f"off-site fetch failed: {exc}") from None
+    except Exception as exc:  # noqa: BLE001 - never print a traceback that could carry config
+        raise RestoreError(offsite.redact(f"off-site fetch failed: {type(exc).__name__}: {exc}", target)) from None
+
+
+def restore_from_offsite(args) -> None:
+    offsite = offsite_modules()
+    with offsite.WorkDir(args.download_dir) as work:
+        files = fetch_offsite(args.from_offsite, work, args.identity_file)
+        args.postgres_file = files.get("postgres") if args.only in (None, "postgres") else None
+        args.oxigraph_file = files.get("oxigraph") if args.only in (None, "oxigraph") else None
+        restore_files(args)
+
+
+def restore_files(args) -> None:
     if args.postgres_file:
         restore_postgres(args.postgres_file, args.compose_project_dir, update_extension=not args.no_extension_update)
         print(f"postgres restored from {args.postgres_file}")

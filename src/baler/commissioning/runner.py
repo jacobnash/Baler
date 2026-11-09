@@ -79,7 +79,7 @@ def execute(repo, job: RunJob, clock: Callable[[], datetime], run_fn=engine.run,
         repo.set_run_status(job.run_id, "running", {"stage": "starting"})
         with repo.history() as history:
             summary, results = run_fn(repo.store, history, job.scopes, job.now, job.window_hours,
-                                      progress=progress, **job.engine_kwargs)
+                                      progress=progress, **_with_source(repo, job.engine_kwargs))
         summary["phase"] = job.phase
         summary["window_hours"] = job.window_hours
         repo.complete_run(job.run_id, clock(), summary, results)
@@ -195,7 +195,15 @@ def engine_kwargs(settings: dict | None) -> dict:
         out["ladder_config"] = s["ladder"]
     if s.get("economizer"):
         out["economizer_settings"] = s["economizer"]
+    if (s.get("overrides") or {}).get("enabled"):
+        out["override_settings"] = s["overrides"]
     return out
+
+
+def _with_source(repo, kwargs: dict) -> dict:
+    """The override tests read schedules, priority arrays and Baler's own
+    writes from the repo (Baler#212); nothing else needs it."""
+    return {**kwargs, "override_source": repo} if kwargs.get("override_settings") else kwargs
 
 
 def queue_run(repo, worker, project: dict, claims: dict, now: datetime, window_hours: float,
@@ -271,7 +279,7 @@ def execute_test(repo, job: TestJob, clock: Callable[[], datetime], run_fn=engin
             equips = [e for e in site if procedures.applies(job.procedure, e)]
             hours = max((job.end - job.start).total_seconds() / 3600, 1 / 60)
             _, results = run_fn(repo.store, hist, job.scopes, job.end, hours, equips=equips, site_equips=site,
-                                **job.engine_kwargs)
+                                **_with_source(repo, job.engine_kwargs))
             ids = _range_points(job.procedure, site)
             truncated: set[str] = set()
             series = hist.window(ids, job.start, job.end + timedelta(seconds=1), truncated=truncated) if ids else {}
