@@ -23,7 +23,8 @@ jobs:
       # openhay's Rust build is the slow part of the install (~1 min): build
       # its wheel once per openhay commit and cache it (#23).
       - id: openhay
-        run: echo "sha=$(git ls-remote https://github.com/jacobnash/openhay refs/heads/main | cut -f1)" >> "$GITHUB_OUTPUT"
+        # the commit pyproject.toml's haystack extra pins, not openhay's main
+        run: echo "sha=$(grep -oP 'openhay@\K[0-9a-f]{40}' pyproject.toml)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         id: openhay-wheel
         with:
@@ -60,7 +61,8 @@ jobs:
       # openhay's Rust build is the slow part of the install (~1 min): build
       # its wheel once per openhay commit and cache it (#23).
       - id: openhay
-        run: echo "sha=$(git ls-remote https://github.com/jacobnash/openhay refs/heads/main | cut -f1)" >> "$GITHUB_OUTPUT"
+        # the commit pyproject.toml's haystack extra pins, not openhay's main
+        run: echo "sha=$(grep -oP 'openhay@\K[0-9a-f]{40}' pyproject.toml)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         id: openhay-wheel
         with:
@@ -208,7 +210,8 @@ jobs:
       # openhay's Rust build is the slow part of the install (~1 min): build
       # its wheel once per openhay commit and cache it (#23).
       - id: openhay
-        run: echo "sha=$(git ls-remote https://github.com/jacobnash/openhay refs/heads/main | cut -f1)" >> "$GITHUB_OUTPUT"
+        # the commit pyproject.toml's haystack extra pins, not openhay's main
+        run: echo "sha=$(grep -oP 'openhay@\K[0-9a-f]{40}' pyproject.toml)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         id: openhay-wheel
         with:
