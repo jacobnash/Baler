@@ -324,6 +324,7 @@ gap is how Docker counts, and part is real disk traffic:
 | `cx_run_s` | creating a 1 h Cx run over site 0 (500 points) and waiting for it | Commissioning verification time. |
 | `limiter`, `evidence` | the evidence sampler during the soak and probes, Jaeger after them | What limited the step, and why: see [Reading the limiter](#reading-the-limiter-269). |
 | `probes[].trace` | Jaeger's `/api/v3/traces` for the probe's API, over the probe's own time window | Per-span self time of the median request, its share of the request, and the time outside any span (gateway, network). |
+| `ops_metrics` | `GET /ops/metrics` through the gateway, every sample | **What Baler itself reports** (#235), against the ladder's own measurements: p95/max of `baler_ingest_newest_reading_age_seconds` (now minus the newest stored reading), the listener's deepest queue and oldest uncommitted reading, and the broker's drop counter. `agrees.lag`: Baler's p95 lag is within max(5 s, 25%) of the canaries' p95; `agrees.drops`: its drop count moved as much as `$SYS` did. A disagreement prints a warning; it doesn't fail the step. |
 | `durability.comparable` | `SHOW fsync / synchronous_commit / full_page_writes` on the server **and** on an ingest-path connection (from inside the listener container) | `true` only if all three are on end to end. A non-durable run is never labelled comparable. |
 
 The ladder adds two rules to the test org, so per-point rule load is realistic: a Cur-mode
@@ -336,6 +337,39 @@ supervisor restarts while the other workers carry on - then `postgres`), brings 
 drains, and reports `missing_acked`. That is
 the number of readings the broker acknowledged that never reached `point_history`. Batching
 and group commit are fine; losing acknowledged readings is not.
+
+## Overload is visible: `/ops/status` and `/ops/metrics` (#235)
+
+Outside the ladder, the same signals are Baler's own:
+
+- **`mqtt_listener`'s heartbeats** (each worker `mqtt_listener/<n>` every 5 s, folded into the
+  supervisor's `mqtt_listener`): readings/s, messages/s, batches/s, queue depth and peak against the
+  cap, the **age of the oldest reading received but not yet committed**, the last batch's write
+  time, seconds spent writing, seconds blocked on a full queue, **redelivered (DUP) messages**, and
+  the broker's drop counter (`$SYS/broker/publish/messages/dropped`, read with the `$SYS` read-only
+  ACL entry in `mosquitto/acl`).
+- **`/ops/status`** has `building.ingest` (lag, queue, oldest uncommitted reading, throughput,
+  drops). The Ingest listener card turns **degraded** when the oldest uncommitted reading is older
+  than `OPS_QUEUE_AGE_DEGRADED_SECONDS` (30, the ladder's p95 budget), a worker's queue is 80% full,
+  or the broker dropped messages in the last hour; **down** past `OPS_QUEUE_AGE_DOWN_SECONDS` (300)
+  or when the listener's heartbeat is stale. The rule daemons' cards already go degraded on
+  reading-feed lag or misses (#243).
+- **`GET /ops/metrics`** (viewer or an API key; not a site-restricted login, the numbers are
+  process-wide) is Prometheus text with all of the above plus per-prefix ingest lag (from
+  `point_registry`, coarse by 30 s, cached 30 s, the stalest 500 prefixes), heartbeat ages, each
+  rule daemon's feed lag and misses, and their cycle times (`baler_rules_cycle_seconds`) and
+  evaluations. A scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: baler
+    metrics_path: /ops/metrics
+    authorization: { credentials_file: /etc/prometheus/baler-api-key }  # an API key (POST /auth/api-keys, admin)
+    static_configs: [{ targets: ["baler.example:8080"] }]
+```
+
+The ladder records what `/ops/metrics` said in each step (`ops_metrics` above), and the post-deploy
+verify job judges it against budgets ([post-deploy verify](post-deploy-verify), dataflow).
 
 ## Long soak: disk and compression (#245)
 

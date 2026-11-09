@@ -195,6 +195,14 @@ status say?), then the Pi itself (`systemctl status windrow-*`, its MQTT connect
 floor with every group fresh means points or a whole prefix disappeared: compare
 `points_seen_last_hour` on Ops with earlier.
 
+**Overload (#235):** the same module reads `GET /ops/metrics` (Prometheus text, the endpoint the
+scale ladder checks against its canaries) and judges Baler's own numbers: end-to-end ingest lag
+(`baler_ingest_newest_reading_age_seconds` ≤ `dataflow.max_ingest_lag_s`, 120), the listener's oldest
+uncommitted reading (`baler_listener_queue_oldest_age_seconds` ≤ `max_queue_age_s`, 30) and broker
+drops since the listener started (≤ `max_broker_drops`, 0). A metric the install doesn't export is
+skipped. **When it fails:** Ops shows the Ingest listener card degraded with the same numbers; the
+[scale-test page](scale-test) says which limiter to raise (usually `BALER_LISTENER_WORKERS`).
+
 To watch more prefixes, add `{ "prefix": "fbf/site-b" }` to `dataflow.prefixes`. `expect_groups`
 lists groups that must exist even if they sent nothing all week (otherwise a group that vanished
 entirely can't be missed).

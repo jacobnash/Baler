@@ -409,6 +409,79 @@ def summarize_listener(samples: list[dict], before: dict, after: dict) -> dict:
     return out
 
 
+# What the ladder reads from GET /ops/metrics (#235), the same endpoint a
+# Prometheus scraper and the post-deploy verify job (#178) read: if Baler's
+# own numbers agree with the canaries and the broker's $SYS, an operator
+# without the ladder sees an overload too.
+OPS_METRICS = {"lag_s": "baler_ingest_newest_reading_age_seconds",
+               "queue": "baler_listener_queue_depth",
+               "queue_age_s": "baler_listener_queue_oldest_age_seconds",
+               "broker_dropped_total": "baler_broker_dropped_messages_total",
+               "readings_per_s": "baler_listener_readings_per_second",
+               "redelivered_total": "baler_listener_redelivered_total"}
+
+
+def parse_prom(text: str) -> dict[str, float]:
+    """Prometheus text -> {'name{labels}': value} (the subset Baler writes)."""
+    out: dict[str, float] = {}
+    for line in text.splitlines():
+        if line and not line.startswith("#"):
+            key, _, val = line.rpartition(" ")
+            try:
+                out[key] = float(val)
+            except ValueError:
+                pass
+    return out
+
+
+def ops_metrics_sample(ep: Endpoints, s) -> dict:
+    """One read of /ops/metrics through the gateway, the OPS_METRICS subset."""
+    t0 = time.perf_counter()
+    try:
+        r = s.get(f"{ep.gateway}/ops/metrics", timeout=30)
+        r.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 - an older Baler, or a failure: recorded, not fatal
+        return {"error": repr(exc)[:200]}
+    m = parse_prom(r.text)
+    out = {k: m.get(name) for k, name in OPS_METRICS.items()}
+    out["fetch_s"] = round(time.perf_counter() - t0, 3)
+    return out
+
+
+def summarize_ops_metrics(samples: list[dict], lag: dict, sys_dropped: int | None) -> dict:
+    """What /ops/metrics said over the soak, against the canaries' lag and
+    the broker's $SYS drop count the ladder reads itself (#235). lag agrees
+    when the p95 of Baler's end-to-end lag (now minus the newest stored
+    reading) is within max(5 s, 25%) of the canaries' p95; drops agree when
+    the counter moved by the same amount (both are the broker's own). Pure."""
+    vals = [x["ops_metrics"] for x in samples if x.get("ops_metrics") and "error" not in x["ops_metrics"]]
+    errors = sum(1 for x in samples if "error" in (x.get("ops_metrics") or {}))
+    out: dict = {"samples": len(vals), "errors": errors}
+    if not vals:
+        return out
+
+    def series(k):
+        return sorted(v[k] for v in vals if v.get(k) is not None)
+
+    lags = series("lag_s")
+    if lags:
+        out["lag_s_p95"] = round(lags[min(len(lags) - 1, int(len(lags) * 0.95))], 2)
+        out["lag_s_max"] = round(lags[-1], 2)
+    out["queue_max"] = max(series("queue"), default=None)
+    out["queue_age_s_max"] = max(series("queue_age_s"), default=None)
+    drops = [v["broker_dropped_total"] for v in vals if v.get("broker_dropped_total") is not None]
+    out["broker_dropped_delta"] = int(drops[-1] - drops[0]) if len(drops) >= 2 else None
+    agrees: dict = {}
+    if "lag_s_p95" in out and lag.get("p95_s") is not None:
+        tol = max(5.0, 0.25 * lag["p95_s"])
+        agrees["lag"] = abs(out["lag_s_p95"] - lag["p95_s"]) <= tol
+        out["lag_tolerance_s"] = round(tol, 2)
+    if out["broker_dropped_delta"] is not None and sys_dropped is not None:
+        agrees["drops"] = out["broker_dropped_delta"] == sys_dropped
+    out["agrees"] = agrees
+    return out
+
+
 def chunk_writes(conn) -> int:
     """Rows inserted or updated into point_history so far (its chunks'
     pg_stat counters): the stored-rows/s numerator, independent of row ts."""
@@ -877,6 +950,11 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
     samples: list[dict] = []
     ev = None
     try:
+        msess = session(ep)  # for /ops/metrics during the soak (#235)
+    except Exception as exc:  # noqa: BLE001 - recorded per sample instead
+        print(f"no session for /ops/metrics: {exc!r}", flush=True)
+        msess = None
+    try:
         time.sleep(args.warmup)
         ev = start_evidence(ep, sysmon, args)
         soak_start = time.time()
@@ -899,6 +977,8 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
                 sample["docker"] = docker_stats()
                 sample["docker_stats_s"] = round(time.perf_counter() - t1, 3)  # its cost, for the overhead record
             sample.update(lag=canary.stats(soak_start), feed=feed_status(conn), listener=listener_status(conn))
+            if msess is not None:
+                sample["ops_metrics"] = ops_metrics_sample(ep, msess)
             t1 = time.perf_counter()
             conn.execute("SELECT 1")
             sample["pg_roundtrip_s"] = round(time.perf_counter() - t1, 4)
@@ -999,6 +1079,9 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
                          "behind_max_s": st.get("behind_max_s"), "procs": st.get("procs"), "cpu_s": st.get("cpu_s"),
                          "behind_soak_max_s": max((x["gen_behind_s"] for x in samples), default=None)}
     step["lag"] = canary.stats(soak_start)
+    step["ops_metrics"] = summarize_ops_metrics(samples, step["lag"], dropped)
+    if step["ops_metrics"].get("agrees") and not all(step["ops_metrics"]["agrees"].values()):
+        print(f"WARNING: /ops/metrics disagrees with the ladder's own measurements: {step['ops_metrics']}", flush=True)
     step["broker"] = sys1
     step["db"] = db_metrics(conn)
     if step["db"].get("bytes_per_row"):

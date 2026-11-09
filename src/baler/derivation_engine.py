@@ -609,11 +609,14 @@ def main() -> None:
         now = datetime.now(timezone.utc)
         derivations = cast(list[Derivation], cache.get())
         due_ids = {d["id"] for d in derivations if now >= next_run.get(d["id"], now)}
+        t0 = time.monotonic()
         if due_ids:
             evaluate_derivations(store, ts_conn, fault_conn, health_conn, derivations, now=now, dry_run=False, only_ids=due_ids)
             for d in derivations:
                 if d["id"] in due_ids:
                     next_run[d["id"]] = now + timedelta(seconds=d.get("interval_seconds") or args.tick_seconds)
+        # The scheduled (non-Cur) pass's own time, for /ops/metrics (#235).
+        status.update("tick", {"derivations_due": len(due_ids), "cycle_s": round(time.monotonic() - t0, 3)})
         status.beat(health_conn)
         time.sleep(args.tick_seconds)
 

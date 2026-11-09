@@ -70,6 +70,10 @@ const ROUTES = [
   // own 5xx log spans every org and site, so it is whole-org and operator.
   ["GET",    /^\/ops\/freshness$/,                   "ops", "viewer"],
   ["GET",    /^\/ops\/gateway-errors$/,              "gateway", "operator"],
+  // Prometheus text (#235): the listener's, broker's and rule daemons'
+  // numbers are process-wide, not per org, so "metrics" is a WHOLE_ORG
+  // resource - an API key (role service) or any org-wide login can scrape.
+  ["GET",    /^\/ops\/metrics$/,                     "metrics", "viewer"],
   // source registry (Baler#20): settings include credentials - admin only
   ["GET",    /^\/ops\/sources$/,                     "ops", "admin"],
   ["GET",    /^\/ops\/sources\/kinds$/,               "ops", "admin"],
@@ -332,7 +336,7 @@ function jtiRevoked(claims, cached) {
 
 // Resources a site-restricted token can't reach at all: they span the
 // whole org and have no per-site filter to apply.
-const WHOLE_ORG = { devices: true, gateway: true };
+const WHOLE_ORG = { devices: true, gateway: true, metrics: true };
 
 /*
  * Whether these claims may reach a resource: site-restricted tokens
