@@ -43,6 +43,7 @@ from baler.migrations import (
     v0023_performance_baselines,
     v0024_savings_cases,
     v0025_schedules,
+    v0026_schedule_evidence,
 )
 
 ALL = (
@@ -71,4 +72,5 @@ ALL = (
     v0023_performance_baselines,
     v0024_savings_cases,
     v0025_schedules,
+    v0026_schedule_evidence,
 )
