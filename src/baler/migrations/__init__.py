@@ -30,6 +30,7 @@ from baler.migrations import (
     v0010_active_schedules,
     v0011_assets,
     v0012_documents,
+    v0013_warranties,
 )
 
 ALL = (
@@ -45,4 +46,5 @@ ALL = (
     v0010_active_schedules,
     v0011_assets,
     v0012_documents,
+    v0013_warranties,
 )
