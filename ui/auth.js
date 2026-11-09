@@ -42,13 +42,7 @@
   };
 })();
 
-// The ?auth= override (e.g. a dev proxy path) is honoured only as a
-// same-origin path: this is where passwords and reset tokens are sent, so a
-// crafted link must not be able to point them at another site.
-function sameOriginPath(value, fallback) {
-  return value && value.startsWith("/") && !value.startsWith("//") && !value.includes("\\") ? value : fallback;
-}
-const AUTH_API_URL = sameOriginPath(new URLSearchParams(location.search).get("auth"), "/auth");
+const AUTH_API_URL = apiBase("auth", "/auth");
 const TOKEN_KEY = "td_token";
 
 const getToken = () => localStorage.getItem(TOKEN_KEY);

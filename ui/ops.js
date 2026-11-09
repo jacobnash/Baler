@@ -1,4 +1,4 @@
-const OPS_API_URL = new URLSearchParams(location.search).get("ops") || "/ops";
+const OPS_API_URL = apiBase("ops", "/ops");
 
 const statusEl = document.getElementById("status");
 const chipEl = document.getElementById("system-chip");

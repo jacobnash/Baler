@@ -86,6 +86,9 @@ jobs:
       # WebCrypto-based logic njs runs inside nginx (GitHub Actions
       # runners have Node preinstalled, no setup-node action needed).
       - run: node gateway/njs/test_jwt.mjs && node gateway/njs/test_policy.mjs && node gateway/njs/test_ratelimit.mjs
+      # ui/apibase.js: the ?api=/?ingest=/... base-URL overrides only accept
+      # same-origin paths; plain node runs it in a vm against a fake location.
+      - run: node --test ui/apibase.test.mjs
       # tools/live-check (post-deploy verification, #178): budget, freshness,
       # edge and issue-sync logic on fixtures, and a --dry-run against a stub
       # install. Needs no npm install: Playwright loads only for the
