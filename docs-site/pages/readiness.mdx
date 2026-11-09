@@ -1,0 +1,64 @@
+---
+title: Readiness
+---
+
+"Is the surgery suite ready for patients?" is the readiness report for the
+suite's rooms (Baler#210, epic #221 §4). It is the same report for a lab, a
+cleanroom, a data hall or an office floor. It runs over
+[spaces](/spaces).
+
+## What "ready" means
+
+A room is **ready** only when all four criteria pass:
+
+| Criterion | Passes when | Where the evidence comes from |
+|---|---|---|
+| `requirements` | every applicable requirement passes over its window | requirement packs (#205) and continuous compliance (#207) |
+| `tests` | every piece of equipment serving the room passed its latest start-up, power-on or functional test | Cx 6 procedures and their test runs, for the room's terminals and everything that feeds them (`brick:feeds`) |
+| `tab_report` | a TAB report is linked to the room | see below |
+| `issues` | every open issue on that equipment, or on the room's own points, is resolved or accepted as a risk | the Cx 4 issues log |
+
+Each criterion is `pass`, `fail` or `inconclusive`, and lists its evidence:
+which test run, which issue, which document. **No evidence is never a
+pass.** A room with no requirement evaluated, with equipment no test has
+covered, or with no TAB report linked is `inconclusive`, and its verdict is
+`incomplete`, not `ready`.
+
+| Room verdict | When |
+|---|---|
+| `ready` | all four pass |
+| `not_ready` | any criterion fails (a failed test, an open issue, a failing requirement) |
+| `incomplete` | nothing failed, but something has no evidence |
+
+A suite, zone or floor gets the worst verdict of the rooms under it, and
+counts of each.
+
+## Running it
+
+```bash
+curl $BALER/cx/spaces/$SUITE/readiness                 # JSON
+curl "$BALER/cx/spaces/$SUITE/readiness?format=html"   # printable page
+```
+
+The printable page has the same Content-Security-Policy as the Cx reports
+(nothing runs in it), and states its limitations at the top.
+
+## What this slice has, and doesn't yet
+
+- **Requirements are inconclusive until a pack applies.** The report takes
+  requirement results from `readiness.REQUIREMENT_SOURCES`. Packs (#205)
+  and continuous compliance (#207) register there. Until one does, every
+  room says so, and the report's limitations say so too.
+- **TAB report link (interim).** Until the document store (#201) links
+  documents to spaces, the link is a field a person sets on the space:
+
+  ```bash
+  curl -X PATCH $BALER/cx/spaces/$OR3 \
+    -d '{"attributes": {"tab_report": {"title": "TAB report, level 3, rev 2", "date": "2027-03-02"}}}'
+  ```
+
+  `readiness.DOCUMENT_SOURCES` is where the document store will answer
+  instead.
+- **Tests** are Cx 6 passive test runs. Active tests (Cx 9) aren't counted
+  yet.
+- A risk-accepted issue doesn't block readiness, and is listed as evidence.

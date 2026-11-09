@@ -1884,6 +1884,31 @@ paths:
               schema: { $ref: "#/components/schemas/SpaceDetail" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /spaces/{id}/readiness:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Spaces]
+      operationId: getCxSpaceReadiness
+      summary: Readiness of a room, or of every room under a suite/zone/floor
+      description: |
+        Ready means every applicable requirement passes over its window, the
+        required start-up/functional tests of the serving equipment passed,
+        the TAB report is linked, and every open issue is resolved or
+        accepted as a risk. No evidence is never a pass: a criterion with
+        none is `inconclusive` and the verdict `incomplete`.
+      parameters:
+        - { name: format, in: query, schema: { type: string, enum: [json, html] } }
+      responses:
+        "200":
+          description: The report (text/html for format=html)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+            text/html:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
 components:
   parameters:
     ProjectId:
@@ -1919,6 +1944,49 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    ReadinessCriterion:
+      type: object
+      required: [status, items]
+      properties:
+        status: { type: string, enum: [pass, fail, inconclusive] }
+        items: { type: array, items: { type: object } }
+        note: { type: [string, "null"] }
+    Readiness:
+      type: object
+      required: [project, space, generated_at, status, verdict, counts, rooms, limitations]
+      properties:
+        project: { type: object }
+        space: { type: object }
+        generated_at: { type: string, format: date-time }
+        status: { type: string, enum: [pass, fail, inconclusive] }
+        verdict: { type: string, enum: [ready, incomplete, not_ready] }
+        counts:
+          type: object
+          properties:
+            ready: { type: integer }
+            incomplete: { type: integer }
+            not_ready: { type: integer }
+        limitations: { type: array, items: { type: string } }
+        rooms:
+          type: array
+          items:
+            type: object
+            required: [space_id, name, status, verdict, criteria, serving_chain]
+            properties:
+              space_id: { type: string }
+              name: { type: string }
+              space_type: { type: [string, "null"] }
+              status: { type: string, enum: [pass, fail, inconclusive] }
+              verdict: { type: string, enum: [ready, incomplete, not_ready] }
+              serving_chain: { type: array, items: { type: object } }
+              criteria:
+                type: object
+                required: [requirements, tests, tab_report, issues]
+                properties:
+                  requirements: { $ref: "#/components/schemas/ReadinessCriterion" }
+                  tests: { $ref: "#/components/schemas/ReadinessCriterion" }
+                  tab_report: { $ref: "#/components/schemas/ReadinessCriterion" }
+                  issues: { $ref: "#/components/schemas/ReadinessCriterion" }
     SpaceSpec:
       type: object
       properties:

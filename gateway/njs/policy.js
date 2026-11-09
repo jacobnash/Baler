@@ -193,6 +193,8 @@ const ROUTES = [
   ["DELETE", /^\/cx\/spaces\/[^/]+$/,                        "commissioning", "admin"],
   ["PUT",    /^\/cx\/spaces\/[^/]+\/adjacent$/,               "commissioning", "operator"],
   ["PUT",    /^\/cx\/spaces\/[^/]+\/serving$/,                "commissioning", "operator"],
+  // Readiness (#210)
+  ["GET",    /^\/cx\/spaces\/[^/]+\/readiness$/,              "commissioning", "viewer"],
 
   // auth_api - POST /auth/login has its own exact-match nginx location
   // with no js_access at all (can't require a token to get a token), so
