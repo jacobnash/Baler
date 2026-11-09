@@ -37,6 +37,7 @@ RELEASED = {
     "v0017_doc_proposals.py": "e340ec86a364fce550050e3d72d41b90045b7a733b964d66715d40752cc02562",
     "v0018_spares.py": "2e9caa208ab9b3611605e30e7f713e704a1d30a541d6ba9b267a2ef1518ca96a",
     "v0019_spaces.py": "8ea63b1fe98775a210f0e10a1a74f2330ef3e360f91703dae9a5eb64ce56d246",
+    "v0020_requirement_packs.py": "bf07e04a20094a50b491447d9dc6a29af42df28f5929813ad7b0749ad891e7f1",
 }
 
 

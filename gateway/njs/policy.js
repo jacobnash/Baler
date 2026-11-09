@@ -316,6 +316,16 @@ const ROUTES = [
   ["PUT",    /^\/cx\/spaces\/[^/]+\/serving$/,                "commissioning", "operator"],
   // Readiness (#210)
   ["GET",    /^\/cx\/spaces\/[^/]+\/readiness$/,              "commissioning", "viewer"],
+  // Requirement packs (#205): org library; publishing freezes a version (admin)
+  ["GET",    /^\/cx\/pack-schema$/,                         "commissioning", "viewer"],
+  ["GET",    /^\/cx\/packs$/,                               "commissioning", "viewer"],
+  ["POST",   /^\/cx\/packs$/,                               "commissioning", "operator"],
+  ["GET",    /^\/cx\/packs\/[^/]+$/,                         "commissioning", "viewer"],
+  ["PATCH",  /^\/cx\/packs\/[^/]+\/requirements\/[^/]+$/,      "commissioning", "operator"],
+  ["POST",   /^\/cx\/packs\/[^/]+\/requirements\/[^/]+\/confirm$/, "commissioning", "operator"],
+  ["POST",   /^\/cx\/packs\/[^/]+\/publish$/,                 "commissioning", "admin"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/packs$/,                "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/packs$/,                "commissioning", "operator"],
 
   // auth_api - POST /auth/login has its own exact-match nginx location
   // with no js_access at all (can't require a token to get a token), so
