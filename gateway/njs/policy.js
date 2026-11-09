@@ -309,6 +309,8 @@ const ROUTES = [
   ["GET",    /^\/cx\/projects\/[^/]+\/agent\/proposals$/,        "commissioning", "viewer"],
   ["POST",   /^\/cx\/agent-proposals\/[^/]+\/accept$/,          "commissioning", "operator"],
   ["POST",   /^\/cx\/agent-proposals\/[^/]+\/reject$/,          "commissioning", "operator"],
+  // Building passport (#219)
+  ["GET",    /^\/cx\/projects\/[^/]+\/passport$/,             "commissioning", "viewer"],
   // Performance baselines and degradation (#215)
   ["POST",   /^\/cx\/projects\/[^/]+\/baselines$/,            "commissioning", "operator"],
   ["GET",    /^\/cx\/projects\/[^/]+\/baselines$/,            "commissioning", "viewer"],
