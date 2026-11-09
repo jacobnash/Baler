@@ -107,6 +107,22 @@ jobs:
           BALER_LIVE_LLM_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: pytest tests/test_llm_live.py -ra
 
+  # docs-site: the same npm ci + build the deploy runs (deploy.yml), so a
+  # dependency bump that breaks the docs build turns the PR red instead of
+  # failing the deploy on main.
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true  # the build reads windrow/openapi.yaml
+      - run: npm ci
+        working-directory: docs-site
+      - run: npm run lint
+        working-directory: docs-site
+      - run: npm run build
+        working-directory: docs-site
+
   integration:
     runs-on: ubuntu-latest
     # Three shards, each with its own stack, split the integration files

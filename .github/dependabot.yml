@@ -25,6 +25,16 @@ updates:
     groups:
       npm:
         patterns: ["*"]
+    # Majors that need a peer to move first: typescript and eslint wait on
+    # @typescript-eslint, mermaid waits on zudoku's peer range. Bump these by
+    # hand once their peers allow it (CI's docs job builds docs-site).
+    ignore:
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+      - dependency-name: eslint
+        update-types: ["version-update:semver-major"]
+      - dependency-name: mermaid
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
