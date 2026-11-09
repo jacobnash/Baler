@@ -236,9 +236,6 @@ class MemoryRepo:
     def list_scheduled_projects(self) -> list[dict]:
         return [copy.deepcopy(p) for p in self.projects.values() if (p.get("settings") or {}).get("schedule")]
 
-    def list_projects_with_setting(self, key: str) -> list[dict]:
-        return [copy.deepcopy(p) for p in self.projects.values() if (p.get("settings") or {}).get(key)]
-
     def update_project(self, project_id: str, now: datetime, name: str | None = None, settings: dict | None = None,
                        archived_at: datetime | None = None) -> None:
         p = self.projects[project_id]
@@ -691,10 +688,6 @@ class PgRepo:
     def list_scheduled_projects(self) -> list[dict]:
         with self.pool.connection() as conn:
             return self._project_rows(conn, "archived_at IS NULL AND settings ? 'schedule'", ())
-
-    def list_projects_with_setting(self, key: str) -> list[dict]:
-        with self.pool.connection() as conn:
-            return self._project_rows(conn, "archived_at IS NULL AND settings ? %s", (key,))
 
     def update_project(self, project_id: str, now: datetime, name: str | None = None, settings: dict | None = None,
                        archived_at: datetime | None = None) -> None:
