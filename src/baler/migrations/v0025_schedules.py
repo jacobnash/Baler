@@ -1,5 +1,5 @@
 """
-0003 construction schedules (#217, epic #221 §9): imported P6 XER / MS
+0025 construction schedules (#217, epic #221 §9): imported P6 XER / MS
 Project XML schedules and their activities, read and written by
 baler.commissioning.schedules_api.
 
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 3
+VERSION = 25
 NAME = "schedules"
 
 SCHEDULES = """

@@ -550,6 +550,8 @@ def test_scram_login_issues_session_jwt(monkeypatch):
             "password_hash": auth.hash_password("pencil"), "role": "admin"}
     monkeypatch.setattr(auth, "get_user_by_email", lambda conn, e: user if e == user["email"] else None)
     monkeypatch.setattr(auth, "user_site_ids", lambda conn, uid: ["s1"])
+    step = {"u1": "session"}
+    monkeypatch.setattr(ha.mfa, "login_step", lambda conn, uid: step[uid])
     login = ha.ScramLogin(FakeTS())
 
     def run(email, password):
@@ -576,6 +578,12 @@ def test_scram_login_issues_session_jwt(monkeypatch):
 
     assert run("admin@acme.example", "wrong")[0] == 403
     assert run("nobody@acme.example", "pencil")[0] == 403
+
+    # #278: SCRAM is password-only, so an account with MFA on (or required
+    # by its org and not set up) can't use it - right password or not.
+    for s in ("mfa", "enroll"):
+        step["u1"] = s
+        assert run("admin@acme.example", "pencil")[0] == 403
 
 
 # --- site scoping ---------------------------------------------------------

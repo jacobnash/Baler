@@ -70,6 +70,10 @@ const ROUTES = [
   // own 5xx log spans every org and site, so it is whole-org and operator.
   ["GET",    /^\/ops\/freshness$/,                   "ops", "viewer"],
   ["GET",    /^\/ops\/gateway-errors$/,              "gateway", "operator"],
+  // Prometheus text (#235): the listener's, broker's and rule daemons'
+  // numbers are process-wide, not per org, so "metrics" is a WHOLE_ORG
+  // resource - an API key (role service) or any org-wide login can scrape.
+  ["GET",    /^\/ops\/metrics$/,                     "metrics", "viewer"],
   // source registry (Baler#20): settings include credentials - admin only
   ["GET",    /^\/ops\/sources$/,                     "ops", "admin"],
   ["GET",    /^\/ops\/sources\/kinds$/,               "ops", "admin"],
@@ -102,6 +106,82 @@ const ROUTES = [
   ["GET",    /^\/ops\/edges$/,                        "devices", "viewer"],
   ["POST",   /^\/ops\/edges\/[^/]+\/[^/]+\/actions\/(list_devices|list_connections|modbus_list_connections|list_announced)$/, "devices", "viewer"],
   ["POST",   /^\/ops\/edges\/[^/]+\/[^/]+\/actions\/[a-z_]+$/, "devices", "admin"],
+
+  // Building lifecycle record (epic #221), served by ops_api from
+  // baler.lifecycle. Reads viewer, changes operator; ops_api also keeps
+  // each org's rows to itself and positions to the caller's sites.
+  // Positions vs installed assets (#197): install/remove history is
+  // append-only, so there is no DELETE.
+  ["GET",    /^\/ops\/assets$/,                         "assets", "viewer"],
+  ["POST",   /^\/ops\/assets$/,                         "assets", "operator"],
+  ["GET",    /^\/ops\/assets\/changes$/,                 "assets", "viewer"],
+  ["GET",    /^\/ops\/assets\/[^/]+$/,                   "assets", "viewer"],
+  ["PATCH",  /^\/ops\/assets\/[^/]+$/,                   "assets", "operator"],
+  ["GET",    /^\/ops\/assets\/[^/]+\/audit$/,             "assets", "viewer"],
+  ["POST",   /^\/ops\/assets\/[^/]+\/(install|remove|retire)$/, "assets", "operator"],
+  ["GET",    /^\/ops\/positions\/history$/,              "assets", "viewer"],
+  ["GET",    /^\/ops\/positions\/asset-at$/,             "assets", "viewer"],
+  ["POST",   /^\/ops\/positions\/replace$/,               "assets", "operator"],
+  // Warranties on assets (#198): voided, never deleted.
+  ["GET",    /^\/ops\/assets\/[^/]+\/warranties$/,        "assets", "viewer"],
+  ["POST",   /^\/ops\/assets\/[^/]+\/warranties$/,        "assets", "operator"],
+  ["GET",    /^\/ops\/warranties$/,                      "assets", "viewer"],
+  ["GET",    /^\/ops\/warranties\/alerts$/,               "assets", "viewer"],
+  ["PATCH",  /^\/ops\/warranties\/[^/]+$/,                "assets", "operator"],
+  ["POST",   /^\/ops\/warranties\/[^/]+\/void$/,          "assets", "operator"],
+
+  // Document store (#201): deleting (a soft delete) is admin.
+  ["GET",    /^\/ops\/documents$/,                       "documents", "viewer"],
+  ["POST",   /^\/ops\/documents$/,                       "documents", "operator"],
+  ["GET",    /^\/ops\/documents\/search$/,               "documents", "viewer"],
+  ["GET",    /^\/ops\/documents\/kinds$/,                "documents", "viewer"],
+  ["GET",    /^\/ops\/documents\/[^/]+$/,                "documents", "viewer"],
+  ["PATCH",  /^\/ops\/documents\/[^/]+$/,                "documents", "operator"],
+  ["DELETE", /^\/ops\/documents\/[^/]+$/,                "documents", "admin"],
+  ["GET",    /^\/ops\/documents\/[^/]+\/(content|verify|audit)$/, "documents", "viewer"],
+  ["GET",    /^\/ops\/documents\/[^/]+\/pages\/[^/]+$/,     "documents", "viewer"],
+  ["POST",   /^\/ops\/documents\/[^/]+\/links$/,          "documents", "operator"],
+  ["DELETE", /^\/ops\/documents\/[^/]+\/links\/[^/]+$/,   "documents", "operator"],
+  // Extraction from documents (#202): proposals only; a person confirms each.
+  ["POST",   /^\/ops\/documents\/[^/]+\/extract$/,        "documents", "operator"],
+  // Drawing schedules (#203): rows become proposals like #202's.
+  ["POST",   /^\/ops\/documents\/[^/]+\/schedules$/,      "documents", "operator"],
+  ["GET",    /^\/ops\/documents\/[^/]+\/proposals$/,      "documents", "viewer"],
+  ["GET",    /^\/ops\/document-proposals$/,              "documents", "viewer"],
+  ["POST",   /^\/ops\/document-proposals\/[^/]+\/decide$/, "documents", "operator"],
+
+  // PM schedules (#199): due work is computed, then exported (CSV, COBie Job).
+  ["GET",    /^\/ops\/pm\/tasks$/,                       "assets", "viewer"],
+  ["POST",   /^\/ops\/pm\/tasks$/,                       "assets", "operator"],
+  ["PATCH",  /^\/ops\/pm\/tasks\/[^/]+$/,                 "assets", "operator"],
+  ["POST",   /^\/ops\/pm\/tasks\/[^/]+\/complete$/,       "assets", "operator"],
+  ["GET",    /^\/ops\/pm\/tasks\/[^/]+\/completions$/,    "assets", "viewer"],
+  ["GET",    /^\/ops\/pm\/due$/,                         "assets", "viewer"],
+  ["GET",    /^\/ops\/pm\/due\/export$/,                  "assets", "viewer"],
+  // COBie import/export and spares (#204). Import is a dry run unless commit.
+  ["POST",   /^\/ops\/cobie\/import$/,                   "assets", "operator"],
+  ["GET",    /^\/ops\/cobie\/export$/,                   "assets", "viewer"],
+  ["GET",    /^\/ops\/spares$/,                          "assets", "viewer"],
+  ["POST",   /^\/ops\/spares$/,                          "assets", "operator"],
+  // Deferred maintenance, service-life references, FCI (#200): closed, never deleted.
+  ["GET",    /^\/ops\/deferred$/,                        "assets", "viewer"],
+  ["POST",   /^\/ops\/deferred$/,                        "assets", "operator"],
+  ["GET",    /^\/ops\/deferred\/fci$/,                    "assets", "viewer"],
+  ["GET",    /^\/ops\/deferred\/capital-plan$/,           "assets", "viewer"],
+  ["PATCH",  /^\/ops\/deferred\/[^/]+$/,                  "assets", "operator"],
+  ["GET",    /^\/ops\/service-life$/,                    "assets", "viewer"],
+  ["POST",   /^\/ops\/service-life$/,                    "assets", "operator"],
+  ["GET",    /^\/ops\/service-life\/assets$/,             "assets", "viewer"],
+  ["GET",    /^\/ops\/assets\/[^/]+\/values$/,            "assets", "viewer"],
+  ["POST",   /^\/ops\/assets\/[^/]+\/values$/,            "assets", "operator"],
+  // Bench tests (#211): procedures as data; results append-only.
+  ["GET",    /^\/ops\/bench\/templates$/,                 "assets", "viewer"],
+  ["GET",    /^\/ops\/bench\/procedures$/,                "assets", "viewer"],
+  ["POST",   /^\/ops\/bench\/procedures$/,                "assets", "operator"],
+  ["PATCH",  /^\/ops\/bench\/procedures\/[^/]+$/,          "assets", "operator"],
+  ["GET",    /^\/ops\/assets\/[^/]+\/bench-tests$/,       "assets", "viewer"],
+  ["POST",   /^\/ops\/assets\/[^/]+\/bench-tests$/,       "assets", "operator"],
+  ["GET",    /^\/ops\/assets\/[^/]+\/baseline$/,          "assets", "viewer"],
 
   // commissioning_api (Baler#37): reads viewer, changes operator,
   // archiving a project admin. The backend also checks the caller's org
@@ -169,11 +249,56 @@ const ROUTES = [
   // backend re-checks admin, and BALER_CX_ALLOW_WRITES gates it all.
   ["GET",    /^\/cx\/active\/status$/,                         "commissioning", "viewer"],
   ["POST",   /^\/cx\/active\/kill$/,                           "commissioning", "admin"],
+  ["GET",    /^\/cx\/active\/library$/,                        "commissioning", "viewer"],
   ["GET",    /^\/cx\/projects\/[^/]+\/active-runs$/,            "commissioning", "viewer"],
   ["POST",   /^\/cx\/projects\/[^/]+\/active-runs$/,            "commissioning", "admin"],
   ["GET",    /^\/cx\/active-runs\/[^/]+$/,                     "commissioning", "viewer"],
   ["POST",   /^\/cx\/active-runs\/[^/]+\/confirm$/,             "commissioning", "admin"],
   ["POST",   /^\/cx\/active-runs\/[^/]+\/abort$/,               "commissioning", "operator"],
+  // Fleet runs (Baler#275 d): one active test across many equipment, the
+  // same envelope per member. Planning and confirming are admin (the
+  // confirmation repeats the plan hash); stopping one is the safe direction.
+  ["GET",    /^\/cx\/projects\/[^/]+\/fleet-runs$/,             "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/fleet-runs$/,             "commissioning", "admin"],
+  ["GET",    /^\/cx\/fleet-runs\/[^/]+$/,                      "commissioning", "viewer"],
+  ["POST",   /^\/cx\/fleet-runs\/[^/]+\/confirm$/,              "commissioning", "admin"],
+  ["POST",   /^\/cx\/fleet-runs\/[^/]+\/abort$/,                "commissioning", "operator"],
+  // Scheduled retests (Baler#275 e): proposing, approving (the backend also
+  // refuses API keys) and narrowing are admin; revoking is the safe
+  // direction, so an operator can do it.
+  ["GET",    /^\/cx\/projects\/[^/]+\/active-schedules$/,       "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/active-schedules$/,       "commissioning", "admin"],
+  ["GET",    /^\/cx\/active-schedules\/[^/]+$/,                "commissioning", "viewer"],
+  ["PATCH",  /^\/cx\/active-schedules\/[^/]+$/,                "commissioning", "admin"],
+  ["POST",   /^\/cx\/active-schedules\/[^/]+\/approve$/,        "commissioning", "admin"],
+  ["POST",   /^\/cx\/active-schedules\/[^/]+\/revoke$/,         "commissioning", "operator"],
+  // Audited operator writes (Baler#213): a person (the backend refuses API
+  // keys) commands a point at levels 8-16 with a reason and an expiry -
+  // operator; schedule and calendar writes change what the building does
+  // every day - admin. Reading the live schedule objects talks to the
+  // site, so it is operator too.
+  ["GET",    /^\/cx\/projects\/[^/]+\/writes$/,                 "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/writes$/,                 "commissioning", "operator"],
+  ["POST",   /^\/cx\/writes\/[^/]+\/relinquish$/,                "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/schedule-targets$/,       "commissioning", "operator"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/schedule-writes$/,        "commissioning", "admin"],
+  ["POST",   /^\/cx\/writes\/[^/]+\/revert$/,                    "commissioning", "admin"],
+  // Override tests (Baler#212): the schedules Windrow last read, and a
+  // re-read (reads schedules and priority arrays, never writes).
+  ["GET",    /^\/cx\/projects\/[^/]+\/schedules$/,              "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/schedules\/refresh$/,     "commissioning", "operator"],
+  // Traditional commissioning (Baler#275): a person records a manual step
+  // result (the backend refuses API keys and records the caller, never
+  // someone else) and edits only their own; coverage is a read.
+  ["POST",   /^\/cx\/test-runs\/[^/]+\/manual-results$/,         "commissioning", "operator"],
+  ["GET",    /^\/cx\/test-runs\/[^/]+\/manual-results$/,         "commissioning", "viewer"],
+  ["PATCH",  /^\/cx\/manual-results\/[^/]+$/,                    "commissioning", "operator"],
+  ["GET",    /^\/cx\/manual-attachments\/[^/]+$/,                "commissioning", "viewer"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/coverage$/,                "commissioning", "viewer"],
+  // Construction schedules (#217)
+  ["POST",   /^\/cx\/projects\/[^/]+\/construction-schedules$/, "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/construction-schedules$/, "commissioning", "viewer"],
+  ["GET",    /^\/cx\/construction-schedules\/[^/]+\/activities$/, "commissioning", "viewer"],
   // Cx 10 (Baler#46): the agent. Talking to it is a change (it can start
   // passive runs and propose); accepting a proposal is the change itself,
   // and the backend requires admin for an active-test proposal.
@@ -184,10 +309,49 @@ const ROUTES = [
   ["GET",    /^\/cx\/projects\/[^/]+\/agent\/proposals$/,        "commissioning", "viewer"],
   ["POST",   /^\/cx\/agent-proposals\/[^/]+\/accept$/,          "commissioning", "operator"],
   ["POST",   /^\/cx\/agent-proposals\/[^/]+\/reject$/,          "commissioning", "operator"],
-  // Construction schedules (#217)
-  ["POST",   /^\/cx\/projects\/[^/]+\/construction-schedules$/, "commissioning", "operator"],
-  ["GET",    /^\/cx\/projects\/[^/]+\/construction-schedules$/, "commissioning", "viewer"],
-  ["GET",    /^\/cx\/construction-schedules\/[^/]+\/activities$/, "commissioning", "viewer"],
+  // Performance baselines and degradation (#215)
+  ["POST",   /^\/cx\/projects\/[^/]+\/baselines$/,            "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/baselines$/,            "commissioning", "viewer"],
+  ["GET",    /^\/cx\/baselines\/[^/]+\/degradation$/,          "commissioning", "viewer"],
+  // Replace-vs-keep savings cases (#216)
+  ["POST",   /^\/cx\/projects\/[^/]+\/savings-cases$/,        "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/savings-cases$/,        "commissioning", "viewer"],
+  ["GET",    /^\/cx\/savings-cases\/[^/]+$/,                  "commissioning", "viewer"],
+  ["PATCH",  /^\/cx\/savings-cases\/[^/]+$/,                  "commissioning", "operator"],
+  // Spaces (#209)
+  ["GET",    /^\/cx\/space-types$/,                         "commissioning", "viewer"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/spaces$/,               "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/spaces$/,               "commissioning", "operator"],
+  ["GET",    /^\/cx\/spaces\/[^/]+$/,                        "commissioning", "viewer"],
+  ["PATCH",  /^\/cx\/spaces\/[^/]+$/,                        "commissioning", "operator"],
+  ["DELETE", /^\/cx\/spaces\/[^/]+$/,                        "commissioning", "admin"],
+  ["PUT",    /^\/cx\/spaces\/[^/]+\/adjacent$/,               "commissioning", "operator"],
+  ["PUT",    /^\/cx\/spaces\/[^/]+\/serving$/,                "commissioning", "operator"],
+  // Readiness (#210)
+  ["GET",    /^\/cx\/spaces\/[^/]+\/readiness$/,              "commissioning", "viewer"],
+  // Continuous compliance (#207)
+  ["POST",   /^\/cx\/projects\/[^/]+\/compliance\/runs$/,     "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/compliance\/runs$/,     "commissioning", "viewer"],
+  ["GET",    /^\/cx\/compliance-runs\/[^/]+$/,                "commissioning", "viewer"],
+  ["GET",    /^\/cx\/spaces\/[^/]+\/compliance$/,             "commissioning", "viewer"],
+  // Requirement packs (#205): org library; publishing freezes a version (admin)
+  ["GET",    /^\/cx\/pack-schema$/,                         "commissioning", "viewer"],
+  ["GET",    /^\/cx\/packs$/,                               "commissioning", "viewer"],
+  ["POST",   /^\/cx\/packs$/,                               "commissioning", "operator"],
+  ["GET",    /^\/cx\/packs\/[^/]+$/,                         "commissioning", "viewer"],
+  ["PATCH",  /^\/cx\/packs\/[^/]+\/requirements\/[^/]+$/,      "commissioning", "operator"],
+  ["POST",   /^\/cx\/packs\/[^/]+\/requirements\/[^/]+\/confirm$/, "commissioning", "operator"],
+  ["POST",   /^\/cx\/packs\/[^/]+\/publish$/,                 "commissioning", "admin"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/packs$/,                "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/packs$/,                "commissioning", "operator"],
+  // Pack extraction proposals (#206)
+  ["POST",   /^\/cx\/packs\/[^/]+\/extract$/,                 "commissioning", "operator"],
+  ["GET",    /^\/cx\/packs\/[^/]+\/proposals$/,               "commissioning", "viewer"],
+  ["GET",    /^\/cx\/pack-extractions\/[^/]+$/,               "commissioning", "viewer"],
+  ["POST",   /^\/cx\/pack-proposals\/[^/]+\/accept$/,          "commissioning", "operator"],
+  ["POST",   /^\/cx\/pack-proposals\/[^/]+\/reject$/,          "commissioning", "operator"],
+  // Hunting per loop (#214)
+  ["GET",    /^\/cx\/projects\/[^/]+\/hunting$/,              "commissioning", "viewer"],
 
   // auth_api - POST /auth/login has its own exact-match nginx location
   // with no js_access at all (can't require a token to get a token), so
@@ -211,6 +375,25 @@ const ROUTES = [
   ["POST",   /^\/auth\/broker-accounts\/[^/]+\/rotate$/, "auth", "admin"],
   ["DELETE", /^\/auth\/broker-accounts\/[^/]+$/,      "auth", "admin"],
   ["POST",   /^\/auth\/me\/password$/,                "auth", "viewer"],
+  // Multi-factor login and password reset (#278). The caller's own MFA:
+  // any role (an enrolment-only session reaches these, MFA_ENROLL_ROUTES).
+  ["GET",    /^\/auth\/me\/mfa$/,                     "auth", "viewer"],
+  ["POST",   /^\/auth\/me\/mfa\/totp\/setup$/,         "auth", "viewer"],
+  ["POST",   /^\/auth\/me\/mfa\/totp\/enable$/,        "auth", "viewer"],
+  ["POST",   /^\/auth\/me\/mfa\/disable$/,             "auth", "viewer"],
+  ["POST",   /^\/auth\/me\/mfa\/recovery-codes$/,      "auth", "viewer"],
+  // The org's MFA requirement, resetting a user's MFA, the audit trail.
+  ["GET",    /^\/auth\/org$/,                         "auth", "admin"],
+  ["PATCH",  /^\/auth\/org$/,                         "auth", "admin"],
+  ["DELETE", /^\/auth\/users\/[^/]+\/mfa$/,            "auth", "admin"],
+  ["GET",    /^\/auth\/events$/,                      "auth", "admin"],
+  // Public, each with its own rate-limited nginx location: the second
+  // sign-in step (its mfa_token is signed with a different key, so it is
+  // never a bearer token here), and the emailed password reset.
+  ["POST",   /^\/auth\/login\/mfa$/,                  null, null],
+  ["POST",   /^\/auth\/password-reset$/,               null, null],
+  ["POST",   /^\/auth\/password-reset\/confirm$/,       null, null],
+  ["GET",    /^\/auth\/password-reset\/config$/,        null, null],
   // Public like /auth/login (not exempted via its own nginx location,
   // since unlike login it still needs js_access to run so the public
   // "no role" branch below actually executes) - a brand-new org has to
@@ -334,9 +517,37 @@ function jtiRevoked(claims, cached) {
     return cached !== undefined && cached !== null && cached !== "";
 }
 
+/*
+ * A session carrying mfa_enroll (auth.issue_session_token: the org requires
+ * MFA and this user hasn't set it up) reaches only these: enough to see who
+ * they are, set up an authenticator, and log out (#278). auth_api checks
+ * the same on its side.
+ */
+const MFA_ENROLL_ROUTES = [
+  ["GET",  /^\/auth\/me$/],
+  ["POST", /^\/auth\/logout$/],
+  ["GET",  /^\/auth\/me\/mfa$/],
+  ["POST", /^\/auth\/me\/mfa\/totp\/setup$/],
+  ["POST", /^\/auth\/me\/mfa\/totp\/enable$/],
+];
+
+/*
+ * Whether these claims may make this request as far as MFA is concerned:
+ * always, unless the token is an enrolment-only session.
+ */
+function mfaAllows(claims, method, uri) {
+    if (!claims || claims.mfa_enroll !== true) {
+        return true;
+    }
+    const path = uri.split("?")[0];
+    return MFA_ENROLL_ROUTES.some(function (row) {
+        return row[0] === method && row[1].test(path);
+    });
+}
+
 // Resources a site-restricted token can't reach at all: they span the
 // whole org and have no per-site filter to apply.
-const WHOLE_ORG = { devices: true, gateway: true };
+const WHOLE_ORG = { devices: true, gateway: true, metrics: true };
 
 /*
  * Whether these claims may reach a resource: site-restricted tokens
@@ -403,4 +614,4 @@ function unknownRouteMessage(method, uri) {
 
 const SIGN_IN_HINT = "sign in with POST /auth/login (see /auth/docs), then send Authorization: Bearer <token>";
 
-export default { ROLE_RANK, ROUTES, resolveRoute, roleSatisfies, scopeSatisfies, parseUserCutoff, sessionCutOff, jtiRevoked, bearerFromHeader, isHaystackHandshake, unknownRouteMessage, SIGN_IN_HINT };
+export default { ROLE_RANK, ROUTES, MFA_ENROLL_ROUTES, mfaAllows, resolveRoute, roleSatisfies, scopeSatisfies, parseUserCutoff, sessionCutOff, jtiRevoked, bearerFromHeader, isHaystackHandshake, unknownRouteMessage, SIGN_IN_HINT };

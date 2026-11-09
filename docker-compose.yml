@@ -54,6 +54,11 @@ x-daemon-env: &daemon-env
   BALER_MQTT_PUBLIC_HOST: ${BALER_MQTT_PUBLIC_HOST:-}
   BALER_MQTT_PUBLIC_PORT: ${BALER_MQTT_PUBLIC_PORT:-1883}
   BALER_MQTT_PUBLIC_TLS_PORT: ${BALER_MQTT_PUBLIC_TLS_PORT:-}
+  # Blank-safe (blank = off): every process posts each unhandled exception
+  # (type, message, file/line - no locals) here as signed JSON (#277,
+  # baler.errors). Counts land in /ops/status either way.
+  BALER_ERROR_TRACKING_URL: ${BALER_ERROR_TRACKING_URL:-}
+  BALER_ERROR_TRACKING_SECRET: ${BALER_ERROR_TRACKING_SECRET:-}
 
 x-daemon-depends-on: &daemon-depends-on
   postgres:
@@ -146,7 +151,9 @@ services:
     restart: unless-stopped
     # pinned (#23): holds history and auth - tag and digest of what nash-srv runs
     image: timescale/timescaledb:2.30.0-pg16@sha256:322ae364eca3321cf2a48f1ef31213b87843413b3cf8feeebf54e999a26bb731
-    command: postgres -c log_statement=all
+    # Statement logging off by default: log_statement=all wrote ~73 GB/day of
+    # container log at 10k points (#245). Slow statements are still logged.
+    command: postgres -c log_statement=${BALER_PG_LOG_STATEMENT:-none} -c log_min_duration_statement=${BALER_PG_LOG_MIN_DURATION_MS:-1000}
     # Docker's default 64 MB /dev/shm is too small for Postgres parallel
     # queries over point_history (nash-srv hit "could not resize shared
     # memory segment"); the host disk was fine.
@@ -160,7 +167,14 @@ services:
     ports:
       - "5433:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${BALER_PG_USER:-baler}"]
+      # Over TCP (-h 127.0.0.1), not the default Unix socket. On a fresh
+      # volume the image's entrypoint runs a temporary init server that
+      # listens on the socket only, then shuts it down and starts the real
+      # one. A socket check passed against the init server, so `migrate`
+      # (and every daemon) could connect in the gap and fail with "the
+      # database system is starting up" (seen in CI). Only the real server
+      # listens on TCP.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${BALER_PG_USER:-baler}"]
       interval: 2s
       timeout: 3s
       retries: 20
@@ -217,11 +231,11 @@ services:
     # index, and a second container would retire the first one's sessions.
     command: python -m baler.mqtt_listener
     # Pure daemons connect to Postgres/MQTT eagerly at startup and exit on
-    # failure. On a fresh DB volume, postgres' first-boot init briefly passes
-    # its healthcheck then restarts, refusing that first connection (a race the
-    # HTTP APIs dodge by connecting lazily). Restart so the daemon recovers
-    # instead of staying dead - otherwise the mqtt_listener/fault_detector-
-    # dependent e2e tests fail intermittently (seen on CI's fresh volumes).
+    # failure. On a fresh DB volume, postgres' first-boot init used to pass
+    # its (socket) healthcheck and then restart, refusing that first
+    # connection; the healthcheck now probes TCP, which the init server
+    # doesn't listen on. Restart anyway, so a daemon recovers from any
+    # later Postgres restart instead of staying dead.
     restart: unless-stopped
     environment: *daemon-env
     volumes:
@@ -303,6 +317,10 @@ services:
       <<: *daemon-env
       # rules/webhooks/derivations stores: a volume, not the checkout (#30)
       BALER_DATA_DIR: /data
+      # Blank-safe (blank = 200000 / 5000): what one pass holds in memory
+      # (#336, see .env.example).
+      BALER_DERIVATION_READ_BUDGET: ${BALER_DERIVATION_READ_BUDGET:-}
+      BALER_DERIVATION_WRITE_BATCH: ${BALER_DERIVATION_WRITE_BATCH:-}
     volumes:
       - .:/app
       - baler-data:/data
@@ -324,7 +342,18 @@ services:
     restart: unless-stopped
     build: .
     command: python -m baler.auth_api
-    environment: *daemon-env
+    environment:
+      <<: *daemon-env
+      # Password reset email and two-step sign-in (#278; .env.example)
+      BALER_SMTP_HOST: ${BALER_SMTP_HOST:-}
+      BALER_SMTP_PORT: ${BALER_SMTP_PORT:-}
+      BALER_SMTP_TLS: ${BALER_SMTP_TLS:-}
+      BALER_SMTP_USER: ${BALER_SMTP_USER:-}
+      BALER_SMTP_PASSWORD: ${BALER_SMTP_PASSWORD:-}
+      BALER_SMTP_FROM: ${BALER_SMTP_FROM:-}
+      BALER_PUBLIC_URL: ${BALER_PUBLIC_URL:-}
+      BALER_PASSWORD_RESET_TTL_SECONDS: ${BALER_PASSWORD_RESET_TTL_SECONDS:-}
+      BALER_MFA_KEY: ${BALER_MFA_KEY:-}
     volumes:
       - .:/app
     depends_on: *daemon-depends-on
@@ -340,6 +369,9 @@ services:
       <<: *daemon-env
       # reads derivations.json to find computed points whose derivation is gone
       BALER_DATA_DIR: /data
+      # when the Backups / Restore drill cards turn degraded (#276, #196)
+      OPS_BACKUP_STALE_HOURS: ${OPS_BACKUP_STALE_HOURS:-36}
+      OPS_DRILL_STALE_DAYS: ${OPS_DRILL_STALE_DAYS:-8}
     volumes:
       - .:/app
       - baler-data:/data:ro
@@ -349,6 +381,52 @@ services:
     healthcheck:
       <<: *http-api-healthcheck
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8007/openapi.yaml')"]
+
+  # Operator alerts and the dead-man's switch (#277, baler.alerts): judges
+  # what /ops/status knows every BALER_ALERT_INTERVAL_SECONDS and sends one
+  # notice when something breaks and one when it clears, by webhook and/or
+  # email. Sends nothing until a channel is configured in .env, and pings
+  # nothing unless BALER_DEADMAN_URL is set. Its own process, so a slow mail
+  # server or webhook never holds up /ops/status.
+  alerter:
+    restart: unless-stopped
+    build: .
+    command: python -m baler.alerts
+    environment:
+      <<: *daemon-env
+      BALER_ALERT_INTERVAL_SECONDS: ${BALER_ALERT_INTERVAL_SECONDS:-}
+      BALER_ALERT_FOR_SECONDS: ${BALER_ALERT_FOR_SECONDS:-}
+      BALER_ALERT_CLEAR_SECONDS: ${BALER_ALERT_CLEAR_SECONDS:-}
+      BALER_ALERT_REPEAT_SECONDS: ${BALER_ALERT_REPEAT_SECONDS:-}
+      BALER_ALERT_INSTANCE: ${BALER_ALERT_INSTANCE:-}
+      BALER_ALERT_WEBHOOK_URL: ${BALER_ALERT_WEBHOOK_URL:-}
+      BALER_ALERT_WEBHOOK_SECRET: ${BALER_ALERT_WEBHOOK_SECRET:-}
+      BALER_ALERT_EMAIL_TO: ${BALER_ALERT_EMAIL_TO:-}
+      # The data volume, mounted read-only below, is what "disk low" watches.
+      BALER_ALERT_DISK_PATHS: ${BALER_ALERT_DISK_PATHS:-/pgdata}
+      BALER_ALERT_DISK_MIN_FREE_PCT: ${BALER_ALERT_DISK_MIN_FREE_PCT:-}
+      BALER_ALERT_CERT_HOSTS: ${BALER_ALERT_CERT_HOSTS:-}
+      BALER_ALERT_CERT_DAYS: ${BALER_ALERT_CERT_DAYS:-}
+      BALER_ALERT_GATEWAY_5XX: ${BALER_ALERT_GATEWAY_5XX:-}
+      BALER_ALERT_GATEWAY_WINDOW_SECONDS: ${BALER_ALERT_GATEWAY_WINDOW_SECONDS:-}
+      BALER_ALERT_RESTART_COUNT: ${BALER_ALERT_RESTART_COUNT:-}
+      BALER_ALERT_RESTART_WINDOW_SECONDS: ${BALER_ALERT_RESTART_WINDOW_SECONDS:-}
+      BALER_ALERT_RESTART_IGNORE: ${BALER_ALERT_RESTART_IGNORE:-}
+      BALER_DEADMAN_URL: ${BALER_DEADMAN_URL:-}
+      BALER_DEADMAN_INTERVAL_SECONDS: ${BALER_DEADMAN_INTERVAL_SECONDS:-}
+      BALER_SMTP_HOST: ${BALER_SMTP_HOST:-}
+      BALER_SMTP_PORT: ${BALER_SMTP_PORT:-}
+      BALER_SMTP_TLS: ${BALER_SMTP_TLS:-}
+      BALER_SMTP_USER: ${BALER_SMTP_USER:-}
+      BALER_SMTP_PASSWORD: ${BALER_SMTP_PASSWORD:-}
+      BALER_SMTP_FROM: ${BALER_SMTP_FROM:-}
+    volumes:
+      - .:/app
+      - postgres-data:/pgdata:ro
+      # the gateway's 5xx log, for the "gateway answering with server errors" alert
+      - gateway-logs:/gateway-logs:ro
+    depends_on: *daemon-depends-on
+    extra_hosts: *host-gateway
 
   # Commissioning (Baler#32/#37): projects, phases, scoped inventory,
   # SHACL expected-point templates, verification runs. Gateway /cx/.
