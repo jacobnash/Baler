@@ -62,7 +62,9 @@ from baler.commissioning import (
     procedures,
     report,
     retest_schedules,
+    routes,
     runner,
+    spaces_api,
     spec,
     test_library,
 )
@@ -109,6 +111,9 @@ _ACTIVE_SCHEDULE = re.compile(r"/active-schedules/([^/]+)")
 _ACTIVE_SCHEDULE_SUB = re.compile(r"/active-schedules/([^/]+)/(approve|revoke)")
 _RUN = re.compile(r"/runs/([^/]+)")
 _RUN_REPORT = re.compile(r"/runs/([^/]+)/report")
+
+# Building-record features (epic #221), each a route table (commissioning.routes).
+EXTENSIONS = (spaces_api,)
 
 
 def _check_prefixes(value) -> list[str]:
@@ -184,6 +189,8 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
         TRACER = tracer
         ALLOWED_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
         ALLOWED_HEADERS = "Content-Type, Authorization"
+        REPO = repo  # for the EXTENSIONS' handlers (commissioning.routes)
+        NOW = staticmethod(now_fn)
 
         # ------------------------------------------------------- plumbing
 
@@ -224,6 +231,11 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
 
         def _route(self, method: str, path: str):
             """(span name, fn(span, claims)) or None."""
+            for ext in EXTENSIONS:
+                found_ext = routes.match(ext.ROUTES, method, path)
+                if found_ext is not None:
+                    ext_name, ext_fn, groups = found_ext
+                    return ext_name, lambda span, claims, fn=ext_fn, g=groups: fn(self, span, claims, *g)
             if path == "/projects":
                 return {"GET": ("list_projects", self._list_projects), "POST": ("create_project", self._create_project)}.get(method)
             if path == "/templates" and method == "GET":

@@ -36,6 +36,7 @@ from baler.migrations import (
     v0016_bench,
     v0017_doc_proposals,
     v0018_spares,
+    v0019_spaces,
 )
 
 ALL = (
@@ -57,4 +58,5 @@ ALL = (
     v0016_bench,
     v0017_doc_proposals,
     v0018_spares,
+    v0019_spaces,
 )
