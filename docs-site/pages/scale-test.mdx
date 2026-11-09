@@ -109,8 +109,12 @@ $PY scripts/scale/ladder.py up       # builds and starts the scale stack (5-10 m
 nohup $PY scripts/scale/ladder.py run --no-up --procs 1 > ~/scale-ladder.log 2>&1 &
 tail -f ~/scale-ladder.log
 
-# Durability: kill -9 the listener, then postgres, mid-run; count acknowledged readings lost
+# Durability: kill -9 the listener container, one listener worker, then postgres, mid-run;
+# count acknowledged readings lost
 $PY scripts/scale/ladder.py crash --points 5000 --procs 1
+
+# Listener capacity alone (#233): readings/s with 1..4 worker processes, from a broker backlog
+$PY scripts/scale/listener_bench.py --workers 1,2,3,4 --messages 300000
 
 $PY scripts/scale/ladder.py table scripts/scale/results/*-ladder.json   # rows for the table below
 $PY scripts/scale/ladder.py down --rmi                                  # remove the stack, volumes, images
@@ -152,6 +156,10 @@ So a 1-CPU run and a 12-CPU run are never compared without saying so.
 | `graph.ingest_s`, `tags_per_s` | Oxigraph count of `scale` points after publishing a step's tags | How long the graph takes to absorb new equipment. |
 | `graph.triples`, `count_*_s` | SPARQL `COUNT` timed | Graph size and the time of a full scan. |
 | `probes[]` | timed GETs through the gateway as the test org's admin, 5 runs, warm median vs. `budgets.json` | **Responsiveness.** Any probe over budget, or not HTTP 200, fails the step. |
+| `listener.workers.<n>` | each worker's heartbeat (`service_heartbeats` `mqtt_listener/<n>`, every 10 s) | **Per-worker throughput and CPU** (#233): mean `readings_per_s`, mean/max `cpu_pct` (the worker process's CPU, 100 = one core), and `blocked_s`, the seconds `on_message` waited on a full batch queue. Blocked time with spare CPU means Postgres is the wall; CPU near 100 means add workers. |
+| `listener.restarts_delta`, `listener.broker_dropped_delta` | the supervisor's heartbeat (`mqtt_listener`) | Worker or tag-path restarts during the step (any fails it, like a container restart), and the broker's drop counter as the listener saw it. |
+| `listener.tag_path` | `mqtt_listener/tags` heartbeat | The tag path's lag on the reading feed and tag messages applied. |
+| `tags_storm` (`--tags-storm N`) | tags for N new points published mid-soak; canary lag over the storm | #233's done-when: a tags storm must not push p95 reading lag past 30 s. `graph_s` is how long the graph took to have them all. |
 | `rules.<service>.median_cycle_s` | `service_heartbeats` beat-to-beat | Fault detector and derivation engine cycle time, including their sleep (30 s and 10 s by default). Since #243 their reading-feed threads beat too (every 10 s), so this is the beat interval; the His sweep's own duration is `heartbeat.his.sweep_s`. |
 | `rules.<service>.feed` | `reading_feed_consumers` sampled every 15 s | **Rule-daemon misses and lag** (#243). `missed_readings_delta` counts readings pruned from the feed before the daemon read them (more than `BALER_FEED_RETENTION_S` behind) and must be 0. `lag_s_max`/`lag_s_last` show how far behind it ran; still over 30 s at the end of the soak fails the step. |
 | `rules.<service>.heartbeat` | `service_heartbeats.detail` | Readings consumed, Cur-mode evaluations (`cur_evaluations`) or rows run (`cur_rows`), and for fault_detector the last His sweep: `sweep_s`, rules, faulted points. |
@@ -162,8 +170,10 @@ The ladder adds two rules to the test org, so per-point rule load is realistic: 
 `range` rule over every scale point, and a His-mode `stale` rule. Their bounds keep them
 from firing, so a fault storm doesn't distort the run.
 
-`crash` runs readings, kills each `--kill` service with `docker kill -s KILL` mid-run (default:
-`mqtt_listener`, then `postgres`), brings it back, drains, and reports `missing_acked`. That is
+`crash` runs readings, kills each `--kill` target with `kill -9` mid-run (default:
+the `mqtt_listener` container, then `listener_worker` - one worker process inside it, which its
+supervisor restarts while the other workers carry on - then `postgres`), brings it back,
+drains, and reports `missing_acked`. That is
 the number of readings the broker acknowledged that never reached `point_history`. Batching
 and group commit are fine; losing acknowledged readings is not.
 
@@ -329,6 +339,86 @@ measured 17–25k rows/s against 15–21k for `off`; single-row writes pay the f
 Most of main's loss wasn't the async commit itself. After any listener restart, its
 re-subscribe replayed every retained tags message, which it handled at about 150/s. Readings
 queued behind that replay until mosquitto's 10,000-message queue overflowed.
+
+### Listener scale-out (#233): limiter removed, next limiter exposed
+
+nash-srv's 100k step (`20261108T233336Z`, c36aec3) found the first data loss: one listener
+process stored 14,921 of 20,000 readings/s (73.9%) at about one core of its 1.5-CPU cap, and
+the broker dropped 4.74 M messages. One process is one GIL. #233 runs the listener as
+`BALER_LISTENER_WORKERS` processes on the shared subscription `$share/baler/fbf/#` (see
+[Architecture](/architecture)), moves tags off the readings path, and makes overload counted.
+
+**Local capacity**, `listener_bench.py` (300,000 readings queued at the broker, then drained;
+20,000 points; durable commits). Dev VM, 4 CPUs shared with three other agents' stacks: host
+load 9-13 throughout, so every process got well under a core. Read these as lower bounds and
+for their shape, not as nash-srv numbers.
+
+| Code | Workers | Stored/s | Per worker | Worker CPU % (each) | Batcher writing % | Postgres CPU % | Missing |
+|---|---|---|---|---|---|---|---|
+| this branch, before the registry fix | 1 | 10,579 | 10,579 | 67 | - | - | 0 |
+| | 2 | 14,353 | 7,176 | 45, 46 | - | - | 0 |
+| | 3 | 9,227 | 3,076 | 22, 21, 20 | - | - | 0 |
+| | 4 | 11,648 | 2,912 | 23, 19, 22, 21 | - | - | 0 |
+| + registry upsert locks only rows it moves | 1 | 11,295 | 11,295 | 58 | 85 | 26 | 0 |
+| | 2 | 14,167 | 7,083 | 35, 35 | 96, 97 | 35 | 0 |
+| | 3 | **18,232** | 6,077 | 29, 27, 29 | 71-77 | 32 | 0 |
+| | 4 | 17,091 | 4,273 | 21 each | 67-73 | 34 | 0 |
+
+- **Limiter removed:** the single process. Two workers store 1.25-1.3x one, three 1.6x, on a
+  host with no spare core to give them. No worker ran out of CPU (≤ 58%), and none blocked on
+  a full queue.
+- **First limiter exposed, and fixed:** `point_registry`. Every batch upserted every point it
+  carried with `ON CONFLICT DO UPDATE ... WHERE <moved by 30 s>`, and Postgres locks the
+  conflicting row to commit even when the WHERE skips the update. Workers' batches share most
+  points, so they queued on each other's registry rows (`Lock transactionid` in
+  `pg_stat_activity`): 3 workers stored *less* than 2. The upsert now pre-filters with an
+  unlocked anti-join and only locks rows it actually moves.
+- **Next limiter:** the `point_history` upsert in Postgres. With 4 workers, sampling
+  `pg_stat_activity` every 200 ms found the `INSERT INTO point_history ... ON CONFLICT` active
+  in 131 of 189 samples, the registry upsert in 16, `COPY` in 11, and the feed's advisory lock
+  waited on in 3. Each worker's batcher is busy writing 70-97% of the time at ≤ 30% CPU: the
+  batches wait on Postgres, not on Python. Here that is host CPU starvation (Postgres shows
+  ~35% of a core while ~1.2 backends are runnable); on nash-srv's 12 threads it's the next
+  thing the ladder will find, so `ingest.stored_rps` with more workers than that adds nothing
+  is the signal to look at the write path (narrow row, #245) or Postgres's CPU cap.
+
+**Tags storm during readings** (20,000 new points' tags plus 2,000 equips published in 4.5-5 s,
+while 10,000 points report every 5 s; same host, same broker and Postgres):
+
+| Code | Graph had them all after | Tags/s into the graph | Reading lag p95 before → during |
+|---|---|---|---|
+| main c36aec3 (inline, one process) | 149 s | 134 | 1.0 s → **141 s** (readings fell to ~30/s) |
+| this branch, 2 workers | 7.4 s | ≥ 2,700 (bounded by the publisher) | 1.0 s → **1.0 s** |
+
+Tags now ride their batch into the reading feed (no Oxigraph call in `on_message`), and
+`tag_ingest` applies each poll's tags in about five Oxigraph requests: one `INSERT DATA`, one
+update per link direction, two reads and a write for classification.
+
+**Overload is explicit:** each worker counts the seconds `on_message` blocked on a full queue
+(`blocked_s` in its heartbeat); the supervisor reads the broker's drop counter and logs
+`BROKER DROPPED n message(s)`, puts it in the `mqtt_listener` heartbeat, and `/ops/status`
+shows ingest degraded for an hour; the tag path's lag is a reading-feed consumer's lag. The
+broker's per-client queue is bounded at 500,000 messages or 64 MiB of payload, whichever comes
+first (~550 B of broker memory per queued reading, measured), and per client, so N workers
+buffer N times that. Queued messages don't survive a broker crash: Windrow's spool covers the
+uplink, and at steady state each worker's queue is under one batch. A test run that left the
+pre-#233 session unattended for a few minutes at 2,000 readings/s filled exactly 500,000 and
+dropped the rest, which is what the limit is for, and why the supervisor now retires sessions
+no worker resumes.
+
+**On nash-srv**, to check #233's acceptance (100k step: ≥ 99% stored, 0 broker drops, no lost
+canaries; per-worker CPU and throughput in the step; `crash` with 0 `missing_acked`):
+
+```sh
+# scripts/scale/scale.env
+BALER_LISTENER_WORKERS=3
+SCALE_CPUS_MQTT_LISTENER=3.5
+SCALE_MEM_MQTT_LISTENER=2g
+
+$PY scripts/scale/ladder.py up
+$PY scripts/scale/ladder.py run --no-up --steps 100k --tags-storm 100000 --continue-on-fail
+$PY scripts/scale/ladder.py crash --points 10000
+```
 
 ### nash-srv
 

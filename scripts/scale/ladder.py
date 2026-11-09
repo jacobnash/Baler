@@ -1054,7 +1054,8 @@ def cmd_crash(args) -> None:
             pid = ((lst0.get("mqtt_listener") or {}).get("pids") or {}).get(args.kill_worker)
             if not pid:
                 raise SystemExit(f"no pid for {args.kill_worker} in the mqtt_listener heartbeat (a pre-#233 listener?)")
-            compose("exec", "-T", "mqtt_listener", "kill", "-9", str(pid))
+            # (the image has no `kill` binary)
+            compose("exec", "-T", "mqtt_listener", "python", "-c", f"import os; os.kill({int(pid)}, 9)")
             while time.time() - t_kill < 120:
                 time.sleep(1)
                 now = ((listener_status(conn).get("mqtt_listener") or {}).get("pids") or {}).get(args.kill_worker)
