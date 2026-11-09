@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { evaluate as dataflow, groupOf, staleAfter } from "./dataflow.mjs";
+import { evaluate as dataflow, evaluateMetrics, groupOf, parseProm, staleAfter } from "./dataflow.mjs";
 import { evaluate as deploy } from "./deploywin.mjs";
 import { evaluate as edges, hostOf, nodeId } from "./edges.mjs";
 import { fingerprint, merge } from "./findings.mjs";
@@ -188,4 +188,20 @@ test("deploy window: zero 5xx passes; any 5xx is one finding; no log is an error
   assert.equal(burst.raw[0].kind, "deploy-5xx");
   assert.match(burst.raw[0].detail, /7× 502 GET \/api\/read/);
   assert.equal(deploy({}, { available: false, detail: "no log" }, win).checks[0].status, "error");
+});
+
+// --- overload from /ops/metrics (#235) --------------------------------------
+
+test("overload: Baler's own lag, backlog and drops from /ops/metrics, against budgets.json", () => {
+  const text = "# HELP x y\n# TYPE baler_ingest_newest_reading_age_seconds gauge\nbaler_ingest_newest_reading_age_seconds 2.5\n"
+    + "baler_listener_queue_oldest_age_seconds 45.0\nbaler_broker_dropped_since_listener_start 0\n"
+    + 'baler_reading_feed_lag_seconds{consumer="fault_detector"} 1.5\n';
+  assert.equal(parseProm(text)['baler_reading_feed_lag_seconds{consumer="fault_detector"}'], 1.5);
+  const out = evaluateMetrics(budgets.dataflow, text);
+  assert.deepEqual(out.checks.map((c) => [c.name, c.status]), [
+    ["ingest lag (/ops/metrics)", "pass"], ["listener backlog (/ops/metrics)", "fail"], ["broker drops (/ops/metrics)", "pass"]]);
+  assert.equal(out.raw.length, 1);
+  assert.equal(out.raw[0].kind, "overload");
+  // an older Baler without the endpoint's metrics: nothing judged
+  assert.deepEqual(evaluateMetrics(budgets.dataflow, '{"rows": []}'), { checks: [], raw: [] });
 });

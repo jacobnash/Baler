@@ -2,7 +2,7 @@
 // to review and remove (ops_api /orphans, src/baler/orphans.py). Loaded
 // after sources.js (reuses ago()) and users.js (openConfirm, showError).
 
-const ORPHANS_URL = (new URLSearchParams(location.search).get("ops") || "/ops") + "/orphans";
+const ORPHANS_URL = apiBase("ops", "/ops") + "/orphans";
 const orphanState = { list: [] };
 
 const ORPHAN_KIND = {
