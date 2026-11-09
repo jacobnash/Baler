@@ -48,7 +48,7 @@ jobs:
       started_at: ${{ steps.started.outputs.at }}
       finished_at: ${{ steps.finished.outputs.at }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Deploy exactly the commit CI validated, not just "main" (which
           # may have moved on again by the time this job starts) - falls
@@ -192,7 +192,7 @@ jobs:
           echo "verifying ${expect:-whatever is live (no $LIVE_CHECK_MARKER)}"
           echo "LIVE_CHECK_EXPECT_SHA=$expect" >> "$GITHUB_ENV"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: steps.creds.outcome == 'success'
         with:
           ref: ${{ env.LIVE_CHECK_SHA }}
@@ -248,7 +248,7 @@ jobs:
       # always(): a cold result is kept even if a newer verify cancels this one.
       - name: Upload the verification artifact
         if: ${{ always() && steps.creds.outcome == 'success' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: live-verify-${{ env.LIVE_CHECK_SHA }}
           path: |

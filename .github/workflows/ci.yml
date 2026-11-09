@@ -12,10 +12,10 @@ jobs:
   unit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true  # windrow/: mock_hospital is the mapping eval's corpus (#180)
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -25,7 +25,7 @@ jobs:
       - id: openhay
         # the commit pyproject.toml's haystack extra pins, not openhay's main
         run: echo "sha=$(grep -oP 'openhay@\K[0-9a-f]{40}' pyproject.toml)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         id: openhay-wheel
         with:
           path: openhay-wheel
@@ -52,8 +52,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -63,7 +63,7 @@ jobs:
       - id: openhay
         # the commit pyproject.toml's haystack extra pins, not openhay's main
         run: echo "sha=$(grep -oP 'openhay@\K[0-9a-f]{40}' pyproject.toml)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         id: openhay-wheel
         with:
           path: openhay-wheel
@@ -136,13 +136,13 @@ jobs:
       MQTT_PASSWORD: ci-only-mqtt-password
       BALER_ALLOW_PRIVATE_WEBHOOKS: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history and tags: tests/test_schema_upgrade.py builds a
           # database with each release's own code (git archive <tag>) and
           # upgrades it to this commit (#194).
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -150,8 +150,8 @@ jobs:
       - run: pip install -e ".[dev,validate,export,offsite]"
       # docker-container builder + Actions cache token: the type=gha layer
       # cache in .github/ci/build-app-image.sh needs both (#27)
-      - uses: docker/setup-buildx-action@v3
-      - uses: crazy-max/ghaction-github-runtime@v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+      - uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487  # v4.0.0
       # One app image build for every service (not one per service), from
       # the Actions layer cache; shard 1 writes the cache for the next run.
       - run: .github/ci/build-app-image.sh ${{ matrix.shard == 1 && '--write-cache' || '' }}
@@ -199,10 +199,10 @@ jobs:
       HAXALL_SU_USERNAME: su
       HAXALL_SU_PASSWORD: ci-only-haxall-password
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true  # windrow/docker/haxall.Dockerfile builds the Haxall image
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -212,7 +212,7 @@ jobs:
       - id: openhay
         # the commit pyproject.toml's haystack extra pins, not openhay's main
         run: echo "sha=$(grep -oP 'openhay@\K[0-9a-f]{40}' pyproject.toml)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         id: openhay-wheel
         with:
           path: openhay-wheel
@@ -229,7 +229,7 @@ jobs:
       # backoff (up to ~7.5 min).
       - name: Restore the cached Haxall image
         id: haxall-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: /tmp/haxall-image.tar
           key: haxall-image-${{ hashFiles('windrow/docker/haxall.Dockerfile') }}
@@ -249,7 +249,7 @@ jobs:
       # step doesn't throw the downloaded image away.
       - name: Save the Haxall image to the cache
         if: steps.haxall-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: /tmp/haxall-image.tar
           key: ${{ steps.haxall-cache.outputs.cache-primary-key }}
@@ -258,8 +258,8 @@ jobs:
           "bin/hx init -headless -suUser su -suPass $HAXALL_SU_PASSWORD -httpPort 8080 /haxall/var/ci && bin/hx run /haxall/var/ci"
       # docker-container builder + Actions cache token: the type=gha layer
       # cache in .github/ci/build-app-image.sh needs both (#27)
-      - uses: docker/setup-buildx-action@v3
-      - uses: crazy-max/ghaction-github-runtime@v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+      - uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487  # v4.0.0
       - run: .github/ci/build-app-image.sh  # reads the cache; integration (1) writes it
       - run: docker compose up -d --no-build --wait --wait-timeout 300
       - name: Wait for Haxall
