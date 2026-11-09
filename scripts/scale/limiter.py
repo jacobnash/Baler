@@ -38,7 +38,8 @@ closest to its limit (`headroom`, highest ratio first).
 from __future__ import annotations
 
 # Thresholds. A ratio of 1.0 in `headroom` means "at this threshold".
-THROTTLED = 0.20        # share of CFS periods throttled: CPU-capped
+THROTTLED = 0.20        # share of CFS periods throttled: CPU-capped...
+THROTTLE_BUSY = 0.60    # ...when its CPU p90 is at least this share of its cap
 NEAR_CAP = 0.90         # CPU p90 / cap: at the cap even without throttling counts
 HOT_THREAD = 0.85       # busiest thread, cores: a GIL-bound Python process
 ONE_CORE_PROC = 0.90    # a single-threaded-by-design process's CPU, cores
@@ -53,6 +54,9 @@ LAG_S = 30.0            # p95 lag pass condition (ladder.MAX_P95_LAG_S)
 
 ONE_CORE = ("mqtt_listener", "fault_detector", "derivation_engine", "haystack_api", "ingest_api",
             "commissioning_api", "ops_api", "mosquitto")
+# Observability and one-shot containers: in the evidence, never a limiter
+# or a next suspect (Grafana near its 256 MB cap says nothing about Baler).
+NOT_BALER = ("grafana", "jaeger", "migrate")
 WRITE_WAITS = ("IO:", "LWLock:WAL", "LWLock:Buffer", "IO:WAL", "LWLock:Checkpoint")
 PROBE_API = {"api": "haystack_api", "ingest": "ingest_api", "ops": "ops_api", "fault": "fault_api",
              "cx": "commissioning_api"}
@@ -86,7 +90,11 @@ def cpu_saturation(svc: str, c: dict) -> tuple[float, str] | None:
     if not c:
         return None
     cands = []
-    if c.get("throttled") is not None:
+    # Throttling counts only for a container using most of its cap: a
+    # nearly idle API under a 0.25-CPU cap is throttled in ~45% of its
+    # (few) CFS periods by its own healthcheck's start-up burst.
+    busy = (c["cpu_p90"] / c["cap"]) if c.get("cap") and c.get("cpu_p90") is not None else 1.0
+    if c.get("throttled") is not None and busy >= THROTTLE_BUSY:
         cands.append((c["throttled"] / THROTTLED, f"{svc} CPU-capped (throttled {_pct(c['throttled'])})"))
     if c.get("cap") and c.get("cpu_p90") is not None:
         cands.append((c["cpu_p90"] / c["cap"] / NEAR_CAP,
@@ -227,6 +235,8 @@ def headroom(step: dict) -> list[dict]:
     soak = _phase(step, "soak")
     out = []
     for svc, c in (soak.get("containers") or {}).items():
+        if svc in NOT_BALER:
+            continue
         s = cpu_saturation(svc, c)
         if s:
             out.append({"part": svc, "ratio": round(s[0], 3), "detail": s[1].replace(" CPU-capped", " CPU").replace(
@@ -319,6 +329,10 @@ def verdict(step: dict) -> dict:
         ev.extend(symptoms)
         name, more, also, conf = attribute_ingest(soak)
         ev.extend(more)
+        pw = (step.get("evidence") or {}).get("pg_writes") or {}
+        if pw.get("checkpoints_requested"):
+            ev.append(f"{pw['checkpoints_requested']} checkpoints requested (WAL reached max_wal_size), "
+                      f"{pw.get('wal_fpi')} full-page images in WAL")
         if name.startswith("ingest listener (unattributed") and (step.get("ingest") or {}).get("broker_dropped_delta"):
             name = f"broker drops ({step['ingest']['broker_dropped_delta']:,}; subscriber unattributed)"
         return done(name, name.split(":")[0].split(" (")[0], conf, also)

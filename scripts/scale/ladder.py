@@ -19,7 +19,10 @@ no growing backlog, no broker drops), responsive reads (the probes stay in
 budget), graceful degradation (no container restart or OOM kill; lag stays
 measurable). A step can also stop for reasons that are *not* a Baler
 ceiling - the generator couldn't offer the rate, the live install on the
-same host degraded, the host disk ran low - and the result says which.
+same host degraded, the disk holding Docker's data ran low - and the result
+says which. Every step also names its limiter (limiter.py) from evidence
+sampled during the soak (evidence.py): the bottleneck, or for a passing
+step the next suspect (Baler#269).
 
 See docs-site/pages/scale-test.mdx for running it on nash-srv.
 """
@@ -781,9 +784,12 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
             sample = {"t": round(time.time() - soak_start, 1), "live": live, "stored_total": chunk_writes(conn),
                       "gen_rate": round(st.get("sent_rate_10s", 0)), "gen_behind_s": round(st.get("behind_s", 0), 1),
                       "broker": sysmon.snapshot()}
-            t1 = time.perf_counter()
-            sample["docker"] = docker_stats()
-            sample["docker_stats_s"] = round(time.perf_counter() - t1, 3)  # its cost, for the overhead record
+            if not (ev and ev.has_cgroups):
+                # `docker stats` costs ~2 s and dockerd CPU per call: only
+                # without the evidence sampler's cgroup reads (#269)
+                t1 = time.perf_counter()
+                sample["docker"] = docker_stats()
+                sample["docker_stats_s"] = round(time.perf_counter() - t1, 3)  # its cost, for the overhead record
             sample.update(lag=canary.stats(soak_start), feed=feed_status(conn))
             t1 = time.perf_counter()
             conn.execute("SELECT 1")
@@ -886,7 +892,8 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
     step["db"] = db_metrics(conn)
     if step["db"].get("bytes_per_row"):
         step["db"]["bytes_per_day_raw_at_this_rate"] = round(step["db"]["bytes_per_row"] * stored_rps * 86400)
-    step["resources"] = summarize_docker(samples)
+    step["resources"] = (evidence.resources(ev.ticks) if ev and ev.has_cgroups and ev.ticks
+                         else summarize_docker(samples))
     states1 = container_states()
     step["containers"] = {svc: {**c, "restarts_delta": c["restarts"] - states0.get(svc, {}).get("restarts", 0)}
                           for svc, c in states1.items()}

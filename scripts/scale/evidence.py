@@ -449,6 +449,12 @@ class Sampler:
         self.statements: list[dict] = []
         self.started = self.stopped = 0.0
 
+    @property
+    def has_cgroups(self) -> bool:
+        """CPU and memory per container from cgroups (else the ladder keeps
+        calling `docker stats`)."""
+        return any("cpu" in c.dirs for c in self.containers)
+
     # lifecycle
     def start(self) -> Sampler:
         try:
@@ -607,6 +613,7 @@ def summarize(ticks: list[dict], pg_delta: dict | None = None, statements: list 
         out["pg_delta"] = pg_delta
         wal = pg_delta.get("wal") or {}
         io = pg_delta.get("io") or {}
+        bg, ck = pg_delta.get("bgwriter") or {}, pg_delta.get("checkpointer") or {}
         data_w = sum(v.get("write_bytes", 0) + v.get("extend_bytes", 0) for v in io.values())
         if wal or io:
             # The write amplification view (#269's "Postgres write gap"):
@@ -617,7 +624,11 @@ def summarize(ticks: list[dict], pg_delta: dict | None = None, statements: list 
                                 "wal_sync_calls": wal.get("wal_sync"), "wal_fpi": wal.get("wal_fpi"),
                                 "wal_page_bytes_min": (wal.get("wal_write") or 0) * 8192,
                                 "data_write_bytes": data_w,
-                                "temp_bytes": (pg_delta.get("database") or {}).get("temp_bytes")}
+                                "temp_bytes": (pg_delta.get("database") or {}).get("temp_bytes"),
+                                "checkpoints_requested": bg.get("checkpoints_req", ck.get("num_requested")),
+                                "checkpoints_timed": bg.get("checkpoints_timed", ck.get("num_timed")),
+                                "buffers_checkpoint": bg.get("buffers_checkpoint", ck.get("buffers_written")),
+                                "buffers_backend": bg.get("buffers_backend")}
     if statements:
         out["pg_top_statements"] = statements
     if overhead:
@@ -709,6 +720,26 @@ def summarize_phase(ts: list[dict]) -> dict:
                            "queue_first": qs[0] if qs else None, "queue_cap": li[-1].get("queue_max"),
                            "flush_busy_mean": round(statistics.mean(busy), 3) if busy else None,
                            "flush_busy_p90": _pct(busy, 0.9)}
+    return out
+
+
+def resources(ticks: list[dict]) -> dict:
+    """step["resources"] in the shape ladder.summarize_docker gives from
+    `docker stats` (CPU % where 100 = one core, memory % of the cap), from
+    the soak's cgroup samples instead."""
+    out: dict = {}
+    for svc in sorted({s for t in ticks if t.get("phase", "soak") == "soak" for s in t.get("containers", {})}):
+        es = [t["containers"][svc] for t in ticks if t.get("phase", "soak") == "soak" and svc in t["containers"]]
+        cpu = [e["cpu"] * 100 for e in es if e.get("cpu") is not None]
+        mem = [(e["mem"], e.get("mem_cap")) for e in es if e.get("mem") is not None]
+        if not cpu:
+            continue
+        r = {"cpu_pct_mean": round(statistics.mean(cpu), 1), "cpu_pct_max": round(max(cpu), 1), "source": "cgroup"}
+        if mem:
+            r["mem_last"] = f"{mem[-1][0] / 2**20:.1f}MiB"
+            if mem[-1][1]:
+                r["mem_pct_max"] = round(max(m / (cap or 1) for m, cap in mem) * 100, 1)
+        out[svc] = r
     return out
 
 

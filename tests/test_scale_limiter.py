@@ -2,8 +2,9 @@
 scripts/scale/limiter.py and evidence.py (Baler#269): every ladder step
 names its limiter from the evidence sampled during its soak. The verdict
 rules run on fixtures of samples in exactly the shape evidence.Sampler
-records them (tests/fixtures/scale_limiter/: one recorded on a real local
-run, the overload cases built in the same shape), and the parsers on real
+records them (tests/fixtures/scale_limiter/: recorded_*.json from real
+local runs, trimmed to the services that matter; the other overload cases
+built in the same shape), and the parsers on real
 cgroup, /proc and diskstats text. No services.
 """
 
@@ -59,7 +60,7 @@ def test_acceptance_case_names_the_ingest_listener_with_evidence():
 def test_postgres_cpu_capped_outranks_its_busy_listener():
     step, _ = _load(FIXTURES / "postgres_write_bound.json")
     soak = step["evidence"]["phases"]["soak"]
-    soak["containers"]["postgres"].update(throttled=0.5)
+    soak["containers"]["postgres"].update(throttled=0.5, cpu_p90=1.9)
     soak["pg"]["waits"] = {"CPU:running": 1.0}
     v = limiter.verdict(step)
     assert v["limiter"] == "postgres CPU-capped (throttled 50%)", v
@@ -67,7 +68,7 @@ def test_postgres_cpu_capped_outranks_its_busy_listener():
 
 def test_several_saturated_parts_lower_the_confidence():
     step, _ = _load(FIXTURES / "listener_cpu_capped.json")
-    step["evidence"]["phases"]["soak"]["containers"]["mosquitto"].update(throttled=0.3)
+    step["evidence"]["phases"]["soak"]["containers"]["mosquitto"].update(throttled=0.3, cpu_p90=0.95)
     v = limiter.verdict(step)
     assert v["confidence"] == "medium" and any("mosquitto" in a for a in v["also"]), v
 
