@@ -358,3 +358,24 @@ def test_registered_sources_feed_the_engine_and_a_broken_one_is_skipped(monkeypa
     alerts.register_source("broken", broken)
     a.cycle(T0)
     assert sent == [("firing", "myjob:late")]
+
+
+@pytest.mark.integration
+def test_alert_state_and_service_runtime_sql_against_postgres():
+    """Migration 0003's tables with the real statements. Runs inside one
+    transaction that is rolled back, so the stack's own alerter (which
+    rewrites alert_state every cycle) never sees or deletes these rows."""
+    from baler import errors, timeseries
+
+    alert = alerts.Alert("test:sql", "firing", alerts.WARNING, "t", "d", T0, T0, T0, T0, None)
+    with timeseries.connect() as conn, conn.transaction(force_rollback=True):
+        alerts.save_state(conn, {"test:sql": alert})
+        got = alerts.load_state(conn)
+        assert got["test:sql"].opened_at == T0 and got["test:sql"].state == "firing"
+        assert [a["key"] for a in alerts.open_alerts(conn)] == ["test:sql"]
+        for _ in range(3):
+            conn.execute(errors.START_SQL, ("test-errors-sql", T0, T0))
+        conn.execute(errors.ERROR_SQL, ("test-errors-sql", T0, "ValueError: x"))
+        row = next(r for r in errors.summary(conn) if r["service"] == "test-errors-sql")
+        assert row["starts"] == 3 and row["errors"] == 1 and row["last_error"] == "ValueError: x"
+        assert len(errors.recent_starts(conn)["test-errors-sql"]) == 3
