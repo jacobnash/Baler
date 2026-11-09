@@ -13,6 +13,8 @@ the pass conditions, and writes one JSON result per run.
   python scripts/scale/ladder.py soak --points 100000 # 6 h at one count: disk plateau, compression cycles (#245)
   python scripts/scale/ladder.py table results/*.json # Markdown results table
   python scripts/scale/ladder.py down                # remove the scale stack and its volumes
+  python scripts/scale/ladder.py run --target haxall # the same ladder against Haxall (#236, haxall.py)
+  python scripts/scale/ladder.py table baler.json --haxall haxall.json   # Baler vs Haxall side by side
 
 "Doesn't choke" (Jacob, #190) is three things, and a step passes only if
 all three hold: no data loss (stored >= 99% of what the broker acknowledged,
@@ -53,6 +55,8 @@ SMALL_HOST_STEPS = [1_000, 2_500, 5_000]  # prepended when the host has few CPUs
 EMAIL, PASSWORD = "admin@scale.test", "scale-password-123"
 SCALE_GLOB = f"{common.TOPIC_ROOT}/s*"
 POINT_LIKE = f"urn:point:{common.TOPIC_ROOT}/s%"
+
+CRASH_KILL_DEFAULT = "mqtt_listener,listener_worker,postgres"
 
 # R4 pass conditions
 MIN_STORED_RATIO = 0.99
@@ -139,6 +143,12 @@ def cmd_init(args) -> None:
         "# Listener worker processes (#233; blank = 1). Give the listener about a CPU each:",
         "# BALER_LISTENER_WORKERS=4 with SCALE_CPUS_MQTT_LISTENER=4.5 and SCALE_MEM_MQTT_LISTENER=2g.",
         "BALER_LISTENER_WORKERS=",
+        "# The Haxall baseline (#236, --target haxall): its own project <SCALE_PROJECT>-haxall.",
+        f"SCALE_HAXALL_SU_PASSWORD={secrets.token_hex(16)}",
+        "SCALE_HAXALL_MQTT_PORT=22883", "SCALE_HAXALL_HTTP_PORT=28280",
+        "# How Haxall's history is fsync'd, once checked (docs-site scale-test.mdx, Baler vs Haxall);",
+        "# blank: Haxall results are labelled not comparable.",
+        "SCALE_HAXALL_DURABILITY=",
     ]
     common.ENV_FILE.write_text("\n".join(lines) + "\n")
     common.ENV_FILE.chmod(0o600)
@@ -182,7 +192,15 @@ def busy_ports(config: dict) -> list[int]:
     return busy
 
 
-def cmd_up(args) -> Endpoints:
+def _haxall():
+    import haxall  # the Haxall baseline target (#236): scripts/scale/haxall.py
+
+    return haxall
+
+
+def cmd_up(args):
+    if getattr(args, "target", "baler") == "haxall":
+        return _haxall().cmd_up(args)
     config = guard()
     busy = busy_ports(config)
     if busy:
@@ -215,6 +233,11 @@ def preflight(ep: Endpoints, timeout: float = 120.0) -> None:
 
 
 def cmd_down(args) -> None:
+    if getattr(args, "target", "baler") == "haxall":
+        _haxall().guard()
+        _haxall().cmd_down(args)
+        print("haxall stack and its volumes removed")
+        return
     guard()
     extra = ["--rmi", "local"] if args.rmi else []
     compose("down", "-v", "--remove-orphans", *extra)
@@ -1060,6 +1083,9 @@ def write_result(result: dict) -> Path:
 
 
 def cmd_run(args) -> None:
+    if args.target == "haxall":
+        _haxall().cmd_run(sys.modules[__name__], args)
+        return
     config = guard()
     ep = cmd_up(args) if not args.no_up else Endpoints(config)
     ensure_rules(ep)
@@ -1119,6 +1145,11 @@ def cmd_crash(args) -> None:
     point_history. Batching is fine; losing acknowledged data isn't. With
     several listener workers (#233) `listener_worker` kills one worker
     process while the others keep storing; `mqtt_listener` kills them all."""
+    if args.target == "haxall":
+        if args.kill == CRASH_KILL_DEFAULT:
+            args.kill = "haxall,haxall_bridge"
+        _haxall().cmd_crash(sys.modules[__name__], args)
+        return
     config = guard()
     ep = Endpoints(config)
     result = run_header(ep, args)
@@ -1194,7 +1225,18 @@ def cmd_crash(args) -> None:
 
 
 def cmd_table(args) -> None:
-    """Markdown rows for docs-site/pages/scale-test.mdx's results table."""
+    """Markdown rows for docs-site/pages/scale-test.mdx's results table;
+    with --haxall, the Baler vs Haxall side-by-side for the steps both
+    runs have (#236)."""
+    if getattr(args, "haxall", None):
+        hx = json.loads(Path(args.haxall).read_text())
+        print("| Step | Baler stored/s | Haxall stored/s | Baler p95 lag | Haxall p95 lag | Baler read filter | "
+              "Haxall read filter | Baler hisRead 1000 | Haxall hisRead 1000 | Baler RAM / disk | Haxall RAM / disk |")
+        print("|---|---|---|---|---|---|---|---|---|---|---|")
+        for path in args.files:
+            for row in _haxall().side_by_side(json.loads(Path(path).read_text()), hx):
+                print(row)
+        return
     print("| Run | Host (nproc, model, RAM) | Durable | Points | Status | Offered/s | Stored/s | Stored/s per CPU | "
           "p95 lag | read?filter=point | readAll(equip) | Cx report | First failure | Limiter (or next suspect) |")
     print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
@@ -1224,14 +1266,22 @@ def main(argv=None) -> None:
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_init)
     sub.add_parser("guard", help="check the target is the isolated scale stack").set_defaults(func=cmd_guard)
+    def target_arg(p):
+        p.add_argument("--target", choices=("baler", "haxall"), default="baler",
+                       help="the system under test: Baler's scale stack, or the Haxall baseline (#236, "
+                            "compose.haxall.yml, project <SCALE_PROJECT>-haxall)")
+
     p = sub.add_parser("up", help="build and start the scale stack")
     p.add_argument("--no-build", action="store_true", help="use the scale-* images already built (or retagged)")
+    target_arg(p)
     p.set_defaults(func=cmd_up)
     p = sub.add_parser("down", help="remove the scale stack and its volumes")
     p.add_argument("--rmi", action="store_true", help="also remove the images built for it")
+    target_arg(p)
     p.set_defaults(func=cmd_down)
     p = sub.add_parser("table", help="Markdown results table from result JSON files")
     p.add_argument("files", nargs="+")
+    p.add_argument("--haxall", help="a --target haxall run's result JSON: print the side-by-side table instead")
     p.set_defaults(func=cmd_table)
     def generator_args(p):
         p.add_argument("--interval", type=float, default=5.0)
@@ -1246,6 +1296,7 @@ def main(argv=None) -> None:
         p = sub.add_parser(name)
         p.set_defaults(func=func)
         generator_args(p)
+        target_arg(p)
     import soak  # long soaks at one point count (#245): scripts/scale/soak.py
 
     soak.add_parser(sub, generator_args)
@@ -1273,9 +1324,9 @@ def main(argv=None) -> None:
     p.add_argument("--live-latency-factor", type=float, default=3.0)
     p = sub.choices["crash"]
     p.add_argument("--points", type=int, default=10_000)
-    p.add_argument("--kill", default="mqtt_listener,listener_worker,postgres",
+    p.add_argument("--kill", default=CRASH_KILL_DEFAULT,
                    help="services to kill -9, one at a time; listener_worker is one mqtt_listener worker "
-                        "process (--kill-worker), not the container")
+                        "process (--kill-worker), not the container. --target haxall: haxall,haxall_bridge")
     p.add_argument("--kill-worker", default="worker-0", help="which worker listener_worker kills")
     p.add_argument("--down-for", type=float, default=10.0, help="seconds a killed service stays down")
     args = ap.parse_args(argv)
