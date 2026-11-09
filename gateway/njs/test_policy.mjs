@@ -160,6 +160,18 @@ check("post-deploy verification reads (Baler#178): GET only, freshness for viewe
     assert.equal(policy.resolveRoute("DELETE", "/ops/gateway-errors"), null);
 });
 
+check("ops metrics (#235): GET only, viewer and API keys, never a site-restricted login", () => {
+    const route = policy.resolveRoute("GET", "/ops/metrics");
+    assert.equal(route.minRole, "viewer");
+    assert.equal(route.resource, "metrics");
+    assert.equal(policy.roleSatisfies("viewer", route.minRole), true);
+    assert.equal(policy.roleSatisfies("service", route.minRole), true);
+    assert.equal(policy.scopeSatisfies("metrics", { site_ids: ["s1"] }), false);
+    assert.equal(policy.scopeSatisfies("metrics", {}), true);
+    assert.equal(policy.resolveRoute("POST", "/ops/metrics"), null);
+    assert.equal(policy.resolveRoute("GET", "/ops/metrics/x"), null);
+});
+
 check("ops edges (Connectors page): listing for any role, changes and scans admin-only", () => {
     assert.equal(policy.resolveRoute("GET", "/ops/edges").minRole, "viewer");
     assert.equal(policy.resolveRoute("GET", "/ops/edges").resource, "devices");

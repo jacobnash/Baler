@@ -422,3 +422,61 @@ def test_a_malformed_or_empty_batch_is_skipped_and_acked(monkeypatch):
     on_message(client, None, _QMsg("fbf/s/ahu/batch", json.dumps({"points": {"a/#": 1}}).encode(), 1))
     on_message(client, None, _QMsg("fbf/s/ahu/batch", json.dumps({"ts": 1.0, "points": {}}).encode(), 2))
     assert client.acks == [(1, 1), (2, 1)] and batcher.queue.qsize() == 0
+
+
+# --- overload signals (#235): oldest uncommitted reading, last write, DUPs
+
+
+def test_the_oldest_uncommitted_reading_is_aged_until_its_batch_commits(monkeypatch):
+    from baler import mqtt_listener
+
+    written: list = []
+    _client, batcher = _batcher(monkeypatch, written)
+    assert batcher.oldest_age() == 0.0
+    clock = [100.0]
+    monkeypatch.setattr(mqtt_listener.time, "monotonic", lambda: clock[0])
+    batcher.put(_QMsg("fbf/s/a/p", b"", 1), "fbf/s/a/p", 1.0, 1.0)
+    clock[0] = 102.5
+    batcher.put(_QMsg("fbf/s/a/q", b"", 2), "fbf/s/a/q", 1.0, 1.0)
+    clock[0] = 104.0
+    assert batcher.oldest_age() == 4.0  # the queue's head, not the newest
+    first = batcher.queue.get_nowait()
+    batcher._batch_t0 = first[-1]  # what _run does as it starts a batch
+    assert batcher.oldest_age() == 4.0  # being written still counts
+    batcher.flush([first])
+    assert batcher.oldest_age() == 1.5  # now the second, still queued
+    batcher.flush([batcher.queue.get_nowait()])
+    st = batcher.stats()
+    assert st["oldest_age_s"] == 0.0 and "last_flush_s" in st and written
+
+
+def test_redelivered_messages_are_counted(monkeypatch):
+    from baler.mqtt_listener import make_on_message
+
+    written: list = []
+    client, batcher = _batcher(monkeypatch, written)
+    on_message = make_on_message(None, None, batcher)
+    for mid, dup in ((1, False), (2, True), (3, True)):
+        msg = _QMsg(f"fbf/s/a/p{mid}", _envelope(1.0), mid)
+        msg.dup = dup
+        on_message(client, None, msg)
+    on_message(client, None, _QMsg("fbf/s/a/p4", _envelope(1.0), 4))  # no dup attribute at all
+    assert batcher.stats()["redelivered"] == 2
+
+
+def test_worker_totals_fold_the_overload_signals():
+    from baler import mqtt_listener
+
+    class Conn:
+        closed = broken = False
+
+        def execute(self, sql):
+            return [({"rows": 10, "queue": 5, "queue_max": 50, "oldest_age_s": 2.0, "last_flush_s": 0.1,
+                      "redelivered": 1, "received": 12, "readings_per_s": 100.0, "batches_per_s": 2.0},),
+                    ({"rows": 20, "queue": 9, "queue_max": 50, "oldest_age_s": 7.5, "last_flush_s": 0.3,
+                      "redelivered": 2, "received": 25, "readings_per_s": 150.5, "batches_per_s": 1.0},)]
+
+    t = mqtt_listener._worker_totals(Conn())
+    assert t["writers"] == 2 and t["rows"] == 30 and t["queue"] == 9
+    assert t["oldest_age_s"] == 7.5 and t["last_flush_s"] == 0.3 and t["redelivered"] == 3
+    assert t["received"] == 37 and t["readings_per_s"] == 250.5 and t["batches_per_s"] == 3.0

@@ -258,6 +258,15 @@ class ReadingBatcher:
         # last beat (take_queue_peak).
         self.flush_s = 0.0
         self.queue_peak = 0
+        # Overload signals for /ops/status and /ops/metrics (#235): the
+        # last batch's write time, messages the broker redelivered (DUP:
+        # sent before but never acknowledged, so after a reconnect or a
+        # crash), and when the oldest reading not yet committed arrived -
+        # the first item of the batch being gathered or written, else the
+        # queue's head (each item carries its arrival time, last).
+        self.last_flush_s = 0.0
+        self.redelivered = 0
+        self._batch_t0: float | None = None
         self.last_message_at = 0.0
         self.thread = threading.Thread(target=self._run, name=name, daemon=True)
 
@@ -267,6 +276,7 @@ class ReadingBatcher:
     def _put(self, item) -> None:
         self.received += 1
         self.last_message_at = time.monotonic()
+        item = (*item, self.last_message_at)
         try:
             self.queue.put_nowait(item)
         except queue.Full:
@@ -274,6 +284,10 @@ class ReadingBatcher:
             self.queue.put(item)
             self.blocked_s += time.monotonic() - t0
             self.blocked_events += 1
+
+    def note_redelivery(self, msg) -> None:
+        if getattr(msg, "dup", False):
+            self.redelivered += 1
 
     def put(self, msg, topic: str, value, ts, flag: str | None = None, ack: bool = True) -> None:
         """ack=False: this reading's commit doesn't acknowledge its message
@@ -309,6 +323,7 @@ class ReadingBatcher:
                           f"blocked {self.blocked_s:.1f} s in all", flush=True)
                     last_report, last_rows, last_batches = now, self.rows, self.batches
                 batch = [self.queue.get()]
+                self._batch_t0 = batch[0][-1]
                 self.queue_peak = max(self.queue_peak, self.queue.qsize() + 1)
                 deadline = time.monotonic() + self.max_wait
                 while len(batch) < self.max_rows:
@@ -341,12 +356,24 @@ class ReadingBatcher:
         try:
             self._flush(batch)
         finally:
-            self.flush_s += time.monotonic() - t0
+            self.last_flush_s = time.monotonic() - t0
+            self.flush_s += self.last_flush_s
+            self._batch_t0 = None
+
+    def oldest_age(self) -> float:
+        """Seconds the oldest reading not yet committed has waited in this
+        worker (0 when nothing is waiting): the listener's own share of
+        ingest lag, before the readings' rows exist to measure."""
+        t = self._batch_t0
+        if t is None:
+            with self.queue.mutex:
+                t = self.queue.queue[0][-1] if self.queue.queue else None
+        return round(max(0.0, time.monotonic() - t), 3) if t is not None else 0.0
 
     def _flush(self, batch: list) -> None:
         with tracer.start_as_current_span("mqtt_listener.flush") as span:
             readings, alarms, tags = [], [], []
-            for _, _, _, topic, value, ts, flag in batch:
+            for _, _, _, topic, value, ts, flag, _ in batch:
                 if flag is ALARM:
                     alarms.append([topic, value, ts])
                 elif flag is TAGS:
@@ -389,7 +416,9 @@ class ReadingBatcher:
         return {"received": self.received, "rows": self.rows, "batches": self.batches, "tags": self.tags,
                 "alarms": self.alarms, "messages": self.messages, "queue": self.queue.qsize(), "blocked_s": round(self.blocked_s, 2),
                 "blocked_events": self.blocked_events, "flush_s": round(self.flush_s, 3),
-                "queue_max": self.queue.maxsize, "connected": self.connected}
+                "queue_max": self.queue.maxsize, "connected": self.connected,
+                "oldest_age_s": self.oldest_age(), "last_flush_s": round(self.last_flush_s, 3),
+                "redelivered": self.redelivered}
 
 
 def make_on_message(store, ts_conn, batcher: ReadingBatcher | None = None, retained_only: bool = False):
@@ -407,6 +436,7 @@ def make_on_message(store, ts_conn, batcher: ReadingBatcher | None = None, retai
         (Postgres/Oxigraph down) still raise, so the worker restarts."""
         if batcher is not None:
             batcher.messages += 1
+            batcher.note_redelivery(msg)
         try:
             queued = False if retained_only and not msg.retain else _handle(msg)
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
@@ -643,6 +673,7 @@ def _heartbeats(service: str, client_id: str, batcher: ReadingBatcher) -> None:
                   "readings_per_s": round((st["rows"] - last["rows"]) / dt, 1),
                   "messages_per_s": round((st["messages"] - last["messages"]) / dt, 1),
                   "items_per_s": round((st["received"] - last["received"]) / dt, 1),
+                  "batches_per_s": round((st["batches"] - last["batches"]) / dt, 2),
                   "cpu_pct": round(100 * (cpu - last_cpu) / dt, 1),
                   "blocked_s_delta": round(st["blocked_s"] - last["blocked_s"], 2),
                   # share of the interval the batcher spent writing: near
@@ -689,7 +720,16 @@ def _worker_totals(conn) -> dict:
             "flush_s": round(sum(d.get("flush_s", 0) for d in rows), 3),
             "queue": max(d.get("queue", 0) for d in rows), "queue_peak": max(d.get("queue_peak", 0) for d in rows),
             "queue_max": max(d.get("queue_max", 0) for d in rows),
-            "blocked_s": round(sum(d.get("blocked_s", 0) for d in rows), 2)}
+            "blocked_s": round(sum(d.get("blocked_s", 0) for d in rows), 2),
+            # #235: the oldest uncommitted reading in any worker, the slowest
+            # last batch, redeliveries and the current rates, summed.
+            "oldest_age_s": max(d.get("oldest_age_s", 0) for d in rows),
+            "last_flush_s": max(d.get("last_flush_s", 0) for d in rows),
+            "redelivered": sum(d.get("redelivered", 0) for d in rows),
+            "received": sum(d.get("received", 0) for d in rows),
+            "readings_per_s": round(sum(d.get("readings_per_s", 0) for d in rows), 1),
+            "messages_per_s": round(sum(d.get("messages_per_s", 0) for d in rows), 1),
+            "batches_per_s": round(sum(d.get("batches_per_s", 0) for d in rows), 2)}
 
 
 def run_tags(args) -> None:

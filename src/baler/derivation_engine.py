@@ -755,7 +755,10 @@ def main() -> None:
                     next_run[d["id"]] = now + timedelta(seconds=sweep_interval(d, args.tick_seconds, args.cur_sweep_seconds))
             interval = min(sweep_interval(d, args.tick_seconds, args.cur_sweep_seconds)
                            for d in derivations if d["id"] in due_ids)
-            status.update("tick", ticks.record(time.monotonic() - t0, len(trace), interval, late))
+            elapsed = time.monotonic() - t0
+            # The scheduled pass's own time also feeds /ops/metrics (#235).
+            status.update("tick", {**ticks.record(elapsed, len(trace), interval, late),
+                                   "derivations_due": len(due_ids), "cycle_s": round(elapsed, 3)})
         status.beat(health_conn)
         time.sleep(args.tick_seconds)
 
