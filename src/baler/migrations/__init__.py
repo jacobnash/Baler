@@ -28,6 +28,7 @@ from baler.migrations import (
     v0008_manual_results,
     v0009_fleet_runs,
     v0010_active_schedules,
+    v0011_assets,
 )
 
 ALL = (
@@ -41,4 +42,5 @@ ALL = (
     v0008_manual_results,
     v0009_fleet_runs,
     v0010_active_schedules,
+    v0011_assets,
 )

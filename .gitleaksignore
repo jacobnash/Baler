@@ -7,3 +7,8 @@
 # tests/test_auth_mfa.py: monkeypatching auth._PBKDF2_ITERATIONS to 1000 to
 # speed the tests up - a setting name and an iteration count, not a secret.
 0349d886d4ca52cd603ae2a0ecefecd0aefe023a:tests/test_auth_mfa.py:generic-api-key:19
+
+# tests/test_lifecycle_assets.py: a test-only BALER_JWT_SECRET (the line now
+# uses the same placeholder as the other tests; this covers the commit that
+# added it).
+4b3662427208be01c9173a20125a2cd38d86272e:tests/test_lifecycle_assets.py:generic-api-key:151

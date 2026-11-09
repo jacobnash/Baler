@@ -3,7 +3,7 @@
 // ?param= API base overrides it accepts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import vm from "node:vm";
 
 const SRC = readFileSync(new URL("./apibase.js", import.meta.url), "utf8");
@@ -118,7 +118,9 @@ test("every page script takes its API base through apiBase()", () => {
   const dir = new URL("./", import.meta.url);
   const names = ["api", "auth", "ingest", "ops", "fault", "cx", "derivation", "windrow", "validate"];
   const re = new RegExp(`\\.get\\(["'](?:${names.join("|")})["']\\)`);
-  for (const f of ["alarms", "app", "auth", "connectors", "cx", "derivations", "devices", "his", "mapping", "ops", "orphans", "record_edit", "reset", "sources"]) {
+  // Every page script in ui/, not a fixed list, so a new page is covered.
+  const scripts = readdirSync(dir).filter((n) => n.endsWith(".js") && n !== "apibase.js").map((n) => n.slice(0, -3));
+  for (const f of scripts) {
     const src = readFileSync(new URL(`${f}.js`, dir), "utf8");
     assert.ok(!re.test(src), `${f}.js reads an API base from the query string without apiBase()`);
   }
@@ -126,8 +128,11 @@ test("every page script takes its API base through apiBase()", () => {
 
 test("every page loads apibase.js before auth.js", () => {
   const dir = new URL("./", import.meta.url);
-  for (const f of ["alarms", "connectors", "cx", "derivations", "his", "index", "mapping", "ops"]) {
+  // Every page that loads auth.js, not a fixed list, so a new page is covered.
+  const pages = readdirSync(dir).filter((n) => n.endsWith(".html")).map((n) => n.slice(0, -5));
+  for (const f of pages) {
     const html = readFileSync(new URL(`${f}.html`, dir), "utf8");
+    if (!html.includes('<script src="auth.js"></script>')) continue;
     const a = html.indexOf('<script src="apibase.js"></script>');
     const b = html.indexOf('<script src="auth.js"></script>');
     assert.ok(a >= 0 && a < b, `${f}.html must load apibase.js before auth.js`);

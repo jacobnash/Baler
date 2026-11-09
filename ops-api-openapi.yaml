@@ -588,6 +588,82 @@ paths:
               schema: { $ref: "#/components/schemas/GatewayErrors" }
         "400": { description: since or until isn't an ISO 8601 time }
         "401": { description: Not through the gateway }
+  # Building lifecycle record (epic #221): positions vs assets (#197).
+  # Full field list: docs-site/pages/assets.mdx.
+  /assets:
+    get:
+      operationId: listAssets
+      summary: Assets of the caller's org (filters q, status, position, manufacturer, type)
+      responses:
+        "200": {description: Assets with status and current position, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+    post:
+      operationId: createAsset
+      summary: Add an asset (make, model, serial, cost ...)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: The asset, content: {application/json: {schema: {type: object}}}}
+        "400": {description: Invalid fields}
+  /assets/changes:
+    get:
+      operationId: assetChanges
+      summary: Replacements in a window (since, until, type, manufacturer)
+      responses:
+        "200": {description: Replacements, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+  /assets/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getAsset
+      summary: An asset and its install/remove history
+      responses:
+        "200": {description: The asset, content: {application/json: {schema: {type: object}}}}
+        "404": {description: No such asset}
+    patch:
+      operationId: patchAsset
+      summary: Correct an asset's fields (audited)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: The asset, content: {application/json: {schema: {type: object}}}}
+  /assets/{id}/{action}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+      - {name: action, in: path, required: true, schema: {type: string, enum: [install, remove, retire]}}
+    post:
+      operationId: assetAction
+      summary: Install into a position, remove (reason required), or retire
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: The appended event, content: {application/json: {schema: {type: object}}}}
+        "409": {description: The position or asset isn't free}
+  /assets/{id}/audit:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: assetAudit
+      summary: Every change to the asset, newest first
+      responses:
+        "200": {description: Audit entries, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+  /positions/history:
+    get:
+      operationId: positionHistory
+      summary: Every asset a position has held
+      parameters: [{name: uri, in: query, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: History, content: {application/json: {schema: {type: object}}}}
+  /positions/asset-at:
+    get:
+      operationId: positionAssetAt
+      summary: Which asset was in a position at a moment
+      parameters:
+        - {name: uri, in: query, required: true, schema: {type: string}}
+        - {name: at, in: query, schema: {type: string}}
+      responses:
+        "200": {description: "The interval and asset (asset null if empty)", content: {application/json: {schema: {type: object}}}}
+  /positions/replace:
+    post:
+      operationId: replaceInPosition
+      summary: Remove what's in a position and install another asset at the same instant
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: The removed and installed events, content: {application/json: {schema: {type: object}}}}
 components:
   schemas:
     Freshness:
