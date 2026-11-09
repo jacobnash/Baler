@@ -337,6 +337,8 @@ const ROUTES = [
   ["GET",    /^\/cx\/pack-extractions\/[^/]+$/,               "commissioning", "viewer"],
   ["POST",   /^\/cx\/pack-proposals\/[^/]+\/accept$/,          "commissioning", "operator"],
   ["POST",   /^\/cx\/pack-proposals\/[^/]+\/reject$/,          "commissioning", "operator"],
+  // Hunting per loop (#214)
+  ["GET",    /^\/cx\/projects\/[^/]+\/hunting$/,              "commissioning", "viewer"],
 
   // auth_api - POST /auth/login has its own exact-match nginx location
   // with no js_access at all (can't require a token to get a token), so

@@ -2121,6 +2121,64 @@ paths:
       summary: Interactive docs for this API
       responses:
         "200": { description: HTML }
+  /projects/{id}/hunting:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Runs]
+      operationId: getCxHunting
+      summary: Hunting per control loop, against each equipment's start-up baseline
+      description: |
+        Error zero crossings and command reversals per hour, period,
+        amplitude and travel, from raw samples (a series sampled slower
+        than once a minute is not judged). `hunting` when the rate is over
+        `ratio` x the start-up baseline, or over `min_reversals_per_hour`
+        with no baseline; then the onset day and setpoint edits / asset
+        events around it.
+      parameters:
+        - { name: hours, in: query, schema: { type: number, minimum: 1, maximum: 168 } }
+        - { name: days, in: query, description: How far back to look for the onset, schema: { type: integer, minimum: 1, maximum: 60 } }
+        - { name: ratio, in: query, schema: { type: number } }
+        - { name: min_reversals_per_hour, in: query, schema: { type: number } }
+        - { name: command_deadband, in: query, description: "Command moves within this many % are noise (default 2)", schema: { type: number } }
+        - { name: error_deadband, in: query, description: "Error within this band around zero is noise, in the variable's units (default 0.5)", schema: { type: number } }
+        - { name: equip, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: One row per loop
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [generated_at, hours, hunting, loops]
+                properties:
+                  generated_at: { type: string, format: date-time }
+                  hours: { type: number }
+                  settings: { type: object }
+                  hunting: { type: integer }
+                  loops:
+                    type: array
+                    items:
+                      type: object
+                      required: [equip_uri, loop, verdict, now, commands]
+                      properties:
+                        equip_uri: { type: string }
+                        loop: { type: string }
+                        label: { type: string }
+                        sensor: { type: [string, "null"] }
+                        setpoint: { type: [string, "null"] }
+                        commands: { type: array, items: { type: string } }
+                        now: { type: object }
+                        baseline: { type: [object, "null"] }
+                        rate_per_hour: { type: [number, "null"] }
+                        baseline_rate_per_hour: { type: [number, "null"] }
+                        ratio: { type: [number, "null"] }
+                        threshold_per_hour: { type: number }
+                        verdict: { type: string, enum: [hunting, steady, inconclusive] }
+                        onset: { type: [string, "null"] }
+                        changes: { type: array, items: { type: object } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /pack-schema:
     get:
       tags: [Packs]
