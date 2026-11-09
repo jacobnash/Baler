@@ -214,8 +214,10 @@ already be done by the time this page was checked against the code again
   spools to a local JSONL file (replayed on reconnect) when the client
   isn't currently connected — a link drop no longer means silently dropped
   readings on Windrow's side.
-- `mqtt_listener.py`'s client uses a stable `client_id` and
-  `clean_session=False`, so mosquitto's queued messages actually have a
+- `mqtt_listener.py`'s workers each use a stable `client_id`
+  (`baler-mqtt-listener-<n>`) and a persistent MQTT 5 session on the shared
+  subscription `$share/baler/fbf/#` (#233; before that, one client with
+  `clean_session=False`), so mosquitto's queued messages actually have a
   session to be queued against. `fault_detector.py` and
   `derivation_engine.py` authenticate the same way (all three now go
   through the shared `baler.mqtt_util.make_client()`) but still use
@@ -224,17 +226,20 @@ already be done by the time this page was checked against the code again
   command channel below where a dropped message means a scan silently
   never runs.
 - `mosquitto` now runs with a real mounted config (`mosquitto/mosquitto.conf`)
-  setting `persistence true` and `max_queued_messages 200000` (up from the
-  image default of 1000; 10000 until the scale test (#190) showed a listener
-  restart overflowing it at 5k points) — see `mosquitto/entrypoint.sh` for how the
+  setting `persistence true`, `max_queued_messages 500000` and
+  `max_queued_bytes` 64 MiB per client (up from the image default of 1000;
+  10000 until the scale test (#190) showed a listener restart overflowing it
+  at 5k points, 200000 until #233 sized it per worker) — see `mosquitto/entrypoint.sh` for how the
   password file is generated from `.env` at container start rather than
   committing hashed credentials.
 - `retain=True` is still not a history buffer — it only caches the latest
   value per topic for new subscribers. The queue depth above is what
   actually protects an outage window, not `retain`.
 
-200000 queued messages per client is still not unlimited — a
+500000 queued messages per client is still not unlimited — a
 busy multi-point site can still overflow it during a long enough outage.
+When it does, mqtt_listener's supervisor logs `BROKER DROPPED` with the
+count and /ops/status shows ingest degraded, so it is never silent.
 If that turns out to matter in practice, the next step is backfilling
 from BACnet/Modbus devices' own trend logs on reconnect rather than
 raising the cap indefinitely.

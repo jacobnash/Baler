@@ -362,7 +362,8 @@ def listener_status(conn) -> dict:
     from before #233."""
     try:
         return {s: d for s, d in conn.execute(
-            "SELECT service, detail FROM service_heartbeats WHERE service LIKE 'mqtt_listener%%'") if d}
+            "SELECT service, detail FROM service_heartbeats WHERE service LIKE 'mqtt_listener%%' "
+            "AND beat_at > now() - interval '60 seconds'") if d}
     except Exception:  # noqa: BLE001
         conn.rollback()
         return {}
@@ -1041,35 +1042,39 @@ def cmd_crash(args) -> None:
     for target in args.kill.split(","):
         stats_file = outdir / f"gen-{target}.json"
         gen = start_loadgen(ep, args, args.points, "readings", stats_file)
-        time.sleep(args.warmup)
-        a = int(time.time())
-        time.sleep(15)
-        conn = pg_connect(ep)
-        lst0 = listener_status(conn)
-        t_kill = time.time()
-        if target == "listener_worker":
-            # One worker process (#233), not the container: the supervisor
-            # restarts it, and its persistent session has kept what it
-            # hadn't acknowledged - the rest of the workers carry on.
-            pid = ((lst0.get("mqtt_listener") or {}).get("pids") or {}).get(args.kill_worker)
-            if not pid:
-                raise SystemExit(f"no pid for {args.kill_worker} in the mqtt_listener heartbeat (a pre-#233 listener?)")
-            # (the image has no `kill` binary)
-            compose("exec", "-T", "mqtt_listener", "python", "-c", f"import os; os.kill({int(pid)}, 9)")
-            while time.time() - t_kill < 120:
-                time.sleep(1)
-                now = ((listener_status(conn).get("mqtt_listener") or {}).get("pids") or {}).get(args.kill_worker)
-                if now and now != pid:
-                    break
-        else:
-            cid = compose("ps", "-q", target, capture=True).stdout.strip()
-            subprocess.run(["docker", "kill", "-s", "KILL", cid], check=True, capture_output=True)
-            time.sleep(args.down_for)
-            compose("up", "-d", "--no-deps", "--wait", target, check=False)
-        t_back = time.time()
-        conn.close()
-        time.sleep(30)
-        b = int(time.time())
+        try:
+            time.sleep(args.warmup)
+            a = int(time.time())
+            time.sleep(15)
+            conn = pg_connect(ep)
+            lst0 = listener_status(conn)
+            t_kill = time.time()
+            if target == "listener_worker":
+                # One worker process (#233), not the container: the supervisor
+                # restarts it, and its persistent session has kept what it
+                # hadn't acknowledged - the rest of the workers carry on.
+                pid = ((lst0.get("mqtt_listener") or {}).get("pids") or {}).get(args.kill_worker)
+                if not pid:
+                    raise SystemExit(f"no pid for {args.kill_worker} in the mqtt_listener heartbeat (a pre-#233 listener?)")
+                # (the image has no `kill` binary)
+                compose("exec", "-T", "mqtt_listener", "python", "-c", f"import os; os.kill({int(pid)}, 9)")
+                while time.time() - t_kill < 120:
+                    time.sleep(1)
+                    now = ((listener_status(conn).get("mqtt_listener") or {}).get("pids") or {}).get(args.kill_worker)
+                    if now and now != pid:
+                        break
+            else:
+                cid = compose("ps", "-q", target, capture=True).stdout.strip()
+                subprocess.run(["docker", "kill", "-s", "KILL", cid], check=True, capture_output=True)
+                time.sleep(args.down_for)
+                compose("up", "-d", "--no-deps", "--wait", target, check=False)
+            t_back = time.time()
+            conn.close()
+            time.sleep(30)
+            b = int(time.time())
+        except BaseException:
+            gen.kill()  # a generator left running would double the next target's rows
+            raise
         gen.send_signal(signal.SIGTERM)
         gen.wait(timeout=60)
         # drain: let the listener catch up (the broker queued for its session)

@@ -564,12 +564,21 @@ def _heartbeats(service: str, client_id: str, batcher: ReadingBatcher) -> None:
                   "flush_busy_pct": round(100 * (st["flush_s"] - last["flush_s"]) / dt, 1),
                   "interval_s": round(dt, 1)}
         last_t, last_cpu, last = now, cpu, st
-        try:
-            conn = conn or connect()
-            heartbeat.beat(conn, service, detail)
-        except Exception as exc:  # noqa: BLE001 - liveness reporting is best-effort
-            print(f"heartbeat {service}: {exc!r}", flush=True)
-            conn = None
+        conn = _beat(conn, service, detail)
+
+
+def _beat(conn, service: str, detail: dict):
+    """heartbeat.beat on `conn`, (re)connecting first if it's gone - a
+    Postgres restart closes it, and heartbeat.beat never raises, so without
+    this the heartbeat would go stale for good. Returns the connection."""
+    try:
+        if conn is None or conn.closed or conn.broken:
+            conn = connect()
+        heartbeat.beat(conn, service, detail)
+    except Exception as exc:  # noqa: BLE001 - liveness reporting is best-effort
+        print(f"heartbeat {service}: {exc!r}", flush=True)
+        return None
+    return conn
 
 
 def run_tags(args) -> None:
@@ -739,6 +748,9 @@ def main(argv=None) -> None:
         # starts at the feed's head, so registering later would skip the
         # tags committed in between.
         reading_feed.FeedConsumer(conn, tag_ingest.CONSUMER, log=log, tags_only=True).start()
+    # Workers' heartbeats are rewritten within HEARTBEAT_EVERY; clearing
+    # them drops those of worker indices that no longer exist.
+    conn.execute("DELETE FROM service_heartbeats WHERE service LIKE 'mqtt\\_listener/%%'")
     sup = Supervisor(args)
     signal.signal(signal.SIGTERM, sup.stop)
     signal.signal(signal.SIGINT, sup.stop)
@@ -758,8 +770,8 @@ def main(argv=None) -> None:
         drops.check()
         if time.monotonic() - last_beat >= HEARTBEAT_EVERY:
             last_beat = time.monotonic()
-            heartbeat.beat(conn, "mqtt_listener", {"workers": args.workers, "pids": sup.pids(),
-                                                   "restarts": dict(sup.restarts), **drops.detail()})
+            conn = _beat(conn, "mqtt_listener", {"workers": args.workers, "pids": sup.pids(),
+                                                 "restarts": dict(sup.restarts), **drops.detail()})
     log("mqtt_listener: stopping")
     sup.terminate()
 
