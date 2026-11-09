@@ -137,6 +137,21 @@
     </section>
 
     <section>
+      <h2>COBie</h2>
+      <p class="hint">Import a COBie handover workbook (Type, Component, Spare, Job; warranties from Type) to seed
+        assets, warranties, PM tasks and spares. It's a dry run first: check what it would write and skip, then commit.
+        <a href="/docs/cobie" target="_blank" rel="noopener">Docs</a>.</p>
+      <form id="cobie-form" class="inline-form">
+        <input type="file" name="file" accept=".xlsx" required />
+        <textarea name="positions" rows="2" cols="50" placeholder='optional: {"AHU-1": "urn:equip:fbf/site/ahu-1"}'></textarea>
+        <label><input type="checkbox" name="commit" /> commit (not a dry run)</label>
+        <button type="submit">Import</button>
+      </form>
+      <pre id="cobie-result"></pre>
+      <p><a id="cobie-export" href="#">Download COBie workbook (.xlsx)</a></p>
+    </section>
+
+    <section>
       <h2>Position history</h2>
       <form id="position-form" class="inline-form">
         <input name="uri" placeholder="position URI (urn:equip:…)" size="40" required />

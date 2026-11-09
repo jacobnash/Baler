@@ -23,6 +23,7 @@ from baler.migrations import (
     v0003_assets,
     v0004_pm,
     v0005_warranties,
+    v0006_spares,
 )
 
-ALL = (v0001_baseline, v0002_reading_feed, v0003_assets, v0004_pm, v0005_warranties)
+ALL = (v0001_baseline, v0002_reading_feed, v0003_assets, v0004_pm, v0005_warranties, v0006_spares)

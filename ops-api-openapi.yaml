@@ -730,6 +730,33 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object}}}}
       responses:
         "200": {description: The warranty, content: {application/json: {schema: {type: object}}}}
+  # COBie import/export and spares (#204). docs-site/pages/cobie.mdx.
+  /cobie/import:
+    post:
+      operationId: importCOBie
+      summary: Import a COBie workbook (base64 in JSON); a dry run unless commit is true
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: "Dry run: the plan and what would be skipped", content: {application/json: {schema: {type: object}}}}
+        "201": {description: "Committed: what was created and any errors", content: {application/json: {schema: {type: object}}}}
+  /cobie/export:
+    get:
+      operationId: exportCOBie
+      summary: The record as a COBie workbook (Type, Component, Spare, Job)
+      responses:
+        "200": {description: The workbook, content: {application/vnd.openxmlformats-officedocument.spreadsheetml.sheet: {schema: {type: string, format: binary}}}}
+  /spares:
+    get:
+      operationId: listSpares
+      summary: Spare parts by type (filter type)
+      responses:
+        "200": {description: Spares, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+    post:
+      operationId: addSpare
+      summary: Add a spare part
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: The spare, content: {application/json: {schema: {type: object}}}}
 components:
   schemas:
     Freshness:

@@ -118,6 +118,11 @@ const ROUTES = [
   ["GET",    /^\/ops\/positions\/history$/,              "assets", "viewer"],
   ["GET",    /^\/ops\/positions\/asset-at$/,             "assets", "viewer"],
   ["POST",   /^\/ops\/positions\/replace$/,               "assets", "operator"],
+  // COBie import/export and spares (#204). Import is a dry run unless commit.
+  ["POST",   /^\/ops\/cobie\/import$/,                   "assets", "operator"],
+  ["GET",    /^\/ops\/cobie\/export$/,                   "assets", "viewer"],
+  ["GET",    /^\/ops\/spares$/,                          "assets", "viewer"],
+  ["POST",   /^\/ops\/spares$/,                          "assets", "operator"],
   // PM schedules (#199): due work is computed, then exported (CSV, COBie Job).
   ["GET",    /^\/ops\/pm\/tasks$/,                       "assets", "viewer"],
   ["POST",   /^\/ops\/pm\/tasks$/,                       "assets", "operator"],
