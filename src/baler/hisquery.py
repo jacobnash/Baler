@@ -1159,6 +1159,10 @@ def _any_flag(expr: str) -> bool:
     return "F" in text and bool(_ANY_FLAG.fullmatch(text))
 
 
+# Nested Dict values' nodes (ingest._dict_triples; store.DICT_NS).
+DICT_NS = "urn:baler:dict:"
+
+
 def compile_filter(node, graph: GraphVocab | None = None, scope=None) -> str:
     """One SELECT over every subject in the graph. Each leaf test of the
     filter is a subject-set (see _Compiler), left-joined once; the whole
@@ -1181,8 +1185,12 @@ def compile_filter(node, graph: GraphVocab | None = None, scope=None) -> str:
         f"  OPTIONAL {{ {{ SELECT DISTINCT ?s (true AS ?{m}) WHERE {{ {pattern} }} }} }}"
         for m, pattern in compiler.flags
     )
-    # nested Dict nodes (urn:baler:dict:) are values, never records
-    record = "FILTER(isIRI(?s) && !STRSTARTS(STR(?s), \"urn:baler:dict:\"))"
+    # Records are IRIs, and not nested Dict nodes (urn:baler:dict:, values,
+    # never records). match_entities drops the rest, not this query: per
+    # candidate, STR(?s) cost Oxigraph a dictionary lookup and even isIRI(?s)
+    # a term decode - 1.1 s of a 1.2 s `point` match at 100k points, against
+    # ~0.1 s for the match itself (Baler#244). Each ?s is judged on its own,
+    # so dropping them after the fact is the same answer.
     if compiler.flags and _any_flag(leaf_logic):
         # Matches exactly when ?s is in some leaf set (`point`, `equip`,
         # `ahu or vav`): the union of the sets is the answer, so neither
@@ -1198,7 +1206,7 @@ def compile_filter(node, graph: GraphVocab | None = None, scope=None) -> str:
         return (
             PREFIXES
             + f"SELECT ?s WHERE {{\n  {{ SELECT DISTINCT ?s WHERE {{ {union} }} }}\n"
-            + f"  FILTER(isIRI(?s)) FILTER(!STRSTARTS(STR(?s), \"urn:baler:dict:\")){subject}{scoped}\n}}"
+            + f"  {subject}{scoped}\n}}"
         )
     if compiler.flags and _false_without_flags(leaf_logic):
         # Nothing outside every leaf set can match, so the candidates are
@@ -1207,9 +1215,9 @@ def compile_filter(node, graph: GraphVocab | None = None, scope=None) -> str:
         # read, even `site` (Baler#107). The ?s ?cp ?co join keeps "is a
         # subject", as the full scan had it (a path can reach a bare object).
         union = " UNION ".join(f"{{ {pattern} }}" for _, pattern in compiler.flags)
-        candidates = f"  {{ SELECT DISTINCT ?s WHERE {{ {{ SELECT DISTINCT ?s WHERE {{ {union} }} }} ?s ?cp ?co . {record} }} }}\n"
+        candidates = f"  {{ SELECT DISTINCT ?s WHERE {{ {{ SELECT DISTINCT ?s WHERE {{ {union} }} }} ?s ?cp ?co . }} }}\n"
     else:
-        candidates = f"  {{ SELECT DISTINCT ?s WHERE {{ ?s ?p ?o . {record} }} }}\n"
+        candidates = "  { SELECT DISTINCT ?s WHERE { ?s ?p ?o . } }\n"
     return (
         PREFIXES
         + "SELECT DISTINCT ?s WHERE {\n"
@@ -1416,8 +1424,12 @@ def match_entities(store, node, graph: GraphVocab | None = None, scope=None) -> 
     after the fact is the same result as excluding them as candidates,
     minus a per-candidate NOT EXISTS that cost ~0.4s per query."""
     graph = graph if graph is not None else graph_vocab(store)
-    rows = store.query(compile_filter(node, graph, scope))
-    return sorted(uri for uri in (str(row.s) for row in rows) if not graph.is_schema(uri))
+    query = compile_filter(node, graph, scope)
+    if hasattr(store, "iter_tsv"):  # TSV terms: an IRI is `<...>`, a blank node `_:b`, a literal `"..."`
+        found = (t[1:-1] for t in (row[0] for row in store.iter_tsv(query)) if t[:1] == "<")
+    else:  # rdflib terms
+        found = (str(t) for t in (row.s for row in store.query(query)) if type(t).__name__ == "URIRef")
+    return sorted(uri for uri in found if not uri.startswith(DICT_NS) and not graph.is_schema(uri))
 
 
 def visible_uris(store, uris: list[str], scope) -> list[str]:
