@@ -47,6 +47,7 @@ from baler.commissioning import (
     compliance_api,
     coverage,
     db,
+    earned_api,
     economizer,
     engine,
     fleet,
@@ -64,6 +65,7 @@ from baler.commissioning import (
     overrides,
     pack_extract_api,
     packs_api,
+    passport_api,
     phases,
     procedures,
     readiness_api,
@@ -72,6 +74,7 @@ from baler.commissioning import (
     routes,
     runner,
     savings_api,
+    schedules_api,
     spaces_api,
     spec,
     test_library,
@@ -122,7 +125,7 @@ _RUN_REPORT = re.compile(r"/runs/([^/]+)/report")
 
 # Building-record features (epic #221), each a route table (commissioning.routes).
 EXTENSIONS = (spaces_api, readiness_api, packs_api, pack_extract_api, compliance_api, hunting_api, baselines_api,
-              savings_api)
+              savings_api, passport_api, schedules_api, earned_api)
 
 
 def _check_prefixes(value) -> list[str]:

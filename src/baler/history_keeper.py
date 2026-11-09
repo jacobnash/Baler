@@ -31,7 +31,7 @@ next run. nash-srv's 6 h soak at 100k points (#337) showed three gaps:
 So every BALER_HISTORY_KEEPER_INTERVAL_S (300 s) the keeper:
 
 - copies new failed runs of the policy job from job_errors into
-  history_compression_events (migration 0025) and logs them;
+  history_compression_events (migration 0027) and logs them;
 - **retries**: compresses chunks the policy should have compressed by now
   (older than compress_after plus one policy schedule, still uncompressed),
   each in its own statement, recording the error's SQLSTATE, message,
@@ -566,7 +566,7 @@ def compression_status(conn) -> dict:
         return {}
     try:
         fails = failing(conn)
-    except psycopg.Error:  # before migration 0025
+    except psycopg.Error:  # before migration 0027
         conn.rollback()
         fails = {}
     return summary(cs, pol, fails, Settle(), datetime.now(timezone.utc))

@@ -1374,6 +1374,120 @@ paths:
                             priority: { type: integer }
                             unoccupied: { type: boolean }
         "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/schedule-links:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Projects]
+      operationId: listCxScheduleLinks
+      summary: Links from schedule activities to evidence
+      responses:
+        "200":
+          description: Links
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ScheduleLink" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Projects]
+      operationId: addCxScheduleLink
+      summary: Link an activity (by code) to evidence (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [activity_code, kind, params]
+              properties:
+                activity_code: { type: string }
+                kind: { type: string, enum: [points_online, procedure_passed, form_signed] }
+                params: { type: object }
+                note: { type: string }
+      responses:
+        "201":
+          description: The link
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScheduleLink" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /schedule-links/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    delete:
+      tags: [Projects]
+      operationId: deleteCxScheduleLink
+      summary: Remove a link and its sign-offs (operator)
+      responses:
+        "204": { description: Removed }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /schedule-links/{id}/signoff:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Projects]
+      operationId: signCxScheduleLink
+      summary: A person signs off a form_signed link (operator)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                document: { type: object, properties: { title: { type: string }, ref: { type: string } } }
+                note: { type: string }
+      responses:
+        "201":
+          description: The sign-off
+          content:
+            application/json:
+              schema: { type: object, required: [id, link_id, signed_at] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /construction-schedules/{id}/earned-evidence:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Projects]
+      operationId: getCxEarnedEvidence
+      summary: Done by the data, due but not evidenced, marked done with no evidence
+      parameters:
+        - { name: as_of, in: query, schema: { type: string, format: date-time } }
+      responses:
+        "200":
+          description: The report
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [schedule, as_of, counts, done_by_data, due_not_evidenced, marked_done_no_evidence, not_linked]
+                properties:
+                  schedule: { $ref: "#/components/schemas/Schedule" }
+                  as_of: { type: string }
+                  activities: { type: integer }
+                  linked: { type: integer }
+                  counts: { type: object }
+                  done_by_data: { type: array, items: { type: object } }
+                  due_not_evidenced: { type: array, items: { type: object } }
+                  marked_done_no_evidence: { type: array, items: { type: object } }
+                  ahead_of_schedule_status: { type: array, items: { type: object } }
+                  not_linked: { type: array, items: { type: object } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /construction-schedules/{id}/link-suggestions:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Projects]
+      operationId: getCxScheduleLinkSuggestions
+      summary: Proposed links (never applied) from activity names that name equipment
+      responses:
+        "200":
+          description: Proposals
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, required: [activity_code, kind, params, why] } }
+        "404": { $ref: "#/components/responses/NotFound" }
   /projects/{id}/schedules/refresh:
     parameters:
       - { $ref: "#/components/parameters/ProjectId" }
@@ -2121,6 +2235,98 @@ paths:
       summary: Interactive docs for this API
       responses:
         "200": { description: HTML }
+  /projects/{id}/construction-schedules:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Projects]
+      operationId: listCxConstructionSchedules
+      summary: Imported schedule versions, newest first
+      responses:
+        "200":
+          description: Schedules
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Schedule" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Projects]
+      operationId: importCxConstructionSchedule
+      summary: Import a P6 XER or MS Project XML (MSPDI) schedule (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                filename: { type: string }
+                data: { type: string, description: The file, base64 }
+      responses:
+        "201":
+          description: The schedule version
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Schedule" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /construction-schedules/{id}/activities:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Projects]
+      operationId: listCxConstructionScheduleActivities
+      summary: A schedule's activities
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [not_started, in_progress, complete] } }
+        - { name: milestones, in: query, schema: { type: boolean } }
+      responses:
+        "200":
+          description: Activities by planned start
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ScheduleActivity" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/passport:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Projects]
+      operationId: getCxPassport
+      summary: The building passport (handover and sale package)
+      description: |
+        Per position: start-up test vs latest, issues and accepted risks,
+        open faults, and, where this record has them, efficiency baselines,
+        replace-vs-keep cases, asset history, warranties and deferred
+        maintenance; compliance history per space; documents; the Std 202
+        deliverables. `not_in_this_record` names each part this install
+        doesn't hold yet and the issue that builds it.
+      parameters:
+        - { name: format, in: query, schema: { type: string, enum: [json, html] } }
+      responses:
+        "200":
+          description: The passport (text/html for format=html)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [project, generated_at, positions, documents, std_202_deliverables, not_in_this_record]
+                properties:
+                  project: { type: object }
+                  generated_at: { type: string, format: date-time }
+                  generated_by: { type: [string, "null"] }
+                  positions: { type: array, items: { type: object, required: [equip_uri, issues, open_faults] } }
+                  compliance_by_space: { type: [array, "null"], items: { type: object } }
+                  documents: { type: array, items: { type: object } }
+                  std_202_deliverables: { type: array, items: { type: object } }
+                  not_in_this_record: { type: object, additionalProperties: { type: string } }
+                  export: { type: string }
+            text/html:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /projects/{id}/baselines:
     parameters:
       - { $ref: "#/components/parameters/ProjectId" }
@@ -4443,3 +4649,50 @@ components:
         created_by: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    Schedule:
+      type: object
+      required: [id, project_id, filename, sha256, format, activities, created_at]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        filename: { type: string }
+        sha256: { type: string }
+        format: { type: string, enum: [xer, mspdi] }
+        source_project: { type: [string, "null"] }
+        data_date: { type: [string, "null"] }
+        activities: { type: integer }
+        info: { type: [object, "null"] }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+    ScheduleActivity:
+      type: object
+      required: [id, schedule_id, code, name, status, predecessors]
+      properties:
+        id: { type: string }
+        schedule_id: { type: string }
+        project_id: { type: string }
+        code: { type: string }
+        name: { type: string }
+        wbs: { type: [string, "null"] }
+        planned_start: { type: [string, "null"] }
+        planned_finish: { type: [string, "null"] }
+        actual_start: { type: [string, "null"] }
+        actual_finish: { type: [string, "null"] }
+        percent_complete: { type: [number, "null"] }
+        status: { type: string, enum: [not_started, in_progress, complete] }
+        milestone: { type: boolean }
+        summary: { type: boolean }
+        predecessors: { type: array, items: { type: string } }
+    ScheduleLink:
+      type: object
+      required: [id, project_id, activity_code, kind, params]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        activity_code: { type: string }
+        kind: { type: string, enum: [points_online, procedure_passed, form_signed] }
+        params: { type: object }
+        note: { type: [string, "null"] }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+

@@ -16,18 +16,18 @@ from baler.commissioning import pack_extract, pack_extract_api, spec_pdf
 
 PAGES = [
     spec_pdf.Page(1, "Owner design guide. Contents.", ""),
-    spec_pdf.Page(7, "4.3 Operating rooms. Relative humidity shall be held between 30 and 60 percent. "
-                     "Rooms shall be positive to adjacent corridors by at least 0.01 in. w.c.", ""),
+    spec_pdf.Page(7, "4.3 Operating rooms. Relative humidity shall be held between 41 and 57 percent. "
+                     "Rooms shall be positive to adjacent corridors by at least 0.07 in. w.c.", ""),
 ]
 GOOD = {"id": "guide-or-rh", "title": "OR humidity band", "ref": "4.3", "page": 7,
-        "quote": "Relative humidity shall be held between 30 and 60 percent", "space_type": ["operating_room"],
-        "quantity": "relative_humidity", "op": "between", "min": 30, "max": 60, "unit": "%RH", "confidence": 0.9}
+        "quote": "Relative humidity shall be held between 41 and 57 percent", "space_type": ["operating_room"],
+        "quantity": "relative_humidity", "op": "between", "min": 41, "max": 57, "unit": "%RH", "confidence": 0.9}
 MOVED = {"id": "or-dp", "title": "OR positive to corridor", "ref": "4.3", "page": 1,
-         "quote": "positive to adjacent corridors by at least 0.01 in. w.c.", "space_type": ["operating_room"],
-         "quantity": "pressure_to_adjacent", "op": ">=", "value": 0.01, "unit": "inH2O", "confidence": 0.8}
-INVENTED = {**GOOD, "id": "or-ach", "quote": "Twenty air changes per hour are required", "quantity": "total_ach",
-            "op": ">=", "value": 20, "unit": "1/h"}
-NO_ENGINE = {**GOOD, "id": "filters", "quantity": "filtration", "value": "MERV 14"}
+         "quote": "positive to adjacent corridors by at least 0.07 in. w.c.", "space_type": ["operating_room"],
+         "quantity": "pressure_to_adjacent", "op": ">=", "value": 0.07, "unit": "inH2O", "confidence": 0.8}
+INVENTED = {**GOOD, "id": "or-ach", "quote": "Thirty-three air changes per hour are required", "quantity": "total_ach",
+            "op": ">=", "value": 33, "unit": "1/h"}
+NO_ENGINE = {**GOOD, "id": "filters", "quantity": "filtration", "value": "MERV 9"}
 
 
 def fake(items):
@@ -41,7 +41,7 @@ def test_quotes_are_checked_and_rows_carry_citations_only():
     assert rh["row"]["citation"] == {"ref": "4.3", "page": 7}
     assert "quote" not in json.dumps(rh["row"])  # the quote stays on the proposal
     assert rh["source"]["quote"].startswith("Relative humidity") and rh["source"]["quote_verified"]
-    assert rh["row"]["criterion"] == {"quantity": "relative_humidity", "op": "between", "unit": "%RH", "min": 30, "max": 60}
+    assert rh["row"]["criterion"] == {"quantity": "relative_humidity", "op": "between", "unit": "%RH", "min": 41, "max": 57}
     assert rh["row"]["verified_by"] is None
     assert dp["source"]["page"] == 7 and dp["row"]["citation"]["page"] == 7  # quote found on p7, not the cited p1
     assert info["dropped"] == 2 and "quote not in the PDF" in info["notes"] and "filtration" in info["notes"]
@@ -69,12 +69,12 @@ def test_extract_api_accept_and_reject(monkeypatch):
         dp = next(p for p in props if p["row"]["id"] == "or-dp")
         # the person corrects the RH floor and accepts: the row joins the draft unconfirmed
         acc = hx.check(requests.post(f"{base}/pack-proposals/{rh['id']}/accept", json={"row": {"criterion": {
-            "quantity": "relative_humidity", "op": "between", "min": 20, "max": 60, "unit": "%RH"}}}, headers=hx.A),
+            "quantity": "relative_humidity", "op": "between", "min": 23, "max": 58, "unit": "%RH"}}}, headers=hx.A),
             "/pack-proposals/{id}/accept", "post", 200)
         assert acc["status"] == "accepted"
         pack = requests.get(f"{base}/packs/{draft['id']}", headers=hx.A).json()
         row = pack["requirements"][-1]
-        assert row["id"] == "guide-or-rh" and row["criterion"]["min"] == 20 and row["verified_by"] is None
+        assert row["id"] == "guide-or-rh" and row["criterion"]["min"] == 23 and row["verified_by"] is None
         assert pack["summary"]["active"] == 0
         assert requests.post(f"{base}/pack-proposals/{rh['id']}/accept", headers=hx.A).status_code == 400  # decided already
         hx.check(requests.post(f"{base}/pack-proposals/{dp['id']}/reject", headers=hx.A), "/pack-proposals/{id}/reject", "post", 200)
