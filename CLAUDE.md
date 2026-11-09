@@ -12,8 +12,9 @@ integrations). This file is gotchas only — don't duplicate those.
   which builds from git with maturin and so needs a Rust toolchain
   (`cargo`). Without it `tests/test_haystack_api.py` *skips* rather than
   failing. CI's unit job installs it; the Dockerfile builds it in a Rust
-  stage. The openhay git ref is pinned in two places, `pyproject.toml` and
-  the Dockerfile's `OPENHAY_REF`, so bump both together.
+  stage. openhay is pinned to a commit SHA in two places, `pyproject.toml`
+  and the Dockerfile's `OPENHAY_REF` (CI builds pyproject's), so bump both
+  together; openhay's main never reaches Baler until you do.
 - **Renamed from Timberdoodle (FBF -> Windrow).** The legacy shims are
   load-bearing for the live nash-srv install, not leftovers: compose's
   `${BALER_X:-${TIMBERDOODLE_X}}` fallbacks, the `BALER_PG_USER`/`BALER_PG_DB`/
