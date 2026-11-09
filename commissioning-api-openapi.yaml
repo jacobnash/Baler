@@ -1827,7 +1827,6 @@ paths:
       summary: Interactive docs for this API
       responses:
         "200": { description: HTML }
-<<<<<<< HEAD
   /test-runs/{id}/manual-results:
     parameters:
       - { name: id, in: path, required: true, schema: { type: string } }
@@ -1855,51 +1854,12 @@ paths:
         14 days back). The run's statuses, summary and issues update: a
         manual fail opens an issue, a contradiction with the data opens
         one, and a later pass resolves or retests it.
-=======
-  /projects/{id}/writes:
-    parameters:
-      - { $ref: "#/components/parameters/ProjectId" }
-    get:
-      tags: [Operator writes]
-      operationId: listCxOperatorWrites
-      summary: Every audited operator write on the project, newest first
-      parameters:
-        - { name: point, in: query, required: false, schema: { type: string }, description: "Also return Baler's priority array for this point" }
-      responses:
-        "200":
-          description: Writes
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [writes, levels, max_hold_minutes]
-                properties:
-                  writes: { type: array, items: { $ref: "#/components/schemas/OperatorWrite" } }
-                  levels: { type: array, items: { type: integer }, description: "Levels a UI write may use (8-16)" }
-                  max_hold_minutes: { type: number }
-                  priority_array: { type: object, additionalProperties: { type: object } }
-        "404": { $ref: "#/components/responses/NotFound" }
-    post:
-      tags: [Operator writes]
-      operationId: createCxOperatorPointWrite
-      summary: Command a point, with a reason and an auto-relinquish time (operator, a person)
-      description: >-
-        Baler#213. Goes through point_write to the Windrow instance that
-        owns the point (a BACnet WriteProperty at the level). Levels 8-16
-        only; `reason` and `hold_minutes` (or `expires_at`, at most 24 h
-        ahead) are required, and the level is relinquished by itself when
-        it runs out. Refused for an API key (a person makes operator
-        writes) and with 409 if a Cx active test holds the level, or
-        another person does without `replace: true`. Baler's priority array
-        records the level as `op:<write id>`.
->>>>>>> origin/main
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-<<<<<<< HEAD
               required: [equip_uri, step_id, status]
               additionalProperties: false
               properties:
@@ -1934,28 +1894,10 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ManualResult" }
-=======
-              required: [point, value, reason]
-              properties:
-                point: { type: string }
-                value: { type: [number, boolean] }
-                level: { type: integer, minimum: 8, maximum: 16, default: 8 }
-                reason: { type: string, minLength: 3, maxLength: 500 }
-                hold_minutes: { type: number, exclusiveMinimum: 0, maximum: 1440 }
-                expires_at: { type: string, format: date-time }
-                replace: { type: boolean, description: "Take a level another person holds (their value is kept in `before`)" }
-      responses:
-        "201":
-          description: Written
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/OperatorWrite" }
->>>>>>> origin/main
         "400": { $ref: "#/components/responses/BadRequest" }
         "403": { description: "Not a person's session, or not operator" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
-<<<<<<< HEAD
   /manual-results/{id}:
     parameters:
       - { name: id, in: path, required: true, schema: { type: string } }
@@ -1963,17 +1905,6 @@ paths:
       tags: [Procedures]
       operationId: editCxManualResult
       summary: Edit your own manual result; the previous version is kept in history (operator)
-=======
-        "502": { description: The site refused the write or didn't answer (recorded as failed) }
-        "503": { description: No Windrow command channel configured }
-  /writes/{id}/relinquish:
-    parameters:
-      - { name: id, in: path, required: true, schema: { type: string } }
-    post:
-      tags: [Operator writes]
-      operationId: relinquishCxOperatorWrite
-      summary: Release an operator point write before it expires (operator, a person)
->>>>>>> origin/main
       requestBody:
         required: true
         content:
@@ -1982,7 +1913,6 @@ paths:
               type: object
               required: [reason]
               properties:
-<<<<<<< HEAD
                 status: { type: string, enum: [pass, fail, not_applicable] }
                 note: { type: string }
                 witness: { type: [object, "null"] }
@@ -2026,7 +1956,107 @@ paths:
       responses:
         "200":
           description: One row per equipment class
-=======
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [equip_class, in_class, sampled, tested, passed, by_method, automatic, witnessed, summary]
+                  properties:
+                    equip_class: { type: string }
+                    in_class: { type: integer }
+                    sampled: { type: integer }
+                    tested: { type: integer }
+                    passed: { type: integer }
+                    failed: { type: integer }
+                    untested: { type: integer }
+                    automatic: { type: integer }
+                    witnessed: { type: integer }
+                    by_method:
+                      type: object
+                      properties: { manual: { type: integer }, passive: { type: integer }, active: { type: integer } }
+                    procedures: { type: array, items: { type: object } }
+                    summary: { type: string, description: "e.g. 220 of 220 tested: 220 automatically, 12 witnessed" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/writes:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Operator writes]
+      operationId: listCxOperatorWrites
+      summary: Every audited operator write on the project, newest first
+      parameters:
+        - { name: point, in: query, required: false, schema: { type: string }, description: "Also return Baler's priority array for this point" }
+      responses:
+        "200":
+          description: Writes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [writes, levels, max_hold_minutes]
+                properties:
+                  writes: { type: array, items: { $ref: "#/components/schemas/OperatorWrite" } }
+                  levels: { type: array, items: { type: integer }, description: "Levels a UI write may use (8-16)" }
+                  max_hold_minutes: { type: number }
+                  priority_array: { type: object, additionalProperties: { type: object } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Operator writes]
+      operationId: createCxOperatorPointWrite
+      summary: Command a point, with a reason and an auto-relinquish time (operator, a person)
+      description: >-
+        Baler#213. Goes through point_write to the Windrow instance that
+        owns the point (a BACnet WriteProperty at the level). Levels 8-16
+        only; `reason` and `hold_minutes` (or `expires_at`, at most 24 h
+        ahead) are required, and the level is relinquished by itself when
+        it runs out. Refused for an API key (a person makes operator
+        writes) and with 409 if a Cx active test holds the level, or
+        another person does without `replace: true`. Baler's priority array
+        records the level as `op:<write id>`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [point, value, reason]
+              properties:
+                point: { type: string }
+                value: { type: [number, boolean] }
+                level: { type: integer, minimum: 8, maximum: 16, default: 8 }
+                reason: { type: string, minLength: 3, maxLength: 500 }
+                hold_minutes: { type: number, exclusiveMinimum: 0, maximum: 1440 }
+                expires_at: { type: string, format: date-time }
+                replace: { type: boolean, description: "Take a level another person holds (their value is kept in `before`)" }
+      responses:
+        "201":
+          description: Written
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorWrite" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: "Not a person's session, or not operator" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { description: The site refused the write or didn't answer (recorded as failed) }
+        "503": { description: No Windrow command channel configured }
+  /writes/{id}/relinquish:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Operator writes]
+      operationId: relinquishCxOperatorWrite
+      summary: Release an operator point write before it expires (operator, a person)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
                 reason: { type: string, minLength: 3 }
       responses:
         "200":
@@ -2051,32 +2081,12 @@ paths:
       responses:
         "200":
           description: Objects per connection
->>>>>>> origin/main
           content:
             application/json:
               schema:
                 type: array
                 items:
                   type: object
-<<<<<<< HEAD
-                  required: [equip_class, in_class, sampled, tested, passed, by_method, automatic, witnessed, summary]
-                  properties:
-                    equip_class: { type: string }
-                    in_class: { type: integer }
-                    sampled: { type: integer }
-                    tested: { type: integer }
-                    passed: { type: integer }
-                    failed: { type: integer }
-                    untested: { type: integer }
-                    automatic: { type: integer }
-                    witnessed: { type: integer }
-                    by_method:
-                      type: object
-                      properties: { manual: { type: integer }, passive: { type: integer }, active: { type: integer } }
-                    procedures: { type: array, items: { type: object } }
-                    summary: { type: string, description: "e.g. 220 of 220 tested: 220 automatically, 12 witnessed" }
-        "404": { $ref: "#/components/responses/NotFound" }
-=======
                   properties:
                     connection_id: { type: string }
                     topic_prefix: { type: string }
@@ -2156,7 +2166,6 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "502": { description: The revert wasn't applied }
->>>>>>> origin/main
 components:
   parameters:
     ProjectId:
@@ -2192,35 +2201,6 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
-<<<<<<< HEAD
-    ManualResult:
-      type: object
-      required: [id, project_id, procedure_id, test_run_id, equip_uri, step_id, status, recorded_by, recorded_at, observed_at, history]
-      properties:
-        id: { type: string }
-        project_id: { type: string }
-        procedure_id: { type: string }
-        test_run_id: { type: string }
-        equip_uri: { type: string }
-        step_id: { type: string }
-        status: { type: string, enum: [pass, fail, not_applicable] }
-        note: { type: [string, "null"] }
-        witness: { type: [object, "null"] }
-        attachments:
-          type: array
-          items:
-            type: object
-            properties: { id: { type: string }, filename: { type: string }, media_type: { type: string }, size: { type: integer }, sha256: { type: string } }
-        recorded_by: { type: string }
-        recorded_email: { type: [string, "null"] }
-        recorded_name: { type: [string, "null"] }
-        recorded_role: { type: [string, "null"] }
-        recorded_at: { type: string, format: date-time }
-        observed_at: { type: string, format: date-time }
-        client_id: { type: [string, "null"] }
-        history: { type: array, items: { type: object }, description: "Earlier versions: status, note, witness, attachments, replaced_at, replaced_by, reason" }
-        updated_at: { type: string, format: date-time }
-=======
     OperatorWrite:
       type: object
       required: [id, project_id, kind, target, reason, status, created_at, log]
@@ -2248,7 +2228,6 @@ components:
         end_reason: { type: [string, "null"] }
         error: { type: [string, "null"] }
         log: { type: array, items: { type: object } }
->>>>>>> origin/main
     Error:
       type: object
       required: [error]
@@ -2964,3 +2943,30 @@ components:
               message: { type: string }
               haystack_markers: { type: array, items: { type: string } }
               xeto_spec: { type: [string, "null"] }
+    ManualResult:
+      type: object
+      required: [id, project_id, procedure_id, test_run_id, equip_uri, step_id, status, recorded_by, recorded_at, observed_at, history]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        procedure_id: { type: string }
+        test_run_id: { type: string }
+        equip_uri: { type: string }
+        step_id: { type: string }
+        status: { type: string, enum: [pass, fail, not_applicable] }
+        note: { type: [string, "null"] }
+        witness: { type: [object, "null"] }
+        attachments:
+          type: array
+          items:
+            type: object
+            properties: { id: { type: string }, filename: { type: string }, media_type: { type: string }, size: { type: integer }, sha256: { type: string } }
+        recorded_by: { type: string }
+        recorded_email: { type: [string, "null"] }
+        recorded_name: { type: [string, "null"] }
+        recorded_role: { type: [string, "null"] }
+        recorded_at: { type: string, format: date-time }
+        observed_at: { type: string, format: date-time }
+        client_id: { type: [string, "null"] }
+        history: { type: array, items: { type: object }, description: "Earlier versions: status, note, witness, attachments, replaced_at, replaced_by, reason" }
+        updated_at: { type: string, format: date-time }
