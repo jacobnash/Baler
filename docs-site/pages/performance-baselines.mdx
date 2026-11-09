@@ -1,0 +1,85 @@
+---
+title: Performance baselines
+---
+
+> Show what the chiller has lost in efficiency since it was installed.
+
+A performance baseline is a model of how a piece of equipment performed
+when it was known good, so that later performance can be compared with
+*itself*, not with a brochure (Baler#215, epic #221 §8.2). Chiller kW/ton
+comes first.
+
+## The chiller model
+
+Fitted on hourly averages over a period you choose, normally the first
+cooling season after acceptance:
+
+```
+kW/ton = b0 + b1·tons + b2·tons² + b3·ECWT
+```
+
+Load and entering condenser water temperature (ECWT) are in the model so
+that a hot week, which raises ECWT and kW/ton, isn't mistaken for a worn
+chiller.
+
+- **Inputs** are existing points, read as hourly averages through the
+  history rollups (`timeseries.read_rollup`, the continuous aggregates;
+  raw history stays raw). `kw` (chiller power, kW) and `ecwt` (degF), and
+  either `tons` (any point in tons, for example a [derivation](/derivation)'s
+  output) or chilled-water `chw_flow_gpm`, `chw_supply_f` and `chw_return_f`
+  (tons = gpm × ΔT / 24).
+- Hours below 10 % of the period's peak load are left out: kW/ton near zero
+  load is noise.
+- At least 48 usable hours are needed, and a period that doesn't vary in
+  load or ECWT is refused (there is nothing to fit).
+
+## Model quality
+
+Every baseline reports ASHRAE Guideline 14's calibration statistics,
+**CV(RMSE)** and **NMBE**, with `meets_thresholds` against thresholds that
+are **settings**: 30 % and ±10 % by default, labelled "verify against the
+current edition of ASHRAE Guideline 14". Baler doesn't quote them as the
+standard's numbers. Check them against the edition you work to.
+
+## Degradation
+
+```bash
+curl -X POST $BALER/cx/projects/$P/baselines -d '{
+  "equip_uri": "urn:equip:fbf/plant/ch-1",
+  "points": {"kw": "urn:point:.../kw", "tons": "urn:point:.../tons", "ecwt": "urn:point:.../ecwt"},
+  "fit_start": "2027-05-01T00:00:00Z", "fit_end": "2027-09-30T00:00:00Z"}'
+
+curl "$BALER/cx/baselines/$B/degradation?bucket=month&alert_pct=10"
+```
+
+For each month (or week) after the fit, the report gives actual and
+predicted kW/ton and the gap in %, **at matched conditions only**: hours
+whose load and ECWT are outside the range the model was fitted on are not
+compared (no extrapolation), and the report counts them
+(`hours_outside_fit_range`). A positive gap is more energy per ton than
+the baseline.
+
+`alert_pct` is your threshold. Industry rules of thumb ("inspect at 10 %
+drift") are vendor claims, so Baler has no default and presents none as a
+standard.
+
+## Baselines belong to the asset
+
+A refit supersedes the active baseline for the same equipment and asset;
+nothing is deleted. Each baseline has an `asset_id` for when the asset
+registry lands (#197): a replaced chiller gets its own baseline instead of
+being compared against the machine it replaced.
+
+## Measured, not claimed
+
+The tests use a synthetic chiller following the model form with 1 % noise,
+an 8 % drift after the fit season, and a hot spell outside the fitted
+range. The report finds a gap between 7 % and 9 % and leaves the hot spell
+out. No accuracy on real plant data is claimed yet.
+
+## Not yet
+
+- Boilers (efficiency vs load and return water), fans (kW vs flow and
+  static), pumps (kW vs flow and head): the same pattern, other features.
+- Picking the points by Brick class automatically.
+- A chart, and the replace-vs-keep case built on the gap (#216).

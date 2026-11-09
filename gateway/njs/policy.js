@@ -184,6 +184,10 @@ const ROUTES = [
   ["GET",    /^\/cx\/projects\/[^/]+\/agent\/proposals$/,        "commissioning", "viewer"],
   ["POST",   /^\/cx\/agent-proposals\/[^/]+\/accept$/,          "commissioning", "operator"],
   ["POST",   /^\/cx\/agent-proposals\/[^/]+\/reject$/,          "commissioning", "operator"],
+  // Performance baselines and degradation (#215)
+  ["POST",   /^\/cx\/projects\/[^/]+\/baselines$/,            "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/baselines$/,            "commissioning", "viewer"],
+  ["GET",    /^\/cx\/baselines\/[^/]+\/degradation$/,          "commissioning", "viewer"],
 
   // auth_api - POST /auth/login has its own exact-match nginx location
   // with no js_access at all (can't require a token to get a token), so
