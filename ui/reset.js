@@ -1,7 +1,11 @@
 // Password reset (#278): ask for a link, or, arriving from the emailed link
 // (reset.html#token=...), set the new password. The token is read from the
 // fragment and then removed from the address bar.
-const AUTH = new URLSearchParams(location.search).get("auth") || "/auth";
+// ?auth= is honoured only as a same-origin path: the new password and the
+// reset token are posted there, so a crafted link must not redirect them.
+const AUTH_PARAM = new URLSearchParams(location.search).get("auth");
+const AUTH = AUTH_PARAM && AUTH_PARAM.startsWith("/") && !AUTH_PARAM.startsWith("//") && !AUTH_PARAM.includes("\\")
+  ? AUTH_PARAM : "/auth";
 const el = (id) => document.getElementById(id);
 
 function say(id, text) {

@@ -82,8 +82,13 @@ def _fernet():
     if not key:
         return None
     from cryptography.fernet import Fernet
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(b"baler-mfa:" + key.encode()).digest()))
+    # BALER_MFA_KEY is a long random string (.env.example), so a key
+    # derivation function, not a password hash, is what's needed here.
+    derived = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"baler-mfa").derive(key.encode())
+    return Fernet(base64.urlsafe_b64encode(derived))
 
 
 def seal(secret_b32: str) -> str:
