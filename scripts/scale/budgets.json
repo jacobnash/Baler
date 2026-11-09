@@ -14,5 +14,12 @@
     {"name": "/ops/status", "path": "/ops/status", "params": {}, "warm_median_s": 1.0, "source": "#178"},
     {"name": "/fault/faults", "path": "/fault/faults", "params": {}, "warm_median_s": 0.5, "max_bytes": 500000, "source": "#178"},
     {"name": "Cx report, 500-point project", "path": "/cx/projects/{cx_project}/report", "params": {"format": "html"}, "warm_median_s": 2.0, "source": "#178", "needs": "cx_project"}
+  ],
+  "_comment_soak": "soak_probes: run by `ladder.py soak` (Baler#245) beside the probes above, every --probe-every s. {point0}, {start_1h} and {start_boundary} (compress_after + 2 chunk intervals ago, so the window straddles the hot/compressed boundary) are filled in each round. Budgets provisional.",
+  "soak_probes": [
+    {"name": "history 1 point, last hour", "path": "/ingest/history", "params": {"point": "{point0}", "start": "{start_1h}"}, "warm_median_s": 0.5, "source": "provisional"},
+    {"name": "history 1 point, across the compressed boundary", "path": "/ingest/history", "params": {"point": "{point0}", "start": "{start_boundary}"}, "warm_median_s": 0.5, "source": "provisional"},
+    {"name": "hisRead 100 points (pastWeek)", "path": "/ingest/his", "params": {"expr": "readAll(scaleHis100).hisRead(pastWeek)"}, "warm_median_s": 3.0, "source": "provisional"},
+    {"name": "hisRead 1000 points (pastWeek)", "path": "/ingest/his", "params": {"expr": "readAll(scaleHis1000).hisRead(pastWeek)"}, "warm_median_s": 10.0, "source": "provisional"}
   ]
 }

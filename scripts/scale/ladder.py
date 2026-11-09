@@ -10,6 +10,7 @@ the pass conditions, and writes one JSON result per run.
   python scripts/scale/ladder.py run                 # the ladder (default steps, 15 min soak each)
   python scripts/scale/ladder.py run --steps 10k,25k --soak 300
   python scripts/scale/ladder.py crash --points 10000 # kill -9 mid-run, count acknowledged readings lost
+  python scripts/scale/ladder.py soak --points 100000 # 6 h at one count: disk plateau, compression cycles (#245)
   python scripts/scale/ladder.py table results/*.json # Markdown results table
   python scripts/scale/ladder.py down                # remove the scale stack and its volumes
 
@@ -380,6 +381,11 @@ def db_metrics(conn) -> dict:
         row = q("SELECT before_compression_total_bytes, after_compression_total_bytes, number_compressed_chunks "
                 "FROM hypertable_compression_stats('point_history')").fetchone()
         out["compression"] = {"before_bytes": row[0], "after_bytes": row[1], "compressed_chunks": row[2]}
+        # the policy the run had (#245): compress_after and how often it runs
+        pol = q("SELECT config->>'compress_after', schedule_interval::text FROM timescaledb_information.jobs "
+                "WHERE proc_name = 'policy_compression' AND hypertable_name = 'point_history'").fetchone()
+        if pol:
+            out["compression"].update(compress_after=pol[0], schedule_interval=pol[1])
     out["db_bytes"] = q("SELECT pg_database_size(current_database())").fetchone()[0]
     out["retention_policy"] = bool(q("SELECT count(*) FROM timescaledb_information.jobs "
                                      "WHERE proc_name='policy_retention' AND hypertable_name='point_history'").fetchone()[0])
@@ -1023,9 +1029,7 @@ def main(argv=None) -> None:
     p = sub.add_parser("table", help="Markdown results table from result JSON files")
     p.add_argument("files", nargs="+")
     p.set_defaults(func=cmd_table)
-    for name, func in (("run", cmd_run), ("crash", cmd_crash)):
-        p = sub.add_parser(name)
-        p.set_defaults(func=func)
+    def generator_args(p):
         p.add_argument("--interval", type=float, default=5.0)
         p.add_argument("--procs", type=int, default=max(1, (os.cpu_count() or 2) // 2), help="generator processes")
         p.add_argument("--tags-rate", type=float, default=2000.0)
@@ -1033,6 +1037,14 @@ def main(argv=None) -> None:
         p.add_argument("--equips-per-site", type=int, default=50)
         p.add_argument("--pattern", choices=common.PATTERNS, default="mix")
         p.add_argument("--warmup", type=float, default=60.0)
+
+    for name, func in (("run", cmd_run), ("crash", cmd_crash)):
+        p = sub.add_parser(name)
+        p.set_defaults(func=func)
+        generator_args(p)
+    import soak  # long soaks at one point count (#245): scripts/scale/soak.py
+
+    soak.add_parser(sub, generator_args)
     p = sub.choices["run"]
     p.add_argument("--steps", help="comma list, e.g. 10k,25k,50k (default: 10k..1M, from 1k on hosts with < 4 CPUs)")
     p.add_argument("--soak", type=float, default=900.0, help="seconds per step (R2: at least 900)")
