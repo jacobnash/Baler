@@ -187,6 +187,15 @@ const ROUTES = [
   ["GET",    /^\/cx\/fleet-runs\/[^/]+$/,                      "commissioning", "viewer"],
   ["POST",   /^\/cx\/fleet-runs\/[^/]+\/confirm$/,              "commissioning", "admin"],
   ["POST",   /^\/cx\/fleet-runs\/[^/]+\/abort$/,                "commissioning", "operator"],
+  // Scheduled retests (Baler#275 e): proposing, approving (the backend also
+  // refuses API keys) and narrowing are admin; revoking is the safe
+  // direction, so an operator can do it.
+  ["GET",    /^\/cx\/projects\/[^/]+\/active-schedules$/,       "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/active-schedules$/,       "commissioning", "admin"],
+  ["GET",    /^\/cx\/active-schedules\/[^/]+$/,                "commissioning", "viewer"],
+  ["PATCH",  /^\/cx\/active-schedules\/[^/]+$/,                "commissioning", "admin"],
+  ["POST",   /^\/cx\/active-schedules\/[^/]+\/approve$/,        "commissioning", "admin"],
+  ["POST",   /^\/cx\/active-schedules\/[^/]+\/revoke$/,         "commissioning", "operator"],
   // Audited operator writes (Baler#213): a person (the backend refuses API
   // keys) commands a point at levels 8-16 with a reason and an expiry -
   // operator; schedule and calendar writes change what the building does

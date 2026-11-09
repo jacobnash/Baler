@@ -333,6 +333,14 @@ check("commissioning (/cx/): reads viewer, changes operator, archive admin, site
     assert.equal(policy.resolveRoute("POST", "/cx/fleet-runs/f1/confirm").minRole, "admin");
     assert.equal(policy.resolveRoute("POST", "/cx/fleet-runs/f1/abort").minRole, "operator");
     assert.equal(policy.resolveRoute("DELETE", "/cx/fleet-runs/f1"), null);
+    // Baler#275 scheduled retests: propose, approve, narrow admin; revoke operator
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/active-schedules").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/projects/p1/active-schedules").minRole, "admin");
+    assert.equal(policy.resolveRoute("GET", "/cx/active-schedules/s1").minRole, "viewer");
+    assert.equal(policy.resolveRoute("PATCH", "/cx/active-schedules/s1").minRole, "admin");
+    assert.equal(policy.resolveRoute("POST", "/cx/active-schedules/s1/approve").minRole, "admin");
+    assert.equal(policy.resolveRoute("POST", "/cx/active-schedules/s1/revoke").minRole, "operator");
+    assert.equal(policy.resolveRoute("DELETE", "/cx/active-schedules/s1"), null);
     assert.equal(policy.resolveRoute("DELETE", "/cx/active-runs/a1"), null);
     // Cx 10 agent
     assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/agent/sessions").minRole, "viewer");

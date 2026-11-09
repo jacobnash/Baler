@@ -230,3 +230,63 @@ plan `{"retest_of": "<fleet id>", ...}`. Only the failed units are
 planned, so nothing else is commanded. It is a new plan with a new hash.
 On the Commissioning page, use the **Retest failures** button on a
 finished fleet.
+
+## Scheduled retests
+
+A scheduled retest repeats a fleet run, for example every season. It runs
+only under an admin's approval that names its scope and its window, and
+**approving never turns writes on**.
+
+**Proposing:** send `POST /cx/projects/{id}/active-schedules` (admin). The
+proposal names:
+
+- **the scope**: the equipment (`equip_uris`, or every unit of
+  `equip_class`, frozen as a list when proposed), the test (`kind`,
+  `test`, `response_minutes`), the fleet limits, and `mode`. In `all` mode
+  every unit is retested each window. In `failures` mode only the units
+  that failed in the schedule's last run are retested;
+- **the window**: `first_window_start`, then every `every_days` days, each
+  `window_minutes` long (at most 8 hours), until `valid_until` (at most 400
+  days ahead).
+
+Nothing runs yet. The answer has an `approval_hash` (a sha256 of the scope
+and the window) and a dry run of the next window, listing every write.
+
+**Approving:** send `POST /cx/active-schedules/{id}/approve {"confirm": "<approval_hash>"}`.
+This must be an admin, signed in as a person: API keys are refused. The
+approved scope and window are kept as an envelope, separate from the
+schedule.
+
+**Narrowing only:** after approval, `PATCH /cx/active-schedules/{id}` can
+only narrow the schedule inside the envelope. It can:
+
+- drop equipment;
+- shorten the window, or end the approval sooner;
+- lower `concurrency_per_system`, `max_concurrent` or `max_failures`, or
+  lengthen the stagger;
+- go from `all` to `failures`.
+
+Anything else is refused with 409: more equipment, another test, a longer
+or moved window, a later `valid_until`. Those need a new schedule and a
+new approval.
+
+**Each window:** once a minute the scheduler looks at approved schedules.
+For a window that has started and not been handled yet:
+
+- If `BALER_CX_ALLOW_WRITES` isn't `1` at that moment, or no point_write
+  route is configured, the window is **skipped**, and the skip is audited.
+- Otherwise a fleet run is planned afresh from the current inventory, as
+  the approver can see it. It is checked against the envelope once more,
+  then confirmed in the approver's name, recorded with `schedule_id`, and
+  run like any other fleet run. Every #45 safeguard applies to each write.
+- A window is handled once, whether it ran or was skipped. A window
+  doesn't start while the schedule's previous run is still going.
+
+**Expiry and revoking:** once `valid_until` passes, the schedule is
+`expired` and stops scheduling. `POST /cx/active-schedules/{id}/revoke`
+(operator, the safe direction) stops it at any time. If it has a fleet run
+going, that run is stopped and every level it holds is relinquished.
+
+**Audit:** each step is a `cx_events` row: `active_schedule.propose`,
+`approve`, `edit`, `revoke`, `run` (with the fleet run, its `plan_hash` and
+the approval hash), `skip` (with the reason) and `expire`.

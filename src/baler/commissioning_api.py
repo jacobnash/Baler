@@ -61,6 +61,7 @@ from baler.commissioning import (
     phases,
     procedures,
     report,
+    retest_schedules,
     runner,
     spec,
     test_library,
@@ -79,7 +80,7 @@ PORT = 8009
 RUN_STATEMENT_TIMEOUT = "10min"
 
 _PROJECT = re.compile(r"/projects/([^/]+)")
-_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|gate|report|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|fleet-runs|agent/sessions|agent/proposals|writes|schedule-writes|schedule-targets|schedules|schedules/refresh|coverage)")
+_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|gate|report|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|fleet-runs|active-schedules|agent/sessions|agent/proposals|writes|schedule-writes|schedule-targets|schedules|schedules/refresh|coverage)")
 _PROJECT_ISSUES = re.compile(r"/projects/([^/]+)/issues/(import|export)")
 _RUN_ISSUES = re.compile(r"/runs/([^/]+)/issues")
 _ISSUE = re.compile(r"/issues/([^/]+)")
@@ -104,6 +105,8 @@ _WRITE_SUB = re.compile(r"/writes/([^/]+)/(relinquish|revert)")
 _ACTIVE_RUN_SUB = re.compile(r"/active-runs/([^/]+)/(confirm|abort)")
 _FLEET_RUN = re.compile(r"/fleet-runs/([^/]+)")
 _FLEET_RUN_SUB = re.compile(r"/fleet-runs/([^/]+)/(confirm|abort)")
+_ACTIVE_SCHEDULE = re.compile(r"/active-schedules/([^/]+)")
+_ACTIVE_SCHEDULE_SUB = re.compile(r"/active-schedules/([^/]+)/(approve|revoke)")
 _RUN = re.compile(r"/runs/([^/]+)")
 _RUN_REPORT = re.compile(r"/runs/([^/]+)/report")
 
@@ -259,6 +262,8 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                     ("POST", "active-runs"): ("plan_active_run", self._plan_active_run),
                     ("GET", "fleet-runs"): ("list_fleet_runs", self._list_fleet_runs),
                     ("POST", "fleet-runs"): ("plan_fleet_run", self._plan_fleet_run),
+                    ("GET", "active-schedules"): ("list_active_schedules", self._list_active_schedules),
+                    ("POST", "active-schedules"): ("propose_active_schedule", self._propose_active_schedule),
                     ("GET", "agent/sessions"): ("list_agent_sessions", self._list_agent_sessions),
                     ("POST", "agent/sessions"): ("start_agent_session", self._start_agent_session),
                     ("GET", "agent/proposals"): ("list_agent_proposals", self._list_agent_proposals),
@@ -291,6 +296,8 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                                    ("POST", "abort"): ("abort_active_run", self._abort_active_run)}),
                 (_FLEET_RUN_SUB, {("POST", "confirm"): ("confirm_fleet_run", self._confirm_fleet_run),
                                   ("POST", "abort"): ("abort_fleet_run", self._abort_fleet_run)}),
+                (_ACTIVE_SCHEDULE_SUB, {("POST", "approve"): ("approve_active_schedule", self._approve_active_schedule),
+                                        ("POST", "revoke"): ("revoke_active_schedule", self._revoke_active_schedule)}),
             ):
                 m = rx.fullmatch(path)
                 if m:
@@ -329,6 +336,8 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 (_MAPPING, {"DELETE": ("undo_mapping", self._undo_mapping)}),
                 (_ACTIVE_RUN, {"GET": ("get_active_run", self._get_active_run)}),
                 (_FLEET_RUN, {"GET": ("get_fleet_run", self._get_fleet_run)}),
+                (_ACTIVE_SCHEDULE, {"GET": ("get_active_schedule", self._get_active_schedule),
+                                    "PATCH": ("patch_active_schedule", self._patch_active_schedule)}),
                 (_AGENT_SESSION_MSG, {"POST": ("agent_message", self._agent_message)}),
                 (_AGENT_SESSION, {"GET": ("get_agent_session", self._get_agent_session)}),
             ):
@@ -2065,6 +2074,141 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                                                                    "relinquished": len(relinquished)})
             respond_json(self, 202, fleet.public(repo.get_row(fleet.TABLE, fid) or f))
 
+        # ------------------------------- scheduled active retests (Baler#275 e)
+
+        def _visible_schedule(self, sid: str, claims: dict) -> tuple[dict, dict] | None:
+            s = repo.get_row(retest_schedules.TABLE, sid)
+            project = repo.get_project(s["project_id"]) if s else None
+            if s is None or project is None or not self._visible(project, claims) or \
+                    not all(repo.scope_for(claims).allows(u) for u in s["scope"]["equip_uris"]):
+                respond_error(self, 404, "no such schedule")
+                return None
+            return s, project
+
+        def _list_active_schedules(self, span, claims, pid) -> None:
+            if self._project(pid, claims) is None:
+                return
+            scope = repo.scope_for(claims)
+            respond_json(self, 200, [retest_schedules.public(s, now_fn())
+                                     for s in reversed(repo.find_rows(retest_schedules.TABLE, project_id=pid))
+                                     if all(scope.allows(u) for u in s["scope"]["equip_uris"])])
+
+        def _get_active_schedule(self, span, claims, sid) -> None:
+            hit = self._visible_schedule(sid, claims)
+            if hit is not None:
+                respond_json(self, 200, retest_schedules.public(hit[0], now_fn()))
+
+        def _propose_active_schedule(self, span, claims, pid) -> None:
+            """Propose a repeating fleet retest: its scope and windows, with
+            a dry run of the next window. Nothing runs until an admin
+            approves it, and then only with BALER_CX_ALLOW_WRITES on."""
+            if not self._require_admin(claims):
+                return
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            if p.get("archived_at"):
+                respond_error(self, 409, "project is archived")
+                return
+            body = self.read_json_body()
+            now = now_fn()
+            scopes, _ = self._scopes(p, claims)
+            equips = inventory.build(repo.store, scopes)
+            scope, timing = retest_schedules.parse(body, equips, now)
+            s = retest_schedules.new(pid, str(body.get("name") or ""), scope, timing, claims.get("sub"), now)
+            nxt = retest_schedules.next_window(timing, now)
+            if nxt is None:
+                raise ValueError("no scheduled window starts before valid_until")
+            ws = datetime.fromisoformat(nxt)
+            we = min(ws + timedelta(minutes=timing["window_minutes"]), datetime.fromisoformat(timing["valid_until"]))
+            preview = fleet.plan(repo, p, equips, {"equip_uris": scope["equip_uris"], "window_start": ws.isoformat(),
+                                                   "window_end": we.isoformat(), "kind": scope["kind"], "test": scope["test"],
+                                                   **{k: scope[k] for k in ("response_minutes", "concurrency_per_system", "max_concurrent",
+                                                                            "stagger_seconds", "max_failures")}},
+                                 claims.get("sub"), now)
+            repo.put_rows(retest_schedules.TABLE, [s])
+            self._event(pid, "active_schedule.propose", claims, {"schedule_id": s["id"], "approval_hash": s["approval_hash"],
+                                                                 "equipment": len(scope["equip_uris"]), "timing": timing})
+            respond_json(self, 201, {**retest_schedules.public(s, now),
+                                     "preview": {"window_start": ws.isoformat(), "window_end": we.isoformat(),
+                                                 "members": len(preview["members"]), "skipped": preview["skipped"],
+                                                 "plan": preview["plan"]},
+                                     "writes_allowed": active.writes_allowed()})
+
+        def _approve_active_schedule(self, span, claims, sid) -> None:
+            """An admin - a signed-in person - approves exactly the proposed
+            scope and windows by typing the approval hash. Approving never
+            turns writes on."""
+            if not self._require_admin(claims):
+                return
+            if claims.get("kind") != "session" or not claims.get("sub"):
+                respond_error(self, 403, "a schedule is approved by a signed-in person, not an API key")
+                return
+            hit = self._visible_schedule(sid, claims)
+            if hit is None:
+                return
+            s, project = hit
+            body = self.read_json_body()
+            if body.get("confirm") != s["approval_hash"]:
+                raise ValueError("approve by sending {\"confirm\": \"<this schedule's approval_hash>\"} after reading it")
+            if s["status"] != "proposed":
+                respond_error(self, 409, f"schedule is {s['status']}")
+                return
+            now = now_fn()
+            if s["approval_hash"] != retest_schedules.approval_hash(s):
+                respond_error(self, 409, "the stored schedule no longer matches its approval hash - propose it again")
+                return
+            if retest_schedules._dt(s["timing"]["valid_until"]) <= now:
+                respond_error(self, 409, "valid_until has already passed")
+                return
+            envelope = {"scope": s["scope"], "timing": s["timing"], "hash": s["approval_hash"]}
+            repo.update_row(retest_schedules.TABLE, sid, {
+                "status": "approved", "approval": envelope, "approved_by": claims.get("sub"), "approved_at": now,
+                "approver_claims": {"org_id": claims.get("org_id"), "site_ids": list(claims.get("site_ids") or [])},
+                "updated_at": now})
+            self._event(project["id"], "active_schedule.approve", claims, {"schedule_id": sid, "approval_hash": s["approval_hash"],
+                                                                           "scope": s["scope"], "timing": s["timing"]})
+            respond_json(self, 200, retest_schedules.public(repo.get_row(retest_schedules.TABLE, sid) or s, now))
+
+        def _patch_active_schedule(self, span, claims, sid) -> None:
+            """Narrow a schedule: never wider than what was approved."""
+            if not self._require_admin(claims):
+                return
+            hit = self._visible_schedule(sid, claims)
+            if hit is None:
+                return
+            s, project = hit
+            body = self.read_json_body()
+            now = now_fn()
+            try:
+                changes = retest_schedules.patch(s, body, now)
+            except PermissionError as exc:
+                respond_error(self, 409, str(exc))
+                return
+            repo.update_row(retest_schedules.TABLE, sid, changes)
+            self._event(project["id"], "active_schedule.edit", claims, {"schedule_id": sid, "changed": sorted(body)})
+            respond_json(self, 200, retest_schedules.public(repo.get_row(retest_schedules.TABLE, sid) or s, now))
+
+        def _revoke_active_schedule(self, span, claims, sid) -> None:
+            """Stop scheduling (operator, the safe direction); a fleet the
+            schedule has running is stopped and relinquished too."""
+            hit = self._visible_schedule(sid, claims)
+            if hit is None:
+                return
+            s, project = hit
+            now = now_fn()
+            if s["status"] in ("proposed", "approved"):
+                repo.update_row(retest_schedules.TABLE, sid, {"status": "revoked", "revoked_by": claims.get("sub"), "revoked_at": now,
+                                                              "updated_at": now})
+            stopped = None
+            last = repo.get_row(fleet.TABLE, s["last_fleet_id"]) if s.get("last_fleet_id") else None
+            if last is not None and last["status"] in ("confirmed", "running"):
+                fleet.flag_stop(repo, fleet_runner.writer if fleet_runner else None, last["id"], "its schedule was revoked")
+                stopped = last["id"]
+            self._event(project["id"], "active_schedule.revoke", claims, {"schedule_id": sid, "was": s["status"],
+                                                                          "stopped_fleet_run_id": stopped})
+            respond_json(self, 200, retest_schedules.public(repo.get_row(retest_schedules.TABLE, sid) or s, now))
+
         # ------------------------------------------ operator writes (Baler#213)
 
         def _require_person(self, claims: dict, role: str) -> bool:
@@ -2554,6 +2698,8 @@ def main() -> None:
                                     lambda p: runner.project_scopes(repo, p, {"org_id": p["org_id"], "site_ids": []})[0])
     runner.Scheduler(repo, worker, clock, extra=[lambda t: active.sweep(repo, writer, t),
                                                  lambda t: fleet.sweep(repo, writer, t),
+                                                 # scheduled retests (Baler#275 e): only approved, only with the switch on
+                                                 retest_schedules.Ticker(repo, fleet_runner),
                                                  lambda t: operator_writes.sweep(repo, writer.commander, t),
                                                  refresher.tick])
     server = ThreadingHTTPServer((args.host, args.port), make_handler(repo, worker=worker, executor=executor,
