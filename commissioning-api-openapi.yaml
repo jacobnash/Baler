@@ -1778,6 +1778,166 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/FleetRun" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/active-schedules:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Active tests]
+      operationId: listCxActiveSchedules
+      summary: The project's scheduled retests, newest first (Baler#275)
+      responses:
+        "200":
+          description: Schedules
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ActiveSchedule" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Active tests]
+      operationId: proposeCxActiveSchedule
+      summary: Propose a scheduled (e.g. seasonal) fleet retest (admin) - nothing runs until approved
+      description: >-
+        The scope is a frozen equipment list (equip_uris, or every
+        equipment of equip_class now), a test and fleet limits; the timing
+        is first_window_start + k * every_days, window_minutes long (at
+        most 8 h), until valid_until (at most 400 days out). mode `all`
+        retests every member each window, `failures` only those that failed
+        in the schedule's last run. The answer carries the approval_hash
+        and a dry run of the next window. Approval never turns writes on.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [first_window_start, window_minutes, every_days, valid_until]
+              properties:
+                name: { type: string }
+                equip_uris: { type: array, items: { type: string } }
+                equip_class: { type: string }
+                kind: { type: string, enum: [command_response, library], default: command_response }
+                test: { type: string }
+                response_minutes: { type: number, default: 2 }
+                concurrency_per_system: { type: integer, default: 1 }
+                max_concurrent: { type: integer, default: 10 }
+                stagger_seconds: { type: integer, default: 30 }
+                max_failures: { type: integer, default: 3 }
+                mode: { type: string, enum: [all, failures], default: all }
+                first_window_start: { type: string, format: date-time }
+                window_minutes: { type: integer, minimum: 1, maximum: 480 }
+                every_days: { type: integer, minimum: 1, maximum: 366 }
+                valid_until: { type: string, format: date-time }
+      responses:
+        "201":
+          description: The proposed schedule
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/ActiveSchedule" }
+                  - type: object
+                    required: [preview]
+                    properties:
+                      writes_allowed: { type: boolean }
+                      preview:
+                        type: object
+                        description: The fleet dry run for the next window
+                        properties:
+                          window_start: { type: string, format: date-time }
+                          window_end: { type: string, format: date-time }
+                          members: { type: integer }
+                          skipped: { type: array, items: { type: object } }
+                          plan: { type: array, items: { type: object } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: Not an admin }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /active-schedules/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Active tests]
+      operationId: getCxActiveSchedule
+      summary: A scheduled retest
+      responses:
+        "200":
+          description: The schedule
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActiveSchedule" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Active tests]
+      operationId: patchCxActiveSchedule
+      summary: Narrow a schedule (admin) - never wider than what was approved
+      description: >-
+        Only name, equip_uris (a subset), window_minutes (shorter),
+        valid_until (sooner), concurrency_per_system / max_concurrent /
+        max_failures (lower), stagger_seconds (longer) and mode (all to
+        failures) may change, and only inside the approved envelope; 409
+        otherwise (propose a new schedule for approval).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: The schedule
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActiveSchedule" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: Not an admin }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /active-schedules/{id}/approve:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Active tests]
+      operationId: approveCxActiveSchedule
+      summary: Approve exactly the proposed scope and timing (admin, a signed-in person)
+      description: >-
+        The body repeats the approval_hash. API keys are refused (403). From
+        then on each window runs as a fleet run confirmed in the approver's
+        name - only if BALER_CX_ALLOW_WRITES=1 at that moment; otherwise the
+        window is skipped and audited. Expired approvals stop scheduling.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: string, description: This schedule's approval_hash }
+      responses:
+        "200":
+          description: The approved schedule
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActiveSchedule" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: "Not an admin, or not a signed-in person" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /active-schedules/{id}/revoke:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Active tests]
+      operationId: revokeCxActiveSchedule
+      summary: Revoke a schedule (operator) - it stops scheduling, and a fleet it has running is stopped and relinquished
+      responses:
+        "200":
+          description: The schedule
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActiveSchedule" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /projects/{id}/agent/sessions:
     parameters:
       - { $ref: "#/components/parameters/ProjectId" }
@@ -3005,6 +3165,59 @@ components:
         error: { type: [string, "null"] }
         abort_requested: { type: boolean }
         tally: { type: object, additionalProperties: { type: integer }, description: Members by outcome (or state while not finished) }
+        schedule_id: { type: [string, "null"], description: The scheduled retest that started it (Baler#275) }
+    ActiveScheduleScope:
+      type: object
+      required: [equip_uris, kind, mode]
+      properties:
+        equip_uris: { type: array, items: { type: string } }
+        kind: { type: string, enum: [command_response, library] }
+        test: { type: [string, "null"] }
+        response_minutes: { type: number }
+        concurrency_per_system: { type: integer }
+        max_concurrent: { type: integer }
+        stagger_seconds: { type: integer }
+        max_failures: { type: integer }
+        mode: { type: string, enum: [all, failures] }
+    ActiveScheduleTiming:
+      type: object
+      required: [first_window_start, window_minutes, every_days, valid_until]
+      properties:
+        first_window_start: { type: string, format: date-time }
+        window_minutes: { type: integer, maximum: 480 }
+        every_days: { type: integer }
+        valid_until: { type: string, format: date-time }
+    ActiveSchedule:
+      type: object
+      required: [id, project_id, name, status, scope, timing, approval_hash, valid_until]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        name: { type: string }
+        status: { type: string, enum: [proposed, approved, expired, revoked] }
+        scope: { $ref: "#/components/schemas/ActiveScheduleScope" }
+        timing: { $ref: "#/components/schemas/ActiveScheduleTiming" }
+        approval:
+          type: [object, "null"]
+          description: The approved envelope - the schedule may only narrow inside it
+          properties:
+            scope: { $ref: "#/components/schemas/ActiveScheduleScope" }
+            timing: { $ref: "#/components/schemas/ActiveScheduleTiming" }
+            hash: { type: string }
+        approval_hash: { type: string, description: sha256 of scope + timing; the approver types it }
+        approved_by: { type: [string, "null"] }
+        approved_at: { type: [string, "null"], format: date-time }
+        approver_claims: { type: [object, "null"] }
+        valid_until: { type: string, format: date-time }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        last_occurrence: { type: [integer, "null"] }
+        last_fleet_id: { type: [string, "null"] }
+        revoked_by: { type: [string, "null"] }
+        revoked_at: { type: [string, "null"], format: date-time }
+        history: { type: array, items: { type: object } }
+        next_window: { type: [string, "null"], format: date-time }
     AgentSession:
       type: object
       required: [id, project_id, status, transcript]

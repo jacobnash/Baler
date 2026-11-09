@@ -29,7 +29,7 @@ from baler.scope import Scope
 # cx_issue_events, cx_risks, cx_test_procedures, cx_test_runs,
 # cx_spec_documents, cx_spec_items, cx_mappings, cx_active_runs,
 # cx_agent_sessions, cx_agent_proposals, and later cx_operator_writes,
-# cx_manual_results, cx_fleet_runs): baler/migrations/, from 0001 (#194).
+# cx_manual_results, cx_fleet_runs, cx_active_schedules): baler/migrations/, from 0001 (#194).
 # Change it with a new migration there, not here.
 
 ROW_TABLES: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
@@ -44,8 +44,12 @@ ROW_TABLES: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
                        frozenset({"steps", "plan", "before", "writes", "results"})),
     "cx_fleet_runs": (("id", "project_id", "kind", "params", "members", "skipped", "plan", "plan_hash", "status", "window_start",
                        "window_end", "retest_of", "created_by", "created_at", "confirmed_by", "confirmed_at", "started_at",
-                       "finished_at", "heartbeat_at", "failures", "stop_reason", "error", "abort_requested"),
+                       "finished_at", "heartbeat_at", "failures", "stop_reason", "error", "abort_requested", "schedule_id"),
                       frozenset({"params", "members", "skipped", "plan"})),
+    "cx_active_schedules": (("id", "project_id", "name", "status", "scope", "timing", "approval", "approval_hash", "approved_by",
+                             "approved_at", "approver_claims", "valid_until", "created_by", "created_at", "updated_at",
+                             "last_occurrence", "last_fleet_id", "revoked_by", "revoked_at", "history"),
+                            frozenset({"scope", "timing", "approval", "approver_claims", "history"})),
     "cx_agent_sessions": (("id", "project_id", "created_by", "claims", "status", "messages", "last_reply", "error",
                            "created_at", "updated_at"), frozenset({"claims", "messages"})),
     "cx_agent_proposals": (("id", "project_id", "session_id", "kind", "payload", "reason", "status", "result",

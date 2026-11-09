@@ -3,7 +3,7 @@
 // exact run inside its window; abort and the kill switch relinquish.
 // Loaded after cx.js; registers on cxProjectHooks.
 
-const activeState = { status: null, runs: [], fleets: [], poll: null };
+const activeState = { status: null, runs: [], fleets: [], schedules: [], poll: null };
 
 cxProjectHooks.push(() => loadActive());
 
@@ -19,6 +19,8 @@ async function loadActive() {
     activeState.fleets = await cxApi("GET", `/projects/${cx.project.id}/fleet-runs`);
     renderActive();
     renderFleets();
+    activeState.schedules = await cxApi("GET", `/projects/${cx.project.id}/active-schedules`);
+    renderSchedules();
     if (can("admin") && $("fleet-test").options.length < 2) await loadFleetTests();
     if (can("admin") && !$("active-equip").options.length) await loadActiveEquip();
     const live = activeState.runs.some((r) => r.status === "running" || r.status === "confirmed")
@@ -199,6 +201,85 @@ async function abortFleet(f) {
   }
 }
 
+// ---------------------------------------------------- scheduled retests (Baler#275 e)
+
+function renderSchedules() {
+  const sel = $("sched-fleet");
+  const keep = sel.value;
+  sel.innerHTML = "";
+  for (const f of activeState.fleets) sel.append(el("option", { value: f.id, textContent: `${when(f.created_at)} · ${f.kind} · ${f.members.length} units` }));
+  if (keep) sel.value = keep;
+  const body = $("sched-body");
+  body.innerHTML = "";
+  for (const s of activeState.schedules) {
+    const t = s.timing;
+    const tr = el("tr", { className: "clickable" });
+    tr.innerHTML = `<td>${esc(s.name)}</td><td class="${s.status === "approved" ? "st-pass" : s.status === "revoked" ? "st-fail" : ""}">${esc(s.status)}</td>
+      <td>${s.scope.equip_uris.length} (${esc(s.scope.mode === "failures" ? "failures only" : "all")})</td>
+      <td>${t.window_minutes} min every ${t.every_days} days until ${esc(when(t.valid_until))}</td><td>${esc(s.next_window ? when(s.next_window) : "-")}</td><td></td>`;
+    const actions = tr.lastElementChild;
+    if (s.status === "proposed" && can("admin")) actions.append(activeButton("Approve…", () => approveSchedule(s)));
+    if (["proposed", "approved"].includes(s.status) && can("operator")) actions.append(activeButton("Revoke", () => revokeSchedule(s)));
+    tr.addEventListener("click", () => showSchedule(s));
+    body.append(tr);
+  }
+  if (!activeState.schedules.length) body.innerHTML = '<tr><td colspan="6" class="hint">No scheduled retests.</td></tr>';
+}
+
+function showSchedule(s, preview) {
+  const p = preview ? `<p>Next window's dry run: ${preview.members} units, ${preview.plan.length} writes (${esc(when(preview.window_start))} - ${esc(when(preview.window_end))}).</p>` : "";
+  $("sched-detail").innerHTML = `<h3 class="cx-sub">${esc(s.name)} · ${esc(s.status)}</h3>
+    <p>${esc(s.scope.kind)}${s.scope.test ? ` (${esc(s.scope.test)})` : ""} on ${s.scope.equip_uris.length} units; at most ${s.scope.concurrency_per_system} per system and ${s.scope.max_concurrent} at once, stops after ${s.scope.max_failures} failures. Approval code: <code>${esc(s.approval_hash)}</code>${s.approved_by ? ` · approved by ${esc(s.approved_by)} ${esc(when(s.approved_at))}` : ""}</p>${p}
+    <details><summary>Equipment</summary><ul>${s.scope.equip_uris.map((u) => `<li>${esc(u)}</li>`).join("")}</ul></details>`;
+}
+
+async function proposeSchedule() {
+  const f = activeState.fleets.find((x) => x.id === $("sched-fleet").value);
+  if (!f || !$("sched-first").value || !$("sched-until").value) {
+    alert("Pick a fleet run to repeat, a first window and an approval end date.");
+    return;
+  }
+  const body = {
+    name: `Retest of ${f.kind}`, equip_uris: f.members.map((m) => m.equip_uri), kind: f.params.kind, response_minutes: f.params.response_minutes,
+    concurrency_per_system: f.params.concurrency_per_system, max_concurrent: f.params.max_concurrent,
+    stagger_seconds: f.params.stagger_seconds, max_failures: f.params.max_failures, mode: $("sched-mode").value,
+    first_window_start: new Date($("sched-first").value).toISOString(),
+    window_minutes: Math.round((parseFloat($("sched-hours").value) || 8) * 60), every_days: parseInt($("sched-days").value, 10),
+    valid_until: new Date(`${$("sched-until").value}T23:59:00`).toISOString(),
+  };
+  if (f.params.test) body.test = f.params.test;
+  try {
+    const s = await cxApi("POST", `/projects/${cx.project.id}/active-schedules`, body);
+    await Promise.all([loadActive(), loadEvents()]);
+    showSchedule(s, s.preview);
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+async function approveSchedule(s) {
+  const typed = prompt(`Approve ${s.name}: ${s.scope.equip_uris.length} units, ${s.timing.window_minutes}-minute windows every ${s.timing.every_days} days `
+    + `until ${when(s.timing.valid_until)}. Each window commands real equipment, if active tests are switched on then.\n\nType the approval code:\n${s.approval_hash}`);
+  if (typed === null) return;
+  try {
+    await cxApi("POST", `/active-schedules/${s.id}/approve`, { confirm: typed.trim() });
+    await Promise.all([loadActive(), loadEvents()]);
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+async function revokeSchedule(s) {
+  if (!confirm(`Revoke ${s.name}? It stops scheduling, and a run it has going is stopped.`)) return;
+  try {
+    await cxApi("POST", `/active-schedules/${s.id}/revoke`, {});
+    await Promise.all([loadActive(), loadEvents()]);
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+$("sched-propose-btn").addEventListener("click", proposeSchedule);
 $("fleet-plan-btn").addEventListener("click", () => planFleet(null));
 $("active-plan-btn").addEventListener("click", planActive);
 $("active-kill-btn").addEventListener("click", async () => {

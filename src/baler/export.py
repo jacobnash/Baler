@@ -111,6 +111,7 @@ CX_TABLES: list[tuple[str, str]] = [
     ("cx_mappings", "project"),
     ("cx_active_runs", "project"),
     ("cx_fleet_runs", "project"),
+    ("cx_active_schedules", "project"),
     ("cx_agent_sessions", "project"),
     ("cx_agent_proposals", "project"),
 ]
@@ -760,7 +761,8 @@ in Baler's database: `cx_projects` (commissioning projects), `cx_phases`,
 risks), `cx_test_procedures` and `cx_test_runs` (start-up and functional
 tests), `cx_spec_*` and `cx_mappings` (specification items and how they
 matched equipment), `cx_active_runs` (active tests), `cx_fleet_runs`
-(active tests across many equipment), `cx_agent_*` (the
+(active tests across many equipment), `cx_active_schedules` (approved
+scheduled retests), `cx_agent_*` (the
 assistant's sessions and proposals), `cx_events` (the audit trail), and
 `faults` (detected faults on this building's points).
 
