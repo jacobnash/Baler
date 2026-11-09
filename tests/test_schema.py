@@ -41,6 +41,7 @@ RELEASED = {
     "v0021_pack_proposals.py": "e671a941b4d26b864101b74bbd9c36dcd3017825b201f74b4129b7dc34901425",
     "v0022_compliance_log.py": "76bb046143b96e005e4eb5d5ec272e036c0697c6442db30eb57ddc09a72bc942",
     "v0023_performance_baselines.py": "aaab2593e1d34b4c193d9a06442af11af7b5443f08c9499360b097d22291246d",
+    "v0024_savings_cases.py": "ab1b3ad721ca8a9f2b87d58e957419347ae996de295fab2381afb326d16634de",
 }
 
 
