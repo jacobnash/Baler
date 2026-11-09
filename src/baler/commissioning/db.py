@@ -127,6 +127,30 @@ def public_row(r: dict) -> dict:
     return {k: v.isoformat() if hasattr(v, "isoformat") else v for k, v in r.items()}
 
 
+def _active_run_writes(runs: list[dict]) -> list[tuple[str, datetime]]:
+    """(point, at) of every write and relinquish in active runs' logs."""
+    out = []
+    for r in runs:
+        for w in r.get("writes") or []:
+            if w.get("action") in ("write", "relinquish") and w.get("point") and w.get("at"):
+                at = w["at"] if isinstance(w["at"], datetime) else datetime.fromisoformat(str(w["at"]))
+                out.append((w["point"], at))
+    return out
+
+
+def _schedules_for(rows: list[dict], point_uris: list[str]) -> list[dict]:
+    """Schedules controlling any of the points, each with the calendars on
+    its connection (for exceptions that reference one)."""
+    want = set(point_uris)
+    cals: dict[tuple, dict[str, dict]] = {}
+    for r in rows:
+        if r["kind"] == "calendar":
+            cals.setdefault((r["site"], r["instance"], r["connection_id"]), {})[r["object"]] = r["body"]
+    return [{"id": r["id"], "name": r.get("name"), "body": r["body"], "points": list(r.get("points") or []),
+             "read_at": r.get("read_at"), "calendars": cals.get((r["site"], r["instance"], r["connection_id"]), {})}
+            for r in rows if r["kind"] == "schedule" and want & set(r.get("points") or [])]
+
+
 # --------------------------------------------------------------- memory
 
 
@@ -155,6 +179,9 @@ class MemoryRepo:
         self.faults: list[dict] = []  # the shared faults table (Cx 8)
         self.levels: dict[tuple[str, int], dict] = {}  # point_write_levels (Cx 9)
         self.commands: list[dict] = []  # what was sent to the site (Cx 9)
+        self.schedules: dict[str, dict] = {}  # bacnet_schedules (Baler#212)
+        self.priority_arrays: dict[str, list[dict]] = {}  # point_priority_arrays (Baler#212)
+        self.write_log: list[tuple[str, datetime]] = []  # Baler's own writes, with times (Baler#212)
         self._lock = threading.Lock()  # runs are written from the worker thread
 
     def scope_for(self, claims) -> Scope:
@@ -485,6 +512,55 @@ class MemoryRepo:
     def point_levels(self, point_uri: str) -> dict:
         with self._lock:
             return {str(lvl): {"val": v["val"], "who": v["who"]} for (p, lvl), v in self.levels.items() if p == point_uri}
+
+    # ------------------------------------- override tests (Baler#212)
+
+    def list_projects_with_setting(self, key: str) -> list[dict]:
+        return [copy.deepcopy(p) for p in self.projects.values() if key in (p.get("settings") or {})]
+
+    def put_schedules(self, rows: list[dict]) -> None:
+        with self._lock:
+            for r in rows:
+                self.schedules[r["id"]] = copy.deepcopy(r)
+
+    def list_schedules(self) -> list[dict]:
+        with self._lock:
+            return sorted((copy.deepcopy(r) for r in self.schedules.values()), key=lambda r: r["id"])
+
+    def schedules_for_points(self, point_uris: list[str]) -> list[dict]:
+        return _schedules_for(self.list_schedules(), point_uris)
+
+    def record_priority_arrays(self, observations: dict[str, dict], now: datetime) -> int:
+        with self._lock:
+            added = 0
+            for uri, levels in observations.items():
+                rows = self.priority_arrays.setdefault(uri, [])
+                if not rows or rows[-1]["levels"] != levels:
+                    rows.append({"observed_at": now, "levels": copy.deepcopy(levels)})
+                    added += 1
+            return added
+
+    def priority_observations(self, point_uris: list[str], start: datetime, end: datetime) -> dict[str, list[dict]]:
+        with self._lock:
+            out = {}
+            for uri in point_uris:
+                rows = self.priority_arrays.get(uri) or []
+                before = [r for r in rows if r["observed_at"] <= start][-1:]
+                got = before + [r for r in rows if start < r["observed_at"] <= end]
+                if got:
+                    out[uri] = copy.deepcopy(got)
+            return out
+
+    def baler_writes(self, point_uris: list[str], start: datetime, end: datetime) -> dict[str, list[datetime]]:
+        want = set(point_uris)
+        out: dict[str, list[datetime]] = {}
+        with self._lock:
+            logged = list(self.write_log)
+            runs = list(self._rows.get("cx_active_runs", {}).values())
+        for point, ts in logged + _active_run_writes(runs):
+            if point in want and start <= ts <= end:
+                out.setdefault(point, []).append(ts)
+        return {k: sorted(v) for k, v in out.items()}
 
 
 # ------------------------------------------------------------- postgres
@@ -1033,3 +1109,91 @@ class PgRepo:
         with self.pool.connection() as conn:
             got = point_write.levels(conn, point_uri)
         return {str(lvl): {"val": v["val"], "who": v["who"]} for lvl, v in got.items()}
+
+    # ------------------------------------- override tests (Baler#212)
+
+    def list_projects_with_setting(self, key: str) -> list[dict]:
+        with self.pool.connection() as conn:
+            return self._project_rows(conn, "archived_at IS NULL AND settings ? %s", (key,))
+
+    _SCHEDULE_COLS = ("id", "site", "instance", "connection_id", "topic_prefix", "kind", "object", "name", "body",
+                      "points", "read_at")
+
+    def put_schedules(self, rows: list[dict]) -> None:
+        if not rows:
+            return
+        cols = self._SCHEDULE_COLS
+        with self.pool.connection() as conn, conn.cursor() as cur:
+            cur.executemany(
+                f"INSERT INTO bacnet_schedules ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})"
+                " ON CONFLICT (id) DO UPDATE SET " + ", ".join(f"{c} = EXCLUDED.{c}" for c in cols if c != "id"),
+                [tuple(json.dumps(r[c], default=str) if c == "body" else r.get(c) for c in cols) for r in rows])
+
+    def list_schedules(self) -> list[dict]:
+        with self.pool.connection() as conn:
+            rows = conn.execute(f"SELECT {', '.join(self._SCHEDULE_COLS)} FROM bacnet_schedules ORDER BY id").fetchall()
+        return [dict(zip(self._SCHEDULE_COLS, r, strict=True)) for r in rows]
+
+    def schedules_for_points(self, point_uris: list[str]) -> list[dict]:
+        if not point_uris:
+            return []
+        cols = ", ".join(self._SCHEDULE_COLS)
+        with self.pool.connection() as conn:
+            # the schedules controlling any of the points, and every calendar
+            # on the same connections (an exception can reference one)
+            rows = conn.execute(
+                f"WITH hit AS (SELECT {cols} FROM bacnet_schedules WHERE kind = 'schedule' AND points && %s)"
+                f" SELECT * FROM hit UNION ALL SELECT {cols} FROM bacnet_schedules c WHERE c.kind = 'calendar'"
+                " AND (c.site, c.instance, c.connection_id) IN (SELECT site, instance, connection_id FROM hit)",
+                (list(point_uris),)).fetchall()
+        return _schedules_for([dict(zip(self._SCHEDULE_COLS, r, strict=True)) for r in rows], point_uris)
+
+    def record_priority_arrays(self, observations: dict[str, dict], now: datetime) -> int:
+        """Append an observation per point whose levels changed since its
+        last one; returns how many were added."""
+        if not observations:
+            return 0
+        added = 0
+        with self.pool.connection() as conn, conn.transaction():
+            last = {u: lv for u, lv in conn.execute(
+                "SELECT DISTINCT ON (point_uri) point_uri, levels FROM point_priority_arrays WHERE point_uri = ANY(%s)"
+                " ORDER BY point_uri, observed_at DESC", (list(observations),)).fetchall()}
+            for uri, levels in observations.items():
+                if last.get(uri) == levels:
+                    continue
+                conn.execute("INSERT INTO point_priority_arrays (point_uri, observed_at, levels) VALUES (%s, %s, %s)"
+                             " ON CONFLICT DO NOTHING", (uri, now, json.dumps(levels, default=str)))
+                added += 1
+        return added
+
+    def priority_observations(self, point_uris: list[str], start: datetime, end: datetime) -> dict[str, list[dict]]:
+        if not point_uris:
+            return {}
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT point_uri, observed_at, levels FROM point_priority_arrays WHERE point_uri = ANY(%s)"
+                " AND observed_at > %s AND observed_at <= %s"
+                " UNION ALL (SELECT DISTINCT ON (point_uri) point_uri, observed_at, levels FROM point_priority_arrays"
+                " WHERE point_uri = ANY(%s) AND observed_at <= %s ORDER BY point_uri, observed_at DESC) ORDER BY 1, 2",
+                (list(point_uris), start, end, list(point_uris), start)).fetchall()
+        out: dict[str, list[dict]] = {}
+        for uri, ts, levels in rows:
+            out.setdefault(uri, []).append({"observed_at": ts, "levels": levels})
+        return out
+
+    def baler_writes(self, point_uris: list[str], start: datetime, end: datetime) -> dict[str, list[datetime]]:
+        """When Baler itself commanded each point: the active-run write log
+        (Cx 9) and point_write_levels' written_at (Haystack pointWrite and
+        timed overrides; only the current level of each, as that table
+        keeps no history)."""
+        want = set(point_uris)
+        out: dict[str, list[datetime]] = {}
+        with self.pool.connection() as conn:
+            runs = conn.execute("SELECT writes FROM cx_active_runs WHERE started_at <= %s"
+                                " AND (finished_at IS NULL OR finished_at >= %s)", (end, start)).fetchall()
+            levels = conn.execute("SELECT point_uri, written_at FROM point_write_levels WHERE point_uri = ANY(%s)"
+                                  " AND written_at BETWEEN %s AND %s", (list(point_uris), start, end)).fetchall()
+        for point, ts in _active_run_writes([{"writes": w} for (w,) in runs]) + [(p, t) for p, t in levels]:
+            if point in want and start <= ts <= end:
+                out.setdefault(point, []).append(ts)
+        return {k: sorted(v) for k, v in out.items()}

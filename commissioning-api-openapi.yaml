@@ -38,6 +38,7 @@ tags:
   - name: Spec
   - name: Faults
   - name: Active tests
+  - name: Override tests
   - name: Agent
 paths:
   /projects:
@@ -1317,6 +1318,90 @@ paths:
       responses:
         "204": { description: Undone }
         "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/schedules:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Override tests]
+      operationId: listCxSchedules
+      summary: BACnet schedules and calendars last read from the project's connections
+      description: >-
+        Baler#212. What `POST .../schedules/refresh` (or the periodic
+        refresh, settings.overrides.refresh_minutes) last read from Windrow:
+        each Schedule and Calendar object as Windrow's
+        `connection_schedules` answers it (`body`), the urn:point: URIs a
+        schedule controls, and what it commands now in the project's time
+        zone (settings.overrides.tz, default UTC).
+      responses:
+        "200":
+          description: Schedules
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tz, schedules]
+                properties:
+                  tz: { type: string }
+                  schedules:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, kind, object, topic_prefix, points, read_at, body]
+                      properties:
+                        id: { type: string }
+                        kind: { type: string, enum: [schedule, calendar] }
+                        object: { type: string }
+                        name: { type: [string, "null"] }
+                        topic_prefix: { type: string }
+                        points: { type: array, items: { type: string } }
+                        read_at: { type: string, format: date-time }
+                        body: { type: object }
+                        now:
+                          type: object
+                          properties:
+                            value: {}
+                            source: { type: string, enum: [exception, weekly, default, not_in_effect] }
+                            priority: { type: integer }
+                            unoccupied: { type: boolean }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/schedules/refresh:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Override tests]
+      operationId: refreshCxSchedules
+      summary: Read schedules, calendars and priority arrays from Windrow now (operator)
+      description: >-
+        Reads only: for every Windrow instance on the command channel, its
+        in-scope connections' Schedule and Calendar objects
+        (`connection_schedules`) and the priority arrays of their
+        commandable points (`read_priority_arrays`, the Windrow#25
+        contract; an instance without it reports `unsupported` and the
+        rest still refreshes). Nothing is written to a controller.
+      responses:
+        "200":
+          description: What was read
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [instances, schedules, calendars, priority_points, errors]
+                properties:
+                  instances:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        site: { type: string }
+                        instance: { type: string }
+                        connections: { type: integer }
+                        priority_arrays: { type: string, description: "ok, unsupported, or the error" }
+                  schedules: { type: integer }
+                  calendars: { type: integer }
+                  priority_points: { type: integer, description: Points whose priority array changed and was recorded }
+                  errors: { type: array, items: { type: string } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { description: No Windrow command channel configured }
   /projects/{id}/faults:
     parameters:
       - { $ref: "#/components/parameters/ProjectId" }
@@ -1862,6 +1947,30 @@ components:
             tail_fraction: { type: number, minimum: 0.01, maximum: 1 }
             tolerances: { type: object, additionalProperties: { type: number, minimum: 0 } }
           additionalProperties: false
+        overrides:
+          type: object
+          description: >-
+            Passive override tests (Baler#212): every override of a setpoint
+            or command found in history (minus Baler's own writes, the
+            schedule's own changes and releases; annotated with the
+            priority-array level when Windrow reports it) is judged as
+            `override:<pair>` - did the controlled variable reach it within
+            `within_minutes` - and a setpoint override while the equipment
+            was scheduled unoccupied is not_applicable, never a fail. Off
+            unless `enabled`.
+          properties:
+            enabled: { type: boolean }
+            within_minutes: { type: number, minimum: 1, maximum: 1440, description: "Time to reach the override (default 30)" }
+            min_hold_minutes: { type: number, minimum: 0, maximum: 1440, description: "A step must hold this long to count (default 10)" }
+            schedule_slack_minutes: { type: number, minimum: 0, maximum: 120 }
+            baler_slack_minutes: { type: number, minimum: 0, maximum: 120 }
+            refresh_minutes: { type: number, minimum: 0, maximum: 1440, description: "Re-read schedules and priority arrays this often; 0 = on request only (default 15)" }
+            basis: { type: string, enum: [any, priority_array], description: "priority_array: only overrides a priority-array observation confirms" }
+            tz: { type: [string, "null"], description: "IANA time zone the controllers' schedules run in" }
+            tolerances: { type: object, additionalProperties: { type: number, minimum: 0 } }
+            min_step: { type: object, additionalProperties: { type: number, minimum: 0 } }
+            unoccupied_values: { type: array, items: { type: [number, string, boolean] } }
+          additionalProperties: false
         economizer:
           type: object
           description: >-
@@ -1986,7 +2095,7 @@ components:
           type: [object, "null"]
           description: While running, roughly every 2 s; null otherwise
           properties:
-            stage: { type: string, enum: [starting, inventory, history, checks, gl36, economizer] }
+            stage: { type: string, enum: [starting, inventory, history, checks, gl36, economizer, overrides] }
             equipment_done: { type: integer }
             equipment_total: { type: [integer, "null"] }
             points: { type: [integer, "null"] }

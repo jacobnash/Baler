@@ -174,6 +174,10 @@ const ROUTES = [
   ["GET",    /^\/cx\/active-runs\/[^/]+$/,                     "commissioning", "viewer"],
   ["POST",   /^\/cx\/active-runs\/[^/]+\/confirm$/,             "commissioning", "admin"],
   ["POST",   /^\/cx\/active-runs\/[^/]+\/abort$/,               "commissioning", "operator"],
+  // Override tests (Baler#212): the schedules Windrow last read, and a
+  // re-read (reads schedules and priority arrays, never writes).
+  ["GET",    /^\/cx\/projects\/[^/]+\/schedules$/,              "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/schedules\/refresh$/,     "commissioning", "operator"],
   // Cx 10 (Baler#46): the agent. Talking to it is a change (it can start
   // passive runs and propose); accepting a proposal is the change itself,
   // and the backend requires admin for an active-test proposal.

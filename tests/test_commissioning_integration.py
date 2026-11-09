@@ -394,3 +394,45 @@ def test_availability_on_postgres_is_availability_pct(repo, monkeypatch):
             times = series.get(uri, [])
             assert got[uri] == (len(times), availability_pct(times, start, end, gap)), (uri, valid_sql)
         assert got["urn:point:test-cxint-avail/silent"] == (0, 0.0)
+
+
+def test_override_inputs_round_trip(repo):
+    """Baler#212: schedule snapshots, the priority-array change log and
+    Baler's own writes, on Postgres."""
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    tag = f"ov-it-{int(now.timestamp() * 1000)}"
+    prefix = f"fbf/{tag}"
+    sp, occ = f"urn:point:{prefix}/zsp", f"urn:point:{prefix}/occ"
+    office = {"object": "schedule,1", "name": "Office", "default": "inactive", "weekly": {}, "exceptions": [],
+              "controls": [{"object": "binary-value,1", "property": "present-value", "label": "occ"}]}
+    cal = {"object": "calendar,1", "name": "Holidays", "dates": [{"date": "*-12-25"}]}
+    rows = [{"id": f"s/{tag}/c1/{b['object']}", "site": "s", "instance": tag, "connection_id": "c1", "topic_prefix": prefix,
+             "kind": kind, "object": b["object"], "name": b["name"], "body": b, "points": [occ] if kind == "schedule" else [],
+             "read_at": now} for kind, b in (("schedule", office), ("calendar", cal))]
+    repo.put_schedules(rows)
+    repo.put_schedules(rows)  # a refresh replaces, never duplicates
+    got = repo.schedules_for_points([occ])
+    assert [s["name"] for s in got] == ["Office"] and got[0]["calendars"] == {"calendar,1": cal}
+    assert repo.schedules_for_points([sp]) == []
+    assert sum(1 for r in repo.list_schedules() if r["topic_prefix"] == prefix) == 2
+
+    a = {"8": {"value": 68.0, "baler": False}}
+    assert repo.record_priority_arrays({sp: a}, now - timedelta(hours=2)) == 1
+    assert repo.record_priority_arrays({sp: a}, now - timedelta(hours=1)) == 0  # unchanged: no row
+    assert repo.record_priority_arrays({sp: {}}, now) == 1
+    obs = repo.priority_observations([sp], now - timedelta(minutes=90), now)[sp]
+    assert [(o["observed_at"], o["levels"]) for o in obs] == [(now - timedelta(hours=2), a), (now, {})]
+
+    with repo.pool.connection() as conn:
+        orgs = auth.create_org(conn, f"{tag}-org", f"{tag}@example.com", "pw-123456789")
+    pid = db.new_id()
+    repo.create_project({"id": pid, "org_id": orgs["id"], "site_id": None, "name": tag, "settings": {"overrides": {"enabled": True}},
+                         "created_by": "it", "created_at": now, "updated_at": now, "phases": phases.default_phases()})
+    assert pid in [p["id"] for p in repo.list_projects_with_setting("overrides")]
+    run = {"id": db.new_id(), "project_id": pid, "equip_uri": f"urn:equip:{prefix}", "kind": "custom", "steps": [], "plan": [],
+           "status": "completed", "window_start": now - timedelta(hours=1), "window_end": now, "created_by": "it",
+           "created_at": now, "confirmed_by": None, "confirmed_at": None, "started_at": now - timedelta(minutes=50),
+           "finished_at": now - timedelta(minutes=40), "before": None, "results": [], "error": None, "abort_requested": False,
+           "writes": [{"action": "write", "point": sp, "at": (now - timedelta(minutes=45)).isoformat()}]}
+    repo.put_rows("cx_active_runs", [run])
+    assert repo.baler_writes([sp], now - timedelta(hours=1), now) == {sp: [now - timedelta(minutes=45)]}

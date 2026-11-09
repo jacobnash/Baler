@@ -259,6 +259,10 @@ check("commissioning (/cx/): reads viewer, changes operator, archive admin, site
     assert.equal(policy.resolveRoute("POST", "/cx/issues/i1/risk").minRole, "admin");
     assert.equal(policy.resolveRoute("DELETE", "/cx/risks/k1").minRole, "admin");
     assert.equal(policy.resolveRoute("DELETE", "/cx/issues/i1"), null);
+    // Baler#212 override tests: the schedule snapshot and its (read-only) refresh
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/schedules").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/projects/p1/schedules/refresh").minRole, "operator");
+    assert.equal(policy.resolveRoute("PUT", "/cx/projects/p1/schedules"), null);
     // Cx 6 procedures
     assert.equal(policy.resolveRoute("GET", "/cx/procedure-templates").minRole, "viewer");
     assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/procedures").minRole, "viewer");
