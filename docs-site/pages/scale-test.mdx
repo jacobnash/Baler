@@ -1145,6 +1145,9 @@ runs it was 228–265 B/row (241 at 1k points, 265 at 25k). That works out to ab
 raw** at 1M points, which is why
 native compression ([#192](https://github.com/jacobnash/Baler/issues/192), under [#221](https://github.com/jacobnash/Baler/issues/221)) and a narrower row matter. Raw rows are kept, never downsampled. Fill in compressed bytes per row from `db.compression` once #192 lands.
 
+For sizing a deployment from these results (disk, chunk settings, listener workers, servers), see
+[Deployment profiles and sizing](/deployment-profiles) and `python -m baler.sizing`.
+
 ### Baler vs Haxall
 
 Same generator, steps, 5 s rate, probes and CPU/memory caps against Haxall, with durability on

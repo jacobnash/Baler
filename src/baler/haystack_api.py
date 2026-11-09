@@ -53,7 +53,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 import openhay as oh
 
-from baler import auth, gateway_auth, hisquery, timeseries, tracing, warmup
+from baler import auth, gateway_auth, hisquery, mfa, timeseries, tracing, warmup
 from baler import point_write as pw
 from baler.http_handler_base import BaseAPIHandler
 from baler.remote_store import parse_term, typed_value
@@ -1216,6 +1216,10 @@ class ScramLogin:
             user = auth.get_user_by_email(conn, email)
             if not user:
                 return None, None
+            # SCRAM is password-only: an account with MFA on (or required by
+            # its org) can't sign in this way, or it would skip the second
+            # factor (#278). Haystack clients for those accounts use an API key.
+            user["needs_second_factor"] = mfa.login_step(conn, user["id"]) != "session"
             return user, auth.user_site_ids(conn, user["id"])
 
     def handle(self, scheme: str, params: dict) -> tuple[int, dict, dict | None]:
@@ -1270,7 +1274,7 @@ class ScramLogin:
                 server_final = h["state"].finish(data, h["creds"])
             except oh.AuthError:
                 return 403, {}, None
-            if h["user"] is None:
+            if h["user"] is None or h["user"].get("needs_second_factor"):
                 return 403, {}, None
             jwt = auth.issue_session_token(h["user"], h["sites"])
             return 200, {"Authentication-Info": f"authToken={jwt}, data={oh.b64url(server_final.encode())}"}, h["user"]
