@@ -69,6 +69,9 @@ async function showAsset(id) {
   const { history, ...fields } = a;
   document.getElementById("detail-fields").textContent = JSON.stringify(fields, null, 2);
   fill("#history-table tbody", history, ["position_uri", (h) => h.installed_at, "install_reason", (h) => h.removed_at || "still installed", "remove_reason"]);
+  const ws = await api(`/assets/${encodeURIComponent(id)}/warranties`);
+  fill("#warranty-table tbody", ws, ["kind", "provider", "starts_on", "ends_on", "status",
+    (w) => (w.source ? `doc ${w.source.document_id || "?"} p. ${w.source.page || "?"}` : "")]);
   document.getElementById("install-form").hidden = a.status !== "in_stock";
   document.getElementById("remove-form").hidden = a.status !== "installed";
 }
@@ -106,6 +109,15 @@ async function downloadCSV(path, name) {
   URL.revokeObjectURL(url);
 }
 
+async function loadAlerts() {
+  const al = await api("/warranties/alerts");
+  const label = (a) => `${a.manufacturer || ""} ${a.model || ""} (${a.serial || a.tag || a.id})`;
+  fill("#expiring-table tbody", al.expiring, [(w) => label(w.asset), "kind", "ends_on", "days_left"]);
+  fill("#failures-table tbody", al.failures_under_warranty, [(f) => f.failure.opened_at.slice(0, 10),
+    (f) => `${f.failure.kind}: ${f.failure.title}`, "position_uri", (f) => label(f.asset),
+    (f) => f.warranties.map((w) => w.ends_on).join(", ")]);
+}
+
 initAuth(() => {
   loadAssets().catch((err) => say(`error: ${err.message}`));
   loadPM().catch((err) => say(`error: ${err.message}`));
@@ -119,6 +131,15 @@ initAuth(() => {
     await api("/pm/tasks", { method: "POST", body: JSON.stringify(body) });
     f.reset();
     await loadPM();
+  });
+  loadAlerts().catch((err) => say(`error: ${err.message}`));
+  onSubmit("warranty-form", async (f) => {
+    const body = formJSON(f);
+    if (body.duration_months) body.duration_months = Number(body.duration_months);
+    await api(`/assets/${encodeURIComponent(currentAsset.id)}/warranties`, { method: "POST", body: JSON.stringify(body) });
+    f.reset();
+    await showAsset(currentAsset.id);
+    await loadAlerts();
   });
   onSubmit("filter-form", loadAssets);
   onSubmit("create-form", async (f) => {
