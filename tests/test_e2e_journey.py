@@ -41,7 +41,7 @@ from baler.ingest import (
     topic_prefix_to_equip_uri,
     topic_to_point_uri,
 )
-from baler.mqtt_util import make_client
+from baler.mqtt_util import publish_confirmed
 from baler.remote_store import RemoteStore
 from baler.store import BRICK
 from baler.timeseries import connect
@@ -128,10 +128,7 @@ def _post_with_retry(url, json):
 
 
 def _publish(topic: str, value, ts: float) -> None:
-    client = make_client()
-    client.connect(MQTT_HOST, MQTT_PORT)
-    client.publish(topic, json.dumps({"value": value, "ts": ts}), retain=True)
-    client.disconnect()
+    publish_confirmed(MQTT_HOST, MQTT_PORT, [(topic, json.dumps({"value": value, "ts": ts}))], retain=True)
 
 
 @pytest.mark.integration

@@ -7,6 +7,8 @@ clients, instead of patching each call site separately.
 """
 
 import os
+import time
+from collections.abc import Iterable
 from typing import Any
 
 import paho.mqtt.client as mqtt
@@ -60,3 +62,34 @@ def disconnect_ending_session(client: mqtt.Client) -> None:
     props = Properties(PacketTypes.DISCONNECT)
     props.SessionExpiryInterval = 0
     client.disconnect(properties=props)
+
+
+def publish_confirmed(host: str, port: int, messages: Iterable[tuple[str, str | bytes]], retain: bool = False,
+                      timeout: float = 10.0) -> None:
+    """Publish `messages` ((topic, payload) pairs) at QoS 1 and return only
+    once the broker has acknowledged every one; TimeoutError if it doesn't.
+
+    For one-shot publishers (tests, scripts). The tempting version -
+    connect(), publish(), disconnect() with no network loop - loses
+    messages: the client never reads the broker's CONNACK, so closing the
+    socket with that CONNACK unread resets the connection, and the broker
+    drops whatever it hadn't read off the socket yet. Nothing reports it:
+    QoS 0 has no acknowledgement and paho had already "sent" the bytes.
+    Under CPU load that dropped 1-3 of a session's 4 retained messages in
+    up to ~15% of sessions, and failed test_derivation_engine's real-broker
+    e2e test in CI (the broker logged the publisher as "disconnected:
+    connection closed by client", not "disconnected.", and no subscriber -
+    not even the stack's own mqtt_listener - saw its tags)."""
+    client = make_client()
+    client.connect(host, port)
+    client.loop_start()
+    try:
+        infos = [client.publish(topic, payload, qos=1, retain=retain) for topic, payload in messages]
+        deadline = time.monotonic() + timeout
+        for info in infos:
+            info.wait_for_publish(max(0.0, deadline - time.monotonic()))
+            if not info.is_published():
+                raise TimeoutError(f"broker at {host}:{port} didn't acknowledge a publish within {timeout:.0f} s")
+    finally:
+        client.disconnect()
+        client.loop_stop()

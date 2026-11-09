@@ -27,7 +27,7 @@ from baler.ingest import (
     topic_to_point_uri,
 )
 from baler.mqtt_listener import make_on_message
-from baler.mqtt_util import make_client
+from baler.mqtt_util import make_client, publish_confirmed
 from baler.store import BRICK, TD, Store
 from baler.timeseries import connect, read_latest
 
@@ -336,11 +336,8 @@ def test_full_round_trip_over_real_broker(ts_conn):
     listener.connect("localhost", 1883)
     listener.subscribe(f"fbf/{topic}")
 
-    publisher = make_client()
-    publisher.connect("localhost", 1883)
     payload = json.dumps({"point": topic, "value": 42.0, "ts": time.time()})
-    publisher.publish(f"fbf/{topic}", payload, retain=True)
-    publisher.disconnect()
+    publish_confirmed("localhost", 1883, [(f"fbf/{topic}", payload)], retain=True)
 
     for _ in range(20):  # up to ~2s, no arbitrary long sleep
         listener.loop(timeout=0.1)
