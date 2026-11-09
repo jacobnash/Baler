@@ -87,12 +87,18 @@ def json_pieces(obj):
         yield json.dumps(obj)
 
 
-def respond_json_streamed(handler: BaseHTTPRequestHandler, status: int, payload) -> None:
+# Response headers that repeat a short page's paging meta (#280).
+PAGING_HEADERS = "X-Baler-Incomplete, X-Baler-After, X-Baler-Limit, Link"
+
+
+def respond_json_streamed(handler: BaseHTTPRequestHandler, status: int, payload, headers: dict | None = None) -> None:
     """respond_json for big payloads: the same bytes, encoded piecewise
     (json_pieces) and written in ~1 MB slices, so a large response never
     holds the GIL for more than a few milliseconds at a time."""
     pieces = [p.encode("utf-8") for p in json_pieces(payload)]
     handler.send_response(status)
+    for k, v in (headers or {}).items():
+        handler.send_header(k, v)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(sum(len(p) for p in pieces)))
     handler.end_headers()
@@ -165,6 +171,9 @@ class BaseAPIHandler(BaseHTTPRequestHandler):
         # Lets the docs site's live try-it playground (served from a
         # different origin/port) call these APIs directly from the browser.
         self.send_header("Access-Control-Allow-Origin", "*")
+        # A browser client on another origin may read the paging headers
+        # (haystack_api.paging_headers, ingest_api's /his; #280).
+        self.send_header("Access-Control-Expose-Headers", PAGING_HEADERS)
         super().end_headers()
 
     def log_message(self, fmt, *args):

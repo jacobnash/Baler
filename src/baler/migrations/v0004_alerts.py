@@ -1,5 +1,5 @@
 """
-0003 operator alerts and process health (#277).
+0004 operator alerts and process health (#277).
 
 - alert_state: the alert evaluator's (baler.alerts) open alerts, one row per
   condition key, so a restarted evaluator neither re-sends an alert it
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 3
+VERSION = 4
 NAME = "operator alerts and process health"
 
 ALERT_STATE = """

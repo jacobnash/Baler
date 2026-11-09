@@ -362,7 +362,7 @@ def test_registered_sources_feed_the_engine_and_a_broken_one_is_skipped(monkeypa
 
 @pytest.mark.integration
 def test_alert_state_and_service_runtime_sql_against_postgres():
-    """Migration 0003's tables with the real statements. Runs inside one
+    """Migration 0004's tables with the real statements. Runs inside one
     transaction that is rolled back, so the stack's own alerter (which
     rewrites alert_state every cycle) never sees or deletes these rows."""
     from baler import errors, timeseries

@@ -1,7 +1,7 @@
 """
 Process health for the alert evaluator (#277): every Baler process that
 calls tracing.init_tracing records that it started, and counts the
-unhandled exceptions it raises, in service_runtime (migration 0003).
+unhandled exceptions it raises, in service_runtime (migration 0004).
 /ops/status shows the counts, baler.alerts turns a burst of starts into a
 "restart-looping" alert, and BALER_ERROR_TRACKING_URL (optional) gets each
 exception as a JSON event.
@@ -160,7 +160,7 @@ def summary(conn) -> list[dict[str, Any]]:
         rows = conn.execute(
             "SELECT service, starts, errors, last_error_at, last_error, recent_starts[1] "
             "FROM service_runtime ORDER BY service").fetchall()
-    except Exception:  # noqa: BLE001 - migration 0003 not applied yet
+    except Exception:  # noqa: BLE001 - migration 0004 not applied yet
         return []
 
     def iso(t):

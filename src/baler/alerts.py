@@ -29,7 +29,7 @@ dead-man ping or /ops/status (a different process).
 
 The engine keeps its state in memory, so it can still say "Historian
 down" while Postgres is down, and writes it to alert_state (migration
-0003) whenever the database answers, so a restart neither re-sends an
+0004) whenever the database answers, so a restart neither re-sends an
 open alert nor forgets its clear, and /ops/status can list what is open.
 
 Dead-man's switch: with BALER_DEADMAN_URL set (off by default) every
@@ -474,7 +474,7 @@ def open_alerts(conn) -> list[dict[str, Any]]:
     try:
         return [a.public() for a in sorted(load_state(conn).values(), key=lambda a: a.opened_at or a.first_seen_at)
                 if a.state == "firing"]
-    except Exception:  # noqa: BLE001 - migration 0003 not applied yet
+    except Exception:  # noqa: BLE001 - migration 0004 not applied yet
         return []
 
 
