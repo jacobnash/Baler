@@ -46,25 +46,319 @@ paths:
               properties:
                 email: { type: string, format: email }
                 password: { type: string }
+      description: >-
+        Without multi-factor login (the default), the answer is a session JWT,
+        exactly as before. With MFA on for the account, the answer is
+        `mfa_required` and a short-lived `mfa_token` instead: finish with
+        POST /login/mfa. In an org that requires MFA, a user who hasn't set it
+        up gets a session with `mfa_enrollment_required: true` that reaches
+        only the enrolment routes (GET /me, GET /me/mfa, POST
+        /me/mfa/totp/setup and /enable, POST /logout) until enrolment is done.
       responses:
         "200":
-          description: A session JWT, 12h TTL.
+          description: A session JWT (12h TTL), or the second step to take.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/Session"
+                  - $ref: "#/components/schemas/MfaChallenge"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /login/mfa:
+    post:
+      operationId: loginMfa
+      tags: [Auth]
+      summary: Second sign-in step - a TOTP or recovery code for the mfa_token
+      description: >-
+        Public and rate-limited like /login. Each TOTP code and each recovery
+        code works once. Five wrong codes in a row lock the account's second
+        factor for 15 minutes (429).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mfa_token]
+              properties:
+                mfa_token: { type: string }
+                code: { type: string, description: "6-digit TOTP code, or a recovery code" }
+                recovery_code: { type: string }
+      responses:
+        "200":
+          description: "A session JWT, with `amr: [pwd, otp]`."
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Session"
+                  - type: object
+                    properties:
+                      recovery_codes_left: { type: integer }
+        "401":
+          description: Wrong code, or the mfa_token expired (sign in again).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Too many wrong codes; locked for a few minutes.
+  /password-reset:
+    post:
+      operationId: requestPasswordReset
+      tags: [Auth]
+      summary: Email a single-use password reset link
+      description: >-
+        Public and rate-limited (per IP in the gateway, and at most 3 emails
+        per account per hour). The answer is the same whether or not the email
+        belongs to an account. The link expires within
+        BALER_PASSWORD_RESET_TTL_SECONDS (default 30 min, at most 60) and works
+        once; asking again replaces it. 503 (for every email alike) when this
+        install has no outbound email: an admin resets passwords instead.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "202":
+          description: Accepted (whether or not the account exists).
           content:
             application/json:
               schema:
                 type: object
-                required: [token, user]
                 properties:
+                  status: { type: string }
+        "503":
+          description: Self-service reset isn't configured here.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /password-reset/confirm:
+    post:
+      operationId: confirmPasswordReset
+      tags: [Auth]
+      summary: Set a new password with the emailed token
+      description: >-
+        Consumes the token (once), sets the password and ends every session
+        the user had. Two-step sign-in, if on, stays on.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, new_password]
+              properties:
+                token: { type: string }
+                new_password: { type: string, minLength: 12 }
+      responses:
+        "204":
+          description: Password changed.
+        "400":
+          description: Token invalid, used or expired, or the password too short.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /password-reset/config:
+    get:
+      operationId: passwordResetConfig
+      tags: [Auth]
+      summary: Whether self-service reset is available (for the login page)
+      responses:
+        "200":
+          description: "`self_service` false: ask an admin."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  self_service: { type: boolean }
+  /me/mfa:
+    get:
+      operationId: getMyMfa
+      tags: [Auth]
+      summary: Your two-step sign-in state
+      responses:
+        "200":
+          description: The caller's MFA state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MfaState" }
+  /me/mfa/totp/setup:
+    post:
+      operationId: startMfaSetup
+      tags: [Auth]
+      summary: Start enrolling an authenticator app
+      description: A new secret, pending until POST /me/mfa/totp/enable confirms a code from it. 409 if MFA is already on.
+      responses:
+        "200":
+          description: The secret (base32) and an otpauth:// URI for the app.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secret: { type: string }
+                  otpauth_uri: { type: string }
+        "409":
+          description: MFA is already on.
+  /me/mfa/totp/enable:
+    post:
+      operationId: enableMfa
+      tags: [Auth]
+      summary: Confirm a code and turn MFA on
+      description: >-
+        Returns ten recovery codes (shown once, stored hashed) and a fresh
+        session; every other session of the user ends.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        "200":
+          description: MFA is on.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  recovery_codes: { type: array, items: { type: string } }
                   token: { type: string }
-                  user:
-                    type: object
-                    properties:
-                      id: { type: string }
-                      org_id: { type: string }
-                      role: { type: string, enum: [admin, operator, viewer] }
-                      site_ids: { type: array, items: { type: string } }
+        "400":
+          description: Wrong code, or no enrolment started.
+  /me/mfa/disable:
+    post:
+      operationId: disableMfa
+      tags: [Auth]
+      summary: Turn your MFA off (password and a current code)
+      description: Refused (400) while the org requires MFA.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, code]
+              properties:
+                password: { type: string }
+                code: { type: string }
+      responses:
+        "204":
+          description: MFA is off.
+        "400":
+          description: Wrong code, or the org requires MFA.
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          description: Wrong password.
+        "429":
+          description: Too many wrong codes.
+  /me/mfa/recovery-codes:
+    post:
+      operationId: regenerateRecoveryCodes
+      tags: [Auth]
+      summary: Replace your recovery codes (needs a current TOTP code)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        "200":
+          description: The new codes; the old ones stop working.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  recovery_codes: { type: array, items: { type: string } }
+  /org:
+    get:
+      operationId: getOrg
+      tags: [Directory]
+      summary: Your org, with its MFA requirement (admin)
+      responses:
+        "200":
+          description: The org.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Org" }
+    patch:
+      operationId: updateOrg
+      tags: [Directory]
+      summary: Require MFA for the org, or stop (admin)
+      description: >-
+        The admin must have MFA on first. Turning it on ends the sessions of
+        every user without MFA; they enrol at their next login. API keys and
+        edge credentials are unaffected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mfa_required]
+              properties:
+                mfa_required: { type: boolean }
+      responses:
+        "200":
+          description: The org, updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Org" }
+        "409":
+          description: Turn on MFA for your own account first.
+  /users/{user_id}/mfa:
+    delete:
+      operationId: resetUserMfa
+      tags: [Directory]
+      summary: Reset a user's MFA (lost device; admin)
+      parameters:
+        - { name: user_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204":
+          description: Their MFA is off and their sessions ended.
+        "404":
+          description: No such user in the caller's org.
+  /events:
+    get:
+      operationId: listAuthEvents
+      tags: [Directory]
+      summary: The org's sign-in security audit trail (admin)
+      description: >-
+        MFA enabled/disabled/reset, recovery codes used or regenerated, the
+        factor locked, password resets requested/completed/rate-limited, and
+        the org's MFA requirement changing. Newest first, at most 200.
+      responses:
+        "200":
+          description: Events.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    at: { type: string, format: date-time }
+                    event: { type: string }
+                    user_id: { type: [string, "null"] }
+                    user_email: { type: [string, "null"] }
+                    actor_id: { type: [string, "null"] }
+                    actor_email: { type: [string, "null"] }
+                    detail: { type: [object, "null"] }
+                    ip: { type: [string, "null"] }
   /logout:
     post:
       operationId: logout
@@ -362,6 +656,7 @@ paths:
                     created_at: { type: string, format: date-time }
                     site_ids: { type: array, items: { type: string } }
                     disabled: { type: boolean, description: "Can't log in until enabled again." }
+                    mfa_enabled: { type: boolean, description: "Has two-step sign-in on (#278)." }
                     display_name: { type: [string, "null"], description: How the person signs; null when unset }
         "401":
           $ref: "#/components/responses/Unauthorized"
@@ -615,6 +910,47 @@ components:
         kind: { type: string, enum: [session, api_key] }
         email: { type: [string, "null"], description: "The login's email; null for an API key." }
         display_name: { type: [string, "null"], description: "How the login signs (set by an admin); null when unset or for an API key." }
+        mfa:
+          oneOf:
+            - $ref: "#/components/schemas/MfaState"
+            - type: "null"
+        mfa_enrollment_required: { type: boolean, description: "This session only reaches MFA enrolment (the org requires MFA)." }
+    Session:
+      type: object
+      required: [token, user]
+      properties:
+        token: { type: string }
+        mfa_enrollment_required: { type: boolean }
+        user:
+          type: object
+          properties:
+            id: { type: string }
+            org_id: { type: string }
+            role: { type: string, enum: [admin, operator, viewer] }
+            site_ids: { type: array, items: { type: string } }
+    MfaChallenge:
+      type: object
+      required: [mfa_required, mfa_token]
+      properties:
+        mfa_required: { type: boolean, enum: [true] }
+        mfa_token: { type: string, description: "For POST /login/mfa only; not a bearer token." }
+        expires_in: { type: integer }
+    MfaState:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        enabled_at: { type: [string, "null"], format: date-time }
+        pending: { type: boolean }
+        required: { type: boolean, description: "The org requires MFA." }
+        recovery_codes_left: { type: integer }
+    Org:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        mfa_required: { type: boolean }
+        users: { type: integer }
+        users_with_mfa: { type: integer }
     ApiKey:
       type: object
       required: [id, org_id, role]

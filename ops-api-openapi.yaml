@@ -4,7 +4,8 @@ info:
   version: 0.1.0
   description: >
     Building-engineer control-plane status. Aggregates platform and job
-    health into plain-language states (ok / quiet / degraded / down).
+    health into plain-language states (ok / quiet / degraded / down, and
+    off for a job this install doesn't run, such as backups that never reported).
 paths:
   /status:
     get:
@@ -542,6 +543,29 @@ paths:
               schema: { $ref: "#/components/schemas/Freshness" }
         "400": { description: Missing or malformed prefix }
         "401": { description: Not through the gateway }
+  /metrics:
+    get:
+      operationId: getOpsMetrics
+      summary: Overload signals as Prometheus text
+      description: >-
+        Prometheus text exposition (format 0.0.4) of what /status judges ingest
+        and the rule daemons by (#235): end-to-end ingest lag
+        (baler_ingest_newest_reading_age_seconds) and per source prefix,
+        the listener's queue depth, the age of its oldest uncommitted reading,
+        last batch write time, redelivered (DUP) messages and throughput, the
+        broker's dropped-message counter, each rule daemon's reading-feed lag
+        and misses, and their cycle times and evaluations. The scale ladder
+        and the post-deploy verify job read the same endpoint. Process-wide
+        numbers, so a site-restricted login can't read it (gateway resource
+        "metrics"); per-prefix lines are limited to the caller's sites.
+        Viewer, or an API key.
+      responses:
+        "200":
+          description: Metrics
+          content:
+            text/plain:
+              schema: { type: string }
+        "401": { description: Not through the gateway }
   /gateway-errors:
     get:
       operationId: getGatewayErrors
@@ -681,6 +705,283 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object}}}}
       responses:
         "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+  # Building lifecycle record (epic #221): positions vs assets (#197).
+  # Full field list: docs-site/pages/assets.mdx.
+  /assets:
+    get:
+      operationId: listAssets
+      summary: Assets of the caller's org (filters q, status, position, manufacturer, type)
+      responses:
+        "200": {description: Assets with status and current position, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+    post:
+      operationId: createAsset
+      summary: Add an asset (make, model, serial, cost ...)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: The asset, content: {application/json: {schema: {type: object}}}}
+        "400": {description: Invalid fields}
+  /assets/changes:
+    get:
+      operationId: assetChanges
+      summary: Replacements in a window (since, until, type, manufacturer)
+      responses:
+        "200": {description: Replacements, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+  /assets/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getAsset
+      summary: An asset and its install/remove history
+      responses:
+        "200": {description: The asset, content: {application/json: {schema: {type: object}}}}
+        "404": {description: No such asset}
+    patch:
+      operationId: patchAsset
+      summary: Correct an asset's fields (audited)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: The asset, content: {application/json: {schema: {type: object}}}}
+  /assets/{id}/{action}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+      - {name: action, in: path, required: true, schema: {type: string, enum: [install, remove, retire]}}
+    post:
+      operationId: assetAction
+      summary: Install into a position, remove (reason required), or retire
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: The appended event, content: {application/json: {schema: {type: object}}}}
+        "409": {description: The position or asset isn't free}
+  /assets/{id}/audit:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: assetAudit
+      summary: Every change to the asset, newest first
+      responses:
+        "200": {description: Audit entries, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+  /positions/history:
+    get:
+      operationId: positionHistory
+      summary: Every asset a position has held
+      parameters: [{name: uri, in: query, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: History, content: {application/json: {schema: {type: object}}}}
+  /positions/asset-at:
+    get:
+      operationId: positionAssetAt
+      summary: Which asset was in a position at a moment
+      parameters:
+        - {name: uri, in: query, required: true, schema: {type: string}}
+        - {name: at, in: query, schema: {type: string}}
+      responses:
+        "200": {description: "The interval and asset (asset null if empty)", content: {application/json: {schema: {type: object}}}}
+  /positions/replace:
+    post:
+      operationId: replaceInPosition
+      summary: Remove what's in a position and install another asset at the same instant
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: The removed and installed events, content: {application/json: {schema: {type: object}}}}
+  # Bench tests (#211). docs-site/pages/bench-tests.mdx.
+  /bench/templates:
+    get:
+      operationId: benchTemplates
+      summary: Structure-only bench procedure templates
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+  /bench/procedures:
+    get:
+      operationId: listBenchProcedures
+      summary: The org's bench procedures
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+    post:
+      operationId: createBenchProcedure
+      summary: Add a bench procedure (optionally from a template)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: OK, content: {application/json: {schema: {type: object}}}}
+  /bench/procedures/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    patch:
+      operationId: patchBenchProcedure
+      summary: Edit or archive a procedure
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+  /assets/{id}/bench-tests:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listBenchTests
+      summary: The asset's bench tests, baseline marked
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+    post:
+      operationId: recordBenchTest
+      summary: Record a bench test (procedure_id or inline procedure, measurements)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: OK, content: {application/json: {schema: {type: object}}}}
+  /assets/{id}/baseline:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: assetBaseline
+      summary: The asset's baseline bench test
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+  # Deferred maintenance, service life, FCI (#200). docs-site/pages/deferred-maintenance.mdx.
+  /deferred:
+    get:
+      operationId: listDeferred
+      summary: The deferred-maintenance register (filter status)
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+    post:
+      operationId: createDeferred
+      summary: Add deferred work (cost, risk, asset or position)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: OK, content: {application/json: {schema: {type: object}}}}
+  /deferred/fci:
+    get:
+      operationId: deferredFCI
+      summary: FCI roll-up, with how many assets lack a replacement value
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+  /deferred/capital-plan:
+    get:
+      operationId: capitalPlan
+      summary: Per year, end-of-life assets and targeted deferred work
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+  /deferred/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    patch:
+      operationId: patchDeferred
+      summary: Edit or close (closing needs a resolution)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+  /service-life:
+    get:
+      operationId: listServiceLife
+      summary: The org's service-life references
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+    post:
+      operationId: setServiceLife
+      summary: Set a type's expected life with its reference and retrieval date
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+  /service-life/assets:
+    get:
+      operationId: serviceLifeAssets
+      summary: Installed assets with age and remaining life
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+  /assets/{id}/values:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listAssetValues
+      summary: Replacement-value history
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+    post:
+      operationId: addAssetValue
+      summary: Add a dated replacement-value estimate
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: OK, content: {application/json: {schema: {type: object}}}}
+  # PM schedules (#199). docs-site/pages/pm-schedules.mdx.
+  /pm/tasks:
+    get:
+      operationId: listPMTasks
+      summary: Every PM task
+      responses:
+        "200": {description: Tasks, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+    post:
+      operationId: createPMTask
+      summary: Add a PM task (calendar, run_hours or condition)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: The task, content: {application/json: {schema: {type: object}}}}
+  /pm/tasks/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    patch:
+      operationId: patchPMTask
+      summary: Edit or pause a task (audited)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: The task, content: {application/json: {schema: {type: object}}}}
+  /pm/tasks/{id}/complete:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: completePMTask
+      summary: Record PM done on an asset
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: The completion, content: {application/json: {schema: {type: object}}}}
+  /pm/tasks/{id}/completions:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listPMCompletions
+      summary: Completions of a task
+      responses:
+        "200": {description: Completions, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+  /pm/due:
+    get:
+      operationId: pmDue
+      summary: Due PM work, most urgent first (filter status)
+      responses:
+        "200": {description: Due items, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+  /pm/due/export:
+    get:
+      operationId: pmDueExport
+      summary: Due work as CSV, or active tasks as COBie Job rows (format csv or cobie-job)
+      responses:
+        "200": {description: CSV, content: {text/csv: {schema: {type: string}}}}
+  # Warranties on assets (#198). docs-site/pages/warranties.mdx.
+  /assets/{id}/warranties:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listAssetWarranties
+      summary: The asset's warranties with status and days left
+      responses:
+        "200": {description: Warranties, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+    post:
+      operationId: createWarranty
+      summary: Add a warranty (kind, provider, starts_on, ends_on or duration_months, terms, source)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: The warranty, content: {application/json: {schema: {type: object}}}}
+  /warranties:
+    get:
+      operationId: listWarranties
+      summary: All warranties (filter status)
+      responses:
+        "200": {description: Warranties, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+  /warranties/alerts:
+    get:
+      operationId: warrantyAlerts
+      summary: Warranties expiring within within_days, and failures under warranty
+      responses:
+        "200": {description: Alerts, content: {application/json: {schema: {type: object}}}}
+  /warranties/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    patch:
+      operationId: patchWarranty
+      summary: Correct a warranty (audited)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: The warranty, content: {application/json: {schema: {type: object}}}}
+  /warranties/{id}/void:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: voidWarranty
+      summary: Void a warranty entered in error (reason)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: The warranty, content: {application/json: {schema: {type: object}}}}
 components:
   schemas:
     Freshness:
@@ -826,7 +1127,7 @@ components:
         label: { type: string }
         layer: { type: string, enum: [platform, jobs, tools, building] }
         service: { type: string }
-        state: { type: string, enum: [ok, quiet, degraded, down] }
+        state: { type: string, enum: [ok, quiet, degraded, down, off] }
         detail: { type: ["string", "null"] }
         href:
           type: string
@@ -900,6 +1201,27 @@ components:
                   missed_batches: { type: integer }
                   last_missed_at: { type: ["string", "null"], format: date-time }
                   updated_at: { type: string, format: date-time }
+            ingest:
+              type: object
+              description: >-
+                Overload numbers (#235), the same ones GET /metrics exports: lag_s is
+                now minus the newest stored reading; the queue figures are the busiest
+                listener worker's. An oldest uncommitted reading older than
+                OPS_QUEUE_AGE_DEGRADED_SECONDS (or a queue 80% full) turns the Ingest
+                listener card degraded, older than OPS_QUEUE_AGE_DOWN_SECONDS down;
+                a broker drop in the last hour degraded. Null fields: not reported
+                (no listener heartbeat yet).
+              properties:
+                lag_s: { type: ["number", "null"] }
+                queue: { type: ["integer", "null"] }
+                queue_max: { type: ["integer", "null"] }
+                queue_oldest_age_s: { type: ["number", "null"] }
+                last_flush_s: { type: ["number", "null"] }
+                readings_per_s: { type: ["number", "null"] }
+                redelivered: { type: ["integer", "null"] }
+                workers: { type: ["integer", "null"] }
+                broker_dropped_since_start: { type: ["integer", "null"] }
+                broker_last_drop_at: { type: ["string", "null"], format: date-time }
             cards:
               type: array
               description: >-
@@ -918,6 +1240,38 @@ components:
         attention:
           type: array
           items: { $ref: "#/components/schemas/ComponentState" }
+        alerts:
+          type: array
+          description: >-
+            Alerts baler.alerts has sent and not yet cleared (#277). Empty for a
+            caller limited to some sites, and before the alerter has run.
+          items:
+            type: object
+            required: [key, state, severity, title]
+            properties:
+              key: { type: string, description: "e.g. component:data_api, disk:/pgdata, restarts:baler-fault-detector" }
+              state: { type: string, enum: [firing] }
+              severity: { type: string, enum: [critical, warning] }
+              title: { type: string }
+              detail: { type: ["string", "null"] }
+              opened_at: { type: ["string", "null"], format: date-time }
+              last_seen_at: { type: ["string", "null"], format: date-time }
+              last_sent_at: { type: ["string", "null"], format: date-time }
+        processes:
+          type: array
+          description: >-
+            Per process (tracing service name): starts and unhandled exceptions
+            counted by baler.errors (#277). Empty for a caller limited to some sites.
+          items:
+            type: object
+            required: [service, starts, errors]
+            properties:
+              service: { type: string }
+              starts: { type: integer }
+              errors: { type: integer }
+              last_error_at: { type: ["string", "null"], format: date-time }
+              last_error: { type: ["string", "null"] }
+              last_start_at: { type: ["string", "null"], format: date-time }
         first_actions:
           type: array
           items:

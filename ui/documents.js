@@ -1,6 +1,6 @@
 // Documents page (#201): the building document store over ops_api's
 // /ops/documents routes. Plain globals, no build step.
-const OPS_URL = new URLSearchParams(location.search).get("ops") || "/ops";
+const OPS_URL = apiBase("ops", "/ops");  // same-origin paths only (apibase.js)
 const statusEl = document.getElementById("status");
 let current = null;
 

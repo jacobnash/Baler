@@ -49,11 +49,11 @@ import time as _time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, time, timedelta, timezone
 from http.server import ThreadingHTTPServer
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 import openhay as oh
 
-from baler import auth, gateway_auth, hisquery, timeseries, tracing, warmup
+from baler import auth, gateway_auth, hisquery, mfa, timeseries, tracing, warmup
 from baler import point_write as pw
 from baler.http_handler_base import BaseAPIHandler
 from baler.remote_store import parse_term, typed_value
@@ -1216,6 +1216,10 @@ class ScramLogin:
             user = auth.get_user_by_email(conn, email)
             if not user:
                 return None, None
+            # SCRAM is password-only: an account with MFA on (or required by
+            # its org) can't sign in this way, or it would skip the second
+            # factor (#278). Haystack clients for those accounts use an API key.
+            user["needs_second_factor"] = mfa.login_step(conn, user["id"]) != "session"
             return user, auth.user_site_ids(conn, user["id"])
 
     def handle(self, scheme: str, params: dict) -> tuple[int, dict, dict | None]:
@@ -1270,7 +1274,7 @@ class ScramLogin:
                 server_final = h["state"].finish(data, h["creds"])
             except oh.AuthError:
                 return 403, {}, None
-            if h["user"] is None:
+            if h["user"] is None or h["user"].get("needs_second_factor"):
                 return 403, {}, None
             jwt = auth.issue_session_token(h["user"], h["sites"])
             return 200, {"Authentication-Info": f"authToken={jwt}, data={oh.b64url(server_final.encode())}"}, h["user"]
@@ -1378,9 +1382,40 @@ def make_handler(backend: Backend, login: ScramLogin | None):
                     # (a client sees a reset, not an error): say what failed.
                     span.set_attribute("error", f"encode: {exc}")
                     out = oh.encode_grid(err_grid(f"could not encode the response: {exc}"), fmt).encode("utf-8")
-                self._send(200, out, f"{oh.mime(fmt)}; charset=utf-8", extra)
+                self._send(200, out, f"{oh.mime(fmt)}; charset=utf-8", {**extra, **paging_headers(op, req, grid)})
 
     return HaystackHandler
+
+
+def paging_headers(op: str, req: oh.Grid, grid: oh.Grid) -> dict[str, str]:
+    """The grid's paging meta again as HTTP headers (#280), for a client
+    that hands its caller only the rows (openhay's and phable's `read`):
+    a proxy, a log or a `curl -i` still shows the read was cut short.
+    `X-Baler-Incomplete` whenever the grid says it is; for a read page,
+    `X-Baler-After`, `X-Baler-Limit` and a `Link: <?...>; rel="next"` (RFC
+    8288, relative to the request's own path) that GETs the next page."""
+    meta = grid.meta or {}
+    incomplete = meta.get("incomplete")
+    if incomplete is None:
+        return {}
+    headers = {"X-Baler-Incomplete": _header_text(str(incomplete) if incomplete is not oh.MARKER else "incomplete")}
+    after, limit = meta.get("after"), meta.get("limit")
+    if op == "read" and isinstance(after, oh.Ref):
+        headers["X-Baler-After"] = "@" + after.id
+        row = req.rows[0] if req.rows else {}
+        query = {"filter": str(row.get("filter", ""))}
+        if isinstance(row.get("limit"), oh.Number):
+            query["limit"] = str(int(row["limit"].val))
+        if isinstance(limit, oh.Number):
+            headers["X-Baler-Limit"] = str(int(limit.val))
+        query["after"] = "@" + after.id
+        headers["Link"] = f'<?{urlencode(query, quote_via=quote)}>; rel="next"'
+    return headers
+
+
+def _header_text(text: str) -> str:
+    """An HTTP header value: one line of latin-1."""
+    return " ".join(text.split()).encode("latin-1", "replace").decode("latin-1")
 
 
 # The Equipment page's first reads (ui/app.js), run once before the API

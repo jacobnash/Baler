@@ -1,5 +1,5 @@
 """
-0003 the building document store (#201, epic #221).
+0012 the building document store (#201, epic #221).
 
 Generalises cx_spec_documents' sha256 pattern, but keeps the file:
 
@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 3
+VERSION = 12
 NAME = "lifecycle document store"
 
 BLOBS = """

@@ -22,6 +22,11 @@ project into a separate "open" and "paid" fork.
    gateway/njs/test_policy.mjs` too — see CLAUDE.md for the njs gotchas
    (ES-module-only, no destructuring/spread/classes at nginx's njs 1.0.0).
 
+6. Found a security problem? Don't open a PR or issue for it: report it
+   privately, see [SECURITY.md](SECURITY.md). A PR is also checked by the
+   Security workflow; a new high/critical dependency advisory or a secret
+   in your commits fails it (see docs-site `security-scanning`).
+
 Optional: `pip install pre-commit && pre-commit install` runs `ruff --fix`
 on commit.
 

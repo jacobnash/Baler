@@ -15,7 +15,7 @@ submittals, start-up guides, TAB reports, warranties, photos.
   an answer built on it can cite both.
 
 Bytes live in Postgres (lc_blob_data), so backups already include them and
-no service writes files under the app's directory. Schema: migration 0003.
+no service writes files under the app's directory. Schema: migration 0012.
 """
 
 from __future__ import annotations
