@@ -394,3 +394,37 @@ def test_availability_on_postgres_is_availability_pct(repo, monkeypatch):
             times = series.get(uri, [])
             assert got[uri] == (len(times), availability_pct(times, start, end, gap)), (uri, valid_sql)
         assert got["urn:point:test-cxint-avail/silent"] == (0, 0.0)
+
+
+def test_manual_results_attachments_and_closed_by_round_trip(repo):
+    """Baler#275: manual results (jsonb, the client_id index), attachments
+    (bytea) and cx_issues.closed_by on Postgres."""
+    import psycopg
+
+    from baler.commissioning import manual
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with repo.pool.connection() as conn:
+        org = auth.create_org(conn, f"mr-it-{now.timestamp()}", f"mr-{now.timestamp()}@example.com", "pw-123456789")
+    pid = db.new_id()
+    repo.create_project({"id": pid, "org_id": org["id"], "site_id": None, "name": "MR", "settings": {}, "created_by": "it",
+                         "created_at": now, "updated_at": now, "phases": phases.default_phases()})
+    rid = db.new_id()
+    row = {"id": rid, "project_id": pid, "procedure_id": "proc", "test_run_id": "tr", "equip_uri": "urn:equip:mr", "step_id": "visual",
+           "status": "pass", "note": "ok", "witness": {"name": "Pat", "org": None, "role": None},
+           "attachments": [{"id": "a1", "filename": "x.png"}], "recorded_by": "u1", "recorded_email": None, "recorded_name": None,
+           "recorded_role": "operator", "recorded_at": now, "observed_at": now, "client_id": f"web:{rid}", "history": [],
+           "updated_at": now}
+    repo.put_rows(manual.RESULTS, [row])
+    with pytest.raises(psycopg.errors.UniqueViolation):  # one row per offline entry
+        repo.put_rows(manual.RESULTS, [{**row, "id": db.new_id()}])
+    got = repo.find_rows(manual.RESULTS, project_id=pid, client_id=f"web:{rid}")
+    assert [(r["id"], r["witness"]["name"], r["observed_at"]) for r in got] == [(rid, "Pat", now)]
+    repo.put_rows(manual.ATTACHMENTS, [{"id": f"a-{rid}", "result_id": rid, "project_id": pid, "filename": "x.png",
+                                        "media_type": "image/png", "size": 3, "sha256": "abc", "data": b"\x89PN",
+                                        "created_at": now}])
+    assert bytes(repo.get_row(manual.ATTACHMENTS, f"a-{rid}")["data"]) == b"\x89PN"
+    iid = db.new_id()
+    repo.create_issue({"id": iid, "project_id": pid, "status": "open", "title": "t", "created_at": now, "updated_at": now})
+    repo.update_issue(iid, {"status": "closed", "closed_by": "u-closer", "closed_at": now})
+    assert repo.get_issue(iid)["closed_by"] == "u-closer"

@@ -30,6 +30,7 @@ from baler.commissioning import (
     gates,
     inventory,
     issues,
+    manual,
     mirror,
     phases,
     procedures,
@@ -152,8 +153,10 @@ def phase_gate(repo, project: dict, key: str, now: datetime) -> dict | None:
     run = next((r for r in repo.list_runs(pid, 20) if r.get("status") == "completed"), None)
     results = repo.get_results(run["id"]) if run else []
     procs = repo.list_procedures(pid)
-    latest = {pr["id"]: next((t for t in repo.list_test_runs(pr["id"], 20) if t["status"] == "completed"), None)
-              for pr in procs}
+    latest: dict[str, dict | None] = {}
+    for pr in procs:
+        got = next((t for t in repo.list_test_runs(pr["id"], 20) if t["status"] == "completed"), None)
+        latest[pr["id"]] = refresh_test_run(repo, got, now) if got else None
     reconcile_issues(repo, pid, None, [], now)  # an overdue waiver lapses first
     active = repo.list_issues(pid, issues.ACTIVE)
     risks = {r["issue_id"]: r for r in repo.list_risks(pid)}
@@ -232,9 +235,12 @@ class TestJob:
 
 
 def queue_test_run(repo, worker, project: dict, proc: dict, claims: dict, start: datetime, end: datetime,
-                   now: datetime, user_sub: str | None, user_email: str | None) -> dict:
+                   now: datetime, user_sub: str | None, user_email: str | None, methods: dict | None = None) -> dict:
+    """`methods` picks a method per step for this run (Baler#275);
+    procedures.choose_methods validates it and fills in the defaults."""
     scopes, prefixes = project_scopes(repo, project, claims)
     snapshot = {k: proc[k] for k in ("id", "name", "kind", "equip_class", "equip_uris", "steps", "window_hours")}
+    snapshot["methods"] = procedures.choose_methods(proc, methods)
     tr = {"id": db.new_id(), "project_id": project["id"], "procedure_id": proc["id"], "phase": phases.current(project["phases"]),
           "status": "queued", "started_at": start, "window_end": end, "requested_at": now, "finished_at": None,
           "triggered_by": user_sub, "scope": {"caller": scope_json(scopes[0]), "site_prefixes": prefixes},
@@ -270,6 +276,9 @@ def execute_test(repo, job: TestJob, clock: Callable[[], datetime], run_fn=engin
             truncated: set[str] = set()
             series = hist.window(ids, job.start, job.end + timedelta(seconds=1), truncated=truncated) if ids else {}
         per = procedures.evaluate(job.procedure, equips, results, series, truncated, (job.start, job.end))
+        per = manual.apply(per, job.procedure, job.procedure.get("methods") or procedures.choose_methods(job.procedure),
+                           repo.find_rows(manual.RESULTS, test_run_id=job.run_id),
+                           repo.find_rows("cx_active_runs", project_id=job.project_id), job.start)
         prev = next((r for r in repo.list_test_runs(job.procedure["id"], 20)
                      if r["id"] != job.run_id and r["status"] == "completed"), None)
         summary = procedures.summarize(per)
@@ -286,6 +295,10 @@ def execute_test(repo, job: TestJob, clock: Callable[[], datetime], run_fn=engin
                 reconcile_issues(repo, job.project_id, job.run_id, results, clock(), judged_from=job.start, kind="test_run")
             except Exception:  # the test run stands; the next run reconciles again
                 log.exception("cx test run %s: issue reconcile failed", job.run_id)
+        try:
+            method_issues(repo, repo.get_test_run(job.run_id) or {}, clock())
+        except Exception:
+            log.exception("cx test run %s: method issues failed", job.run_id)
     except Exception as exc:  # noqa: BLE001 - recorded on the row, never fatal to the worker
         log.error("cx test run %s failed:\n%s", job.run_id, traceback.format_exc())
         try:
@@ -294,6 +307,64 @@ def execute_test(repo, job: TestJob, clock: Callable[[], datetime], run_fn=engin
                            {"test_run_id": job.run_id, "error": error_text(exc)}, clock())
         except Exception:
             log.exception("cx test run %s: could not record the failure", job.run_id)
+
+
+def refresh_test_run(repo, tr: dict, now: datetime) -> dict:
+    """Re-apply a completed test run's methods with the manual results and
+    active runs recorded since (Baler#275): its statuses, summary and
+    issues follow a person's entry, or an active test finishing, without
+    re-reading history. Returns the run as stored."""
+    if not tr or tr.get("status") != "completed" or not tr.get("equipment"):
+        return tr
+    proc = tr.get("procedure") or {}
+    methods = proc.get("methods") or procedures.choose_methods(proc)
+    if set(methods.values()) == {"passive"} and not repo.find_rows(manual.RESULTS, test_run_id=tr["id"]):
+        return tr  # nothing but history behind it: unchanged since it ran
+    start = tr["started_at"] if isinstance(tr["started_at"], datetime) else datetime.fromisoformat(str(tr["started_at"]))
+    per = manual.apply(tr["equipment"], proc, methods, repo.find_rows(manual.RESULTS, test_run_id=tr["id"]),
+                       repo.find_rows("cx_active_runs", project_id=tr["project_id"]), start)
+    summary = {**(tr.get("summary") or {}), **procedures.summarize(per)}
+    if per != tr.get("equipment") or summary != tr.get("summary"):
+        repo.update_test_run(tr["id"], {"equipment": per, "summary": summary})
+        tr = {**tr, "equipment": per, "summary": summary}
+    method_issues(repo, tr, now)
+    return repo.get_test_run(tr["id"]) or tr
+
+
+def method_issues(repo, tr: dict, now: datetime) -> list[tuple]:
+    """Open an issue for each manual or active fail and each contradiction
+    the test run carries, and reconcile the rest (a later pass resolves,
+    a pass after the fix is the retest). Only results whose verdict
+    changed since the last time are applied, so re-reading a run is
+    idempotent."""
+    if not tr or not tr.get("equipment"):
+        return []
+    proc_id = tr["procedure_id"]
+    results = manual.issue_results(tr["equipment"], proc_id)
+    seen = dict((tr.get("summary") or {}).get("issue_signatures") or {})
+    fresh = []
+    for r in results:
+        sig = f"{r['status']}|{r['evidence'].get('manual_result_id') or r['evidence'].get('active_run_id')}"
+        key = f"{r['check_id']}|{r['subject']}"
+        if seen.get(key) != sig:
+            fresh.append(r)
+            seen[key] = sig
+    if not fresh:
+        return []
+    for r in fresh:
+        if r["status"] != "fail":
+            continue
+        try:
+            issue = issues.from_result(r, tr["id"], tr["project_id"], db.new_id, now, None)
+            issue["title"] = issues.title_for(r)
+            repo.create_issue(issue)
+            repo.add_issue_event(issue["id"], "open.method", None, None,
+                                 {"test_run_id": tr["id"], "check_id": r["check_id"], "evidence": r["evidence"]}, now)
+        except db.IssueExists:
+            pass
+    changes = reconcile_issues(repo, tr["project_id"], tr["id"], fresh, now, judged_from=None, kind="test_run")
+    repo.update_test_run(tr["id"], {"summary": {**(tr.get("summary") or {}), "issue_signatures": seen}})
+    return changes
 
 
 # ------------------------------------------------------- spec extraction (Cx 7)

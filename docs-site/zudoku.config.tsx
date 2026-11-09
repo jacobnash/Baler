@@ -57,7 +57,7 @@ const config: ZudokuConfig = {
       type: "category",
       label: "Documentation",
       icon: "book",
-      items: ["/introduction", "/architecture", "/multi-site", "/edge-nodes", "/connectors", "/gateway-auth", "/his-query", "/fault-detection", "/quality", "/derivation", "/webhooks", "/validate", "/mapping-eval", "/model-step", "/mapping-review", "/naming-conventions", "/memory", "/equipment-inference", "/commissioning-llm", "/commissioning-walkthrough", "/haxall-drop-in", "/haystack-api", "/haystack-conformance", "/haystack-puller", "/adding-a-data-source", "/weather-stations", "/backups", "/building-export", "/history-compression", "/schema-migrations", "/nash-srv-deploy", "/live-check", "/scale-test", "/post-deploy-verify", "/windrow", "/windrow-adding-a-new-source", "/windrow-periodic-discovery"],
+      items: ["/introduction", "/architecture", "/multi-site", "/edge-nodes", "/connectors", "/gateway-auth", "/his-query", "/fault-detection", "/quality", "/derivation", "/webhooks", "/validate", "/mapping-eval", "/model-step", "/mapping-review", "/naming-conventions", "/memory", "/equipment-inference", "/commissioning-llm", "/commissioning-walkthrough", "/commissioning-methods", "/haxall-drop-in", "/haystack-api", "/haystack-conformance", "/haystack-puller", "/adding-a-data-source", "/weather-stations", "/backups", "/building-export", "/history-compression", "/schema-migrations", "/nash-srv-deploy", "/live-check", "/scale-test", "/post-deploy-verify", "/windrow", "/windrow-adding-a-new-source", "/windrow-periodic-discovery"],
     },
     {
       // Baler Notebooks (the "Code" epic, #90-#95). functions.mdx is

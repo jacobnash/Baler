@@ -45,6 +45,12 @@ ROW_TABLES: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
                            "created_at", "updated_at"), frozenset({"claims", "messages"})),
     "cx_agent_proposals": (("id", "project_id", "session_id", "kind", "payload", "reason", "status", "result",
                             "decided_by", "decided_at", "created_at"), frozenset({"payload", "result"})),
+    "cx_manual_results": (("id", "project_id", "procedure_id", "test_run_id", "equip_uri", "step_id", "status", "note", "witness",
+                           "attachments", "recorded_by", "recorded_email", "recorded_name", "recorded_role", "recorded_at",
+                           "observed_at", "client_id", "history", "updated_at"),
+                          frozenset({"witness", "attachments", "history"})),
+    "cx_manual_attachments": (("id", "result_id", "project_id", "filename", "media_type", "size", "sha256", "data", "created_at"),
+                              frozenset()),
     "cx_mappings": (("id", "project_id", "spec_item_id", "equip_uri", "confidence", "basis", "alternatives", "status",
                      "decided_by", "decided_at", "written_back", "created_at"),
                     frozenset({"basis", "alternatives", "written_back"})),
@@ -58,7 +64,7 @@ _JSON_COLS = {"equip_uris", "steps", "schedule", "scope", "procedure", "equipmen
 
 ISSUE_COLS = ("id", "project_id", "equip_uri", "check_id", "subject", "status", "title", "severity", "assignee",
               "detail", "source", "source_id", "opened_run", "last_seen_run", "closed_run", "created_by",
-              "created_at", "updated_at", "closed_at", "resolved_at", "resolved_by", "retest")
+              "created_at", "updated_at", "closed_at", "resolved_at", "resolved_by", "retest", "closed_by")
 _ISSUE_JSON = ("detail", "resolved_by", "retest")
 RISK_COLS = ("id", "issue_id", "accepted_by", "accepted_email", "reason", "review_by", "created_at", "revoked_at",
              "revoked_by", "owner", "retest_trigger", "accepted_name", "accepted_name_source")
