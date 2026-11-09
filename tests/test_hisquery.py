@@ -632,7 +632,10 @@ def test_run_query_pages_series_by_point_id(graph, monkeypatch):
         assert read == [sorted(s["id"] for s in page["series"])]  # history for the page only
         got += [s["id"] for s in page["series"]]
         after = page["after"]
+        # a cut-short page says so in words too (#280); the last doesn't
+        assert (page["incomplete"] == "seriesLimit of 2 reached; pass after to read on") == (after is not None)
         if after is None:
+            assert page["incomplete"] is None
             break
     assert pages == (n + 1) // 2 and sorted(got) == want and len(got) == n  # each point once
 
