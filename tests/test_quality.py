@@ -120,6 +120,56 @@ def test_judge_marks_unit_suspect_samples():
     assert set(flags.values()) == {"unit_suspect"} and len(flags) == 15
 
 
+def test_spike_indexes_below_start_are_neighbours_only():
+    values = [72.0, 72.1, 71.9, 72.0, 72.2, 72.1, 140.0, 72.0, 71.8, 72.1, 72.0, 72.1, 71.9]
+    assert quality.spike_indexes(values, start=6) == [6]
+    assert quality.spike_indexes(values, start=7) == []
+
+
+def test_spike_indexes_match_the_statistics_median_reference():
+    import random
+    import statistics
+
+    def reference(values, half=5, k=6.0):
+        out = []
+        for i in range(half, len(values) - half):
+            nb = values[i - half:i] + values[i + 1:i + 1 + half]
+            med = statistics.median(nb)
+            mad = statistics.median(abs(v - med) for v in nb)
+            if abs(values[i] - med) > k * 1.4826 * max(mad, max(abs(med) * 0.001, 1e-6)):
+                out.append(i)
+        return out
+
+    rng = random.Random(268)
+    for _ in range(50):
+        values = [72.0 + rng.gauss(0, rng.choice([0.0, 0.01, 0.5])) for _ in range(200)]
+        for i in rng.sample(range(200), 5):
+            values[i] += rng.choice([-1, 1]) * rng.uniform(0, 30)
+        assert quality.spike_indexes(values) == reference(values)
+
+
+def test_context_lets_the_previous_pass_s_unjudged_tail_be_judged_now():
+    # The previous pass ended at a spike with too few right-hand neighbours;
+    # this pass gets it back as context and judges it, without re-judging
+    # the older context.
+    values = [72.0, 72.1, 71.9, 72.0, 72.2, 72.1, 72.0, 72.1, 71.9, 140.0]
+    older = [(T0 + timedelta(minutes=i), v) for i, v in enumerate(values)]
+    new = [(T0 + timedelta(minutes=10 + i), v, None) for i, v in enumerate([72.0, 71.8, 72.1, 72.0, 72.1, 71.9])]
+    flags, _ = quality.judge("Zone_Air_Temperature_Sensor", "°F", new, older)
+    assert flags == {T0 + timedelta(minutes=9): "spike"}
+    # an old spike deeper in the context (already judged last pass) isn't flagged again here
+    older[2] = (older[2][0], 140.0)
+    flags, _ = quality.judge("Zone_Air_Temperature_Sensor", "°F", new, older)
+    assert T0 + timedelta(minutes=2) not in flags
+
+
+def test_judge_only_flags_just_the_late_rows():
+    values = [72.0, 72.1, 71.9, 72.0, 72.2, 72.1, 95.0, 72.0, 71.8, 72.1, 72.0, 72.1, 180.0, 72.0]
+    samples = _samples(values)
+    flags, _ = quality.judge("Zone_Air_Temperature_Sensor", "°F", samples, only={T0 + timedelta(minutes=6)})
+    assert flags == {T0 + timedelta(minutes=6): "spike"}  # the 180 isn't a late row: someone else's job
+
+
 def test_cur_mode_ignores_a_reading_the_device_flags(monkeypatch):
     seen = []
     monkeypatch.setattr(fault_detector, "handle_cur_reading", lambda *a: seen.append(a[3]))
@@ -205,6 +255,126 @@ def test_sweep_flags_without_touching_values_and_suggests_a_unit(conn):
     again = quality.sweep(conn, store=None, now=now, meta=meta)  # idempotent: nothing new to flag
     assert again["flagged"] == 0
     assert len([s for s in quality.open_suggestions(conn) if s["point_uri"] == "urn:test-quality:celsius"]) == 1
+
+
+# --- the incremental sweep (#268) --------------------------------------------
+
+ZONE = ("Zone_Air_Temperature_Sensor", "°F")
+
+
+@pytest.fixture
+def sweeper(conn):
+    import uuid
+
+    name = f"test:quality-{uuid.uuid4().hex[:8]}"
+    s = quality.Sweeper(conn, store=None, name=name, interval=300.0, max_span=timedelta(hours=2), log=lambda m: None)
+    yield s
+    conn.execute("DELETE FROM quality_watermark WHERE sweeper = %s", (name,))
+    conn.execute("DELETE FROM reading_feed_consumers WHERE consumer = %s", (name,))
+    conn.execute("DELETE FROM quality_late WHERE sweeper = %s", (name,))
+
+
+def _write(conn, uri, pairs, feed=False):
+    from baler import reading_feed, timeseries
+
+    rows = [(uri, v, ts) for ts, v in pairs]
+    timeseries.write_point_values(conn, rows, then=reading_feed.append_from_stage if feed else None)
+
+
+def _flags(conn, uri):
+    return dict(conn.execute("SELECT ts, quality FROM point_history WHERE point_uri = %s AND quality IS NOT NULL",
+                             (uri,)).fetchall())
+
+
+@pytest.mark.integration
+def test_the_incremental_sweep_judges_each_row_once_and_keeps_a_watermark(conn, sweeper):
+    uri = "urn:test-quality:inc"
+    meta = {uri: ZONE}
+    now = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(minutes=10)
+    first = [72.0, 72.1, 71.9, 72.0, 72.2, 72.1, 72.0, 72.1, 71.9, 72.0, 72.1, 180.0, 72.0, 71.9, 72.1, 72.0, 72.1,
+             95.0, 72.0, 72.1]  # 95 is the 3rd newest: too few neighbours after it for this pass
+    _write(conn, uri, [(now - timedelta(minutes=len(first) - i), v) for i, v in enumerate(first)])
+    sweeper.start(now)
+    assert sweeper.judged_to == now - quality.LOOKBACK
+
+    one = sweeper.sweep(now=now, meta=meta)
+    assert one["rows"] == 20 and one["until"] == now.isoformat()
+    assert set(_flags(conn, uri).values()) == {"out_of_range"}
+    assert conn.execute("SELECT judged_to FROM quality_watermark WHERE sweeper = %s",
+                        (sweeper.name,)).fetchone()[0] == now
+
+    later = now + timedelta(minutes=6)
+    _write(conn, uri, [(now + timedelta(minutes=i + 1), v) for i, v in enumerate([72.0, 71.8, 72.1, 72.0, 72.1, 71.9])])
+    two = sweeper.sweep(now=later, meta=meta)
+    assert two["rows"] == 6  # what's new, not the hour again (no sample inside the 30 s overlap)
+    assert two["context_rows"] == quality.CONTEXT
+    assert _flags(conn, uri)[now - timedelta(minutes=3)] == "spike"  # judged now, from its context
+    assert sweeper.lag_s(later) == 0.0
+    assert sweeper.sweep(now=later, meta=meta)["flagged"] == 0  # idempotent
+
+
+@pytest.mark.integration
+def test_late_rows_are_judged_by_the_overlap_or_the_feed_watcher(conn, sweeper):
+    uri = "urn:test-quality:late"
+    meta = {uri: ZONE}
+    now = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(minutes=5)
+    _write(conn, uri, [(now - timedelta(minutes=30 - i), 72.0 + (i % 3) * 0.1) for i in range(30)])
+    sweeper.start(now)
+    sweeper.sweep(now=now, meta=meta)
+    assert _flags(conn, uri) == {}
+
+    # Committed after the pass that covered their ts: one 10 minutes late
+    # (the watcher's), one 10 s late (inside the overlap: the next window's).
+    far, near = now - timedelta(minutes=10, seconds=30), now - timedelta(seconds=10)
+    _write(conn, uri, [(far, 180.0), (near, 190.0)], feed=True)
+    assert sweeper.watch() == 1
+    assert conn.execute("SELECT ts FROM quality_late WHERE point_uri = %s", (uri,)).fetchall() == [(far,)]
+
+    out = sweeper.sweep(now=now + timedelta(minutes=1), meta=meta)
+    assert (out["late_rows"], out["late_flagged"]) == (1, 1)
+    assert _flags(conn, uri) == {far: "out_of_range", near: "out_of_range"}
+    assert conn.execute("SELECT count(*) FROM quality_late WHERE point_uri = %s", (uri,)).fetchone()[0] == 0
+    assert sweeper.status()["late_seen"] == 1
+
+
+@pytest.mark.integration
+def test_the_overlap_widens_to_the_ingest_delay_the_feed_shows(conn, sweeper):
+    # A listener running 100 s behind: without this, every row would be
+    # "late" relative to a 30 s overlap and go the slow, one-by-one way.
+    uri = "urn:test-quality:delay"
+    meta = {uri: ZONE}
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    sweeper.start(now)
+    sweeper.sweep(now=now, meta=meta)
+    _write(conn, uri, [(now - timedelta(seconds=3000), 180.0)], feed=True)  # one very late reading...
+    assert sweeper.watch() == 1
+    assert sweeper.overlap == quality.OVERLAP  # ...is the late path's, not a reason to widen
+    filler = [(now - timedelta(seconds=100, microseconds=i), 72.0) for i in range(1, quality.DELAY_MIN_READINGS)]
+    _write(conn, uri, [(now - timedelta(seconds=100), 181.0), *filler], feed=True)  # ~100 s after their ts
+    assert sweeper.watch() == quality.DELAY_MIN_READINGS  # measured as it was recorded: these are late
+    assert 120 <= sweeper.overlap.total_seconds() <= 130
+    _write(conn, uri, [(now - timedelta(seconds=60), 182.0)], feed=True)
+    assert sweeper.watch() == 0  # inside the widened overlap: the next window's
+    out = sweeper.sweep(now=now + timedelta(seconds=5), meta=meta)
+    assert out["overlap_used_s"] >= 120 and out["late_rows"] == 1 + quality.DELAY_MIN_READINGS
+    assert sorted(_flags(conn, uri).values()) == ["out_of_range"] * 3
+    assert sweeper.status()["ingest_delay_s"] >= 100
+
+
+@pytest.mark.integration
+def test_a_long_gap_is_caught_up_in_bounded_passes(conn, sweeper):
+    uri = "urn:test-quality:gap"
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    sweeper.max_span = timedelta(minutes=10)
+    sweeper.start(now)
+    assert sweeper.behind(now)
+    out = sweeper.sweep(now=now, meta={uri: ZONE})
+    assert out["span_s"] == 600.0 and sweeper.lag_s(now) > 2900
+    passes = 1
+    while sweeper.behind(now):
+        sweeper.sweep(now=now, meta={uri: ZONE})
+        passes += 1
+    assert passes == 6 and sweeper.lag_s(now) <= 600
 
 
 @pytest.mark.integration

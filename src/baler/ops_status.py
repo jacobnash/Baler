@@ -233,7 +233,10 @@ def _building_signals(scope=None) -> dict[str, Any]:
             out["reading_feed"] = reading_feed.consumer_status(conn)
             conn.rollback()
             # The listener supervisor's broker-drop count and workers (#233).
-            out["listener"] = heartbeat.details(conn).get("mqtt_listener")
+            details = heartbeat.details(conn)
+            out["listener"] = details.get("mqtt_listener")
+            # fault_detector's quality sweep (#268): its watermark lag.
+            out["quality"] = (details.get("fault_detector") or {}).get("quality")
             conn.rollback()
             try:
                 org_row = conn.execute("SELECT COUNT(*) FROM orgs").fetchone()
@@ -314,13 +317,31 @@ def _feed_state(building: dict[str, Any], consumer: str) -> tuple[str, str] | No
     return None
 
 
+# The quality sweep is behind once its watermark trails now by this many of
+# its intervals (#268): about one when keeping up, and a pass that can't
+# finish within its interval makes it grow.
+QUALITY_LAG_INTERVALS = 3.0
+
+
+def _quality_state(building: dict[str, Any]) -> tuple[str, str] | None:
+    """("degraded", why) when fault_detector's incremental quality sweep
+    has fallen behind: new samples go unflagged for longer than it's set
+    to allow."""
+    q = building.get("quality") or {}
+    lag, interval = q.get("watermark_lag_s"), q.get("interval_s")
+    if not lag or not interval or lag <= QUALITY_LAG_INTERVALS * interval:
+        return None
+    return "degraded", (f"the quality sweep is {lag:.0f} s behind (every {interval:.0f} s; last pass "
+                        f"{q.get('sweep_s')} s over {q.get('rows')} rows)")
+
+
 def _infer_faults(building: dict[str, Any], *, platform_ok: bool) -> tuple[str, str | None]:
     if not platform_ok:
         return "down", "historian unreachable"
     stale = _heartbeat_state(building, "fault_detector")
     if stale:
         return stale
-    behind = _feed_state(building, "fault_detector")
+    behind = _feed_state(building, "fault_detector") or _quality_state(building)
     if behind:
         return behind
     n = building.get("open_faults", 0)
