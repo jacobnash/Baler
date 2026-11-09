@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import signal
 import statistics
 import subprocess
@@ -375,12 +374,15 @@ def cmd_soak(args) -> None:
             conn.execute("SELECT 1")
             sample["pg_roundtrip_s"] = round(time.perf_counter() - t1, 4)
             result["samples"].append(sample)
-            free_gb = shutil.disk_usage(common.REPO).free / 1e9
+            # Docker's data root, where the stack's volumes grow (#269), not the checkout's disk
+            disk_low, free = ladder.disk_check(args.min_free_gb)
+            sample["free"] = free
             d = sample["disk"]
             print(f"  t={sample['t']:>7}s gen {sample['gen_rate']}/s lag p95 {sample['lag'].get('p95_s')} s "
                   f"hot {d['hot_bytes'] / 1e6:.0f} MB ({d['hot_chunks']}) compressed {d['compressed_bytes'] / 1e6:.0f} MB "
                   f"({d['compressed_chunks']}) backlog {ch['backlog']} oldest-hot {ch['oldest_hot_end_age_s']} s "
-                  f"{'COMPRESSING ' if sample['compressing'] else ''}runs {len(result['runs'])} disk {free_gb:.1f} GB",
+                  f"{'COMPRESSING ' if sample['compressing'] else ''}runs {len(result['runs'])} "
+                  f"disk free: docker root {free['docker_root_free_gb']} GB, checkout {free['repo_free_gb']} GB",
                   flush=True)
             if now >= next_probe:
                 was = state["running"] or bool(state.get("last_seen_running", 0) > now - args.sample_every)
@@ -406,8 +408,9 @@ def cmd_soak(args) -> None:
                 result["late"].append(entry)
                 next_late = time.time() + args.late_every
                 print(f"  late writes into compressed chunk: {entry}", flush=True)
-            if free_gb < args.min_free_gb:
-                result["disk_low"] = round(free_gb, 1)
+            if disk_low:
+                result["disk_low"] = (free["docker_root_free_gb"] if free["docker_root_free_gb"] is not None
+                                      else free["repo_free_gb"])
                 break
             ladder.write_result(result)
         soak_end = time.time()
@@ -612,7 +615,7 @@ def add_parser(sub, common_args) -> None:
     p.add_argument("--docker-stats", action="store_true", help="docker stats every sample (slow at high counts)")
     p.add_argument("--graph-timeout", type=float, default=3600.0)
     p.add_argument("--abort-lag", type=float, default=300.0)
-    p.add_argument("--min-free-gb", type=float, default=5.0)
+    p.add_argument("--min-free-gb", type=float, default=5.0, help="stop when Docker's data root has less free")
     p.add_argument("--budgets", default=str(common.HERE / "budgets.json"))
     p.add_argument("--no-up", action="store_true", help="the stack is already up")
     p.add_argument("--no-build", action="store_true", help="up without rebuilding the images")

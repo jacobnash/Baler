@@ -20,7 +20,10 @@ no growing backlog, no broker drops), responsive reads (the probes stay in
 budget), graceful degradation (no container restart or OOM kill; lag stays
 measurable). A step can also stop for reasons that are *not* a Baler
 ceiling - the generator couldn't offer the rate, the live install on the
-same host degraded, the host disk ran low - and the result says which.
+same host degraded, the disk holding Docker's data ran low - and the result
+says which. Every step also names its limiter (limiter.py) from evidence
+sampled during the soak (evidence.py): the bottleneck, or for a passing
+step the next suspect (Baler#269).
 
 See docs-site/pages/scale-test.mdx for running it on nash-srv.
 """
@@ -28,11 +31,9 @@ See docs-site/pages/scale-test.mdx for running it on nash-srv.
 from __future__ import annotations
 
 import argparse
-import itertools
 import json
 import os
 import secrets
-import shutil
 import signal
 import statistics
 import subprocess
@@ -44,6 +45,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common
+import evidence
+import limiter
 
 DEFAULT_STEPS = [10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000]
 SMALL_HOST_STEPS = [1_000, 2_500, 5_000]  # prepended when the host has few CPUs
@@ -159,6 +162,8 @@ class Endpoints:
         self.dsn = (f"postgresql://{user}:{env.get('POSTGRES_PASSWORD') or user}@127.0.0.1:"
                     f"{ports['postgres'][5432]}/{env.get('BALER_PG_DB') or user}")
         self.gen_password = env.get("SCALE_GEN_MQTT_PASSWORD", "")
+        jaeger = ports.get("jaeger", {}).get(16686)
+        self.jaeger = f"http://127.0.0.1:{jaeger}" if jaeger else None
 
 
 def busy_ports(config: dict) -> list[int]:
@@ -286,6 +291,7 @@ def run_probes(ep: Endpoints, s, budgets: dict, ctx: dict) -> list[dict]:
             continue
         path = probe["path"].format(**ctx)
         times, size, status = [], 0, None
+        t_start = time.time()
         for _ in range(budgets.get("runs", 5)):
             t0 = time.perf_counter()
             try:
@@ -297,7 +303,7 @@ def run_probes(ep: Endpoints, s, budgets: dict, ctx: dict) -> list[dict]:
         out.append({"name": probe["name"], "path": path, "status": status, "bytes": size,
                     "cold_s": round(times[0], 3), "median_s": round(statistics.median(times[1:] or times), 3),
                     "max_s": round(max(times), 3), "budget_s": probe["warm_median_s"], "max_bytes": probe.get("max_bytes"),
-                    "source": probe["source"]})
+                    "source": probe["source"], "t0": round(t_start, 3), "t1": round(time.time(), 3)})
     return out
 
 
@@ -718,6 +724,46 @@ def finish_tags_storm(storm: dict, ep: Endpoints, points: int, storm_points: int
             "lag_max_s": round(lags[-1], 2) if lags else None}
 
 
+_DISK_FALLBACK_WARNED = False
+
+
+def disk_check(min_free_gb: float) -> tuple[bool, dict]:
+    """(stop?, free space) for `run` and `soak`. The guard watches Docker's
+    data root (`docker info` DockerRootDir), where the stack's volumes grow,
+    not the checkout's disk, which it used to (#269): on nash-srv they are
+    separate disks, and a guard on the checkout's would never fire while a
+    soak fills Docker's. Both are reported. Only when the Docker root can't
+    be read or stat'ed does it fall back to the checkout's disk, with a
+    warning (once)."""
+    global _DISK_FALLBACK_WARNED
+    root = common.docker_root_reported()
+    docker = common.free_gb(root) if root else None
+    repo = common.free_gb(common.REPO)
+    info = {"docker_root": root or None, "docker_root_free_gb": None if docker is None else round(docker, 1),
+            "repo_free_gb": None if repo is None else round(repo, 1),
+            "watched": "docker_root" if docker is not None else "checkout"}
+    if docker is None and not _DISK_FALLBACK_WARNED:
+        _DISK_FALLBACK_WARNED = True
+        why = f"{root} isn't visible from here" if root else "`docker info` gave no DockerRootDir"
+        print(f"WARNING: disk guard: {why}; watching the checkout's disk ({common.REPO}) instead, "
+              "which may not be where the stack's volumes grow", file=sys.stderr, flush=True)
+    watched = docker if docker is not None else repo
+    return watched is not None and watched < min_free_gb, info
+
+
+def start_evidence(ep: Endpoints, sysmon, args) -> evidence.Sampler | None:
+    """The limiter's evidence sampler (#269) for this step, or None."""
+    if getattr(args, "no_evidence", False):
+        return None
+    try:
+        ids = compose("ps", "-q", check=False, capture=True).stdout.split()
+        return evidence.Sampler(evidence.discover(ids), lambda: pg_connect(ep), sysmon.snapshot,
+                                every=args.evidence_every, docker_root=common.docker_root()).start()
+    except Exception as exc:  # noqa: BLE001 - evidence never fails a step
+        print(f"evidence sampler unavailable: {exc!r}", flush=True)
+        return None
+
+
 # ----------------------------------------------------------------- evaluation
 
 def evaluate(step: dict) -> tuple[str, list[str]]:
@@ -819,6 +865,7 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
     if g.get("scale_points", 0) < points:
         step["graph_timeout"] = args.graph_timeout
         step["status"], step["reasons"] = evaluate(step)
+        step["limiter"] = limiter.verdict(step)
         return step
     print(f"graph: {g['scale_points']} points in {step['graph']['ingest_s']} s", flush=True)
 
@@ -828,39 +875,46 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
     sysmon = Sys(ep)
     canary = Canary(ep)
     samples: list[dict] = []
+    ev = None
     try:
         time.sleep(args.warmup)
+        ev = start_evidence(ep, sysmon, args)
         soak_start = time.time()
         w0 = chunk_writes(conn)
         sys0 = sysmon.snapshot()
         feed0 = feed_status(conn)
         lst0 = listener_status(conn)
         storm = start_tags_storm(ep, args, points, outdir) if args.tags_storm else None
-        hb: dict[str, list[datetime]] = {}
         while time.time() - soak_start < args.soak:
             time.sleep(args.sample_every)
             tripped, live = safety.check()
             st = read_stats(stats_file)
             sample = {"t": round(time.time() - soak_start, 1), "live": live, "stored_total": chunk_writes(conn),
                       "gen_rate": round(st.get("sent_rate_10s", 0)), "gen_behind_s": round(st.get("behind_s", 0), 1),
-                      "broker": sysmon.snapshot(), "docker": docker_stats(), "lag": canary.stats(soak_start),
-                      "feed": feed_status(conn), "listener": listener_status(conn)}
+                      "broker": sysmon.snapshot()}
+            if not (ev and ev.has_cgroups):
+                # `docker stats` costs ~2 s and dockerd CPU per call: only
+                # without the evidence sampler's cgroup reads (#269)
+                t1 = time.perf_counter()
+                sample["docker"] = docker_stats()
+                sample["docker_stats_s"] = round(time.perf_counter() - t1, 3)  # its cost, for the overhead record
+            sample.update(lag=canary.stats(soak_start), feed=feed_status(conn), listener=listener_status(conn))
             t1 = time.perf_counter()
             conn.execute("SELECT 1")
             sample["pg_roundtrip_s"] = round(time.perf_counter() - t1, 4)
-            for svc, at in conn.execute("SELECT service, beat_at FROM service_heartbeats"):
-                if not hb.get(svc) or hb[svc][-1] != at:
-                    hb.setdefault(svc, []).append(at)
+            disk_low, disk = disk_check(args.min_free_gb)
+            sample["disk"] = disk
             samples.append(sample)
-            free_gb = shutil.disk_usage(common.REPO).free / 1e9
             lag_now = sample["lag"].get("max_s") or 0
             print(f"  t={sample['t']:>6}s gen {sample['gen_rate']}/s lag p95 {sample['lag'].get('p95_s')} s "
-                  f"live {live} disk {free_gb:.1f} GB", flush=True)
+                  f"live {live} disk free: docker root {disk['docker_root_free_gb']} GB, "
+                  f"checkout {disk['repo_free_gb']} GB", flush=True)
             if tripped:
                 step["live_safety_tripped"] = live
                 break
-            if free_gb < args.min_free_gb:
-                step["disk_low"] = round(free_gb, 1)
+            if disk_low:
+                step["disk_low"] = disk["docker_root_free_gb"] if disk["docker_root_free_gb"] is not None \
+                    else disk["repo_free_gb"]
                 break
             states = container_states()
             if any(states.get(s, {}).get("restarts", 0) > c.get("restarts", 0) for s, c in states0.items()):
@@ -876,6 +930,8 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
             step["tags_storm"] = finish_tags_storm(storm, ep, points, args.tags_storm, canary)
 
         # 3. read probes and rules, still under load
+        if ev:
+            ev.phase("probes")
         s = session(ep)
         ctx = {}
         t_cx = time.time()
@@ -885,11 +941,13 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
             step["cx_error"] = repr(exc)[:300]
         step["cx_run_s"] = round(time.time() - t_cx, 1)
         step["probes"] = run_probes(ep, s, budgets, ctx)
+        if ev:
+            ev.stop()
         step["graph"].update(graph_counts(ep))
-        step["rules"] = {svc: {"cycles": len(v) - 1,
-                               "median_cycle_s": round(statistics.median(
-                                   [(b - a).total_seconds() for a, b in itertools.pairwise(v)]), 1) if len(v) > 2 else None}
-                         for svc, v in hb.items()}
+        # rules.*.median_cycle_s is gone (#269): beat-to-beat at the ladder's
+        # own sampling interval measured the sampling, not the engines. Their
+        # own timings are in rules.<svc>.heartbeat (his.sweep_s, quality.sweep_s).
+        step["rules"] = {}
         # Rule daemons on the reading feed (#243): readings consumed per
         # second, how far behind they ran, and what they missed.
         details = heartbeat_details(conn)
@@ -902,6 +960,8 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
                          "lag_readings_last": f1["lag_readings"]}
             r["heartbeat"] = details.get(svc)
     finally:
+        if ev and not ev.stopped:
+            ev.stop()
         gen.send_signal(signal.SIGTERM)
         try:
             gen.wait(timeout=60)
@@ -936,20 +996,28 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
                       "rows_per_day_at_this_rate": round(stored_rps * 86400)}
     step["generator"] = {"target_rps": points / args.interval, "achieved_rps": round(offered_rps, 1),
                          "offered_ratio": round(offered_rps / (points / args.interval), 4),
-                         "behind_max_s": st.get("behind_max_s"), "procs": st.get("procs"), "cpu_s": st.get("cpu_s")}
+                         "behind_max_s": st.get("behind_max_s"), "procs": st.get("procs"), "cpu_s": st.get("cpu_s"),
+                         "behind_soak_max_s": max((x["gen_behind_s"] for x in samples), default=None)}
     step["lag"] = canary.stats(soak_start)
     step["broker"] = sys1
     step["db"] = db_metrics(conn)
     if step["db"].get("bytes_per_row"):
         step["db"]["bytes_per_day_raw_at_this_rate"] = round(step["db"]["bytes_per_row"] * stored_rps * 86400)
-    step["resources"] = summarize_docker(samples)
+    step["resources"] = (evidence.resources(ev.ticks) if ev and ev.has_cgroups and ev.ticks
+                         else summarize_docker(samples))
     step["listener"] = summarize_listener(samples, lst0, lst1)
     states1 = container_states()
     step["containers"] = {svc: {**c, "restarts_delta": c["restarts"] - states0.get(svc, {}).get("restarts", 0)}
                           for svc, c in states1.items()}
     step["samples"] = samples
     step["soak_s"] = round(dur, 1)
+    if ev:
+        step["evidence"] = ev.summary()
+        step["evidence"]["overhead"]["docker_stats_s"] = round(sum(x.get("docker_stats_s", 0) for x in samples), 2)
+        time.sleep(3)  # Jaeger's batch processor: the probes' last spans
+        evidence.probe_breakdowns(ep.jaeger, step["probes"])
     step["status"], step["reasons"] = evaluate(step)
+    step["limiter"] = limiter.verdict(step)
     conn.close()
     return step
 
@@ -1016,16 +1084,32 @@ def cmd_run(args) -> None:
         step = run_step(ep, args, points, prev, budgets, safety, outdir)
         result["steps"].append(step)
         path = write_result(result)
-        print(f"step {points:,}: {step['status']} {step.get('reasons')}\n  -> {path}", flush=True)
+        print(f"step {points:,}: {step['status']} {step.get('reasons')}\n"
+              f"  limiter: {limiter.short(step.get('limiter'))}\n  -> {path}", flush=True)
         prev = points
         if step["status"] != "pass" and not args.continue_on_fail:
             break
     passed = [s["points"] for s in result["steps"] if s["status"] == "pass"]
-    result["max_passing_points"] = max(passed) if passed else 0
+    # None, not 0: a run that started at a later step (--no-up) says
+    # nothing about the steps below it (#269)
+    result["max_passing_points"] = max(passed) if passed else None
     first_bad = next((s for s in result["steps"] if s["status"] != "pass"), None)
     result["stopped_at"] = first_bad and {"points": first_bad["points"], "status": first_bad["status"],
                                           "reasons": first_bad["reasons"]}
-    print(f"\nmax passing step: {result['max_passing_points']:,} points -> {write_result(result)}")
+    result["limiters"] = [{"points": s["points"], "status": s["status"], "limiter": limiter.short(s.get("limiter"))}
+                          for s in result["steps"]]
+    print("\n" + summary_text(result) + f"\n-> {write_result(result)}")
+
+
+def summary_text(result: dict) -> str:
+    """The end-of-run summary: each step's verdict and limiter, then the
+    highest passing step of this run."""
+    lines = ["limiter per step:"]
+    for s in result["steps"]:
+        lines.append(f"  {s['points']:>9,}  {s['status']:<12}  {limiter.short(s.get('limiter'))}")
+    mp = result.get("max_passing_points")
+    lines.append(f"max passing step: {f'{mp:,} points' if mp else 'none in this run'}")
+    return "\n".join(lines)
 
 
 def cmd_crash(args) -> None:
@@ -1112,8 +1196,8 @@ def cmd_crash(args) -> None:
 def cmd_table(args) -> None:
     """Markdown rows for docs-site/pages/scale-test.mdx's results table."""
     print("| Run | Host (nproc, model, RAM) | Durable | Points | Status | Offered/s | Stored/s | Stored/s per CPU | "
-          "p95 lag | read?filter=point | readAll(equip) | Cx report | First failure |")
-    print("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+          "p95 lag | read?filter=point | readAll(equip) | Cx report | First failure | Limiter (or next suspect) |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for path in args.files:
         r = json.loads(Path(path).read_text())
         hw = r["hardware"]
@@ -1130,7 +1214,7 @@ def cmd_table(args) -> None:
                   f"{ing.get('offered_rps', '-')} | {ing.get('stored_rps', '-')} | {ing.get('stored_rps_per_host_cpu', '-')} | "
                   f"{s.get('lag', {}).get('p95_s', '-')} s | {med('read?filter=point')} | "
                   f"{med('readAll(equip) hisRead(today)')} | {med('Cx report, 500-point project')} | "
-                  f"{(s.get('reasons') or ['-'])[0]} |")
+                  f"{(s.get('reasons') or ['-'])[0]} | {limiter.short(s.get('limiter')).replace('|', '/')} |")
 
 
 def main(argv=None) -> None:
@@ -1171,7 +1255,10 @@ def main(argv=None) -> None:
     p.add_argument("--sample-every", type=float, default=15.0)
     p.add_argument("--graph-timeout", type=float, default=3600.0, help="seconds to wait for a step's tags to reach the graph")
     p.add_argument("--abort-lag", type=float, default=300.0, help="stop a soak early once lag passes this")
-    p.add_argument("--min-free-gb", type=float, default=5.0, help="stop when the host disk has less free")
+    p.add_argument("--min-free-gb", type=float, default=5.0, help="stop when Docker's data root has less free")
+    p.add_argument("--evidence-every", type=float, default=5.0,
+                   help="seconds between limiter evidence samples (cgroups, threads, pg waits, disk; #269)")
+    p.add_argument("--no-evidence", action="store_true", help="no limiter evidence sampling (the verdict has less to go on)")
     p.add_argument("--budgets", default=str(common.HERE / "budgets.json"))
     p.add_argument("--continue-on-fail", action="store_true")
     p.add_argument("--tags-storm", type=int, default=0,

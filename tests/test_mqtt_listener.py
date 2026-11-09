@@ -339,26 +339,27 @@ def test_the_supervisor_restarts_a_dead_child_with_backoff_and_counts_it(monkeyp
     class Proc:
         made: typing.ClassVar[list] = []
 
-        def __init__(self, target, args, name, daemon):
-            self.name, self.alive, self.exitcode, self.pid = name, True, None, len(Proc.made) + 100
+        def __init__(self, cmd):
+            self.cmd, self.returncode, self.pid = cmd, None, len(Proc.made) + 100
             Proc.made.append(self)
 
-        def start(self):
-            pass
-
-        def is_alive(self):
-            return self.alive
+        def poll(self):
+            return self.returncode
 
         def die(self, code):
-            self.alive, self.exitcode = False, code
+            self.returncode = code
 
     clock = [1000.0]
     monkeypatch.setattr(mqtt_listener.time, "monotonic", lambda: clock[0])
-    sup = mqtt_listener.Supervisor(mqtt_listener.parse_args(["--workers", "2"]))
-    sup.ctx = type("Ctx", (), {"Process": Proc})()
+    monkeypatch.setattr(mqtt_listener.subprocess, "Popen", Proc)
+    sup = mqtt_listener.Supervisor(mqtt_listener.parse_args(["--workers", "2"]), ["--workers", "2"])
     sup.spawn("retire", "retire", retire_ids=["baler-mqtt-listener"])
     sup.spawn("worker-0", "worker", 0)
     sup.spawn("worker-1", "worker", 1)
+    # each child is this module again, its role on its command line (the
+    # scale ladder's per-process CPU labels processes by cmdline)
+    assert Proc.made[2].cmd[1:] == ["-m", "baler.mqtt_listener", "--workers", "2", "--child", "worker", "--index", "1"]
+    assert Proc.made[0].cmd[-2:] == ["--retire-ids", "baler-mqtt-listener"]
     Proc.made[0].die(0)
     Proc.made[2].die(1)
     sup.tick()
@@ -368,7 +369,7 @@ def test_the_supervisor_restarts_a_dead_child_with_backoff_and_counts_it(monkeyp
     assert len(Proc.made) == 3  # still backing off
     clock[0] += 0.6
     sup.tick()
-    assert len(Proc.made) == 4 and Proc.made[3].name == "worker-1"
+    assert len(Proc.made) == 4 and Proc.made[3].cmd[-1] == "1"
     Proc.made[3].die(1)
     sup.tick()
     assert sup.restarts == {"worker-1": 2} and sup.children["worker-1"]["due"] == clock[0] + 2.0

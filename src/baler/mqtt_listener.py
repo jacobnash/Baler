@@ -20,10 +20,11 @@ from __future__ import annotations
 import argparse
 import functools
 import json
-import multiprocessing as mp
 import os
 import queue
 import signal
+import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -76,7 +77,7 @@ SHARE_GROUP = "baler"
 # start (see retire_session): a worker that no longer exists still gets its
 # share of every message from the broker, queued until it overflows.
 MAX_WORKERS = 32
-HEARTBEAT_EVERY = 10.0
+HEARTBEAT_EVERY = 5.0
 
 
 def worker_client_id(index: int) -> str:
@@ -204,7 +205,12 @@ class ReadingBatcher:
         self.alarms = 0
         self.blocked_s = 0.0
         self.blocked_events = 0
+        # What the heartbeat reports (Baler#269): seconds spent in flush()
+        # (the write path's busy time: near 1 s per second means the writer,
+        # not the broker, sets the pace), and the deepest queue since the
+        # last beat (take_queue_peak).
         self.flush_s = 0.0
+        self.queue_peak = 0
         self.last_message_at = 0.0
         self.thread = threading.Thread(target=self._run, name=name, daemon=True)
 
@@ -252,6 +258,7 @@ class ReadingBatcher:
                           f"blocked {self.blocked_s:.1f} s in all", flush=True)
                     last_report, last_rows, last_batches = now, self.rows, self.batches
                 batch = [self.queue.get()]
+                self.queue_peak = max(self.queue_peak, self.queue.qsize() + 1)
                 deadline = time.monotonic() + self.max_wait
                 while len(batch) < self.max_rows:
                     left = deadline - time.monotonic()
@@ -272,8 +279,20 @@ class ReadingBatcher:
             traceback.print_exc()
             os._exit(1)
 
+    def take_queue_peak(self) -> int:
+        """The deepest the queue got since the last call (the heartbeat
+        thread's, every few seconds), and start the next interval from now."""
+        peak, self.queue_peak = max(self.queue_peak, self.queue.qsize()), self.queue.qsize()
+        return peak
+
     def flush(self, batch: list) -> None:
         t0 = time.monotonic()
+        try:
+            self._flush(batch)
+        finally:
+            self.flush_s += time.monotonic() - t0
+
+    def _flush(self, batch: list) -> None:
         with tracer.start_as_current_span("mqtt_listener.flush") as span:
             readings, alarms, tags = [], [], []
             for _, _, _, topic, value, ts, flag in batch:
@@ -301,7 +320,6 @@ class ReadingBatcher:
             self.alarms += len(alarms)
             self.batches += 1
             self.done += len(batch)
-        self.flush_s += time.monotonic() - t0
 
     def prune(self) -> None:
         """Drop feed batches every consumer has read, and any past the
@@ -319,8 +337,8 @@ class ReadingBatcher:
     def stats(self) -> dict:
         return {"received": self.received, "rows": self.rows, "batches": self.batches, "tags": self.tags,
                 "alarms": self.alarms, "queue": self.queue.qsize(), "blocked_s": round(self.blocked_s, 2),
-                "blocked_events": self.blocked_events, "flush_s": round(self.flush_s, 2),
-                "connected": self.connected}
+                "blocked_events": self.blocked_events, "flush_s": round(self.flush_s, 3),
+                "queue_max": self.queue.maxsize, "connected": self.connected}
 
 
 def make_on_message(store, ts_conn, batcher: ReadingBatcher | None = None, retained_only: bool = False):
@@ -554,7 +572,7 @@ def _heartbeats(service: str, client_id: str, batcher: ReadingBatcher) -> None:
         time.sleep(HEARTBEAT_EVERY)
         now, cpu, st = time.monotonic(), time.process_time(), batcher.stats()
         dt = max(now - last_t, 1e-9)
-        detail = {**st, "client_id": client_id, "pid": os.getpid(),
+        detail = {**st, "client_id": client_id, "pid": os.getpid(), "queue_peak": batcher.take_queue_peak(),
                   "readings_per_s": round((st["rows"] - last["rows"]) / dt, 1),
                   "messages_per_s": round((st["received"] - last["received"]) / dt, 1),
                   "cpu_pct": round(100 * (cpu - last_cpu) / dt, 1),
@@ -581,13 +599,38 @@ def _beat(conn, service: str, detail: dict):
     return conn
 
 
+def _worker_totals(conn) -> dict:
+    """The workers' heartbeats folded into the supervisor's, in the shape
+    a single listener's had (Baler#269's limiter evidence reads
+    'mqtt_listener'): rows, batches and seconds spent writing summed over
+    the workers, with `writers` to turn the last into a busy share; the
+    busiest worker's queue, its peak since its last beat and its cap
+    (each worker has its own queue, so that's the one that fills first)."""
+    try:
+        if conn is None or conn.closed or conn.broken:
+            return {}
+        rows = [d for (d,) in conn.execute(
+            "SELECT detail FROM service_heartbeats WHERE service ~ '^mqtt_listener/[0-9]+$' "
+            "AND beat_at > now() - interval '30 seconds'") if d]
+    except Exception:  # noqa: BLE001 - liveness reporting is best-effort
+        return {}
+    if not rows:
+        return {}
+    return {"writers": len(rows), "rows": sum(d.get("rows", 0) for d in rows),
+            "batches": sum(d.get("batches", 0) for d in rows),
+            "flush_s": round(sum(d.get("flush_s", 0) for d in rows), 3),
+            "queue": max(d.get("queue", 0) for d in rows), "queue_peak": max(d.get("queue_peak", 0) for d in rows),
+            "queue_max": max(d.get("queue_max", 0) for d in rows),
+            "blocked_s": round(sum(d.get("blocked_s", 0) for d in rows), 2)}
+
+
 def run_tags(args) -> None:
     args = _worker_args(args)
     tracing.init_tracing("baler-tag-ingest")
     tag_ingest.run(RemoteStore(), connect())
 
 
-def _child(kind: str, index: int, args: dict, retire_ids: list[str] | None = None) -> None:
+def _child(kind: str, index: int, args, retire_ids: list[str] | None = None) -> None:
     if kind == "worker":
         run_worker(index, args)
     elif kind == "tags":
@@ -654,16 +697,26 @@ class Supervisor:
     container restart. Each worker's persistent session means a restart
     loses nothing it hadn't acknowledged."""
 
-    def __init__(self, args):
+    def __init__(self, args, argv: list[str] | None = None):
         self.args = args
-        self.ctx = mp.get_context("spawn")
+        self.argv = list(argv or [])  # the supervisor's own options, passed on to each child
         self.children: dict[str, dict] = {}
         self.restarts: dict[str, int] = {}
         self.stopping = False
 
+    def command(self, kind: str, index: int = 0, retire_ids: list[str] | None = None) -> list[str]:
+        """A child is `python -m baler.mqtt_listener ... --child worker
+        --index 2`: a fresh interpreter (nothing inherited from this
+        process), and a command line that names its role, so `ps` and the
+        scale ladder's per-process CPU (Baler#269 reads each process's
+        cmdline) tell worker 2 from the tag path."""
+        cmd = [sys.executable, "-m", "baler.mqtt_listener", *self.argv, "--child", kind, "--index", str(index)]
+        if retire_ids:
+            cmd += ["--retire-ids", ",".join(retire_ids)]
+        return cmd
+
     def spawn(self, name: str, kind: str, index: int = 0, retire_ids: list[str] | None = None) -> None:
-        p = self.ctx.Process(target=_child, args=(kind, index, vars(self.args), retire_ids), name=name, daemon=False)
-        p.start()
+        p = subprocess.Popen(self.command(kind, index, retire_ids))
         self.children[name] = {"proc": p, "kind": kind, "index": index, "retire_ids": retire_ids,
                                "backoff": self.children.get(name, {}).get("backoff", 1.0),
                                "started": time.monotonic(), "due": None}
@@ -676,11 +729,11 @@ class Supervisor:
                 if now >= c["due"]:
                     self.spawn(name, c["kind"], c["index"], c["retire_ids"])
                 continue
-            if p.is_alive():
+            if p.poll() is None:
                 if now - c["started"] > 60:
                     c["backoff"] = 1.0  # stayed up: the next failure restarts fast again
                 continue
-            code = p.exitcode
+            code = p.returncode
             if code == 0 and c["kind"] == "retire":  # the sweep is done
                 del self.children[name]
                 continue
@@ -695,13 +748,16 @@ class Supervisor:
 
     def terminate(self) -> None:
         for c in self.children.values():
-            if c["proc"].is_alive():
+            if c["proc"].poll() is None:
                 c["proc"].terminate()
         for c in self.children.values():
-            c["proc"].join(timeout=10)
+            try:
+                c["proc"].wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                c["proc"].kill()
 
     def pids(self) -> dict:
-        return {name: c["proc"].pid for name, c in self.children.items() if c["proc"].is_alive()}
+        return {name: c["proc"].pid for name, c in self.children.items() if c["proc"].poll() is None}
 
 
 def retire_ids(workers: int, max_workers: int = MAX_WORKERS) -> list[str]:
@@ -733,6 +789,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="don't retire the sessions of worker ids past --workers (and the pre-#233 listener's)")
     parser.add_argument("--no-retained-snapshot", dest="retained_snapshot", action="store_false",
                         help="don't take the broker's retained messages when worker 0's session is new")
+    # The supervisor starts its children as this module again with these.
+    parser.add_argument("--child", choices=("worker", "tags", "retire"), help=argparse.SUPPRESS)
+    parser.add_argument("--index", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--retire-ids", default="", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if not 1 <= args.workers <= MAX_WORKERS:
         parser.error(f"--workers must be 1..{MAX_WORKERS}")
@@ -740,7 +800,11 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 
 def main(argv=None) -> None:
+    argv = sys.argv[1:] if argv is None else list(argv)
     args = parse_args(argv)
+    if args.child:
+        _child(args.child, args.index, args, [i for i in args.retire_ids.split(",") if i])
+        return
     log = functools.partial(print, flush=True)
     conn = connect()
     if args.feed:
@@ -751,7 +815,7 @@ def main(argv=None) -> None:
     # Workers' heartbeats are rewritten within HEARTBEAT_EVERY; clearing
     # them drops those of worker indices that no longer exist.
     conn.execute("DELETE FROM service_heartbeats WHERE service LIKE 'mqtt\\_listener/%%'")
-    sup = Supervisor(args)
+    sup = Supervisor(args, argv)
     signal.signal(signal.SIGTERM, sup.stop)
     signal.signal(signal.SIGINT, sup.stop)
     if args.retire:
@@ -771,7 +835,8 @@ def main(argv=None) -> None:
         if time.monotonic() - last_beat >= HEARTBEAT_EVERY:
             last_beat = time.monotonic()
             conn = _beat(conn, "mqtt_listener", {"workers": args.workers, "pids": sup.pids(),
-                                                 "restarts": dict(sup.restarts), **drops.detail()})
+                                                 "restarts": dict(sup.restarts), **drops.detail(),
+                                                 **_worker_totals(conn)})
     log("mqtt_listener: stopping")
     sup.terminate()
 
