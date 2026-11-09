@@ -390,4 +390,14 @@ check("an enrolment-only session reaches only enrolment (#278)", () => {
     assert.equal(policy.mfaAllows({ kind: "session", mfa_enroll: "true" }, "GET", "/ingest/points"), true);
 });
 
+check("cx issues from results (#341): a viewer can't open one, single or bulk", () => {
+    for (const [m, uri] of [["POST", "/cx/projects/p1/issues"], ["POST", "/cx/runs/r1/issues"]]) {
+        const minRole = policy.resolveRoute(m, uri).minRole;
+        assert.equal(minRole, "operator", uri);
+        assert.equal(policy.roleSatisfies("viewer", minRole), false, uri);
+    }
+    assert.equal(policy.resolveRoute("POST", "/cx/issues/i1/risk").minRole, "admin");   // waiving
+    assert.equal(policy.resolveRoute("DELETE", "/cx/risks/k1").minRole, "admin");       // revoking
+});
+
 console.log(`\n${passed} passed`);

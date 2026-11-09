@@ -590,3 +590,46 @@ def test_125_print_layout_tables_and_links(base, repo):
         assert any(h.startswith(origin) for h in hrefs)
     assert requests.get(f"{base}/projects/{p['id']}/report", params={"format": "html", "origin": "javascript:alert(1)"},
                         headers=A).status_code == 400
+
+
+def test_ui_paths_for_inconclusive_issues_341(base, repo):
+    """#341: the calls the Cx UI now makes. The bulk action opens issues for
+    inconclusive results only when include_inconclusive is sent (the UI's
+    checkbox, off by default); waiving every one meets the acceptance
+    gate's no_unwaived_inconclusive rule, and revoking a waiver unmeets it."""
+    p, run = ti._completed_run(base)
+    results = repo.get_results(run["id"])
+    inconclusive = {(r["check_id"], r["subject"]) for r in results if r["status"] == "inconclusive"}
+    failing = {(r["check_id"], r["subject"]) for r in results if r["status"] == "fail"}
+    assert inconclusive and failing
+
+    def tracked():
+        got = requests.get(f"{base}/projects/{p['id']}/issues", headers=A).json()
+        return {(i["check_id"], i["subject"]): i for i in got if i.get("check_id")}
+
+    def unwaived():
+        gate = requests.get(f"{base}/projects/{p['id']}/gate", params={"to": "acceptance"}, headers=A).json()["gate"]
+        return next((u["count"] for u in gate["unmet"] if u["rule"] == "no_unwaived_inconclusive"), 0)
+
+    # checkbox unchecked: the UI sends {} and only failures get issues
+    plain = requests.post(f"{base}/runs/{run['id']}/issues", headers=A, json={}).json()
+    assert len(plain["opened"]) == len(failing) and set(tracked()) == failing
+    assert unwaived() == len(inconclusive)
+    # checkbox checked: the inconclusive ones too, failures already tracked
+    more = requests.post(f"{base}/runs/{run['id']}/issues", headers=A, json={"include_inconclusive": True}).json()
+    assert len(more["opened"]) == len(inconclusive) and more["already_tracked"] == len(failing)
+    issues = tracked()
+    assert set(issues) == failing | inconclusive
+
+    review = (fx.NOW.date() + timedelta(days=90)).isoformat()
+    risks = []
+    for key in inconclusive:
+        r = requests.post(f"{base}/issues/{issues[key]['id']}/risk", headers=ti.ADMIN, json={
+            "reason": "read-only controller", "owner": "Controls Co", "retest_trigger": "writes enabled", "review_by": review})
+        assert r.status_code == 201, r.text
+        risks.append(r.json())
+    assert unwaived() == 0  # every inconclusive waived: the rule is met
+
+    assert requests.delete(f"{base}/risks/{risks[0]['id']}", headers=ti.ADMIN).status_code == 204
+    assert unwaived() == 1  # revoked: unmet again
+    assert requests.get(f"{base}/issues/{risks[0]['issue_id']}", headers=A).json()["status"] == "open"
