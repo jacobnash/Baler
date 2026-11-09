@@ -125,7 +125,7 @@ POST /auth/login/mfa   { "mfa_token": "...", "code": "123456" }      (or a recov
   now are accepted, to allow for clock drift. Each recovery code also works once.
 - Five wrong codes in a row lock the account's second factor for 15 minutes (`429`), whichever IP
   they came from. `/auth/login/mfa` also shares `/auth/login`'s per-IP nginx rate limit.
-- TOTP secrets are sealed at rest with `BALER_MFA_KEY` when it is set (`.env.example`).
+- TOTP secrets are sealed at rest with `BALER_MFA_KEY` when it is set (`.env.example`): a random string of at least 32 characters (a shorter one stops auth_api from starting, since the key is derived with HKDF, which does not stretch a password). Without it secrets are stored unsealed: auth_api logs a warning at startup and Ops shows an "Unsealed two-step secrets" card while any exist.
 
 **Requiring it for an org.** In **Ops → Users**, an admin can require two-step sign-in for the org
 (`PATCH /auth/org {"mfa_required": true}`). They must have it on themselves first, so turning it on

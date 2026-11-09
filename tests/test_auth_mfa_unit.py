@@ -59,16 +59,30 @@ def test_session_claims_for_each_login_outcome():
 
 def test_seal_unseal(monkeypatch):
     assert mfa.unseal(mfa.seal("JBSWY3DPEHPK3PXP")) == "JBSWY3DPEHPK3PXP"  # no key: as is
-    monkeypatch.setenv("BALER_MFA_KEY", "k1")
+    monkeypatch.setenv("BALER_MFA_KEY", "k1" * 20)
     sealed = mfa.seal("JBSWY3DPEHPK3PXP")
     assert sealed.startswith("fernet:") and "JBSWY3DP" not in sealed
     assert mfa.unseal(sealed) == "JBSWY3DPEHPK3PXP"
-    monkeypatch.setenv("BALER_MFA_KEY", "k2")
+    monkeypatch.setenv("BALER_MFA_KEY", "k2" * 20)
     with pytest.raises(mfa.MFAError, match="changed"):
         mfa.unseal(sealed)
     monkeypatch.delenv("BALER_MFA_KEY")
     with pytest.raises(mfa.MFAError, match="not set"):
         mfa.unseal(sealed)
+
+
+def test_short_mfa_key_is_refused(monkeypatch):
+    """HKDF doesn't stretch a password: a short BALER_MFA_KEY is refused, not used."""
+    monkeypatch.delenv("BALER_MFA_KEY", raising=False)
+    assert mfa.key_problem() is None
+    monkeypatch.setenv("BALER_MFA_KEY", "x" * (mfa.MFA_KEY_MIN_CHARS - 1))
+    assert "at least 32" in mfa.key_problem()
+    with pytest.raises(mfa.MFAError, match="at least 32"):
+        mfa.seal("JBSWY3DPEHPK3PXP")
+    with pytest.raises(mfa.MFAError, match="at least 32"):
+        mfa.unseal("fernet:anything")
+    monkeypatch.setenv("BALER_MFA_KEY", "x" * mfa.MFA_KEY_MIN_CHARS)
+    assert mfa.key_problem() is None
 
 
 # --- password reset configuration -------------------------------------------------

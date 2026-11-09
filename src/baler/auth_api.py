@@ -16,6 +16,7 @@ public gateway at all, so the header is meaningless there).
 """
 
 import argparse
+import logging
 import os
 import re
 from http.server import ThreadingHTTPServer
@@ -778,7 +779,15 @@ def main() -> None:
             "Set it in .env (see .env.example) before starting this service."
         )
 
+    problem = mfa.key_problem()
+    if problem:
+        raise SystemExit(problem + " - auth_api can't seal two-step sign-in secrets with it.")
+
     tracing.init_tracing("baler-auth-api")
+    if not os.environ.get("BALER_MFA_KEY"):
+        logging.getLogger("baler.auth_api").warning(
+            "BALER_MFA_KEY is not set: two-step sign-in (TOTP) secrets are stored unsealed in the users "
+            "table. Set it (see .env.example) before anyone enrols.")
 
     ts_pool = connect_pool()
     with ts_pool.connection() as conn:

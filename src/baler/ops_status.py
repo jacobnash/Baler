@@ -21,7 +21,7 @@ from typing import Any
 
 import psycopg
 
-from baler import alerts, errors, heartbeat, reading_feed, timeseries
+from baler import alerts, errors, heartbeat, mfa, reading_feed, timeseries
 
 COMPONENTS: list[dict[str, Any]] = [
     {
@@ -265,6 +265,11 @@ def _building_signals(scope=None) -> dict[str, Any]:
                 conn.rollback()
                 out["alerts"] = alerts.open_alerts(conn)
                 conn.rollback()
+                # Two-step sign-in secrets stored without BALER_MFA_KEY (#278).
+                try:
+                    out["mfa_unsealed"] = mfa.unsealed_count(conn)
+                except psycopg.Error:
+                    conn.rollback()
             try:
                 org_row = conn.execute("SELECT COUNT(*) FROM orgs").fetchone()
                 out["org_count"] = int(org_row[0]) if org_row else 0
@@ -506,13 +511,21 @@ def building_cards(building: dict[str, Any]) -> list[dict[str, Any]]:
     seen = int(building.get("points_seen_last_hour") or 0)
     faults = int(building.get("open_faults") or 0)
     disabled = int(building.get("disabled_derivation_targets") or 0)
-    return [
+    cards = [
         card("last_ingest", "Last ingest", "ok" if last else "quiet", last or "none yet"),
         card("points_last_hour", "Points (last hour)", "ok" if seen > 0 else "quiet", str(seen)),
         card("open_faults", "Open faults", "degraded" if faults else "ok", str(faults), "alarms.html"),
         card("disabled_targets", "Disabled analysis targets", "degraded" if disabled else "ok", str(disabled),
              "derivations.html"),
     ]
+    # Advisory, shown only when it applies: authenticators stored unsealed
+    # because BALER_MFA_KEY isn't set (#278). Sign-in still works.
+    unsealed = int(building.get("mfa_unsealed") or 0)
+    if unsealed:
+        cards.append(card("mfa_unsealed", "Unsealed two-step secrets", "degraded",
+                          f"{unsealed} authenticator secret(s) stored without BALER_MFA_KEY: set it, then have "
+                          "those users set up two-step sign-in again", "#users-section"))
+    return cards
 
 
 def _rank_summary(states: list[str]) -> str:

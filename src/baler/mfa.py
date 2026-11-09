@@ -77,18 +77,45 @@ def list_events(conn: psycopg.Connection, org_id: str, limit: int = 200) -> list
 # --- secrets at rest ----------------------------------------------------------
 
 
+# HKDF extracts a key from material that is already random; it does not
+# stretch a human-chosen password. So BALER_MFA_KEY must be a long random
+# string (.env.example has a command that makes one), and a shorter one is
+# refused rather than used.
+MFA_KEY_MIN_CHARS = 32
+
+
+def key_problem() -> str | None:
+    """Why BALER_MFA_KEY can't be used, or None (also None when it's unset:
+    secrets are then stored unsealed, which auth_api warns about)."""
+    key = os.environ.get("BALER_MFA_KEY", "")
+    if key and len(key) < MFA_KEY_MIN_CHARS:
+        return (f"BALER_MFA_KEY is {len(key)} characters; it must be a random string of at least "
+                f"{MFA_KEY_MIN_CHARS} (e.g. python -c \"import secrets;print(secrets.token_urlsafe(48))\")")
+    return None
+
+
 def _fernet():
     key = os.environ.get("BALER_MFA_KEY", "")
     if not key:
         return None
+    problem = key_problem()
+    if problem:
+        raise MFAError(problem)
     from cryptography.fernet import Fernet
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-    # BALER_MFA_KEY is a long random string (.env.example), so a key
-    # derivation function, not a password hash, is what's needed here.
     derived = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"baler-mfa").derive(key.encode())
     return Fernet(base64.urlsafe_b64encode(derived))
+
+
+def unsealed_count(conn: psycopg.Connection) -> int:
+    """Authenticator secrets (enrolled or pending) stored without
+    BALER_MFA_KEY: readable by anyone who can read the users table."""
+    row = conn.execute(
+        "SELECT count(*) FROM users WHERE (totp_secret IS NOT NULL AND totp_secret NOT LIKE 'fernet:%%') "
+        "OR (totp_pending_secret IS NOT NULL AND totp_pending_secret NOT LIKE 'fernet:%%')").fetchone()
+    return int(row[0]) if row else 0
 
 
 def seal(secret_b32: str) -> str:
