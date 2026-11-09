@@ -2121,6 +2121,89 @@ paths:
       summary: Interactive docs for this API
       responses:
         "200": { description: HTML }
+  /projects/{id}/baselines:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Runs]
+      operationId: listCxBaselines
+      summary: Performance baselines fitted for the project's equipment
+      responses:
+        "200":
+          description: Baselines
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/PerformanceBaseline" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Runs]
+      operationId: fitCxBaseline
+      summary: Fit a baseline (chiller kW/ton vs load and ECWT) over a known-good period (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [equip_uri, points, fit_start, fit_end]
+              properties:
+                equip_uri: { type: string }
+                asset_id: { type: [string, "null"], description: "The installed asset, once the asset registry (#197) knows it" }
+                kind: { type: string, enum: [chiller_kw_per_ton] }
+                points:
+                  type: object
+                  description: "kw and ecwt, and tons or chw_flow_gpm + chw_supply_f + chw_return_f"
+                  properties:
+                    kw: { type: string }
+                    ecwt: { type: string }
+                    tons: { type: string }
+                    chw_flow_gpm: { type: string }
+                    chw_supply_f: { type: string }
+                    chw_return_f: { type: string }
+                fit_start: { type: string, format: date-time }
+                fit_end: { type: string, format: date-time }
+                note: { type: string }
+      responses:
+        "201":
+          description: The baseline, with its model and Guideline 14 statistics
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PerformanceBaseline" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /baselines/{id}/degradation:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Runs]
+      operationId: getCxDegradation
+      summary: Actual vs predicted at matched conditions since the baseline
+      parameters:
+        - { name: start, in: query, schema: { type: string, format: date-time } }
+        - { name: end, in: query, schema: { type: string, format: date-time } }
+        - { name: bucket, in: query, schema: { type: string, enum: [month, week] } }
+        - { name: alert_pct, in: query, description: "Your own threshold (a setting, not a standard)", schema: { type: number } }
+      responses:
+        "200":
+          description: The degradation report
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [baseline, hours_total, hours_matched, buckets, overall]
+                properties:
+                  baseline: { $ref: "#/components/schemas/PerformanceBaseline" }
+                  start: { type: string }
+                  end: { type: string }
+                  hours_total: { type: integer }
+                  hours_matched: { type: integer }
+                  hours_outside_fit_range: { type: integer }
+                  buckets: { type: array, items: { type: object } }
+                  overall: { type: [object, "null"] }
+                  alert_pct: { type: [number, "null"] }
+                  alert: { type: [boolean, "null"] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /projects/{id}/hunting:
     parameters:
       - { $ref: "#/components/parameters/ProjectId" }
@@ -4232,3 +4315,29 @@ components:
         window_end: { type: string, format: date-time }
         evidence: { type: object }
         note: { type: [string, "null"] }
+    PerformanceBaseline:
+      type: object
+      required: [id, project_id, equip_uri, kind, points, fit_start, fit_end, model, status]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        equip_uri: { type: string }
+        asset_id: { type: [string, "null"] }
+        kind: { type: string }
+        points: { type: object }
+        fit_start: { type: string, format: date-time }
+        fit_end: { type: string, format: date-time }
+        model:
+          type: object
+          properties:
+            coefficients: { type: array, items: { type: number } }
+            features: { type: array, items: { type: string } }
+            n_hours: { type: integer }
+            cvrmse_pct: { type: number }
+            nmbe_pct: { type: number }
+            ranges: { type: object }
+            quality: { type: object }
+        status: { type: string, enum: [active, superseded] }
+        note: { type: [string, "null"] }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }

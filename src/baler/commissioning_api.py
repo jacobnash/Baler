@@ -42,6 +42,7 @@ from baler import docs_ui, gateway_auth, hisquery, timeseries, tracing, warmup
 from baler.commissioning import (
     active,
     agent,
+    baselines_api,
     compliance,
     compliance_api,
     coverage,
@@ -119,7 +120,7 @@ _RUN = re.compile(r"/runs/([^/]+)")
 _RUN_REPORT = re.compile(r"/runs/([^/]+)/report")
 
 # Building-record features (epic #221), each a route table (commissioning.routes).
-EXTENSIONS = (spaces_api, readiness_api, packs_api, pack_extract_api, compliance_api, hunting_api)
+EXTENSIONS = (spaces_api, readiness_api, packs_api, pack_extract_api, compliance_api, hunting_api, baselines_api)
 
 
 def _check_prefixes(value) -> list[str]:
