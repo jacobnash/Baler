@@ -215,15 +215,38 @@ jobs:
         run: pip wheel --no-deps -w openhay-wheel "openhay @ git+https://github.com/jacobnash/openhay@${{ steps.openhay.outputs.sha }}#subdirectory=crates/openhay-py"
       - run: pip install openhay-wheel/openhay-*.whl
       - run: pip install -e ".[dev,validate]"  # openhay: the cached wheel above
-      # The image downloads the Haxall release zip from GitHub, which has
-      # returned transient 5xx (a 504 failed haxall-matrix on #287 and #295).
-      - name: Build the Haxall image (retried on transient download errors)
+      # The image downloads the Haxall release zip from GitHub releases, which
+      # returns intermittent 504s to Actions runners (it failed haxall-matrix
+      # on many PRs on 2026-11-09 even with retries). Cache the built image,
+      # keyed on its Dockerfile, so the download happens once per Dockerfile
+      # change rather than on every run; a cold cache still retries with
+      # backoff (up to ~7.5 min).
+      - name: Restore the cached Haxall image
+        id: haxall-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/haxall-image.tar
+          key: haxall-image-${{ hashFiles('windrow/docker/haxall.Dockerfile') }}
+      - name: Build the Haxall image (cached; retried on transient download errors)
         run: |
-          for i in 1 2 3 4; do
-            docker build -t haxall:ci -f windrow/docker/haxall.Dockerfile windrow/docker && exit 0
-            [ "$i" = 4 ] || { echo "haxall image build failed (attempt $i), retrying in $((i * 15)) s"; sleep $((i * 15)); }
+          if [ -f /tmp/haxall-image.tar ] && docker load -i /tmp/haxall-image.tar; then
+            echo "haxall image restored from cache"; exit 0
+          fi
+          for i in 1 2 3 4 5 6; do
+            if docker build -t haxall:ci -f windrow/docker/haxall.Dockerfile windrow/docker; then
+              docker save haxall:ci -o /tmp/haxall-image.tar; exit 0
+            fi
+            [ "$i" = 6 ] || { echo "haxall image build failed (attempt $i), retrying in $((i * 30)) s"; sleep $((i * 30)); }
           done
           exit 1
+      # Saved right after the build, not at job end, so a later failing test
+      # step doesn't throw the downloaded image away.
+      - name: Save the Haxall image to the cache
+        if: steps.haxall-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/haxall-image.tar
+          key: ${{ steps.haxall-cache.outputs.cache-primary-key }}
       - run: >-
           docker run -d --name haxall -p 8280:8080 haxall:ci sh -c
           "bin/hx init -headless -suUser su -suPass $HAXALL_SU_PASSWORD -httpPort 8080 /haxall/var/ci && bin/hx run /haxall/var/ci"
