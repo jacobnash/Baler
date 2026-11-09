@@ -122,6 +122,7 @@ TEMPLATES = [
     ("chw-valve", "chilled water valve cmd writable", "%", "Number", "step"),
     ("dsp", "discharge air pressure sensor", "inH₂O", "Number", "sine"),
 ]
+NUMERIC_TEMPLATES = sum(1 for t in TEMPLATES if t[3] == "Number")
 PATTERNS = ("mix", "sine", "walk", "const", "step", "bool")
 # hisRead probes read readAll(<marker>): the first N points carry it.
 HIS_GROUPS = (1, 100, 1000)
@@ -142,7 +143,11 @@ class Shape:
         return math.ceil(self.equips / self.equips_per_site)
 
     def equip_prefix(self, g: int) -> str:
-        return f"{TOPIC_ROOT}/s{g // self.equips_per_site:05d}/e{g % self.equips_per_site:05d}"
+        # e<global index>, not the index within the site: an equip's last
+        # path segment is unique, as derivation outputs need (#273: the
+        # engine names an output after its target's last segment, so two
+        # sites' e00000 wrote one computed point).
+        return f"{TOPIC_ROOT}/s{g // self.equips_per_site:05d}/e{g:05d}"
 
     def site_prefix(self, site: int) -> str:
         return f"{TOPIC_ROOT}/s{site:05d}"
@@ -183,6 +188,26 @@ def envelope(point: str, value, ts: float) -> bytes:
     """Windrow's mqtt_sink._publish payload, byte for byte (json.dumps of
     the same dict in the same key order)."""
     return json.dumps({"point": point, "value": value, "ts": ts}).encode()
+
+
+# Faulting points (#273, --fault-share): numeric points chosen by index read
+# FAULT_VALUE - outside the ladder's scale-range rule (+-1000) - for
+# FAULT_HALF_PERIOD readings, then normally for as many, so their faults
+# open and resolve all soak long.
+FAULT_HALF_PERIOD = 5
+FAULT_VALUE = 5000.0
+
+
+def is_faulting(idx: int, template: tuple, share: float) -> bool:
+    if not share or template[3] != "Number":
+        return False
+    # a fixed multiplicative hash spreads the chosen points over equips
+    return (idx * 2654435761) % 1_000_003 < share * 1_000_003 * len(TEMPLATES) / NUMERIC_TEMPLATES
+
+
+def fault_value(idx: int, tick: int):
+    """FAULT_VALUE in a faulting point's fault half-period, else None."""
+    return FAULT_VALUE if ((tick + idx) // FAULT_HALF_PERIOD) % 2 == 0 else None
 
 
 def value_at(pattern: str, idx: int, tick: int):

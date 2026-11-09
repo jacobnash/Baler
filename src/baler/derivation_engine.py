@@ -547,14 +547,37 @@ def run_feed(store, dsn: str, cache: json_store.RuleCache, targets: CurTargets, 
         if not batch.readings or not cur_derivations(derivations):
             return
         points = {uri for uri, *_ in batch.readings}
+        t0 = time.monotonic()
         status.add("cur_rows", evaluate_cur_points(store, ts_conn, fault_conn, health_conn, derivations, points,
                                                    targets, globs))
+        # cumulative seconds evaluating: its rate is how busy Cur mode keeps
+        # this thread (the scale ladder's limiter evidence, #273)
+        status.add("cur_busy_s", time.monotonic() - t0)
 
     def report(stats):
         status.update("feed", stats.as_dict())
         status.beat(feed_conn)
 
     consumer.run(handle, stop=stop, report=report)
+
+
+class TickStats:
+    """The tick loop's own timing, for the heartbeat (#273): the last pass
+    (seconds, rows, the shortest interval among the derivations it ran, and
+    how late the latest of them started against its schedule), plus running
+    totals whose rates the scale ladder reads - passes, rows, seconds busy.
+    A pass that takes longer than its interval falls further behind every
+    time: `late_s` grows."""
+
+    def __init__(self):
+        self.passes, self.rows, self.busy_s = 0, 0, 0.0
+
+    def record(self, seconds: float, rows: int, interval_s: float, late_s: float) -> dict:
+        self.passes += 1
+        self.rows += rows
+        self.busy_s += seconds
+        return {"last_s": round(seconds, 3), "last_rows": rows, "interval_s": interval_s, "late_s": round(late_s, 3),
+                "passes": self.passes, "rows": self.rows, "busy_s": round(self.busy_s, 3)}
 
 
 def main() -> None:
@@ -592,7 +615,8 @@ def main() -> None:
             print(json.dumps(entry, default=str))
         return
 
-    status = heartbeat.Status("derivation_engine", tick_seconds=args.tick_seconds, feed={}, cur_rows=0)
+    status = heartbeat.Status("derivation_engine", tick_seconds=args.tick_seconds, feed={}, cur_rows=0, cur_busy_s=0.0,
+                              tick={})
 
     def feed_thread():
         try:
@@ -604,16 +628,22 @@ def main() -> None:
     threading.Thread(target=feed_thread, name="reading-feed", daemon=True).start()
 
     next_run: dict[str, datetime] = {}
+    ticks = TickStats()
     print(f"derivation engine ticking every {args.tick_seconds}s, Cur mode from the reading feed", flush=True)
     while True:
         now = datetime.now(timezone.utc)
         derivations = cast(list[Derivation], cache.get())
         due_ids = {d["id"] for d in derivations if now >= next_run.get(d["id"], now)}
         if due_ids:
-            evaluate_derivations(store, ts_conn, fault_conn, health_conn, derivations, now=now, dry_run=False, only_ids=due_ids)
+            t0 = time.monotonic()
+            late = max(((now - next_run[i]).total_seconds() for i in due_ids if i in next_run), default=0.0)
+            trace = evaluate_derivations(store, ts_conn, fault_conn, health_conn, derivations, now=now, dry_run=False,
+                                         only_ids=due_ids)
             for d in derivations:
                 if d["id"] in due_ids:
                     next_run[d["id"]] = now + timedelta(seconds=d.get("interval_seconds") or args.tick_seconds)
+            interval = min((d.get("interval_seconds") or args.tick_seconds) for d in derivations if d["id"] in due_ids)
+            status.update("tick", ticks.record(time.monotonic() - t0, len(trace), interval, late))
         status.beat(health_conn)
         time.sleep(args.tick_seconds)
 

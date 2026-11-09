@@ -47,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common
 import evidence
 import limiter
+import synthetic
 
 DEFAULT_STEPS = [10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000]
 SMALL_HOST_STEPS = [1_000, 2_500, 5_000]  # prepended when the host has few CPUs
@@ -95,6 +96,8 @@ def cpu_caps(nproc: int, env: dict[str, str]) -> dict[str, str]:
 def stack_env() -> dict[str, str]:
     env = dict(os.environ)
     env.update(cpu_caps(os.cpu_count() or 1, common.read_env()))
+    # the synthetic load's webhook receiver is on the host (#273); scale stack only
+    env.setdefault("BALER_ALLOW_PRIVATE_WEBHOOKS", "1")
     return env
 
 
@@ -622,7 +625,8 @@ def start_loadgen(ep: Endpoints, args, points: int, phase: str, stats_file: Path
            "--interval", str(args.interval), "--procs", str(args.procs), "--port", str(ep.mqtt_port),
            "--password", ep.gen_password, "--tags-from", str(tags_from), "--tags-rate", str(args.tags_rate),
            "--points-per-equip", str(args.points_per_equip), "--equips-per-site", str(args.equips_per_site),
-           "--pattern", args.pattern, "--stats-file", str(stats_file), "--duration", str(duration)]
+           "--pattern", args.pattern, "--stats-file", str(stats_file), "--duration", str(duration),
+           "--fault-share", str(getattr(args, "fault_share", 0) or 0)]
     return subprocess.Popen(cmd, cwd=common.REPO)
 
 
@@ -722,6 +726,7 @@ def evaluate(step: dict) -> tuple[str, list[str]]:
                            "retention behind)")
         elif (feed.get("lag_s_last") or 0) > MAX_P95_LAG_S:
             reasons.append(f"{svc} is {feed['lag_s_last']} s behind on the reading feed at the end of the soak")
+    reasons.extend(synthetic.reasons(step))
     lag = step.get("lag", {})
     if lag:
         if lag.get("lost"):
@@ -753,11 +758,19 @@ def evaluate(step: dict) -> tuple[str, list[str]]:
 
 # ----------------------------------------------------------------- one step
 
-def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety: LiveSafety, outdir: Path) -> dict:
+def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety: LiveSafety, outdir: Path,
+             syn: dict | None = None) -> dict:
+    # A step's size is total points, synthetics included (#273); from here
+    # on `points` is the real ones, which the generator publishes.
+    plan = synthetic.plan_for(args)
+    total, points, prev = points, plan.real_points(points), plan.real_points(prev) if prev else 0
     shape = common.Shape(points, args.points_per_equip, args.equips_per_site)
-    step: dict = {"points": points, "offered_target_rps": points / args.interval, "sites": shape.sites,
+    step: dict = {"points": total, "real_points": points, "synthetic_points": plan.points(total)["synthetic"],
+                  "profile": args.profile, "interval_s": args.interval,
+                  "offered_target_rps": points / args.interval, "sites": shape.sites,
                   "equips": shape.equips, "started": datetime.now(timezone.utc).isoformat()}
-    print(f"\n=== step {points:,} points ({shape.sites} sites, {shape.equips} equips) ===", flush=True)
+    print(f"\n=== step {total:,} points ({points:,} real, {step['synthetic_points']:,} synthetic; "
+          f"{shape.sites} sites, {shape.equips} equips; {args.profile}) ===", flush=True)
     conn = pg_connect(ep)
     states0 = container_states()
 
@@ -797,6 +810,7 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
         w0 = chunk_writes(conn)
         sys0 = sysmon.snapshot()
         feed0 = feed_status(conn)
+        eng0, hooks0 = synthetic.engines(conn), syn["sink"].snapshot() if syn and syn.get("sink") else None
         while time.time() - soak_start < args.soak:
             time.sleep(args.sample_every)
             tripped, live = safety.check()
@@ -811,6 +825,7 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
                 sample["docker"] = docker_stats()
                 sample["docker_stats_s"] = round(time.perf_counter() - t1, 3)  # its cost, for the overhead record
             sample.update(lag=canary.stats(soak_start), feed=feed_status(conn))
+            sample["synthetic"] = synthetic.engines(conn)  # tick and Cur-mode timings (#273)
             t1 = time.perf_counter()
             conn.execute("SELECT 1")
             sample["pg_roundtrip_s"] = round(time.perf_counter() - t1, 4)
@@ -837,6 +852,7 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
         w1 = chunk_writes(conn)
         sys1 = sysmon.snapshot()
         feed1 = feed_status(conn)
+        eng1, hooks1 = synthetic.engines(conn), syn["sink"].snapshot() if syn and syn.get("sink") else None
 
         # 3. read probes and rules, still under load
         if ev:
@@ -908,6 +924,12 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
                          "behind_max_s": st.get("behind_max_s"), "procs": st.get("procs"), "cpu_s": st.get("cpu_s"),
                          "behind_soak_max_s": max((x["gen_behind_s"] for x in samples), default=None)}
     step["lag"] = canary.stats(soak_start)
+    if syn is not None:
+        hooks = hooks1 and {k: v - (hooks0 or {}).get(k, 0) for k, v in hooks1.items()}
+        step["synthetic"] = synthetic.summarize(
+            plan, total, samples, eng0, eng1, soak_end - soak_start, synthetic.fault_counts(conn, soak_start, soak_end),
+            hooks, synthetic.chain_lag(conn, syn["derivations"], synthetic.sample_equips(shape), soak_start, soak_end),
+            step["lag"])
     step["broker"] = sys1
     step["db"] = db_metrics(conn)
     if step["db"].get("bytes_per_row"):
@@ -928,6 +950,21 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
     step["limiter"] = limiter.verdict(step)
     conn.close()
     return step
+
+
+def start_synthetic(ep: Endpoints, args) -> dict:
+    """The profile's derivations and rules (#273; none for stress-5s, and a
+    run with another N removes the extra), and with a fault share a webhook
+    receiver for its faults' transitions."""
+    plan = synthetic.plan_for(args)
+    s = session(ep)
+    syn: dict = synthetic.ensure(ep.gateway, s, plan)
+    if plan.fault_share:
+        syn["sink"] = synthetic.WebhookSink(f"{common.PROJECT}_default")
+        syn["sink"].register(ep.gateway, s)
+        print(f"webhook receiver {syn['sink'].url}", flush=True)
+    print(f"profile {plan.profile}: {plan.describe()}", flush=True)
+    return syn
 
 
 def summarize_docker(samples: list[dict]) -> dict:
@@ -970,11 +1007,12 @@ def cmd_run(args) -> None:
     config = guard()
     ep = cmd_up(args) if not args.no_up else Endpoints(config)
     ensure_rules(ep)
+    syn = start_synthetic(ep, args)
     budgets = json.loads(Path(args.budgets).read_text())
     nproc = os.cpu_count() or 1
     steps = [parse_count(s) for s in args.steps.split(",")] if args.steps else default_steps(nproc)
     existing = graph_counts(ep)["scale_points"]
-    if existing > steps[0] and not args.reuse:
+    if existing > synthetic.plan_for(args).real_points(steps[0]) and not args.reuse:
         # Reads scale with the points in the graph, not with the step's load:
         # a 1k step on a graph left with 10k points times 10k-point reads.
         raise SystemExit(f"the stack already has {existing:,} scale points, more than the first step ({steps[0]:,}): "
@@ -988,7 +1026,7 @@ def cmd_run(args) -> None:
         print(f"note: durability not end-to-end on ({result['durability']}); results labelled not comparable", flush=True)
     prev = 0
     for points in steps:
-        step = run_step(ep, args, points, prev, budgets, safety, outdir)
+        step = run_step(ep, args, points, prev, budgets, safety, outdir, syn)
         result["steps"].append(step)
         path = write_result(result)
         print(f"step {points:,}: {step['status']} {step.get('reasons')}\n"
@@ -1114,13 +1152,14 @@ def main(argv=None) -> None:
     p.add_argument("files", nargs="+")
     p.set_defaults(func=cmd_table)
     def generator_args(p):
-        p.add_argument("--interval", type=float, default=5.0)
+        p.add_argument("--interval", type=float, default=None, help="seconds between readings (default: the profile's)")
         p.add_argument("--procs", type=int, default=max(1, (os.cpu_count() or 2) // 2), help="generator processes")
         p.add_argument("--tags-rate", type=float, default=2000.0)
         p.add_argument("--points-per-equip", type=int, default=10)
         p.add_argument("--equips-per-site", type=int, default=50)
         p.add_argument("--pattern", choices=common.PATTERNS, default="mix")
-        p.add_argument("--warmup", type=float, default=60.0)
+        p.add_argument("--warmup", type=float, default=None, help="seconds before measuring (default: the profile's)")
+        synthetic.add_args(p)  # --profile, --synthetic-per-equip, --synthetic-mix, --fault-share (#273)
 
     for name, func in (("run", cmd_run), ("crash", cmd_crash)):
         p = sub.add_parser(name)
@@ -1131,7 +1170,7 @@ def main(argv=None) -> None:
     soak.add_parser(sub, generator_args)
     p = sub.choices["run"]
     p.add_argument("--steps", help="comma list, e.g. 10k,25k,50k (default: 10k..1M, from 1k on hosts with < 4 CPUs)")
-    p.add_argument("--soak", type=float, default=900.0, help="seconds per step (R2: at least 900)")
+    p.add_argument("--soak", type=float, default=None, help="seconds per step (R2: at least 900; default: the profile's)")
     p.add_argument("--sample-every", type=float, default=15.0)
     p.add_argument("--graph-timeout", type=float, default=3600.0, help="seconds to wait for a step's tags to reach the graph")
     p.add_argument("--abort-lag", type=float, default=300.0, help="stop a soak early once lag passes this")
@@ -1153,6 +1192,7 @@ def main(argv=None) -> None:
     p.add_argument("--kill", default="mqtt_listener,postgres", help="services to kill -9, one at a time")
     p.add_argument("--down-for", type=float, default=10.0, help="seconds a killed service stays down")
     args = ap.parse_args(argv)
+    synthetic.apply_profile(args)
     args.func(args)
 
 
