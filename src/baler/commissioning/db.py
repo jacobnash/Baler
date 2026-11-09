@@ -926,7 +926,7 @@ class PgRepo:
             cur.executemany(f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})", vals)
 
     def get_row(self, table: str, row_id: str) -> dict | None:
-        rows = self.find_rows(table, id=row_id)
+        rows = self.find_rows(table, order="id", id=row_id)  # not every row table has created_at
         return rows[0] if rows else None
 
     def find_rows(self, table: str, order: str = "created_at", **eq) -> list[dict]:
