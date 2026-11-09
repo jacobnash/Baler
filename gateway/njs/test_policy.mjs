@@ -259,7 +259,8 @@ check("commissioning (/cx/): reads viewer, changes operator, archive admin, site
     assert.equal(policy.resolveRoute("POST", "/cx/issues/i1/risk").minRole, "admin");
     assert.equal(policy.resolveRoute("DELETE", "/cx/risks/k1").minRole, "admin");
     assert.equal(policy.resolveRoute("DELETE", "/cx/issues/i1"), null);
-    // Baler#275 manual results and coverage
+    // Baler#275 manual results and coverage, the active-test library
+    assert.equal(policy.resolveRoute("GET", "/cx/active/library").minRole, "viewer");
     assert.equal(policy.resolveRoute("POST", "/cx/test-runs/t1/manual-results").minRole, "operator");
     assert.equal(policy.resolveRoute("GET", "/cx/test-runs/t1/manual-results").minRole, "viewer");
     assert.equal(policy.resolveRoute("PATCH", "/cx/manual-results/m1").minRole, "operator");

@@ -89,7 +89,7 @@ MAX_STEPS = 50
 MAX_CRITERIA = 20
 METHODS = ("manual", "passive", "active")
 MANUAL_STATUSES = ("pass", "fail", "not_applicable")
-ACTIVE_KINDS = ("command_response",)
+ACTIVE_KINDS = ("command_response", "library")
 _ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,59}")
 DEFAULT_HOURS = {"power_on": 2.0, "startup": 24.0, "functional": 24.0, "seasonal": 24.0 * 7}
 
@@ -392,9 +392,18 @@ def normalize(body: dict, existing: dict | None = None) -> dict:
             step["methods"] = list(methods)
         if "active" in methods:
             act = st.get("active") or {"kind": "command_response"}
-            if not isinstance(act, dict) or act.get("kind") not in ACTIVE_KINDS or set(act) - {"kind"}:
-                raise ValueError(f"step {sid}: active is {{kind: {' | '.join(ACTIVE_KINDS)}}}")
-            step["active"] = {"kind": act["kind"]}
+            if not isinstance(act, dict) or act.get("kind") not in ACTIVE_KINDS or set(act) - {"kind", "test"}:
+                raise ValueError(f"step {sid}: active is {{kind: command_response}} or {{kind: library, test: <id>}}")
+            if act["kind"] == "library":
+                from baler.commissioning import test_library
+
+                if act.get("test") not in test_library.BY_ID:
+                    raise ValueError(f"step {sid}: active.test is one of {', '.join(test_library.BY_ID)}")
+                step["active"] = {"kind": "library", "test": act["test"]}
+            elif "test" in act:
+                raise ValueError(f"step {sid}: active.test is only for kind library")
+            else:
+                step["active"] = {"kind": act["kind"]}
         elif st.get("active") is not None:
             raise ValueError(f"step {sid}: active is only for a step whose methods include active")
         if "witness_required" in st:
