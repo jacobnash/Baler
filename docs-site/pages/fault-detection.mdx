@@ -169,6 +169,24 @@ same transaction as the delete. You can see it in four places:
 | logs | `fault_detector` logs readings/s, lag and misses every minute, plus a line whenever a sweep overruns `--his-interval`. The listener logs `<consumer> MISSED N reading(s)` when it prunes unread batches. |
 | `reading_feed_consumers` | Offset, `missed_readings`, `missed_batches` and `last_missed_at` per consumer. |
 
+**What a miss means, per consumer (#337).** `/ops/status`'s
+`building.reading_feed.<consumer>` carries `miss_means` and `miss_required`
+(`baler.reading_feed.CONSUMER_RULES`). A miss at a required consumer is a real
+loss and fails a scale ladder step or soak; one at a consumer that covers it
+another way is reported with its meaning but doesn't fail the run.
+
+| Consumer | Required | A missed reading means |
+|---|---|---|
+| `fault_detector` | yes | Cur-mode rules and controller alarms never evaluated it (His-mode rules still see it in `point_history`). |
+| `derivation_engine` | yes | Derived points weren't recomputed for its point until the point reports again or the sweep reaches it. |
+| `tag_ingest` | yes | Tag and equip messages in the batch were never applied to the model. |
+| `quality` | no | Only the quality sweep's late-row watcher reads the feed: on-time readings are judged by the window pass from `point_history` whatever, but a reading in the batch that arrived after the pass covering its timestamp got no range/spike/unit check. Nothing is lost; a late reading may carry no flag. |
+
+The `quality` watcher runs on its own thread and connection (#337). On the
+sweep's thread it read the feed only between passes, so a 253 s pass at 100k
+points left it that much further behind: nash-srv's soak pruned 3,007,304
+readings from under it (637 batches) while every other consumer missed none.
+
 The same applies to `derivation_engine`'s Cur mode (see [Derivations](/derivation)).
 
 ## Severity, acknowledging, and snoozing
