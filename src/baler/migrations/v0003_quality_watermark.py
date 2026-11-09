@@ -32,10 +32,11 @@ CREATE TABLE IF NOT EXISTS quality_watermark (
 
 LATE = """
 CREATE TABLE IF NOT EXISTS quality_late (
+    sweeper   TEXT NOT NULL,
     point_uri TEXT NOT NULL,
     ts        TIMESTAMPTZ NOT NULL,
     seen_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (point_uri, ts)
+    PRIMARY KEY (sweeper, point_uri, ts)
 )"""
 
 

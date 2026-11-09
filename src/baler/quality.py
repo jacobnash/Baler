@@ -220,11 +220,16 @@ LOOKBACK = timedelta(hours=1)
 # The incremental sweep (#268). Each pass judges (judged_to - OVERLAP, now]
 # and moves judged_to to now, so a row is judged once (twice inside the
 # overlap), not on every pass for an hour. The overlap is for rows that
-# were in flight when the previous pass read their point - committed a few
-# seconds after their ts. Anything later than that is a late row: the
-# sweeper's feed watcher records it in quality_late and the next pass
-# judges it on its own (Sweeper.watch).
+# were in flight when the previous pass read their point - committed some
+# seconds after their ts. It is at least OVERLAP, and widens to the ingest
+# delay the feed watcher measures (commit time minus ts, 90th percentile)
+# when ingest falls behind, up to one interval: otherwise a listener 3
+# minutes behind would make nearly every row "late". Anything later than
+# the overlap is a late row: the watcher records it in quality_late and the
+# next pass judges it on its own (Sweeper.watch).
 OVERLAP = timedelta(seconds=float(os.environ.get("BALER_QUALITY_OVERLAP_S", "") or 30))
+# Margin on the measured ingest delay when it sets the overlap.
+DELAY_MARGIN = 1.25
 # Late rows judged per pass at most; the rest wait for the next one.
 LATE_PER_SWEEP = 200_000
 # Good samples fetched from before a pass's window, per point: the first
@@ -439,12 +444,13 @@ def judge_late(ts_conn, meta: dict, late: list[tuple[str, datetime]]) -> dict:
 # row is either recorded or still ahead of the offset, never lost between.
 _WATCH_SQL = """
 WITH b AS (
-    SELECT seq, n, point_uri, ts FROM reading_feed WHERE seq > %(seq)s ORDER BY seq LIMIT %(limit)s
+    SELECT seq, n, committed_at, point_uri, ts FROM reading_feed WHERE seq > %(seq)s ORDER BY seq LIMIT %(limit)s
+), r AS (
+    SELECT u.point_uri, u.ts, b.committed_at FROM b CROSS JOIN LATERAL unnest(b.point_uri, b.ts) AS u(point_uri, ts)
 ), late AS (
-    INSERT INTO quality_late (point_uri, ts)
-    SELECT u.point_uri, u.ts FROM b CROSS JOIN LATERAL unnest(b.point_uri, b.ts) AS u(point_uri, ts)
-    WHERE u.ts <= %(below)s
-    ON CONFLICT (point_uri, ts) DO NOTHING
+    INSERT INTO quality_late (sweeper, point_uri, ts)
+    SELECT %(name)s, point_uri, ts FROM r WHERE ts <= %(below)s
+    ON CONFLICT (sweeper, point_uri, ts) DO NOTHING
     RETURNING 1
 ), moved AS (
     UPDATE reading_feed_consumers SET seq = greatest(seq, (SELECT max(seq) FROM b)), updated_at = now()
@@ -452,7 +458,8 @@ WITH b AS (
     RETURNING seq, missed_readings, missed_batches, last_missed_at
 )
 SELECT (SELECT count(*) FROM b), (SELECT COALESCE(sum(n), 0) FROM b), (SELECT count(*) FROM late),
-       m.seq, m.missed_readings, m.missed_batches, m.last_missed_at
+       m.seq, m.missed_readings, m.missed_batches, m.last_missed_at,
+       (SELECT percentile_cont(0.9) WITHIN GROUP (ORDER BY extract(epoch FROM committed_at - ts)) FROM r)
 FROM (SELECT 1) one LEFT JOIN moved m ON true"""
 
 
@@ -479,7 +486,13 @@ class Sweeper:
     def __init__(self, conn, store, name: str = "quality", interval: float = 300.0,
                  overlap: timedelta = OVERLAP, max_span: timedelta | None = None, log=None):
         self.conn, self.store, self.name = conn, store, name
-        self.interval, self.overlap = interval, overlap
+        self.interval, self.base_overlap = interval, overlap
+        # The overlap in force: never shrinks between two passes (a watch
+        # that left a row unrecorded must find it in the next window), and
+        # restarts from what the last cycle measured after each pass.
+        self.overlap = overlap
+        self.delay_s = 0.0        # ingest delay p90 seen since the last pass
+        self.last_delay_s = 0.0   # ...and over the cycle before it
         self.max_span = max_span or timedelta(seconds=max(2 * interval, 60.0))
         self.log = log or functools.partial(print, flush=True)
         self.consumer = reading_feed.FeedConsumer(conn, name, log=self.log)
@@ -497,6 +510,13 @@ class Sweeper:
             (self.name, now - LOOKBACK))
         self.judged_to = self.conn.execute(
             "SELECT judged_to FROM quality_watermark WHERE sweeper = %s", (self.name,)).fetchone()[0]
+
+    def _overlap_for(self, delay_s: float) -> timedelta:
+        return max(self.base_overlap, min(timedelta(seconds=delay_s * DELAY_MARGIN), timedelta(seconds=self.interval)))
+
+    def _widen(self, delay_s: float) -> None:
+        self.delay_s = max(self.delay_s, delay_s)
+        self.overlap = max(self.overlap, self._overlap_for(delay_s))
 
     def lag_s(self, now: datetime | None = None) -> float:
         """How far behind now the watermark is: about the interval between
@@ -540,18 +560,24 @@ class Sweeper:
         self.conn.execute("UPDATE quality_watermark SET judged_to = %s, updated_at = now() WHERE sweeper = %s",
                           (until, self.name))
         self.judged_to = until
+        used = self.overlap
+        self.last_delay_s, self.delay_s = self.delay_s, 0.0
+        self.overlap = self._overlap_for(self.last_delay_s)
         t1 = time.monotonic()
-        late = self.conn.execute("SELECT point_uri, ts FROM quality_late ORDER BY point_uri, ts LIMIT %s",
-                                 (LATE_PER_SWEEP,)).fetchall()
+        late = self.conn.execute(
+            "SELECT point_uri, ts FROM quality_late WHERE sweeper = %s ORDER BY point_uri, ts LIMIT %s",
+            (self.name, LATE_PER_SWEEP)).fetchall()
         lc = judge_late(self.conn, meta, late) if late else {"late_rows": 0, "late_points": 0, "late_flagged": 0}
         if late:
             self.conn.execute(
                 "DELETE FROM quality_late l USING unnest(%s::text[], %s::timestamptz[]) AS d(uri, ts) "
-                "WHERE l.point_uri = d.uri AND l.ts = d.ts", ([u for u, _ in late], [t for _, t in late]))
+                "WHERE l.sweeper = %s AND l.point_uri = d.uri AND l.ts = d.ts",
+                ([u for u, _ in late], [t for _, t in late], self.name))
         self.sweeps += 1
         self.last = {**counts, **lc, "candidates": len(uris), "classified": len(meta),
                      "since": since.isoformat(), "until": until.isoformat(),
                      "span_s": round((until - since).total_seconds(), 1), "skipped_s": round(skipped_s, 1),
+                     "overlap_used_s": used.total_seconds(),
                      "meta_s": round(meta_s, 3), "window_s": round(window_s, 3),
                      "late_s": round(time.monotonic() - t1, 3), "sweep_s": round(time.monotonic() - t0, 3),
                      "at": now.isoformat()}
@@ -564,13 +590,15 @@ class Sweeper:
         counts only. Returns the late rows recorded."""
         if self.judged_to is None:
             return 0
-        below = self.judged_to - self.overlap
         found = 0
         while True:
-            n, readings, late, seq, mr, mb, last = self.conn.execute(
+            below = self.judged_to - self.overlap
+            n, readings, late, seq, mr, mb, last, delay = self.conn.execute(
                 _WATCH_SQL, {"seq": self.consumer.seq, "limit": limit, "below": below, "name": self.name}).fetchone()
             if not n:
                 return found
+            if delay is not None:
+                self._widen(float(delay))
             self.consumer.seq = seq
             self.watched_readings += int(readings)
             found += int(late)
@@ -589,6 +617,7 @@ class Sweeper:
         lag, and the watcher's feed position."""
         feed = self.consumer.refresh_lag()
         return {**self.last, "interval_s": self.interval, "overlap_s": self.overlap.total_seconds(),
+                "ingest_delay_s": round(max(self.delay_s, self.last_delay_s), 1),
                 "sweeps": self.sweeps,
                 "watermark": self.judged_to.isoformat() if self.judged_to else None,
                 "watermark_lag_s": round(self.lag_s(), 1),
