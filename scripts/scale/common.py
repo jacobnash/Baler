@@ -193,6 +193,13 @@ def envelope(point: str, value, ts: float) -> bytes:
     return json.dumps({"point": point, "value": value, "ts": ts}).encode()
 
 
+def batch_envelope(ts: float, points: dict) -> bytes:
+    """Windrow's batched envelope (WINDROW_MQTT_ENVELOPE=batch, Baler#234):
+    one device's poll tick on f"{prefix}/batch", byte for byte what
+    mqtt_sink.batch_payload makes for readings sharing a timestamp."""
+    return json.dumps({"ts": ts, "points": points}).encode()
+
+
 # Faulting points (#273, --fault-share): numeric points chosen by index read
 # FAULT_VALUE - outside the ladder's scale-range rule (+-1000) - for
 # FAULT_HALF_PERIOD readings, then normally for as many, so their faults

@@ -233,6 +233,39 @@ def test_evaluate_fails_on_listener_restarts_and_tags_storm_lag(over, needle):
     assert status == "fail" and any(needle in r for r in reasons), reasons
 
 
+def test_batch_envelope_is_windrows_bytes():
+    # Windrow's mqtt_sink.batch_payload for one poll tick (Baler#234)
+    assert common.batch_envelope(1.5, {"sat": 71.5, "fan": True}) == b'{"ts": 1.5, "points": {"sat": 71.5, "fan": true}}'
+
+
+def test_a_generator_batch_stores_the_same_rows_as_per_point(monkeypatch):
+    """--envelope batch: the same equip tick, as one message, lands as the
+    same (topic, value, ts) rows the per-point messages do (Baler#234)."""
+    shape = common.Shape(10)
+    prefix = shape.equip_prefix(0)
+    pts = shape.equip_points(0)
+    values = {label: common.value_at(t[4], idx, 3) for idx, label, t in pts}
+    per_point, batched = [], []
+    monkeypatch.setattr(mqtt_listener, "ingest_reading",
+                        lambda store, conn, topic, value, ts, quality=None: per_point.append((topic, value, ts)))
+    monkeypatch.setattr(mqtt_listener, "ingest_readings",
+                        lambda store, conn, rows: batched.extend((r[0], r[1], r[2]) for r in rows))
+    on_message = mqtt_listener.make_on_message(store=None, ts_conn=None)
+    for label, v in values.items():
+        on_message(None, None, SimpleNamespace(topic=f"{prefix}/{label}", payload=common.envelope(label, v, 9.0)))
+    on_message(None, None, SimpleNamespace(topic=f"{prefix}/batch", payload=common.batch_envelope(9.0, values)))
+    assert batched == [(t, mqtt_listener.binary_state(v), ts) for t, v, ts in per_point] and len(batched) == 10
+
+
+def test_loadgen_counts_a_batch_puback_as_its_readings():
+    acks = loadgen.Acks()
+    acks.sent(1, 100, readings=10)
+    acks.on_publish(None, None, 1)
+    acks.on_publish(None, None, 2)  # acked before sent() returned
+    acks.sent(2, 101, readings=5)
+    assert acks.acked == 15 and acks.take_buckets() == {100: 10, 101: 5}
+
+
 def test_ladder_reads_baler_metrics_and_checks_them_against_its_canaries():
     """#235: the ladder parses what ops_metrics renders, and records whether
     Baler's own lag and drop numbers agree with its canaries and $SYS."""

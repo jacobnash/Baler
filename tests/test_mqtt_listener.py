@@ -11,7 +11,7 @@ import typing
 import pytest
 from rdflib import RDF, URIRef
 
-from baler.mqtt_listener import make_on_connect
+from baler.mqtt_listener import make_on_connect, make_on_message
 from baler.store import BRICK, PROJ, TD, Store
 
 
@@ -374,6 +374,54 @@ def test_the_supervisor_restarts_a_dead_child_with_backoff_and_counts_it(monkeyp
     sup.tick()
     assert sup.restarts == {"worker-1": 2} and sup.children["worker-1"]["due"] == clock[0] + 2.0
     assert sup.pids() == {"worker-0": 101}
+
+
+# --- Windrow's batched envelope (Baler#234) ---------------------------------
+
+
+def test_a_batch_expands_to_the_per_point_topics():
+    from baler.mqtt_listener import expand_batch, is_batch
+
+    assert is_batch("fbf/s/ahu/batch", {"ts": 1.0, "points": {"a": 1}})
+    assert not is_batch("fbf/s/ahu/batch", {"point": "batch", "value": 3, "ts": 1.0})  # a point labelled "batch"
+    assert not is_batch("fbf/s/ahu/zone", {"points": {"a": 1}})
+    assert expand_batch("fbf/s/ahu/batch", {"ts": 5.0, "points": {"zone-temp": 70.5, "analogValue,1": 3}}) == [
+        ("fbf/s/ahu/zone-temp", 70.5, 5.0, None), ("fbf/s/ahu/analogValue,1", 3, 5.0, None)]
+    assert expand_batch("fbf/s/ahu/batch", {"points": [{"point": "a", "value": 1, "ts": 2.0},
+                                                        {"point": "b", "value": 2, "ts": 3.0, "quality": "bad"}]}) == [
+        ("fbf/s/ahu/a", 1, 2.0, None), ("fbf/s/ahu/b", 2, 3.0, "bad")]
+    for bad in ({"points": 3}, {"points": [1]}, {"points": {"": 1}}, {"points": {"a/+": 1}},
+                {"points": {"a/tags": "{}"}}, {"points": [{"value": 1}]}):
+        with pytest.raises((TypeError, ValueError)):
+            expand_batch("fbf/s/ahu/batch", bad)
+
+
+def test_a_batch_is_acked_once_after_its_last_reading_commits(monkeypatch):
+    """Its readings may span two flushes (max_rows 3 here, 4 readings): the
+    message is acknowledged once, with the flush holding its last reading."""
+    written: list = []
+    client, batcher = _batcher(monkeypatch, written)
+    on_message = make_on_message(None, None, batcher)
+    body = json.dumps({"ts": 7.0, "points": {"a": 1.0, "b": "active", "c": 3.0, "d": 4.0}}).encode()
+    on_message(client, None, _QMsg("fbf/s/ahu/batch", body, 21))
+    assert batcher.queue.qsize() == 4 and client.acks == []
+    batcher.flush([batcher.queue.get_nowait() for _ in range(3)])
+    assert client.acks == []  # three of four stored: not yet
+    batcher.flush([batcher.queue.get_nowait()])
+    assert client.acks == [(21, 1)]
+    assert written == [[("fbf/s/ahu/a", 1.0, 7.0, None), ("fbf/s/ahu/b", True, 7.0, None), ("fbf/s/ahu/c", 3.0, 7.0, None)],
+                       [("fbf/s/ahu/d", 4.0, 7.0, None)]]
+    st = batcher.stats()
+    assert st["messages"] == 1 and st["received"] == 4 and st["rows"] == 4
+
+
+def test_a_malformed_or_empty_batch_is_skipped_and_acked(monkeypatch):
+    written: list = []
+    client, batcher = _batcher(monkeypatch, written)
+    on_message = make_on_message(None, None, batcher)
+    on_message(client, None, _QMsg("fbf/s/ahu/batch", json.dumps({"points": {"a/#": 1}}).encode(), 1))
+    on_message(client, None, _QMsg("fbf/s/ahu/batch", json.dumps({"ts": 1.0, "points": {}}).encode(), 2))
+    assert client.acks == [(1, 1), (2, 1)] and batcher.queue.qsize() == 0
 
 
 # --- overload signals (#235): oldest uncommitted reading, last write, DUPs
