@@ -8,8 +8,8 @@
 // so a view can be shared by copying the address.
 
 const cxParams = new URLSearchParams(location.search);
-const CX_URL = cxParams.get("cx") || "/cx";
-const CX_INGEST_URL = cxParams.get("ingest") || "/ingest";
+const CX_URL = apiBase("cx", "/cx");
+const CX_INGEST_URL = apiBase("ingest", "/ingest");
 const ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
 const STATUS_ORDER = { fail: 0, inconclusive: 1, pass: 2, not_applicable: 3 };
 const FAMILY_ORDER = ["exists", "live", "pair", "ladder", "template", "gl36", "cx"];

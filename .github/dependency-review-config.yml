@@ -1,0 +1,15 @@
+# actions/dependency-review-action (security.yml, #279): a pull request that
+# adds or upgrades to a dependency with a known high or critical advisory
+# fails the "Dependency review" check. Only what the PR changes is judged,
+# so advisories against dependencies already on main never fail a PR (the
+# scheduled scans report those).
+#
+# Accepting a risk: add the advisory's GHSA id to allow-ghsas below, with a
+# comment saying why it doesn't apply or what mitigates it, who decided, and
+# a date to look again. Keep the reasoning short and general here; anything
+# that explains how to exploit Baler belongs in a private security advisory,
+# not in this public file (see SECURITY.md).
+fail-on-severity: high
+fail-on-scopes: [runtime, development, unknown]
+comment-summary-in-pr: never
+allow-ghsas: []

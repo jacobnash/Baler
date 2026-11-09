@@ -1,0 +1,9 @@
+# gitleaks (security.yml, #279): findings accepted as not-a-secret, one
+# fingerprint per line (gitleaks prints it as "Fingerprint:"), each with a
+# comment above it saying what it is (a test fixture, a documented example
+# value). A real secret is never "accepted": rotate it, then remove it.
+# For a line you are adding, an inline `gitleaks:allow` comment works too.
+
+# tests/test_auth_mfa.py: monkeypatching auth._PBKDF2_ITERATIONS to 1000 to
+# speed the tests up - a setting name and an iteration count, not a secret.
+0349d886d4ca52cd603ae2a0ecefecd0aefe023a:tests/test_auth_mfa.py:generic-api-key:19

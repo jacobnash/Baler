@@ -11,7 +11,7 @@ import typing
 import pytest
 from rdflib import RDF, URIRef
 
-from baler.mqtt_listener import make_on_connect
+from baler.mqtt_listener import make_on_connect, make_on_message
 from baler.store import BRICK, PROJ, TD, Store
 
 
@@ -374,3 +374,109 @@ def test_the_supervisor_restarts_a_dead_child_with_backoff_and_counts_it(monkeyp
     sup.tick()
     assert sup.restarts == {"worker-1": 2} and sup.children["worker-1"]["due"] == clock[0] + 2.0
     assert sup.pids() == {"worker-0": 101}
+
+
+# --- Windrow's batched envelope (Baler#234) ---------------------------------
+
+
+def test_a_batch_expands_to_the_per_point_topics():
+    from baler.mqtt_listener import expand_batch, is_batch
+
+    assert is_batch("fbf/s/ahu/batch", {"ts": 1.0, "points": {"a": 1}})
+    assert not is_batch("fbf/s/ahu/batch", {"point": "batch", "value": 3, "ts": 1.0})  # a point labelled "batch"
+    assert not is_batch("fbf/s/ahu/zone", {"points": {"a": 1}})
+    assert expand_batch("fbf/s/ahu/batch", {"ts": 5.0, "points": {"zone-temp": 70.5, "analogValue,1": 3}}) == [
+        ("fbf/s/ahu/zone-temp", 70.5, 5.0, None), ("fbf/s/ahu/analogValue,1", 3, 5.0, None)]
+    assert expand_batch("fbf/s/ahu/batch", {"points": [{"point": "a", "value": 1, "ts": 2.0},
+                                                        {"point": "b", "value": 2, "ts": 3.0, "quality": "bad"}]}) == [
+        ("fbf/s/ahu/a", 1, 2.0, None), ("fbf/s/ahu/b", 2, 3.0, "bad")]
+    for bad in ({"points": 3}, {"points": [1]}, {"points": {"": 1}}, {"points": {"a/+": 1}},
+                {"points": {"a/tags": "{}"}}, {"points": [{"value": 1}]}):
+        with pytest.raises((TypeError, ValueError)):
+            expand_batch("fbf/s/ahu/batch", bad)
+
+
+def test_a_batch_is_acked_once_after_its_last_reading_commits(monkeypatch):
+    """Its readings may span two flushes (max_rows 3 here, 4 readings): the
+    message is acknowledged once, with the flush holding its last reading."""
+    written: list = []
+    client, batcher = _batcher(monkeypatch, written)
+    on_message = make_on_message(None, None, batcher)
+    body = json.dumps({"ts": 7.0, "points": {"a": 1.0, "b": "active", "c": 3.0, "d": 4.0}}).encode()
+    on_message(client, None, _QMsg("fbf/s/ahu/batch", body, 21))
+    assert batcher.queue.qsize() == 4 and client.acks == []
+    batcher.flush([batcher.queue.get_nowait() for _ in range(3)])
+    assert client.acks == []  # three of four stored: not yet
+    batcher.flush([batcher.queue.get_nowait()])
+    assert client.acks == [(21, 1)]
+    assert written == [[("fbf/s/ahu/a", 1.0, 7.0, None), ("fbf/s/ahu/b", True, 7.0, None), ("fbf/s/ahu/c", 3.0, 7.0, None)],
+                       [("fbf/s/ahu/d", 4.0, 7.0, None)]]
+    st = batcher.stats()
+    assert st["messages"] == 1 and st["received"] == 4 and st["rows"] == 4
+
+
+def test_a_malformed_or_empty_batch_is_skipped_and_acked(monkeypatch):
+    written: list = []
+    client, batcher = _batcher(monkeypatch, written)
+    on_message = make_on_message(None, None, batcher)
+    on_message(client, None, _QMsg("fbf/s/ahu/batch", json.dumps({"points": {"a/#": 1}}).encode(), 1))
+    on_message(client, None, _QMsg("fbf/s/ahu/batch", json.dumps({"ts": 1.0, "points": {}}).encode(), 2))
+    assert client.acks == [(1, 1), (2, 1)] and batcher.queue.qsize() == 0
+
+
+# --- overload signals (#235): oldest uncommitted reading, last write, DUPs
+
+
+def test_the_oldest_uncommitted_reading_is_aged_until_its_batch_commits(monkeypatch):
+    from baler import mqtt_listener
+
+    written: list = []
+    _client, batcher = _batcher(monkeypatch, written)
+    assert batcher.oldest_age() == 0.0
+    clock = [100.0]
+    monkeypatch.setattr(mqtt_listener.time, "monotonic", lambda: clock[0])
+    batcher.put(_QMsg("fbf/s/a/p", b"", 1), "fbf/s/a/p", 1.0, 1.0)
+    clock[0] = 102.5
+    batcher.put(_QMsg("fbf/s/a/q", b"", 2), "fbf/s/a/q", 1.0, 1.0)
+    clock[0] = 104.0
+    assert batcher.oldest_age() == 4.0  # the queue's head, not the newest
+    first = batcher.queue.get_nowait()
+    batcher._batch_t0 = first[-1]  # what _run does as it starts a batch
+    assert batcher.oldest_age() == 4.0  # being written still counts
+    batcher.flush([first])
+    assert batcher.oldest_age() == 1.5  # now the second, still queued
+    batcher.flush([batcher.queue.get_nowait()])
+    st = batcher.stats()
+    assert st["oldest_age_s"] == 0.0 and "last_flush_s" in st and written
+
+
+def test_redelivered_messages_are_counted(monkeypatch):
+    from baler.mqtt_listener import make_on_message
+
+    written: list = []
+    client, batcher = _batcher(monkeypatch, written)
+    on_message = make_on_message(None, None, batcher)
+    for mid, dup in ((1, False), (2, True), (3, True)):
+        msg = _QMsg(f"fbf/s/a/p{mid}", _envelope(1.0), mid)
+        msg.dup = dup
+        on_message(client, None, msg)
+    on_message(client, None, _QMsg("fbf/s/a/p4", _envelope(1.0), 4))  # no dup attribute at all
+    assert batcher.stats()["redelivered"] == 2
+
+
+def test_worker_totals_fold_the_overload_signals():
+    from baler import mqtt_listener
+
+    class Conn:
+        closed = broken = False
+
+        def execute(self, sql):
+            return [({"rows": 10, "queue": 5, "queue_max": 50, "oldest_age_s": 2.0, "last_flush_s": 0.1,
+                      "redelivered": 1, "received": 12, "readings_per_s": 100.0, "batches_per_s": 2.0},),
+                    ({"rows": 20, "queue": 9, "queue_max": 50, "oldest_age_s": 7.5, "last_flush_s": 0.3,
+                      "redelivered": 2, "received": 25, "readings_per_s": 150.5, "batches_per_s": 1.0},)]
+
+    t = mqtt_listener._worker_totals(Conn())
+    assert t["writers"] == 2 and t["rows"] == 30 and t["queue"] == 9
+    assert t["oldest_age_s"] == 7.5 and t["last_flush_s"] == 0.3 and t["redelivered"] == 3
+    assert t["received"] == 37 and t["readings_per_s"] == 250.5 and t["batches_per_s"] == 3.0
