@@ -1191,10 +1191,81 @@ For sizing a deployment from these results (disk, chunk settings, listener worke
 
 ### Baler vs Haxall
 
-Same generator, steps, 5 s rate, probes and CPU/memory caps against Haxall, with durability on
-for both. Tracked as [#236](https://github.com/jacobnash/Baler/issues/236). **Not run yet.** The
-harness records Baler's side (durability read live, the crash test); the Haxall target, bridge
-and probes are #236's work.
+This runs the same generator, steps, 5 s rate, canary, comparable probes and CPU/memory caps
+against Haxall, with durability on for both
+([#236](https://github.com/jacobnash/Baler/issues/236)). **The harness is in place, but the
+measured side-by-side is pending** a nash-srv run (commands below). It needs the Haxall image,
+which this harness doesn't publish.
+
+**What runs**
+
+- `ladder.py up|run|crash|down --target haxall` starts `scripts/scale/compose.haxall.yml` as its
+  own compose project, `<SCALE_PROJECT>-haxall` (`scale-haxall` by default). It runs behind the
+  same guard as the Baler stack: ports off live, on 127.0.0.1, volumes under
+  `BALER_VOLUME_PREFIX`. The project includes:
+  - the same broker image, config and ACL;
+  - Haxall from the image CI's haxall-matrix job builds (`windrow/docker/haxall.Dockerfile`,
+    Haxall 4.0.6, initialized the same way);
+  - `scripts/scale/haxall_bridge.py` in Baler's image, in its own container.
+- **Caps.** Haxall is storage, ingest API and read API in one process, so by default it gets the
+  sum of Baler's caps for those: postgres + oxigraph + haystack_api + ingest_api, which is
+  5 CPUs and 14 GiB with the defaults. The bridge gets `mqtt_listener`'s cap, and both brokers get
+  the same cap. Baler's rule daemons aren't counted, because the Haxall run evaluates no rules. The
+  caps are written into each result (`cpu_caps`). Override them with
+  `SCALE_CPUS_HAXALL`/`SCALE_MEM_HAXALL` and `SCALE_CPUS_HAXALL_BRIDGE`/`SCALE_MEM_HAXALL_BRIDGE`.
+- **Ingest** goes through a batched `hisWrite` bridge, not Windrow's demo bridge. Windrow's bridge
+  makes one Axon eval per reading, stamped `now()`. `haxall_bridge.py` works like Baler's
+  listener:
+  - It uses a persistent session with manual acks. A message is acknowledged only after the
+    `hisWrite` holding its reading returns, so `crash` means the same thing on both sides.
+  - Readings keep their payload `ts`.
+  - It sends one Haystack `hisWrite` per flush as a batch write (a value column per point, with
+    `id` in the column meta). If Haxall refuses batch writes, it falls back to one `hisWrite` per
+    point per flush and records `mode` and `batch_refused`.
+  - It reports its own limit apart from Haxall's: `step.bridge` holds its CPU, queue, batch size
+    and `hisWrite` latency, from `BRIDGE_STATS` lines in its log.
+- **Points** are provisioned as Haxall records by Axon `commit`, with ids taken from their topics
+  (`fbf/scale/s00000/e00000/sat` → `@scale.s00000.e00000.sat`). They get the same markers and
+  `scaleHis1/100/1000` groups as the generator's tags give Baler.
+- **Probes** go through Haxall's own Haystack API: `read` for the filter and curVal rows, and Axon
+  for `hisRead` of 1, 100 and 1,000 points over today. The equip rollup probe is
+  `readAll(point and his and equipRef->ahu and scaleHis1000).hisRead(today())`. Haxall has no
+  curVal for points that no connector drives, so the curVal probes time the same `read` request.
+- **Stored rows** are a `hisRead` count over the soak's seconds, using the same payload-ts window
+  as Baler's `point_history` count. **Lag** is measured from the canary point's `hisRead`.
+- **Durability.** Each result records what Haxall's settings were found to be (its project
+  files mentioning sync/flush, JVM options, and the volume its database is on), next to
+  `crash --target haxall` (kill -9 `haxall`, then `haxall_bridge`). A Haxall result is labelled
+  `comparable` only once `SCALE_HAXALL_DURABILITY` names how its history is fsync'd. If Haxall's
+  store has no fsync-on-commit setting, put its database on a sync-mounted volume (below). That's
+  stricter than Postgres's group commit, so say so next to the numbers. Either way, `crash` must
+  lose nothing.
+
+**On nash-srv** (with the `windrow` submodule checked out):
+
+```sh
+git submodule update --init windrow
+$PY scripts/scale/ladder.py init --force   # or add SCALE_HAXALL_SU_PASSWORD etc. to an existing scale.env
+# Durability parity: read Haxall 4.0.6's history store (hxd HxdHisExt -> rt.db.his, folio) for its
+# flush/fsync behaviour, then either set it on (SCALE_HAXALL_JAVA_OPTS or the haxall command in
+# compose.haxall.yml) or give Haxall a sync-mounted volume:
+#   truncate -s 40G /srv/scale-haxall.img && mkfs.ext4 -q /srv/scale-haxall.img
+#   LOOP=$(sudo losetup -f --show /srv/scale-haxall.img)
+#   docker volume create --driver local --opt type=ext4 --opt device=$LOOP --opt o=sync,dirsync scale_haxall-var-sync
+#   # scale.env: SCALE_HAXALL_VAR_VOLUME=scale_haxall-var-sync  SCALE_HAXALL_VAR_EXTERNAL=true
+# and record how in scale.env: SCALE_HAXALL_DURABILITY=<setting or "sync-mounted volume">
+$PY scripts/scale/ladder.py up --target haxall
+$PY scripts/scale/ladder.py crash --target haxall --points 10000
+$PY scripts/scale/ladder.py run --target haxall --no-up --steps 10k,25k,50k,100k --continue-on-fail
+$PY scripts/scale/ladder.py down --target haxall
+# Baler on the same steps (if not already measured at this commit), then the table:
+$PY scripts/scale/ladder.py run --steps 10k,25k,50k,100k --continue-on-fail
+$PY scripts/scale/ladder.py table results/<baler-run>-ladder.json --haxall results/<haxall-run>-ladder.json
+```
+
+Run one stack at a time, so the two runs never share the host's CPUs.
+
+Results (pending: filled in from `ladder.py table ... --haxall ...`):
 
 | Step | Baler stored/s | Haxall stored/s | Baler p95 lag | Haxall p95 lag | Baler read filter | Haxall read filter | Baler hisRead 1000 | Haxall hisRead 1000 | Baler RAM / disk | Haxall RAM / disk |
 |---|---|---|---|---|---|---|---|---|---|---|
