@@ -252,6 +252,17 @@ def make_handler(store, ts_pool):
                 except ValueError:
                     _respond_error(self, 400, "maxSamples must be an integer")
                     return
+                # Series per response (#244): pages follow with ?after=<the
+                # previous page's `after`>. seriesLimit=0 opts out.
+                try:
+                    series_limit = int(query.get("seriesLimit", [hisquery.DEFAULT_SERIES_LIMIT])[0])
+                except ValueError:
+                    _respond_error(self, 400, "seriesLimit must be an integer")
+                    return
+                if series_limit < 0:
+                    _respond_error(self, 400, "seriesLimit must be 0 (no limit) or more")
+                    return
+                after = query.get("after", [None])[0] or None
                 compact = query.get("compact", ["0"])[0] in ("1", "true")
                 span.set_attribute("expr", expr)
                 span.set_attribute("tz", tz)
@@ -263,7 +274,7 @@ def make_handler(store, ts_pool):
                         caller_scope = scope_for(conn, claims_from_header(self.headers.get("Authorization")))
                         result = hisquery.run_query(
                             store, conn, parsed, now=datetime.now(timezone.utc), tz=tz, limit=limit, scope=caller_scope,
-                            max_samples=max_samples,
+                            max_samples=max_samples, series_limit=series_limit or None, after=after,
                         )
                 except hisquery.NoMatchError as exc:
                     span.set_attribute("error", str(exc))
@@ -455,7 +466,8 @@ def main() -> None:
         with ts_pool.connection() as conn:
             for expr in ("readAll(equip).hisRead(today)", "readAll(equip).hisRead(yesterday).hisRollup(avg, 1h)"):
                 hisquery.run_query(store, conn, hisquery.parse_query(expr), now=datetime.now(timezone.utc), tz=DEFAULT_TZ,
-                                   max_samples=hisquery.DEFAULT_MAX_SAMPLES)
+                                   max_samples=hisquery.DEFAULT_MAX_SAMPLES,
+                                   series_limit=hisquery.DEFAULT_SERIES_LIMIT or None)
 
     warmup.run("his read", warm)
 

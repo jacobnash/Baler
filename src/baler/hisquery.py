@@ -58,6 +58,7 @@ supported, never a silent wrong answer.
 
 from __future__ import annotations
 
+import bisect
 import json
 import os
 import re
@@ -82,6 +83,10 @@ DEFAULT_LIMIT = 10_000
 # Values a /his response may carry in total, raw or rolled up (#33); a
 # request can ask for another budget, or 0 for none.
 DEFAULT_MAX_SAMPLES = 200_000
+# Series a /his response carries at most (Baler#244): readAll(equip) at 100k
+# points was 42 MB and 15 s, 63% of it describing points. Pages follow in
+# point-id order (run_query's `after`); 0 turns the bound off.
+DEFAULT_SERIES_LIMIT = int(os.environ.get("BALER_HIS_SERIES_LIMIT") or "1000")
 
 # Auto-downsampling (run_query's max_samples, the chart page's /his): the
 # bucket widths it picks from, and the narrowest worth folding - below this
@@ -1453,7 +1458,7 @@ def expand_to_points(store, entity_uris: list[str]) -> list[str]:
         return []
     points = {uri for uri in entity_uris if uri.startswith("urn:point:")}
     values = " ".join(f"<{_uri(u)}>" for u in entity_uris)
-    rows = store.query(
+    query = (
         PREFIXES
         + f"""SELECT DISTINCT ?point WHERE {{
             VALUES ?m {{ {values} }}
@@ -1461,7 +1466,10 @@ def expand_to_points(store, entity_uris: list[str]) -> list[str]:
             ?e brick:hasPoint ?point .
         }}"""
     )
-    points.update(str(row.point) for row in rows)
+    if hasattr(store, "iter_tsv"):  # 100k points: 0.46 s as TSV, 0.79 s as JSON rows (Baler#244)
+        points.update(t[1:-1] for t in (row[0] for row in store.iter_tsv(query)) if t[:1] == "<")
+    else:
+        points.update(str(row.point) for row in store.query(query))
     return sorted(points)
 
 
@@ -1668,11 +1676,20 @@ def _read_history(ts_conn, point_uris: list[str], date_span: Span, rollup_spec_i
 
 
 def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limit: int = DEFAULT_LIMIT, scope=None,
-              max_samples: int | None = None) -> dict:
+              max_samples: int | None = None, series_limit: int | None = None, after: str | None = None) -> dict:
     """The whole read(...).hisRead(...).hisRollup(...) pipeline against
     live stores. Raises HisQueryError for a `read` (singular) that matches
     nothing - Axon's read() throws UnknownRecErr for the same case; a
-    readAll with no matches is an empty, successful result."""
+    readAll with no matches is an empty, successful result.
+
+    `series_limit` bounds the points read (None: all): the page is the
+    first that many points, in point-id order, after the point id `after`.
+    The result's `pointCount` is every point the expression reaches, and
+    `after` is the page's last point id when more follow (pass it back as
+    `after`), else None. Describing, labelling and reading history only
+    happen for the page, so a page costs the same at any graph size. The
+    page's series are still sorted for display (equip, dis), and post
+    calls (sort, hisInterpolate, ...) apply to the page."""
     from baler import timeseries
 
     date_span = resolve_span(query.span_text, now, tz)
@@ -1692,6 +1709,13 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
         if scope is not None:
             point_uris = scope.filter(point_uris)
         sp.set_attribute("points", len(point_uris))
+    point_count = len(point_uris)
+    if after is not None:
+        point_uris = point_uris[bisect.bisect_right(point_uris, after):]
+    next_after = None
+    if series_limit is not None and len(point_uris) > series_limit:
+        point_uris = point_uris[:series_limit]
+        next_after = point_uris[-1]
     # The points' graph metadata (Oxigraph) and their history (Postgres)
     # don't depend on each other: describe_points runs on its own thread
     # while this one reads labels and history, instead of one after the
@@ -1750,6 +1774,9 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
         "limit": limit,
         "matched": matched[:_MATCHED_PREVIEW],
         "matchedCount": len(matched),
+        "pointCount": point_count,
+        "seriesLimit": series_limit,
+        "after": next_after,
         "hints": hints_for_empty_result(query.filter, graph) if not matched else [],
         "series": series,
     }

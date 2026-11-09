@@ -40,6 +40,7 @@ grid saying so, and `ops` doesn't advertise it (docs-site haystack-api.mdx).
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import math
 import os
@@ -64,6 +65,10 @@ tracer = tracing.get_tracer(__name__)
 SPEC_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "haystack-api-openapi.yaml")
 DEFAULT_TZ = os.environ.get("BALER_TZ") or "UTC"
 HIS_LIMIT = hisquery.MAX_LIMIT
+# read-by-filter's page size when the request names no `limit` (Baler#244):
+# about 0.6 s a page at 100k points. 0 turns it off (one grid of everything,
+# as before), for a client that can't follow `after`.
+READ_LIMIT = int(os.environ.get("BALER_READ_LIMIT") or "1000")
 
 HAYSTACK_NS = "urn:baler:haystack#"
 HUNIT_NS = "urn:baler:haystack-unit#"
@@ -436,6 +441,8 @@ def read_first_ts_many(conn, point_uris: list[str]) -> dict[str, datetime]:
 
 # Tags build_records derives from point_history, never stored in the graph.
 _LIVE_TAGS = {"his", "curVal", "curStatus"}
+# Live-filter candidates are built this many at a time while a page fills.
+_LIVE_BLOCK = 1000
 # "every entity", for a filter whose relaxation constrains nothing (`not his`)
 _ANY_ENTITY = hisquery.parse_query("point or equip or site or Site or Building or Floor or Zone").filter
 
@@ -529,6 +536,20 @@ class Backend:
         return self.ts_pool.connection()
 
     def read_filter(self, text: str, limit: int | None, scope: Scope = EVERYTHING) -> list[dict]:
+        """Every record the filter matches, at most `limit` (None: all)."""
+        return self.read_page(text, limit, scope)[0]
+
+    def read_page(self, text: str, limit: int | None, scope: Scope = EVERYTHING,
+                  after: str | None = None) -> tuple[list[dict], str | None]:
+        """One page of a filter read: (records, cursor). Records come in id
+        (entity URI) order, only those after `after` (a URI; None: from the
+        start), at most `limit` (None: all). The cursor is the last URI the
+        page covered when more may follow, else None; pass it back as
+        `after` for the next page. Keyset paging, so stable under
+        concurrent writes: a record that exists for the whole walk is
+        returned exactly once, whatever is added or removed meanwhile, and
+        every page costs about the same however far into the walk it is
+        (Baler#244: one 100k-point grid was 33 MB and 15.9 s)."""
         try:
             q = hisquery.parse_query(text)
         except hisquery.HisQueryError as exc:
@@ -536,28 +557,47 @@ class Backend:
         if q.span_text is not None or q.rollup is not None or q.mode != "readAll":
             raise OpError("read takes a plain Haystack filter, not a hisRead/hisRollup expression")
         node = _decode_refs(q.filter)
-        if not _live(node):
-            with tracer.start_as_current_span("haystack.read.match_entities") as span:
+        live = _live(node)
+        with tracer.start_as_current_span("haystack.read.match_entities") as span:
+            if not live:
                 uris = hisquery.match_entities(self.store, node, scope=scope)
-                span.set_attribute("matched", len(uris))
-            if limit is not None:
-                uris = uris[:limit]
+            else:
+                # `his`/`curVal`/`curStatus` come from point_history, not the
+                # graph, so SPARQL alone can't decide them. Candidates from a
+                # relaxed filter, then the exact filter: graph-only parts by
+                # SPARQL set membership, live tags against the built record.
+                relaxed = _relax(node)
+                uris = hisquery.match_entities(self.store, relaxed if relaxed is not None else _ANY_ENTITY, scope=scope)
+            span.set_attribute("matched", len(uris))
+        if after is not None:
+            uris = uris[bisect.bisect_right(uris, after):]
+        if not live:
+            page = uris if limit is None else uris[:limit]
             with self._conn() as conn, tracer.start_as_current_span("haystack.read.build_records") as span:
-                span.set_attribute("records", len(uris))
-                recs = build_records(self.store, conn, uris)
-            return [recs[u] for u in uris if u in recs]
-        # `his`/`curVal`/`curStatus` come from point_history, not the graph,
-        # so SPARQL alone can't decide them. Candidates from a relaxed filter,
-        # then the exact filter: graph-only parts by SPARQL set membership,
-        # live tags against the built record.
-        relaxed = _relax(node)
-        cands = hisquery.match_entities(self.store, relaxed if relaxed is not None else _ANY_ENTITY, scope=scope)
+                span.set_attribute("records", len(page))
+                recs = build_records(self.store, conn, page)
+            more = limit is not None and len(uris) > limit
+            return [recs[u] for u in page if u in recs], (page[-1] if more and page else None)
         sets: dict[int, set[str]] = {}
         _graph_sets(self.store, node, sets, scope)
+        out: list[dict] = []
+        # Candidates in blocks, until the page is full: a selective live
+        # filter (`his and curVal > 90`) reads on past one block's worth.
+        block = len(uris) if limit is None else max(limit, _LIVE_BLOCK)
+        last = None
         with self._conn() as conn:
-            recs = build_records(self.store, conn, cands)
-        out = [recs[u] for u in cands if u in recs and _eval_live(node, u, recs[u], sets)]
-        return out[:limit] if limit is not None else out
+            for i in range(0, len(uris), block):
+                cands = uris[i:i + block]
+                recs = build_records(self.store, conn, cands)
+                for u in cands:
+                    last = u
+                    if u in recs and _eval_live(node, u, recs[u], sets):
+                        out.append(recs[u])
+                        if limit is not None and len(out) >= limit:
+                            break
+                if limit is not None and len(out) >= limit:
+                    break
+        return out, (last if last is not None and last != uris[-1] else None)
 
     def read_ids(self, refs: list[oh.Ref], scope: Scope = EVERYTHING) -> list[dict | None]:
         uris = [ref_to_uri(r.id) for r in refs]
@@ -982,9 +1022,7 @@ def dispatch(backend: Backend, op: str, req: oh.Grid, scope: Scope = EVERYTHING,
         return oh.Grid(meta=meta, cols=full.cols, rows=rows)
     if op == "read":
         if "filter" in row:
-            limit = row.get("limit")
-            limit = int(limit.val) if isinstance(limit, oh.Number) else None
-            return _rows_grid(backend.read_filter(str(row["filter"]), limit, scope))
+            return _read_filter_grid(backend, row, scope)
         refs = [_ref(r["id"]) for r in req.rows if "id" in r]
         if not refs:
             raise OpError("read requires filter or id")
@@ -1059,6 +1097,35 @@ def dispatch(backend: Backend, op: str, req: oh.Grid, scope: Scope = EVERYTHING,
         # Answered (not a 404) so a client gets an error grid it can show.
         raise OpError(INVOKE_ACTION_UNSUPPORTED)
     raise OpError(f"unknown op: {op}")
+
+
+def _read_filter_grid(backend: Backend, row: dict, scope: Scope) -> oh.Grid:
+    """read by filter, a page at a time (Baler#244). `limit` is the spec's
+    own; without one the server's READ_LIMIT applies (0: none), so a read
+    of a large graph answers in bounded time and size instead of building
+    every record. A page that stops short of the end says so in its meta:
+    `incomplete` (why), `limit`, and `after`, the last id it covered, which
+    the client passes back as `after` (a Baler extension, ignored by
+    servers that don't page) for the next page. A read that fits in one
+    page - any read of a graph under READ_LIMIT records - has no extra meta
+    and is exactly what it always was."""
+    limit_v = row.get("limit")
+    if isinstance(limit_v, oh.Number):
+        limit: int | None = int(limit_v.val)
+        if limit < 1:
+            raise OpError("limit must be a positive number")
+    else:
+        limit = READ_LIMIT or None
+    after_v = row.get("after")
+    if after_v is not None and not isinstance(after_v, (oh.Ref, str)):
+        raise OpError("after must be the Ref a previous page's meta handed out")
+    after = ref_to_uri(after_v.id if isinstance(after_v, oh.Ref) else str(after_v)) if after_v is not None else None
+    rows, cursor = backend.read_page(str(row["filter"]), limit, scope, after)
+    grid = _rows_grid(rows)
+    if cursor is not None:
+        grid.meta = {"incomplete": f"limit of {limit} reached; pass after to read on", "limit": oh.Number(limit),
+                     "after": oh.Ref(uri_to_ref(cursor))}
+    return grid
 
 
 _MARKER_HAYSON = {"_kind": "marker"}
@@ -1337,8 +1404,8 @@ def main() -> None:
 
     def warm():
         hisquery.warm_caches()
-        for text in WARM_FILTERS:
-            encode_grid(_rows_grid(backend.read_filter(text, None)), "hayson")
+        for text in WARM_FILTERS:  # a first page each, as the UI asks for them
+            encode_grid(_rows_grid(backend.read_filter(text, READ_LIMIT or None)), "hayson")
 
     warmup.run("haystack reads", warm)
 
