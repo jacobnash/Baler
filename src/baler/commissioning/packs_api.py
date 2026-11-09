@@ -34,7 +34,7 @@ def public(row: dict, full: bool = True) -> dict:
     return out
 
 
-def _pack(h, pack_ref: str, claims: dict) -> dict | None:
+def get_pack(h, pack_ref: str, claims: dict) -> dict | None:
     row = h.REPO.get_row(PACKS, pack_ref)
     if row is None or row["org_id"] != claims.get("org_id"):
         respond_error(h, 404, "no such pack")
@@ -76,13 +76,13 @@ def _import(h, span, claims) -> None:
 
 
 def _get(h, span, claims, ref) -> None:
-    row = _pack(h, ref, claims)
+    row = get_pack(h, ref, claims)
     if row:
         respond_json(h, 200, public(row))
 
 
 def _values(h, span, claims, ref, rid) -> None:
-    row = _pack(h, ref, claims)
+    row = get_pack(h, ref, claims)
     if not row:
         return
     try:
@@ -95,7 +95,7 @@ def _values(h, span, claims, ref, rid) -> None:
 
 
 def _confirm(h, span, claims, ref, rid) -> None:
-    row = _pack(h, ref, claims)
+    row = get_pack(h, ref, claims)
     if not row:
         return
     sub = claims.get("sub")
@@ -110,7 +110,7 @@ def _confirm(h, span, claims, ref, rid) -> None:
 
 def _publish(h, span, claims, ref) -> None:
     """Freeze a draft. Unconfirmed rows are published too, and stay inactive."""
-    row = _pack(h, ref, claims)
+    row = get_pack(h, ref, claims)
     if not row:
         return
     if row["status"] != "draft":

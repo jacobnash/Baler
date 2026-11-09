@@ -2266,6 +2266,103 @@ paths:
               schema: { $ref: "#/components/schemas/PackAdoption" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /packs/{id}/extract:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Packs]
+      operationId: extractCxPackRows
+      summary: Propose rows for a draft pack from a PDF you hold (operator)
+      description: |
+        Runs in the background (poll GET /pack-extractions/{id}). Each
+        proposal cites the page and quotes the text it was read from; the
+        quote must be on that page or the proposal is dropped. The PDF is
+        not kept (only its sha256). Needs BALER_LLM_PROVIDER set to a model.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                filename: { type: string }
+                data: { type: string, description: The PDF, base64 }
+      responses:
+        "202":
+          description: The queued extraction
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PackExtraction" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501":
+          description: No model is configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /pack-extractions/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Packs]
+      operationId: getCxPackExtraction
+      summary: An extraction's status
+      responses:
+        "200":
+          description: The extraction
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PackExtraction" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /packs/{id}/proposals:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Packs]
+      operationId: listCxPackProposals
+      summary: Proposed rows for a pack, with their sources
+      responses:
+        "200":
+          description: Proposals
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/PackProposal" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /pack-proposals/{id}/accept:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Packs]
+      operationId: acceptCxPackProposal
+      summary: Add the row (with your corrections) to the draft pack, unconfirmed (operator)
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { row: { type: object } } }
+      responses:
+        "200":
+          description: The proposal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PackProposal" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /pack-proposals/{id}/reject:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Packs]
+      operationId: rejectCxPackProposal
+      summary: Reject a proposal (operator)
+      responses:
+        "200":
+          description: The proposal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PackProposal" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /space-types:
     get:
       tags: [Spaces]
@@ -3933,3 +4030,42 @@ components:
             adopted_at: { type: string, format: date-time }
             retired_at: { type: [string, "null"] }
         pack: { $ref: "#/components/schemas/Pack" }
+    PackExtraction:
+      type: object
+      required: [id, pack_ref, filename, sha256, size, status, proposals]
+      properties:
+        id: { type: string }
+        org_id: { type: string }
+        pack_ref: { type: string }
+        filename: { type: string }
+        sha256: { type: string }
+        size: { type: integer }
+        status: { type: string, enum: [queued, running, completed, failed] }
+        proposals: { type: integer }
+        info: { type: [object, "null"] }
+        error: { type: [string, "null"] }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        finished_at: { type: [string, "null"] }
+    PackProposal:
+      type: object
+      required: [id, pack_ref, row, source, status]
+      properties:
+        id: { type: string }
+        org_id: { type: string }
+        pack_ref: { type: string }
+        extraction_id: { type: string }
+        row: { $ref: "#/components/schemas/PackRow" }
+        source:
+          type: object
+          properties:
+            document: { type: string }
+            sha256: { type: string }
+            page: { type: integer }
+            quote: { type: string, description: "Verbatim, from the user's own document; never copied into the pack" }
+            quote_verified: { type: boolean }
+        confidence: { type: [number, "null"] }
+        status: { type: string, enum: [proposed, accepted, rejected] }
+        decided_by: { type: [string, "null"] }
+        decided_at: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }

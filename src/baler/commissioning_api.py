@@ -58,6 +58,7 @@ from baler.commissioning import (
     mirror,
     operator_writes,
     overrides,
+    pack_extract_api,
     packs_api,
     phases,
     procedures,
@@ -115,7 +116,7 @@ _RUN = re.compile(r"/runs/([^/]+)")
 _RUN_REPORT = re.compile(r"/runs/([^/]+)/report")
 
 # Building-record features (epic #221), each a route table (commissioning.routes).
-EXTENSIONS = (spaces_api, readiness_api, packs_api)
+EXTENSIONS = (spaces_api, readiness_api, packs_api, pack_extract_api)
 
 
 def _check_prefixes(value) -> list[str]:
@@ -193,6 +194,7 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
         ALLOWED_HEADERS = "Content-Type, Authorization"
         REPO = repo  # for the EXTENSIONS' handlers (commissioning.routes)
         NOW = staticmethod(now_fn)
+        WORKER = worker
 
         # ------------------------------------------------------- plumbing
 
