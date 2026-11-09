@@ -424,8 +424,15 @@ def test_manual_results_attachments_and_closed_by_round_trip(repo):
                                         "media_type": "image/png", "size": 3, "sha256": "abc", "data": b"\x89PN",
                                         "created_at": now}])
     assert bytes(repo.get_row(manual.ATTACHMENTS, f"a-{rid}")["data"]) == b"\x89PN"
-    iid = db.new_id()
-    repo.create_issue({"id": iid, "project_id": pid, "status": "open", "title": "t", "created_at": now, "updated_at": now})
+    # the way runner.method_issues opens one for a manual fail: issues.from_result (source "baler")
+    from baler.commissioning import issues
+
+    issue = issues.from_result({"equip_uri": "urn:equip:mr", "check_id": "manual:proc/visual", "subject": "urn:equip:mr",
+                                "status": "fail", "symptom": "belt frayed", "evidence": {"method": "manual"}},
+                               "tr", pid, db.new_id, now, None)
+    repo.create_issue(issue)
+    iid = issue["id"]
+    assert repo.get_issue(iid)["source"] == "baler"
     repo.update_issue(iid, {"status": "closed", "closed_by": "u-closer", "closed_at": now})
     assert repo.get_issue(iid)["closed_by"] == "u-closer"
 
