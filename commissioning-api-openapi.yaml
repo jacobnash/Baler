@@ -38,6 +38,7 @@ tags:
   - name: Spec
   - name: Faults
   - name: Active tests
+  - name: Spaces
   - name: Agent
 paths:
   /projects:
@@ -1737,6 +1738,152 @@ paths:
       summary: Interactive docs for this API
       responses:
         "200": { description: HTML }
+  /space-types:
+    get:
+      tags: [Spaces]
+      operationId: listCxSpaceTypes
+      summary: The built-in space types (a starting list; any slug is allowed)
+      responses:
+        "200":
+          description: Space types
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, label]
+                  properties:
+                    id: { type: string }
+                    label: { type: string }
+                    brick_class: { type: [string, "null"] }
+  /projects/{id}/spaces:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Spaces]
+      operationId: listCxSpaces
+      summary: The project's spaces
+      parameters:
+        - { name: space_type, in: query, schema: { type: string } }
+        - { name: include_archived, in: query, schema: { type: boolean } }
+      responses:
+        "200":
+          description: Spaces, by name
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Space" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Spaces]
+      operationId: createCxSpace
+      summary: Add a space (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SpaceSpec" }
+      responses:
+        "201":
+          description: The space
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Space" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /spaces/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Spaces]
+      operationId: getCxSpace
+      summary: A space, its neighbours, children and serving chain
+      responses:
+        "200":
+          description: The space
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpaceDetail" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Spaces]
+      operationId: updateCxSpace
+      summary: Change fields of a space (operator)
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SpaceSpec" }
+      responses:
+        "200":
+          description: The space
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpaceDetail" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Spaces]
+      operationId: archiveCxSpace
+      summary: Archive a space (admin)
+      responses:
+        "204": { description: Archived }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /spaces/{id}/adjacent:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    put:
+      tags: [Spaces]
+      operationId: putCxSpaceAdjacent
+      summary: Replace the spaces next to this one (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [adjacent]
+              properties:
+                adjacent:
+                  type: array
+                  maxItems: 50
+                  items:
+                    type: object
+                    required: [space_id]
+                    properties:
+                      space_id: { type: string }
+                      relation: { type: string, enum: [adjacent, door] }
+      responses:
+        "200":
+          description: The space
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpaceDetail" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /spaces/{id}/serving:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    put:
+      tags: [Spaces]
+      operationId: putCxSpaceServing
+      summary: Replace the equipment that serves this space directly (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [equip_uris]
+              properties:
+                equip_uris: { type: array, maxItems: 20, items: { type: string } }
+      responses:
+        "200":
+          description: The space
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpaceDetail" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
 components:
   parameters:
     ProjectId:
@@ -1772,6 +1919,59 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    SpaceSpec:
+      type: object
+      properties:
+        name: { type: string, maxLength: 200 }
+        kind: { type: string, enum: [building, floor, suite, zone, room] }
+        space_type: { type: [string, "null"], description: "Slug, e.g. operating_room; what a pack's applies_to.space_type matches" }
+        parent_id: { type: [string, "null"] }
+        rec_class: { type: [string, "null"] }
+        brick_class: { type: [string, "null"] }
+        point_uris: { type: array, maxItems: 50, items: { type: string } }
+        attributes: { type: object, description: "e.g. area_ft2, volume_ft3" }
+    Space:
+      type: object
+      required: [id, project_id, name, kind, status, point_uris, attributes, created_at, updated_at]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        name: { type: string }
+        kind: { type: string }
+        space_type: { type: [string, "null"] }
+        parent_id: { type: [string, "null"] }
+        rec_class: { type: [string, "null"] }
+        brick_class: { type: [string, "null"] }
+        point_uris: { type: array, items: { type: string } }
+        attributes: { type: object }
+        status: { type: string, enum: [active, archived] }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SpaceDetail:
+      allOf:
+        - { $ref: "#/components/schemas/Space" }
+        - type: object
+          required: [adjacent, serving, serving_chain, children]
+          properties:
+            adjacent:
+              type: array
+              items:
+                type: object
+                properties:
+                  space_id: { type: string }
+                  relation: { type: string }
+            serving: { type: array, items: { type: string } }
+            serving_chain:
+              type: array
+              description: The terminals (level 1) and what feeds them, from the graph's brick:feeds
+              items:
+                type: object
+                properties:
+                  equip_uri: { type: string }
+                  feeds: { type: [string, "null"] }
+                  level: { type: integer }
+            children: { type: array, items: { $ref: "#/components/schemas/Space" } }
     Error:
       type: object
       required: [error]

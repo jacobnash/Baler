@@ -1,0 +1,93 @@
+---
+title: Spaces
+---
+
+Requirements such as a room's pressure relationship, its air changes, its
+temperature and humidity belong to the **room**, not to the AHU that serves
+it. "Is the surgery suite ready for patients?" is a question about rooms.
+Spaces add rooms to a commissioning project's record (Baler#209, epic #221
+§4). The readiness report (#210) and requirement packs (#205) are built on
+them.
+
+## The model
+
+| Field | What it is |
+|---|---|
+| `kind` | `building`, `floor`, `suite`, `zone` or `room` |
+| `parent_id` | The space this one sits in. A suite is the rooms under it. Cycles are refused. |
+| `space_type` | A slug such as `operating_room`. A requirement pack's `applies_to.space_type` matches it. |
+| `rec_class`, `brick_class` | Optional classes. See below. |
+| `point_uris` | The room's own sensors: room pressure, temperature, humidity. |
+| `attributes` | Free fields. `area_ft2`, `volume_ft3` (and the m² / m³ forms) are checked as positive numbers; air-change rates need the volume. |
+
+**Classes.** Locations follow RealEstateCore and equipment follows Brick; in
+their published alignment REC leads location classes. Baler pre-fills
+`brick_class` only where Brick 1.4 (the vendored `ontology/Brick-only.ttl`)
+really has the class: `Room`, `Hallway`, `Laboratory`, `Server_Room`,
+`Office`, `Storage_Room`, `Mechanical_Room`. A test checks each against the
+ontology. Brick has no operating-room class, so an OR gets `Room`. REC class
+names are left for you to set from the REC release you use; Baler doesn't
+guess them.
+
+**Space types** (`GET /cx/space-types`) are a starting list, not a standard:
+`operating_room`, `procedure_room`, `airborne_isolation_room`,
+`protective_environment_room`, `sterile_storage`, `patient_room`,
+`laboratory`, `cleanroom`, `server_room`, `office`, `corridor`,
+`mechanical_room`. Any lowercase slug is accepted.
+
+**Adjacency** is stored once per pair of spaces, with a relation:
+`adjacent`, or `door` when the two share a door. A pressure relationship
+("positive to adjacent") is judged across a door. Setting a space's
+neighbours replaces them, and each neighbour sees the pair too.
+
+**Serving equipment.** A space lists only the equipment that serves it
+directly, usually its VAV box or terminal unit. The rest of the chain
+(terminal, then AHU, then plant) is read from the graph's `brick:feeds`, so
+it is never entered twice. `GET /cx/spaces/{id}` returns it as
+`serving_chain`, level 1 being the terminals. Equipment outside your login's
+scope is left out and isn't walked through. A cycle in the graph stops the
+walk.
+
+A space is served by a **position** (the Brick equipment record the points
+hang on), never by the asset bolted there. Assets come and go (#197); the
+room's serving equipment doesn't change when a motor is replaced.
+
+## API
+
+All under the commissioning API (`/cx/`). Reads need viewer, changes need
+operator, archiving needs admin. Every change is a project event with who
+made it: `space.create`, `space.update`, `space.archive`, `space.adjacency`,
+`space.serving`.
+
+```bash
+# a suite and a room in it
+curl -X POST $BALER/cx/projects/$P/spaces -H "Authorization: Bearer $T" \
+  -d '{"name": "Surgery suite", "kind": "suite"}'
+curl -X POST $BALER/cx/projects/$P/spaces -H "Authorization: Bearer $T" \
+  -d '{"name": "OR 3", "space_type": "operating_room", "parent_id": "'$SUITE'",
+       "point_uris": ["urn:point:fbf/a/or3/dp"], "attributes": {"volume_ft3": 4200}}'
+
+# OR 3 shares a door with the corridor, and VAV-3-1 serves it
+curl -X PUT $BALER/cx/spaces/$OR3/adjacent -d '{"adjacent": [{"space_id": "'$CORR'", "relation": "door"}]}'
+curl -X PUT $BALER/cx/spaces/$OR3/serving  -d '{"equip_uris": ["urn:equip:fbf/a/vav-3-1"]}'
+
+curl $BALER/cx/spaces/$OR3          # neighbours, children, serving chain
+curl "$BALER/cx/projects/$P/spaces?space_type=operating_room"
+```
+
+`DELETE /cx/spaces/{id}` archives a space. It is never deleted: compliance
+history refers to it.
+
+## Storage
+
+Migration `0003_spaces` adds `cx_spaces`, `cx_space_adjacency` and
+`cx_space_serving`, all keyed to the project like the rest of the Cx record.
+
+## Not yet
+
+- A UI. This slice is the model and the API.
+- Importing spaces in bulk (from a room schedule, COBie `Space`/`Zone`, or a
+  REC/Brick Turtle file).
+- Writing spaces into the graph as REC/Brick locations. Today they live in
+  Postgres with the rest of the project's record, and the building export
+  (#193) doesn't include them yet.
