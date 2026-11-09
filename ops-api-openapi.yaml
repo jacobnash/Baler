@@ -802,6 +802,38 @@ components:
         attention:
           type: array
           items: { $ref: "#/components/schemas/ComponentState" }
+        alerts:
+          type: array
+          description: >-
+            Alerts baler.alerts has sent and not yet cleared (#277). Empty for a
+            caller limited to some sites, and before the alerter has run.
+          items:
+            type: object
+            required: [key, state, severity, title]
+            properties:
+              key: { type: string, description: "e.g. component:data_api, disk:/pgdata, restarts:baler-fault-detector" }
+              state: { type: string, enum: [firing] }
+              severity: { type: string, enum: [critical, warning] }
+              title: { type: string }
+              detail: { type: ["string", "null"] }
+              opened_at: { type: ["string", "null"], format: date-time }
+              last_seen_at: { type: ["string", "null"], format: date-time }
+              last_sent_at: { type: ["string", "null"], format: date-time }
+        processes:
+          type: array
+          description: >-
+            Per process (tracing service name): starts and unhandled exceptions
+            counted by baler.errors (#277). Empty for a caller limited to some sites.
+          items:
+            type: object
+            required: [service, starts, errors]
+            properties:
+              service: { type: string }
+              starts: { type: integer }
+              errors: { type: integer }
+              last_error_at: { type: ["string", "null"], format: date-time }
+              last_error: { type: ["string", "null"] }
+              last_start_at: { type: ["string", "null"], format: date-time }
         first_actions:
           type: array
           items:

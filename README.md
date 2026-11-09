@@ -349,6 +349,16 @@ newest). See
 [`docs-site/pages/backups.mdx`](docs-site/pages/backups.mdx) for the full
 picture.
 
+### Alerting
+
+The `alerter` service (`python -m baler.alerts`) emails and/or calls a
+webhook once when something on the Ops page breaks (a service down, ingest
+stopped, readings missed, disk low, a certificate expiring) and once when it
+clears, and can ping an outside dead-man's switch. It sends nothing until
+you set `BALER_ALERT_WEBHOOK_URL` or `BALER_ALERT_EMAIL_TO` (+ `BALER_SMTP_*`)
+in `.env`; see
+[`docs-site/pages/alerting.mdx`](docs-site/pages/alerting.mdx).
+
 ### Building export
 
 A backup is for restoring Baler. `python -m baler.export` is for leaving it,

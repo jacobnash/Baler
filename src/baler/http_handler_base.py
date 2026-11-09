@@ -143,6 +143,13 @@ class BaseAPIHandler(BaseHTTPRequestHandler):
             except self.ERROR_TYPES as exc:
                 span.set_attribute("error", str(exc))
                 respond_error(self, 400, str(exc))
+            except Exception as exc:
+                # Unhandled: counted for Ops and the alerter (#277), then
+                # handled exactly as before (http.server logs it).
+                from baler import errors
+
+                errors.record(exc)
+                raise
 
     def serve_openapi_spec(self, span_name: str, spec_path: str) -> None:
         with self.TRACER.start_as_current_span(span_name):
