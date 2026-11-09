@@ -118,6 +118,13 @@ const ROUTES = [
   ["GET",    /^\/ops\/positions\/history$/,              "assets", "viewer"],
   ["GET",    /^\/ops\/positions\/asset-at$/,             "assets", "viewer"],
   ["POST",   /^\/ops\/positions\/replace$/,               "assets", "operator"],
+  // Warranties on assets (#198): voided, never deleted.
+  ["GET",    /^\/ops\/assets\/[^/]+\/warranties$/,        "assets", "viewer"],
+  ["POST",   /^\/ops\/assets\/[^/]+\/warranties$/,        "assets", "operator"],
+  ["GET",    /^\/ops\/warranties$/,                      "assets", "viewer"],
+  ["GET",    /^\/ops\/warranties\/alerts$/,               "assets", "viewer"],
+  ["PATCH",  /^\/ops\/warranties\/[^/]+$/,                "assets", "operator"],
+  ["POST",   /^\/ops\/warranties\/[^/]+\/void$/,          "assets", "operator"],
 
   // commissioning_api (Baler#37): reads viewer, changes operator,
   // archiving a project admin. The backend also checks the caller's org

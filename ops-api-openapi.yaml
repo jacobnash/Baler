@@ -640,6 +640,48 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object}}}}
       responses:
         "201": {description: The removed and installed events, content: {application/json: {schema: {type: object}}}}
+  # Warranties on assets (#198). docs-site/pages/warranties.mdx.
+  /assets/{id}/warranties:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listAssetWarranties
+      summary: The asset's warranties with status and days left
+      responses:
+        "200": {description: Warranties, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+    post:
+      operationId: createWarranty
+      summary: Add a warranty (kind, provider, starts_on, ends_on or duration_months, terms, source)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: The warranty, content: {application/json: {schema: {type: object}}}}
+  /warranties:
+    get:
+      operationId: listWarranties
+      summary: All warranties (filter status)
+      responses:
+        "200": {description: Warranties, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+  /warranties/alerts:
+    get:
+      operationId: warrantyAlerts
+      summary: Warranties expiring within within_days, and failures under warranty
+      responses:
+        "200": {description: Alerts, content: {application/json: {schema: {type: object}}}}
+  /warranties/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    patch:
+      operationId: patchWarranty
+      summary: Correct a warranty (audited)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: The warranty, content: {application/json: {schema: {type: object}}}}
+  /warranties/{id}/void:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: voidWarranty
+      summary: Void a warranty entered in error (reason)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: The warranty, content: {application/json: {schema: {type: object}}}}
 components:
   schemas:
     Freshness:
