@@ -394,3 +394,23 @@ def test_availability_on_postgres_is_availability_pct(repo, monkeypatch):
             times = series.get(uri, [])
             assert got[uri] == (len(times), availability_pct(times, start, end, gap)), (uri, valid_sql)
         assert got["urn:point:test-cxint-avail/silent"] == (0, 0.0)
+
+
+def test_operator_write_rows_round_trip(repo):
+    """Baler#213: cx_operator_writes through the generic rows on Postgres."""
+    from baler.commissioning import operator_writes as ow
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with repo.pool.connection() as conn:
+        org = auth.create_org(conn, f"ow-it-{now.timestamp()}", f"ow-{now.timestamp()}@example.com", "pw-123456789")
+    pid = db.new_id()
+    repo.create_project({"id": pid, "org_id": org["id"], "site_id": None, "name": "OW", "settings": {}, "created_by": "it",
+                         "created_at": now, "updated_at": now, "phases": phases.default_phases()})
+    row = ow.new_row(pid, "point", "urn:point:ow-it/zsp", {"sub": "u1", "role": "operator"}, "a@example.com", "testing",
+                     now, level=8, value=68.0, expires_at=now + timedelta(hours=1))
+    row["before"] = {"priority_array": {}, "latest": None}
+    repo.put_rows(ow.TABLE, [row])
+    repo.update_row(ow.TABLE, row["id"], {"status": "active", "log": [{"action": "write", "ok": True}]})
+    got = repo.find_rows(ow.TABLE, status="active", project_id=pid)
+    assert [(r["id"], r["level"], r["value"], r["reason"], r["log"][0]["action"]) for r in got] == [(row["id"], 8, 68.0, "testing", "write")]
+    assert got[0]["expires_at"] == now + timedelta(hours=1)

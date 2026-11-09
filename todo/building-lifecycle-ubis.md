@@ -248,8 +248,10 @@ command; Windrow's `connection_manager.write_point` performs a BACnet
 WriteProperty at a priority, refusing commands past `expires_at`. It is used by
 Haystack `pointWrite` and Cx 9. What's next:
 
-- **audited operator writes** from the UI (who, why, auto-relinquish time);
+- **audited operator writes** from the UI (who, why, auto-relinquish time); *built: #213*;
 - **schedule and calendar writes**, which Windrow reads today but doesn't write.
+  *Baler's side built (#213) against the Windrow#26 contract*, see
+  docs-site `operator-writes.mdx`.
 
 ## 8. Operations analytics
 

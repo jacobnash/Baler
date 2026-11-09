@@ -38,6 +38,7 @@ tags:
   - name: Spec
   - name: Faults
   - name: Active tests
+  - name: Operator writes
   - name: Agent
 paths:
   /projects:
@@ -1737,6 +1738,193 @@ paths:
       summary: Interactive docs for this API
       responses:
         "200": { description: HTML }
+  /projects/{id}/writes:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Operator writes]
+      operationId: listCxOperatorWrites
+      summary: Every audited operator write on the project, newest first
+      parameters:
+        - { name: point, in: query, required: false, schema: { type: string }, description: "Also return Baler's priority array for this point" }
+      responses:
+        "200":
+          description: Writes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [writes, levels, max_hold_minutes]
+                properties:
+                  writes: { type: array, items: { $ref: "#/components/schemas/OperatorWrite" } }
+                  levels: { type: array, items: { type: integer }, description: "Levels a UI write may use (8-16)" }
+                  max_hold_minutes: { type: number }
+                  priority_array: { type: object, additionalProperties: { type: object } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Operator writes]
+      operationId: createCxOperatorPointWrite
+      summary: Command a point, with a reason and an auto-relinquish time (operator, a person)
+      description: >-
+        Baler#213. Goes through point_write to the Windrow instance that
+        owns the point (a BACnet WriteProperty at the level). Levels 8-16
+        only; `reason` and `hold_minutes` (or `expires_at`, at most 24 h
+        ahead) are required, and the level is relinquished by itself when
+        it runs out. Refused for an API key (a person makes operator
+        writes) and with 409 if a Cx active test holds the level, or
+        another person does without `replace: true`. Baler's priority array
+        records the level as `op:<write id>`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [point, value, reason]
+              properties:
+                point: { type: string }
+                value: { type: [number, boolean] }
+                level: { type: integer, minimum: 8, maximum: 16, default: 8 }
+                reason: { type: string, minLength: 3, maxLength: 500 }
+                hold_minutes: { type: number, exclusiveMinimum: 0, maximum: 1440 }
+                expires_at: { type: string, format: date-time }
+                replace: { type: boolean, description: "Take a level another person holds (their value is kept in `before`)" }
+      responses:
+        "201":
+          description: Written
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorWrite" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: "Not a person's session, or not operator" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { description: The site refused the write or didn't answer (recorded as failed) }
+        "503": { description: No Windrow command channel configured }
+  /writes/{id}/relinquish:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Operator writes]
+      operationId: relinquishCxOperatorWrite
+      summary: Release an operator point write before it expires (operator, a person)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 3 }
+      responses:
+        "200":
+          description: Relinquished
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorWrite" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { description: The relinquish wasn't applied; the sweeper retries at expiry }
+  /projects/{id}/schedule-targets:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Operator writes]
+      operationId: listCxScheduleTargets
+      summary: Schedule and calendar objects on a Windrow instance's in-scope connections, read live (operator)
+      parameters:
+        - { name: site, in: query, required: true, schema: { type: string } }
+        - { name: instance, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Objects per connection
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    connection_id: { type: string }
+                    topic_prefix: { type: string }
+                    schedules: { type: array, items: { type: object } }
+                    calendars: { type: array, items: { type: object } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/schedule-writes:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Operator writes]
+      operationId: createCxScheduleWrite
+      summary: Change a BACnet Schedule or Calendar, with a reason and a revert time (admin, a person)
+      description: >-
+        Sent over the command channel as Windrow's `write_schedule` /
+        `write_calendar` (the Windrow#26 contract; see docs-site
+        operator-writes). The object is read first and kept as `before`;
+        at `revert_at` the sweeper writes the changed fields back, unless
+        someone has changed the object since (`conflict`, left alone).
+        Without `revert_at`, `permanent: true` must be said.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [site, instance, connection_id, object, reason]
+              properties:
+                site: { type: string }
+                instance: { type: string }
+                connection_id: { type: string }
+                kind: { type: string, enum: [schedule, calendar], default: schedule }
+                object: { type: string, description: "schedule,N or calendar,N" }
+                weekly: { type: object }
+                exceptions: { type: array, items: { type: object } }
+                default: {}
+                effective_period: { type: array, items: { type: string } }
+                dates: { type: array, items: { type: object } }
+                reason: { type: string, minLength: 3, maxLength: 500 }
+                revert_at: { type: string, format: date-time }
+                permanent: { type: boolean }
+      responses:
+        "201":
+          description: Written
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorWrite" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: Not a person's admin session }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { description: The site refused the write or didn't answer (recorded as failed) }
+        "503": { description: No Windrow command channel configured }
+  /writes/{id}/revert:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Operator writes]
+      operationId: revertCxScheduleWrite
+      summary: Write a schedule/calendar write's before-state back now (admin, a person)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 3 }
+      responses:
+        "200":
+          description: Reverted (or conflict, when the object changed since)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorWrite" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { description: The revert wasn't applied }
 components:
   parameters:
     ProjectId:
@@ -1772,6 +1960,33 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    OperatorWrite:
+      type: object
+      required: [id, project_id, kind, target, reason, status, created_at, log]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        kind: { type: string, enum: [point, schedule, calendar] }
+        target: { type: string, description: "The point URI, or site/instance/connection/object" }
+        equip_uri: { type: [string, "null"] }
+        site: { type: [string, "null"] }
+        instance: { type: [string, "null"] }
+        connection_id: { type: [string, "null"] }
+        level: { type: [integer, "null"] }
+        value: {}
+        before: { type: [object, "null"] }
+        reason: { type: string }
+        who: { type: [string, "null"] }
+        user_sub: { type: [string, "null"] }
+        role: { type: [string, "null"] }
+        status: { type: string, enum: [pending, active, permanent, relinquished, expired, superseded, reverted, conflict, failed] }
+        expires_at: { type: [string, "null"], format: date-time, description: "Auto-relinquish (points) or revert (schedules)" }
+        created_at: { type: string, format: date-time }
+        ended_at: { type: [string, "null"], format: date-time }
+        ended_by: { type: [string, "null"] }
+        end_reason: { type: [string, "null"] }
+        error: { type: [string, "null"] }
+        log: { type: array, items: { type: object } }
     Error:
       type: object
       required: [error]

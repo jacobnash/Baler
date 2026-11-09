@@ -259,6 +259,15 @@ check("commissioning (/cx/): reads viewer, changes operator, archive admin, site
     assert.equal(policy.resolveRoute("POST", "/cx/issues/i1/risk").minRole, "admin");
     assert.equal(policy.resolveRoute("DELETE", "/cx/risks/k1").minRole, "admin");
     assert.equal(policy.resolveRoute("DELETE", "/cx/issues/i1"), null);
+    // Baler#213 operator writes: points operator, schedules/calendars admin
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/writes").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/projects/p1/writes").minRole, "operator");
+    assert.equal(policy.resolveRoute("POST", "/cx/writes/w1/relinquish").minRole, "operator");
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/schedule-targets").minRole, "operator");
+    assert.equal(policy.resolveRoute("POST", "/cx/projects/p1/schedule-writes").minRole, "admin");
+    assert.equal(policy.resolveRoute("POST", "/cx/writes/w1/revert").minRole, "admin");
+    assert.equal(policy.resolveRoute("DELETE", "/cx/writes/w1"), null);
+    assert.equal(policy.roleSatisfies("operator", policy.resolveRoute("POST", "/cx/projects/p1/schedule-writes").minRole), false);
     // Cx 6 procedures
     assert.equal(policy.resolveRoute("GET", "/cx/procedure-templates").minRole, "viewer");
     assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/procedures").minRole, "viewer");

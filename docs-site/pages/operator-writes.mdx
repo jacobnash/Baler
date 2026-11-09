@@ -1,0 +1,104 @@
+---
+title: Operator writes
+---
+
+# Operator writes
+
+People command points and change schedules from Baler's Commissioning page,
+and every change is audited and undone on time by Baler itself (Baler#213).
+Each write is a row in `cx_operator_writes`, plus a `cx_events` row on the
+project, recording:
+
+- **who:** the signed-in person, from their own token. API keys can't make
+  operator writes, and nobody writes on someone else's behalf;
+- **why:** `reason` is required;
+- **the level** the write went at, and **when it ends**;
+- the **before-state** and a log of every command sent;
+- **how it ended:** relinquished by a person, expired, superseded,
+  reverted, a conflict, or failed.
+
+## Point writes
+
+`POST /cx/projects/{id}/writes` needs the **operator** role (gateway
+`policy.js`, checked again in the backend):
+
+```json
+{"point": "urn:point:fbf/hq/vav-12/zsp", "value": 68, "level": 8,
+ "hold_minutes": 60, "reason": "tenant in 4012 too warm"}
+```
+
+- **Delivery:** the write goes the same way as Haystack `pointWrite` and
+  Cx 9 active tests: point_write over the command channel to the Windrow
+  instance that owns the point, then a BACnet WriteProperty at that
+  priority. Windrow refuses the command once its `expires_at` has passed.
+- **Levels:** 8–16 only (8 is manual operator). Levels 1–7 cover life
+  safety, critical equipment and minimum on/off time, and are never
+  written from a browser.
+- **Expiry is required:** `hold_minutes`, or `expires_at`, at most 24 h
+  ahead. The commissioning API's scheduler tick relinquishes the level when
+  it runs out, but only if this write still holds it. A restart loses
+  nothing, because the row is in Postgres and the next tick relinquishes.
+  If the site is unreachable at expiry, the row stays active and logs the
+  failure, and the next tick tries again.
+- **Recorded owner:** Baler's priority array records the level as
+  `op:<write id>`. Cx 9's sweeper only ever touches `cx:` levels, and this
+  sweeper only ever touches its own.
+- **Conflicts:**
+  - A level held by a running Cx active test is never taken (409).
+  - A level another person holds needs `replace: true`, and their value is
+    kept in `before`.
+  - A newer operator write replaces an older one, which is marked
+    `superseded`.
+- **Ending early:** `POST /cx/writes/{id}/relinquish {"reason": ...}`
+  releases a write before it expires.
+
+## Schedule and calendar writes
+
+`POST /cx/projects/{id}/schedule-writes` needs the **admin** role:
+
+```json
+{"site": "hq", "instance": "edge-1", "connection_id": "c1", "object": "schedule,1",
+ "exceptions": [{"period": {"date": "2026-11-14"}, "priority": 10,
+                 "times": [{"time": "09:00", "value": "active"}, {"time": "13:00", "value": null}]}],
+ "revert_at": "2026-11-15T06:00:00Z", "reason": "open house Saturday"}
+```
+
+- **Scope:** the connection's topic prefix must be in the project's scope.
+  `GET /cx/projects/{id}/schedule-targets?site=&instance=` (operator) lists
+  the objects live.
+- **Before-state:** the object is read first and kept as `before`.
+- **Fields:** you can send `weekly` (all seven days), `exceptions`,
+  `default` and `effective_period`, or `dates` for a calendar
+  (`"kind": "calendar"`). Fields you leave out are not written.
+- **Reverting:** either `revert_at` (at most 31 days ahead) or
+  `"permanent": true` is required.
+  - At `revert_at`, the sweeper writes the changed fields back. If someone
+    has changed the object since, the write is marked `conflict` and the
+    object is left alone.
+  - `POST /cx/writes/{id}/revert {"reason": ...}` (admin) reverts now.
+
+### The Windrow command contract (Windrow#26)
+
+Baler sends these over `cmd/<site>/<instance>/schedule-write` and
+`.../calendar-write`. The shapes are the same as the read format
+`connection_schedules` uses (`windrow/bacnet_schedules.py`), where a null
+value means relinquish:
+
+| action | body |
+|---|---|
+| `write_schedule` | `id` (connection), `object` (`schedule,N`), and any of `weekly`, `exceptions`, `default`, `effective_period` |
+| `write_calendar` | `id`, `object` (`calendar,N`), `dates` |
+
+A key that is left out is not written. The result is the object read back
+after the write. As with `point_write`, the command carries `expires_at`,
+and Windrow refuses it after that time. Until a Windrow implements the
+contract, it answers "unknown action": the write is recorded as `failed`,
+and nothing is changed.
+
+## Not changed
+
+The Cx 9 active-test safeguards are separate and untouched:
+`BALER_CX_ALLOW_WRITES`, admin role, window, expiring writes, dry run with
+typed confirmation, guaranteed relinquish, sweeper, kill switch and
+before-state capture. The kill switch stops active tests; operator writes
+end through their own expiry or relinquish.
