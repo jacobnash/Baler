@@ -209,6 +209,36 @@ def _run(cmd: list[str], cwd: Path | None = None) -> str:
         return ""
 
 
+_DOCKER_ROOT: str | None = None
+
+
+def docker_root_reported() -> str:
+    """`docker info`'s DockerRootDir, or "" when it can't be read (no
+    docker CLI, daemon unreachable). Cached for the process."""
+    global _DOCKER_ROOT
+    if _DOCKER_ROOT is None:
+        _DOCKER_ROOT = _run(["docker", "info", "--format", "{{.DockerRootDir}}"])
+    return _DOCKER_ROOT
+
+
+def docker_root() -> str:
+    """Docker's data root: where the scale stack's volumes, images and logs
+    live, which is often not the disk the checkout is on (on nash-srv it's
+    a separate disk; Baler#269). Docker's default when it can't be read."""
+    return docker_root_reported() or "/var/lib/docker"
+
+
+def free_gb(path: str | Path) -> float | None:
+    """Free GB (available to this user) on the filesystem holding `path`;
+    None if it isn't visible from here, e.g. a remote or rootless Docker's
+    root, or one this user may not stat."""
+    try:
+        st = os.statvfs(path)
+    except OSError:
+        return None
+    return st.f_bavail * st.f_frsize / 1e9
+
+
 def hardware() -> dict:
     """What the numbers were measured on: never compare a 1-CPU and a
     12-CPU run without seeing this (Baler#190)."""
@@ -231,8 +261,8 @@ def hardware() -> dict:
         cpuset = sorted(os.sched_getaffinity(0))
     except AttributeError:
         cpuset = []
-    docker_root = _run(["docker", "info", "--format", "{{.DockerRootDir}}"]) or "/var/lib/docker"
-    disk = shutil.disk_usage(docker_root if os.path.exists(docker_root) else "/")
+    root = docker_root()
+    disk = shutil.disk_usage(root if os.path.exists(root) else "/")
     return {
         "hostname": platform.node(),
         "nproc": os.cpu_count(),
@@ -242,7 +272,7 @@ def hardware() -> dict:
         "kernel": platform.release(),
         "loadavg_at_start": os.getloadavg(),
         "docker_version": _run(["docker", "version", "--format", "{{.Server.Version}}"]),
-        "docker_root": docker_root,
+        "docker_root": root,
         "disk_total_gb": round(disk.total / 1e9, 1),
         "disk_free_gb": round(disk.free / 1e9, 1),
     }
