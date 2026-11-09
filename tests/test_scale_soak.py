@@ -109,3 +109,38 @@ def test_soak_probes_fill_in_the_windows():
     out = soak.soak_probes(budgets, soak.common.Shape(100), {"chunk_interval_s": 3600, "compress_after_s": 10800}, 100_000.0)
     assert out["runs"] == 3 and [p["name"] for p in out["probes"]] == ["a", "b"]
     assert out["probes"][1]["params"] == {"point": "fbf/scale/s00000/e00000/sat", "start": str(100_000 - 10800 - 7200)}
+
+
+def test_live_safety_trips_only_on_a_sustained_breach():
+    """The soak's live-safety (ladder.LiveSafety, sustain_s): a breach must
+    last the whole window, with no good check in between, to stop it."""
+    clock = [0.0]
+    safety = soak.ladder.LiveSafety(None, 1.5, 3.0, sustain_s=300.0, clock=lambda: clock[0])
+    verdicts = []
+    for t, bad in ((0, True), (120, True), (240, False), (270, True), (450, True), (560, True), (570, True)):
+        clock[0] = t
+        verdicts.append(safety.judge(bad))
+    assert verdicts == [False, False, False, False, False, False, True]  # 270 -> 570: 300 s bad
+    assert safety.bad_for_s() == 300.0
+    three = soak.ladder.LiveSafety(None, 1.5, 3.0)  # the ladder's default: three checks in a row
+    assert [three.judge(b) for b in (True, True, False, True, True, True)] == [False, False, False, False, False, True]
+
+
+def test_a_live_safety_stop_is_recorded_and_inconclusive():
+    r = _result()
+    r["live_safety_tripped"] = {"load_per_cpu": 4.2, "live_latency_s": 3.1, "degraded_for_s": 312.0, "at_t": 7200.0}
+    status, reasons = _verdict(r)
+    assert status == "inconclusive"
+    assert any("live-safety" in x and "312.0 s" in x and "not a Baler ceiling" in x for x in reasons), reasons
+
+
+def test_soak_has_the_ladders_live_safety_options():
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    sub = ap.add_subparsers()
+    soak.add_parser(sub, lambda p: None)
+    args = ap.parse_args(["soak", "--points", "1000"])
+    assert (args.live_sustain, args.live_load_factor, args.live_latency_factor) == (300.0, 1.5, 3.0)
+    args = ap.parse_args(["soak", "--points", "1000", "--live-sustain", "60", "--no-live-check"])
+    assert args.live_sustain == 60.0 and args.no_live_check

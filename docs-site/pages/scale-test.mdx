@@ -51,6 +51,76 @@ evidence captured while it ran.
 Steps default to 10k, 25k, 50k, 100k, 250k, 500k and 1M. On a host with fewer than 4 CPUs
 they start at 1k, 2.5k and 5k first. `--steps 10k,25k` picks your own.
 
+## Profiles and synthetic load (#273)
+
+Jacob's realistic target (#190, 2026-11-09): **most points report every 1–5 min**, each equip
+carries **5–10 synthetic points, rules or derivations**, and **one server takes about 1M points**
+before the next one. 5 s readings stay as the stress test. `--profile` picks one:
+
+| Profile | Readings every | Synthetic items per equip | Faulting points | Warm-up / soak |
+|---|---|---|---|---|
+| `stress-5s` (default: the ladder before #273) | 5 s | 0 | 0 | 60 s / 900 s |
+| `typical-1min` | 60 s | 5 | 1% | 180 s / 900 s |
+| `typical-5min` | 300 s | 5 | 1% | 660 s / 1800 s |
+
+`--synthetic-per-equip N`, `--synthetic-mix D:C:H` (weights of derivations, Cur-mode rules and
+His-mode rules, default `60:20:20`), `--fault-share`, `--interval`, `--warmup` and `--soak`
+override the profile. The profile and every setting are in the result.
+
+**Step size is total points, synthetics included**, because that's what uses memory, disk and
+graph. A derivation's output is a point with history, so with `--points-per-equip 10` and N=5 an
+equip is 10 real points and 3 derived ones: a 100k step is 7,692 equips, 76,920 real points and
+23,076 synthetic ones. Rules add evaluations, not points.
+
+Rules and derivations are templates in Baler, not per-equip objects (a derivation's SPARQL select
+binds a row per equip; a rule's topic glob matches a point on every equip), so N items per equip
+is N templates, each applying to every equip. `scripts/scale/synthetic.py` creates them through
+the gateway (all named `scale-syn-*`; a run with another N removes the extra):
+
+- **Derivations, in chains of three**, so dependency fan-out costs what it costs:
+  - **L1**, Cur mode, two raw inputs (multi-input), re-run when either reports;
+  - **L2**, Cur mode, L1's output and a third raw input (chained: it reads another derivation's
+    output from history), re-run when that input reports;
+  - **L3**, the chain top, ticks once per reporting interval (`depends_on` L2) over L2's and L1's
+    outputs.
+
+  N=5 at the default mix is one chain, one Cur-mode rule and one His-mode rule; N=10 is two of each.
+- **Cur-mode rules**: a range rule per template on one label, with bounds that never fire, on top
+  of the ladder's own `scale-range` rule, which every reading meets.
+- **His-mode rules**: stuck and stale in turn, each on one always-moving label, over a window of
+  ten reporting intervals.
+- **Faults**: `--fault-share` of the points (numeric ones, picked by index) read 5000 for five
+  readings, then normal values for five, so `scale-range` opens and resolves their faults all soak
+  long. Each transition is a fault write and a webhook to a receiver the ladder runs on the scale
+  network's gateway address (`BALER_ALLOW_PRIVATE_WEBHOOKS=1`, set for the scale stack only), and
+  the open faults are what `/fault/faults` returns to its probe.
+
+**How far the chain top lags its inputs** is measured in the data. Every synthetic function
+returns the newest *origin* timestamp behind its inputs: a raw input's sample ts, or a derived
+input's value, which is its own origin ts. So for any derived row, `ts − value` is how stale the
+newest reading behind it was when it was computed. The ladder reads that for 40 equips spread over
+the step, per chain level, and reports it beside the ingest lag (the canary's).
+
+Each step's `synthetic` block records:
+
+| Field | Meaning |
+|---|---|
+| `points` | `real`, `synthetic`, `total`, `equips` |
+| `expected` | what the configured load should do per second: readings, Cur-mode rule evaluations, derivation rows (Cur and tick), faulting points, fault transitions |
+| `derivations.rows_per_s` (`cur_rows_per_s`, `tick_rows_per_s`, `rows_ratio`) | derivation rows run per second, from derivation_engine's heartbeat counters, and against `expected` |
+| `derivations.tick` | the tick loop: mean pass time, `interval_s` (the shortest interval among the derivations it ran), share of the soak spent ticking (`busy`), `late_s_max` (how late a pass started against its schedule; past one interval it is falling behind), rows per pass |
+| `derivations.cur_busy`, `rules.cur_busy` | the share of time the Cur-mode thread spent evaluating, in derivation_engine and fault_detector |
+| `rules.cur_evaluations_per_s` (`cur_ratio`) | Cur-mode rule evaluations per second, against `expected` |
+| `rules.his` | His-mode rules and the longest sweep against its interval |
+| `faults` | faults opened and resolved during the soak, open at its end, webhooks received |
+| `chain_lag` | `ts − value` per chain level (`L1`, `L2`, `L3`: p50/p95/max), `top`, and the ingest lag beside it |
+
+A step **fails** on the synthetic load when a derivation tick pass starts more than an interval
+late, the chain top's p95 lag is past 2 intervals + 30 s (it ticks once an interval, so it can
+legitimately be one interval behind plus the chain below it), derivation rows or Cur-mode rule
+evaluations run under 80% of the configured load, or a His-mode sweep takes longer than its
+interval. `ladder.py table` prints a second table of the synthetic load per step.
+
 ## Isolation (never touches live)
 
 The scale stack is its own compose project, `-p scale`, with these differences from live.
@@ -177,7 +247,7 @@ first). When a step passes, that is where the next step will most likely fail.
 | 2 | a container restarted or was OOM-killed; an mqtt_listener child restarted by its supervisor (#233) | `fault_detector OOM-killed (memory 99% of cap)`, `ingest listener: mqtt_listener worker-2 restarted 1x` |
 | 3 | the graph didn't take a step's tags in time | `graph ingest (…)` |
 | 4 | ingest symptoms: broker drops, < 99% stored, p95 lag ≥ 30 s or growing, lost canaries, listener queue past 80% of its cap, broker queue growing | the most saturated part of the ingest chain: `ingest listener: mqtt_listener CPU-capped (throttled 38%)`, `… CPU-bound (busiest thread 96% of a core)`, `broker: mosquitto …`, `postgres CPU-capped (…)`, `postgres write-bound (IO:WALSync 55%, …)`, `postgres locks (…)`, `disk (util p90 98%, 240 MB/s written)`; `broker drops (N; subscriber unattributed)` if none is at its limit |
-| 5 | a rule daemon missed readings from the reading feed, or ended the soak > 30 s behind | `fault_detector behind on the reading feed: CPU-bound (…)` |
+| 5 | the rule daemons' work ([#273](https://github.com/jacobnash/Baler/issues/273)): a rule daemon missed readings from the reading feed, or ended the soak > 30 s behind; or derivation ticks started more than one interval late, or left the chain top more than 2 intervals + 30 s behind its inputs | the work, then the daemon and what it ran out of (its CPU; else Postgres waits; else a thread evaluating ≥ 90% of the time with CPU to spare, i.e. Postgres round trips): `Cur-mode rule evaluation: fault_detector behind on the reading feed: CPU-bound (…)`, `Cur-mode derivations: derivation_engine behind …`, `derivation ticks: a pass of 7692 rows takes 58.2 s against its 60 s interval; CPU-bound (…)` |
 | 5b | fault_detector's periodic work over its interval (#268), from its heartbeat at the end of the soak: the last quality pass's `sweep_s` ≥ its interval, the quality `watermark_lag_s` ≥ 2 intervals, or His cycles more than 1.5 intervals apart (`his.gap_s_max`) | `fault_detector quality sweep over its interval: quality sweep 412 s of its 300 s interval (9,000,000 rows, 600 s of history)`, `fault_detector his cycle over its interval: …`; high confidence with its CPU at its limit, else medium. The same three ratios are in `headroom`. |
 | 6 | a read probe over budget or not HTTP 200 | the worst probe (median / budget), the span that took most of its median request, and its API's CPU during the probes: `reads: read?filter=point (2.1 s > 1.5 s) haystack.encode 48%` |
 | 7 | anything else `evaluate()` failed the step for | `unattributed: <reason>` |
@@ -367,6 +437,16 @@ generator at `--points` for `--duration` seconds (default 6 h) and records:
 | | the 5m/1h aggregates' watermark age; canary lag; restarts | catalog, canary, `docker inspect` |
 | `--probe-every` (600 s) | every read probe in `budgets.json` plus its `soak_probes`: history over the last hour and across the hot/compressed boundary, `hisRead(pastWeek)` for 100 and 1,000 points. Rounds that overlapped a compression run are marked | gateway |
 | `--late-every` (1800 s) | late data into the newest compressed chunk, over MQTT at the soak's own rate: every point's reading there **replayed** (same ts, new value: a spool or retained replay) and a new reading **backfilled** 1.23 s after it (Windrow's trend backfill). Then each must be stored exactly once, with the new value | generator account |
+
+**Live-safety.** A soak watches the live install sharing the host the way the ladder does, with
+the same code (`ladder.LiveSafety`) and options: `--live-url`, `--live-load-factor`,
+`--live-latency-factor`, `--no-live-check`. Each sample checks the host load and the live
+gateway's latency against their pre-run baselines. Where the ladder stops after three bad checks
+in a row, a soak stops only after `--live-sustain` seconds (default 300) bad with no good check in
+between, so one slow minute doesn't end a 6 h soak. It then stops the generator cleanly, records
+`live_safety_tripped` (the last check, how long live was degraded, when) and finishes the result as
+`inconclusive`: never a Baler ceiling. `--live-sustain` works on `run` too, in place of its three
+checks.
 
 At the end it compares stored with acknowledged readings over the soak (minus its own backfill),
 checks `point_history_5m` against the raw fold over the newest compressed hour, and writes
@@ -762,6 +842,90 @@ $PY scripts/scale/ladder.py run --no-up --steps 100k --tags-storm 100000 --conti
 $PY scripts/scale/ladder.py crash --points 10000
 ```
 
+### Realistic profiles, local (#273)
+
+Dev VM, 4 CPUs, 15 GiB, every stack container at its default cap (derivation_engine, fault_detector
+and the listener at 1 CPU each, Postgres at 2), 300 s soaks (900 s for 5-minute readings),
+`--min-free-gb 2.5`. These runs prove the profiles and find the engine's hot spots. They are not
+a ceiling: that needs nash-srv.
+
+| Run | Profile | N | Points (real + synthetic) | Status | Derivation rows/s (expected) | Tick pass / interval | Rule evals/s (expected) | Faults opened / resolved / webhooks | Chain top lag p50 / p95 (ingest p50) | Limiter |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 20261109T055132Z | typical-1min | 5 | 5,005 (3,850 + 1,155) | pass | 35.3 (19.3) | 3.0 s / 60 s | 79.3 (70.6) | 25 / 26 / 51 | 31.1 / 58.1 s (0.3 s) | none found; next: curVal, 1000 points 0.77 s of 1.0 s |
+| 20261109T055132Z | typical-1min | 5 | 9,997 (7,690 + 2,307) | fail | 68.7 (38.5) | 2.3 s / 60 s | 168.8 (141.0) | 39 / 66 / 105 | 30.7 / 57.4 s (0.3 s) | reads: Equipment tree: read?filter=equip (0.62 s > 0.5 s) |
+| 20261109T032054Z | typical-5min | 5 | 9,997 (7,690 + 2,307) | pass | 38.0 (7.7) | 2.4 s / 60 s | 33.5 (28.2) | 33 / 54 / 87 | 153.0 / 286.6 s (0.3 s) | none found; next: chain top p95 286.6 s (budget 630 s) |
+| 20261109T034822Z | typical-5min | 10 | 10,000 (6,250 + 3,750) | pass | 42.2 (12.5) | 1.0 s / 60 s | 29.3 (25.0) | 27 / 46 / 73 | 159.8 / 289.6 s (0.3 s) | none found; next: chain top p95 289.6 s (budget 630 s) |
+| 20261109T041551Z | stress-5s | 0 | 5,000 (5,000 + 0) | pass | 16.2 (0) | 0.9 s / 60 s | 1,020 (1,000) | 0 / 0 / - | - | none found; next: Equipment tree 0.14 s of 0.5 s |
+| 20261109T061734Z | typical-1min | 10 | 10,000 (6,250 + 3,750) | pass | 92.2 (62.5) | 2.0 s / 60 s | 136.1 (125.0) | 34 / 50 / 84 | 31.5 / 57.5 s (0.3 s) | none found; next: chain top p95 57.5 s (budget 150 s) |
+| 20261109T061734Z | typical-1min | 10 | 20,000 (12,500 + 7,500) | pass | 183.2 (125.0) | 1.4 s / 60 s | 289.3 (250.0) | 66 / 102 / 168 | 30.5 / 57.3 s (0.3 s) | none found; next: chain top p95 57.3 s (budget 150 s) |
+
+The typical-1min N=10 rows are from after the engine changes below. Before them, the same steps
+failed (`20261109T030127Z`): Cur-mode derivations were busy 99% and 113% of the time and ended
+80 s and 76 s behind on the reading feed, with tick passes averaging 49 s and 102 s against the
+60 s interval. After them, at 20k points: Cur mode is busy 13%, the feed lag is at most 0.17 s,
+and a 2,727-row tick pass takes 1.4 s.
+
+How to read it:
+
+- **Derivation rows run above `expected`** because the stack's seeded example derivations
+  (`ahu-delta-t`, `fan-duty-cycle`, every 60 s) match every scale AHU too, and the Cur-mode
+  backstop sweep adds a pass every 300 s. That is real load, so the ratio only fails a step when it
+  falls *under* 80%. The tick interval shown is the seeded derivations' 60 s.
+- **The chain top lags its inputs by about one reporting interval** (p50 ≈ interval/2, p95 ≈
+  interval), as a derivation that ticks once an interval should. L1 and L2 (Cur mode) lag by the
+  ingest lag at p50 (0.3–0.4 s); their p95 includes the backstop sweep's rows, computed from the
+  last reading.
+- **Faults and webhooks match the configured share**: one webhook per transition, and the
+  transition rate is close to `faulting points / (5 readings × interval)`.
+
+What the synthetic load exposed, and what this PR changed in the engine:
+
+1. **Every Cur-mode derivation was also swept over every row on every 5 s tick.** On
+   typical-1min at 5k points that was 6.5 times the configured derivation rows: 911-row passes on
+   a 5 s tick, starting up to 5.9 s late (`recorded_derivation_ticks` in the limiter fixtures). A
+   Cur-mode formula without `interval_seconds` is now swept every `--cur-sweep-seconds` (300), as a
+   backstop ([Derivation](/derivation#cur-mode-re-running-on-new-readings)).
+2. **A derivation row cost 3–12 ms, mostly Postgres round trips**, with derivation_engine at
+   0.1–0.25 cores: a read per input, then an INSERT, a `point_registry` upsert and a health upsert,
+   each its own commit. Now there is one bulk read per window per pass
+   (`timeseries.read_range_bulk`), one write transaction per derivation per pass, and a success is
+   recorded only after a failure. A profiled 769-row pass went from 9.4 s to under 3.5 s for 1,250
+   rows. At 20k points with N=10, steady passes went from 49 s for 2,500 rows to 6–9 s for 5,000.
+3. **Cur mode handled each listener batch separately**: a few readings each at 1-minute rates, with
+   a masking snapshot, a select-index lookup and a commit per derivation every time. It now
+   handles all of a feed poll's batches (up to 20) at once. On typical-1min N=10 at 10k points,
+   Cur mode had been busy 99–107% and 80 s behind.
+4. **The first passes over a step's new equips write each new output's lineage to the graph**,
+   in Oxigraph round trips. In one run that was disturbed by a concurrent compression loop, those
+   passes took 117 s and 73 s; in the clean final run the longest took 3.6 s. The ladder now waits
+   for derivation_engine to settle (two passes, the last one under the interval) before it soaks,
+   and records the wait and the longest pass (`synthetic_settle`).
+5. Found, not fixed: derivation outputs are named after the target's **last path segment**
+   (`derivation_engine._output_uri`), so same-named equips on different sites share one computed
+   point. The generator now names equips globally (`e<global index>`). Fixing it in Baler changes
+   computed point identity, so it needs its own issue.
+6. The stack's seeded `discharge-air-temp-out-of-range` rule (50–70 °F) fired on every scale
+   `sat` point half the time (the generator's 65–75 °F sine): 10% of points flapping, in every
+   earlier ladder run. `sat` now reads 55–65 °F, so only `--fault-share` faults. A His-mode stuck
+   rule also opens a fault on a point whose window holds a single sample (`his_checks.stuck_verdict`:
+   `n_samples > 0`), so new points briefly fault at a step's start, during the warm-up.
+
+**Next limiter.** On this VM the read probes fail first (`Equipment tree: read?filter=equip`,
+haystack `build_records`, 0.62 s against a 0.5 s budget at 10k points in one run). Of the
+synthetic work, **Cur-mode derivations** are next. They run on one Python thread at about 1.6 ms
+per row (13% busy for 83 rows/s at 20k, N=10), so they reach their limit near 600 rows/s:
+
+| Profile | Cur-mode derivation rows/s at 1M points | Where Cur mode reaches its limit (estimated) |
+|---|---|---|
+| typical-1min, N=5 | about 2,600 | about 230k points |
+| typical-1min, N=10 | about 4,200 | about 145k points |
+
+Tick passes come next: about 0.5 ms per row, so a 1M-point typical-1min step's roughly 230k
+rows a minute (the chain tops plus the seeded derivations) would take about 115 s per 60 s
+interval. Both estimates come from a 4-CPU VM; nash-srv will measure the real ones. The fix
+candidates are a second Cur-mode worker sharded by equip, and running each derivation's rows as
+one sandboxed call instead of a thread per row.
+
 ### Quality sweep (#268): limiter removed, next limiter exposed
 
 **Before:** `quality.sweep` ran inline in fault_detector's His loop and re-judged the last hour of
@@ -809,6 +973,38 @@ fault_detector: its headroom ratios at 50k were His cycle 0.67, quality watermar
 sweep 0.06.
 
 ### nash-srv
+
+**Realistic profiles (#273), to run.** Each profile and N starts on a clean stack (`down` then
+`up`), so reads measure only that run's graph. If a soak is still running in the `scale` project,
+use `SCALE_PROJECT=scale2` (own env file and ports) or wait for it to finish.
+
+```sh
+cd ~/baler-scale && git fetch origin && git checkout claude/realistic-profiles && git pull
+PY=~/.venv-scale/bin/python
+nohup sh -c '
+for prof in typical-1min typical-5min; do for n in 5 10; do
+  '"$PY"' scripts/scale/ladder.py down
+  '"$PY"' scripts/scale/ladder.py up
+  '"$PY"' scripts/scale/ladder.py run --no-up --profile $prof --synthetic-per-equip $n \
+      --steps 100k,250k,500k,1M --continue-on-fail --procs 2 > ~/scale-$prof-n$n.log 2>&1
+done; done' > ~/scale-profiles.log 2>&1 &
+
+$PY scripts/scale/ladder.py table scripts/scale/results/*-ladder.json   # both tables, synthetic one last
+```
+
+`typical-1min` takes about 25 min a step (warm-up 180 s, settle, 900 s soak, probes), and
+`typical-5min` about 45 min. The four runs take about 10 hours. The safe points per server for
+each profile, which sets the split threshold, goes here once they've run: the highest step that
+passes with its limiter named.
+
+| Profile | N | Safe points per server | Limiter at the first failing step |
+|---|---|---|---|
+| typical-1min | 5 | _(nash-srv)_ | |
+| typical-1min | 10 | _(nash-srv)_ | |
+| typical-5min | 5 | _(nash-srv)_ | |
+| typical-5min | 10 | _(nash-srv)_ | |
+
+**Stress (5 s), before #273:**
 
 | Run | Host (nproc, model, RAM) | Durable | Points | Status | Offered/s | Stored/s | Stored/s per CPU | p95 lag | read?filter=point | readAll(equip) | Cx report | First failure |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|

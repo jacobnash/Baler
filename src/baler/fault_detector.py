@@ -562,7 +562,11 @@ def run_feed(rule_cache: RuleCache, webhooks_path: str, open_faults: OpenFaults,
     last_log = [time.monotonic(), 0]
 
     def handle(batch):
+        t0 = time.monotonic()
         status.add("cur_evaluations", handle_feed_batch(fault_conn, rule_cache, webhooks_path, batch, open_faults)["evaluations"])
+        # cumulative seconds evaluating: its rate is how busy Cur mode keeps
+        # this thread (the scale ladder's limiter evidence, #273)
+        status.add("cur_busy_s", time.monotonic() - t0)
 
     def report(stats):
         status.update("feed", stats.as_dict())
@@ -610,7 +614,8 @@ def main() -> None:
 
     open_faults = OpenFaults()
     open_faults.refresh(fault_conn_main)
-    status = heartbeat.Status("fault_detector", interval_seconds=args.his_interval, feed={}, his={}, cur_evaluations=0)
+    status = heartbeat.Status("fault_detector", interval_seconds=args.his_interval, feed={}, his={}, cur_evaluations=0,
+                              cur_busy_s=0.0)
 
     def feed_thread():
         try:
