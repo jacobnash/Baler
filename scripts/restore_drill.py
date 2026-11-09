@@ -165,9 +165,10 @@ class Scratch:
                                 capture=True).split()
         self.dsn = f"postgresql://{user}:{DRILL_PASSWORD}@127.0.0.1:{self.pg_port}/{db}"
         self.oxigraph_url = f"http://127.0.0.1:{self.ox_port}"
-        # The healthcheck (pg_isready on the socket) passes during the image's
-        # first-boot init, which then restarts the server; that init server
-        # doesn't listen on TCP, so a TCP connection means the real one is up.
+        # The image's first-boot init runs a socket-only server, then restarts
+        # it; the healthcheck now probes TCP so it can't pass on the init
+        # server, and this TCP connect is the same check from the host side
+        # (a host port can lag the container's own readiness).
         deadline = time.monotonic() + 120
         while True:
             try:
