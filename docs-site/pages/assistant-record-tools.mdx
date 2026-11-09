@@ -1,0 +1,55 @@
+---
+title: Assistant across the record
+---
+
+The commissioning agent (Cx 10, [Commissioning LLM](/commissioning-llm))
+now has read-only tools across the whole building record, not only
+commissioning (Baler#220, epic #221 §12). It can answer:
+
+- "What does the spec say about this pump's seal, and is it under warranty?"
+- "Which ORs failed humidity last month?"
+- "Is the surgery suite ready?"
+- "Is AHU-1's valve hunting, and since when?"
+- "What has the chiller lost since install, and what would replacing it save?"
+
+## Same rules as the Cx agent
+
+- **Proposals only.** Every new tool reads. Anything that changes the record
+  still goes through `propose`, for a person to accept or reject.
+- **Every call audited.** Each tool call is a project event `agent.<tool>`
+  with its input.
+- **Same scope.** Tools run with the session starter's org and sites and the
+  project's site, the same filters a person's request gets.
+- **Same model choice.** `BALER_LLM_PROVIDER`: none, a local
+  OpenAI-compatible model, or Claude.
+- **Answers cite.** Document tools return the document, page and verbatim
+  quote; data tools return the point, window and sample counts they read.
+  The system prompt tells the model to cite them, and to say when the record
+  doesn't hold something rather than guess.
+
+## The tools
+
+| Tool | Reads | Offered when |
+|---|---|---|
+| `search_documents` | Cx 7 spec documents and the items read from them (page, quote); the document store's hits once #201 is in | always |
+| `asset_history` | install/remove history and warranties of the asset at a position. Until #197/#198 it answers that the record doesn't hold them | always |
+| `point_history` | one point's raw history over a window: samples, min, max, mean, first, last | always |
+| `list_spaces`, `space_readiness` | spaces and the readiness report | spaces (#209) and readiness (#210) are installed |
+| `project_packs`, `compliance_log` | adopted pack versions and their confirmed rows; a space's compliance log | packs (#205) / compliance (#207) |
+| `schedule_activities` | the latest construction schedule's activities | schedules (#217) |
+| `hunting` | hunting per loop against the start-up baseline | #214 |
+| `performance`, `savings_cases` | baselines and the gap since the fit; replace-vs-keep cases with their assumptions | #215 / #216 |
+
+A tool whose part of the record isn't in this install isn't offered at
+all (`record_tools.available()` checks for the module), so the model is
+never handed a tool that can only fail. Asset history (#197) and the
+document store (#201) plug in through `record_tools.ASSET_HISTORY` and
+`record_tools.DOCUMENT_SEARCH`. No competing model of either is built here.
+
+## Not yet
+
+- Proposal kinds for the new parts (propose a pack row, a schedule link, a
+  space): today the agent proposes issues, procedures, phase changes, spec
+  items, mappings and active tests.
+- "Draft a test for this sequence" from a document page: needs the document
+  store's page text (#201).
