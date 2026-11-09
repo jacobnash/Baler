@@ -17,6 +17,48 @@ docs-site/pages/schema-migrations.mdx for the rules on hypertables and
 compressed chunks (migrations.hypertable has the helper).
 """
 
-from baler.migrations import v0001_baseline, v0002_reading_feed, v0003_requirement_packs
+from baler.migrations import (
+    v0001_baseline,
+    v0002_reading_feed,
+    v0003_quality_watermark,
+    v0004_alerts,
+    v0005_password_reset_mfa,
+    v0006_override_tests,
+    v0007_operator_writes,
+    v0008_manual_results,
+    v0009_fleet_runs,
+    v0010_active_schedules,
+    v0011_assets,
+    v0012_documents,
+    v0013_warranties,
+    v0014_pm,
+    v0015_deferred,
+    v0016_bench,
+    v0017_doc_proposals,
+    v0018_spares,
+    v0019_spaces,
+    v0020_requirement_packs,
+)
 
-ALL = (v0001_baseline, v0002_reading_feed, v0003_requirement_packs)
+ALL = (
+    v0001_baseline,
+    v0002_reading_feed,
+    v0003_quality_watermark,
+    v0004_alerts,
+    v0005_password_reset_mfa,
+    v0006_override_tests,
+    v0007_operator_writes,
+    v0008_manual_results,
+    v0009_fleet_runs,
+    v0010_active_schedules,
+    v0011_assets,
+    v0012_documents,
+    v0013_warranties,
+    v0014_pm,
+    v0015_deferred,
+    v0016_bench,
+    v0017_doc_proposals,
+    v0018_spares,
+    v0019_spaces,
+    v0020_requirement_packs,
+)

@@ -1,0 +1,75 @@
+---
+title: Warranties
+---
+
+Part of the building lifecycle record (epic Baler#221, design §6).
+Baler#198. Builds on [Positions and assets](/assets).
+
+A warranty belongs to an **asset**, not a position. When a pump is
+replaced, the new pump's warranties apply from then on, and the old pump's
+stay with the old pump.
+
+## What's stored
+
+| Field | |
+|---|---|
+| `kind` | `parts`, `labor`, `parts_and_labor` (default), `extended`, `other` |
+| `provider` | Who honours it |
+| `starts_on` | Defaults to the asset's first install date ("from start-up") |
+| `ends_on` | Or give `duration_months` from the start; an end that falls past a month's last day lands on it |
+| `terms` | The terms, in your words or quoted |
+| `source` | Where it came from: `{document_id, page, quote}`, a page in the [document store](/documents) when it lands |
+
+A warranty entered by mistake is **voided** with a reason, never deleted.
+Edits and voids are logged in `record_edits` (`urn:baler:warranty:<id>`).
+
+Dates entered here are the user's. Nothing is read from a document and applied
+on its own. Extracting warranty terms from O&M manuals (#202) produces
+*proposals* that a person confirms.
+
+## Alerts
+
+`GET /ops/warranties/alerts?within_days=90` returns two lists:
+
+- **`expiring`**: active warranties that end within the window. That leaves
+  time to inspect, claim, or extend before they lapse.
+- **`failures_under_warranty`**: a fault or Cx issue that opened, in the
+  last year, on a position whose asset at that moment was under warranty. The
+  repair should be claimed, not paid for.
+
+How a failure is matched:
+
+- A **Cx issue** carries its equipment URI (`cx_issues.equip_uri`), which is
+  the position.
+- A **fault** is on a point. Its position is the equipment whose key the
+  point's key starts with. `urn:equip:fbf/hosp/chw-p1` owns
+  `urn:point:fbf/hosp/chw-p1/status`, the same key scheme multi-site scoping
+  uses.
+- The asset is whichever was installed in that position **when the failure
+  opened** (`asset-at`), and the warranty must cover that day.
+
+The alerts are computed when asked. The **Assets** page shows them.
+
+## API
+
+Reads need `viewer`, changes `operator`.
+
+| Route | What |
+|---|---|
+| `GET /ops/assets/{id}/warranties` | The asset's warranties, with `status` and `days_left` |
+| `POST /ops/assets/{id}/warranties` | Add one (fields above) |
+| `GET /ops/warranties?status=` | All, or `active`, `expired`, `not_started`, `void` |
+| `GET /ops/warranties/alerts?within_days=` | Expiring and failures under warranty |
+| `PATCH /ops/warranties/{id}` | Correct `kind`, `provider`, `starts_on`, `ends_on`, `terms`, `source` |
+| `POST /ops/warranties/{id}/void` | `reason` |
+
+## Storage
+
+Migration 0013: `lc_warranties`. Code: `baler.lifecycle.warranties`.
+
+## Not built yet
+
+- Pushing alerts (webhooks, email, the Ops attention list), rather than
+  showing them on request.
+- Applying warranty proposals confirmed from O&M extraction (#202) and from
+  COBie import (#204).

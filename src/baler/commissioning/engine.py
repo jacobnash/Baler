@@ -41,13 +41,18 @@ def run(store, history: History, scopes: list[Scope], now: datetime, window_h: f
         templates=None, ladder_config: dict | None = None,
         progress: Callable[[dict], None] | None = None, gl36_settings: dict | None = None,
         economizer_settings: dict | None = None, equips: list[dict] | None = None,
-        site_equips: list[dict] | None = None) -> tuple[dict, list[dict]]:
+        site_equips: list[dict] | None = None, override_settings: dict | None = None,
+        override_source=None) -> tuple[dict, list[dict]]:
     """(summary, results). `progress`, if given, is told the stage and how
     many equipment are done; it must be cheap (it's called per equipment).
     `gl36_settings` (project settings `gl36`) adds ConStrain sequence items
     as gl36:<item> results (Cx 3, needs the cx-gl36 extra);
     `economizer_settings` (settings `economizer`) adds Baler's own
     cx:econ_* checks. `ladder_config` is settings `ladder`.
+    `override_settings` (settings `overrides`, when enabled) adds the
+    passive override tests as override:<pair> results (Baler#212);
+    `override_source` (the repo) supplies the schedules, priority arrays
+    and Baler's own writes they need.
     `equips` skips the inventory read (a test procedure passes just the
     equipment it applies to); `site_equips` is then the whole inventory,
     where building-wide points like outdoor air temperature are found."""
@@ -92,6 +97,12 @@ def run(store, history: History, scopes: list[Scope], now: datetime, window_h: f
 
         report("economizer", len(equips), len(equips), len(point_ids))
         results.extend(economizer.run(equips, history, now, window, economizer_settings, site_equips))
+    if override_settings and override_settings.get("enabled"):
+        from baler.commissioning import overrides
+
+        report("overrides", len(equips), len(equips), len(point_ids))
+        ctx = overrides.context_from(override_source, point_ids, now - window, now)
+        results.extend(overrides.run(equips, series, now, override_settings, ctx))
 
     by_status = {s: 0 for s in checks.STATUSES}
     by_check: dict[str, dict[str, int]] = {}

@@ -1,0 +1,112 @@
+# The Haxall baseline (Baler#236): Haxall on the same ladder as Baler, as its
+# own compose project, never mixed with the Baler scale stack or live:
+#
+#   docker compose -p scale-haxall --env-file scripts/scale/scale.env \
+#     -f scripts/scale/compose.haxall.yml up -d --build
+#
+# (scripts/scale/ladder.py --target haxall builds that command - project
+# "<SCALE_PROJECT>-haxall" - and runs the same guard as the Baler stack:
+# ports off live, volumes under BALER_VOLUME_PREFIX.) Same broker image,
+# config and ACL as the scale stack, so the generator and the broker cost
+# the same on both sides. Haxall is the image CI's haxall-matrix job builds
+# (windrow/docker/haxall.Dockerfile, the windrow submodule). The bridge is
+# scripts/scale/haxall_bridge.py in Baler's own image, in a container of
+# its own with its own cap, so its limit is reported apart from Haxall's.
+#
+# Caps: SCALE_CPUS_HAXALL / SCALE_MEM_HAXALL default to what Baler's
+# storage and ingest path gets in compose.scale.yml (ladder.py haxall_caps
+# fills them in: postgres + oxigraph + haystack_api + ingest_api), and
+# the bridge gets the listener's. Durability: see docs-site scale-test.mdx,
+# "Baler vs Haxall" - SCALE_HAXALL_VAR_VOLUME can put Haxall's database on a
+# sync-mounted volume made beforehand.
+# Paths are relative to the repo root.
+
+name: ${SCALE_PROJECT:-scale}-haxall
+
+x-scale-logging: &scale-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
+services:
+  mosquitto:
+    restart: unless-stopped
+    image: eclipse-mosquitto:2@sha256:75d6662dee52c947dc9dd9c29f1d8d7ffef78ddaf38001caa09755681e8bbc98
+    entrypoint: ["/mosquitto/config/entrypoint.sh"]
+    environment:
+      MOSQUITTO_USERS: baler:${MQTT_PASSWORD:?set in scripts/scale/scale.env},scalegen:${SCALE_GEN_MQTT_PASSWORD:?set in scripts/scale/scale.env}
+    volumes:
+      - ./mosquitto:/mosquitto/config:ro
+      - ./scripts/scale/mosquitto/acl:/mosquitto/config/acl:ro
+      - mosquitto-data:/mosquitto/data
+      - ./mosquitto/tls:/mosquitto/tls:ro
+    ports:
+      - "127.0.0.1:${SCALE_HAXALL_MQTT_PORT:-22883}:1883"
+    cpus: ${SCALE_CPUS_MOSQUITTO:-1.0}
+    mem_limit: ${SCALE_MEM_MOSQUITTO:-2g}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+
+  haxall:
+    restart: unless-stopped
+    build:
+      context: ./windrow/docker
+      dockerfile: haxall.Dockerfile
+    image: ${SCALE_PROJECT:-scale}-haxall:local
+    # The same init + run as CI's haxall-matrix job; init is skipped when the
+    # project already exists (a restart, or the crash test's kill -9).
+    command:
+      - sh
+      - -c
+      - >-
+        [ -d /haxall/var/scale ] ||
+        bin/hx init -headless -suUser su -suPass "$$HAXALL_SU_PASSWORD" -httpPort 8080 /haxall/var/scale;
+        exec bin/hx run /haxall/var/scale
+    environment:
+      HAXALL_SU_PASSWORD: ${SCALE_HAXALL_SU_PASSWORD:?set in scripts/scale/scale.env (ladder.py init)}
+      JAVA_TOOL_OPTIONS: ${SCALE_HAXALL_JAVA_OPTS:-}
+    volumes:
+      - haxall-var:/haxall/var
+    ports:
+      - "127.0.0.1:${SCALE_HAXALL_HTTP_PORT:-28280}:8080"
+    cpus: ${SCALE_CPUS_HAXALL:-5.0}
+    mem_limit: ${SCALE_MEM_HAXALL:-14g}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+
+  haxall_bridge:
+    restart: unless-stopped
+    build: .
+    command: python scripts/scale/haxall_bridge.py
+    environment:
+      PYTHONPATH: /app/src
+      # Bytecode stays in the container: the checkout is bind-mounted and
+      # root-owned files in it break the next deploy's checkout (CLAUDE.md).
+      PYTHONPYCACHEPREFIX: /tmp/pycache
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+      MQTT_USERNAME: baler
+      MQTT_PASSWORD: ${MQTT_PASSWORD}
+      HAXALL_URL: http://haxall:8080/api/sys
+      HAXALL_USER: su
+      HAXALL_PASSWORD: ${SCALE_HAXALL_SU_PASSWORD}
+      HAXALL_BRIDGE_MODE: ${SCALE_HAXALL_BRIDGE_MODE:-auto}
+      HAXALL_BRIDGE_BATCH_ROWS: ${SCALE_HAXALL_BRIDGE_BATCH_ROWS:-5000}
+      HAXALL_BRIDGE_BATCH_MS: ${SCALE_HAXALL_BRIDGE_BATCH_MS:-250}
+    volumes:
+      - .:/app
+    depends_on:
+      - mosquitto
+      - haxall
+    cpus: ${SCALE_CPUS_HAXALL_BRIDGE:-1.0}
+    mem_limit: ${SCALE_MEM_HAXALL_BRIDGE:-1g}
+    cpuset: "${SCALE_CPUSET:-}"
+    logging: *scale-logging
+
+volumes:
+  mosquitto-data:
+    name: ${BALER_VOLUME_PREFIX:?set in scripts/scale/scale.env}_haxall-mosquitto-data
+  haxall-var:
+    name: ${SCALE_HAXALL_VAR_VOLUME:-${BALER_VOLUME_PREFIX}_haxall-var}
+    external: ${SCALE_HAXALL_VAR_EXTERNAL:-false}

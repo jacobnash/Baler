@@ -15,6 +15,12 @@ for the listener's CPU, so the number is the listener's capacity, not the
 generator's.
 
   python scripts/scale/listener_bench.py --workers 1,2,3,4 --messages 300000
+  python scripts/scale/listener_bench.py --workers 1 --envelope batch   # Windrow's batched envelope (#234)
+
+--messages counts readings either way. With --envelope batch the same
+readings go as one message per 10-point equip per tick ({prefix}/batch,
+not retained), so the broker and the listener see a tenth of the messages
+for the same rows.
 
 Needs the scale stack's broker/Postgres/Oxigraph up (`ladder.py up`, or
 just `docker compose ... up -d postgres mosquitto oxigraph migrate`) and
@@ -95,19 +101,59 @@ def _publisher(proc: int, procs: int, args, base: float, out) -> None:
     c.on_publish = lambda *a: acked.__setitem__(0, acked[0] + 1)
     c.connect(args.host, args.port)
     c.loop_start()
-    sent = 0
-    for k in range(proc, args.messages, procs):
-        p = k % args.points
-        payload = common.envelope("zone-temp", round(70 + (k % 97) / 10, 2), base + k / args.points)
-        while c.publish(f"{PREFIX}/e{p // 10:05d}/p{p % 10}", payload, qos=1, retain=True).rc != mqtt.MQTT_ERR_SUCCESS:
-            time.sleep(0.002)
-        sent += 1
+    sent = msgs = 0
+    if args.envelope == "batch":
+        # The same readings (reading k: point k % points, ts base + k / points),
+        # one message per 10-point equip per tick: message m is equip
+        # m % equips at tick m // equips.
+        equips = -(-args.points // 10)
+        per_mid: dict[int, int] = {}  # readings in each unacknowledged message
+        early: set[int] = set()  # acked before publish() returned
+        lock = threading.Lock()
+
+        def on_pub(cl, u, mid, *a):
+            with lock:
+                if mid in per_mid:
+                    acked[0] += per_mid.pop(mid)
+                else:
+                    early.add(mid)
+
+        c.on_publish = on_pub
+        for m in range(proc, -(-args.messages // args.points) * equips, procs):
+            tick, e = divmod(m, equips)
+            ks = [tick * args.points + e * 10 + j for j in range(10) if e * 10 + j < args.points]
+            ks = [k for k in ks if k < args.messages]
+            if not ks:
+                continue
+            payload = common.batch_envelope(base + tick, {f"p{k % args.points % 10}": round(70 + (k % 97) / 10, 2)
+                                                          for k in ks})
+            while True:
+                info = c.publish(f"{PREFIX}/e{e:05d}/batch", payload, qos=1, retain=False)
+                if info.rc == mqtt.MQTT_ERR_SUCCESS:
+                    break
+                time.sleep(0.002)
+            with lock:
+                if info.mid in early:
+                    early.discard(info.mid)
+                    acked[0] += len(ks)
+                else:
+                    per_mid[info.mid] = len(ks)
+            sent += len(ks)
+            msgs += 1
+    else:
+        for k in range(proc, args.messages, procs):
+            p = k % args.points
+            payload = common.envelope("zone-temp", round(70 + (k % 97) / 10, 2), base + k / args.points)
+            while c.publish(f"{PREFIX}/e{p // 10:05d}/p{p % 10}", payload, qos=1, retain=True).rc != mqtt.MQTT_ERR_SUCCESS:
+                time.sleep(0.002)
+            sent += 1
+            msgs += 1
     end = time.time() + 120
     while acked[0] < sent and time.time() < end:
         time.sleep(0.05)
     c.loop_stop()
     c.disconnect()
-    out.put((sent, acked[0]))
+    out.put((sent, acked[0], msgs))
 
 
 def publish_backlog(args, base: float) -> dict:
@@ -120,7 +166,8 @@ def publish_backlog(args, base: float) -> dict:
     for p in procs:
         p.join()
     sent, acked = sum(r[0] for r in res), sum(r[1] for r in res)
-    return {"sent": sent, "acked": acked, "publish_s": round(time.time() - t0, 1)}
+    return {"sent": sent, "acked": acked, "mqtt_messages": sum(r[2] for r in res), "envelope": args.envelope,
+            "publish_s": round(time.time() - t0, 1)}
 
 
 def docker_cpu(container: str) -> float | None:
@@ -238,6 +285,9 @@ def main(argv=None) -> None:
     ap.add_argument("--messages", type=int, default=300_000)
     ap.add_argument("--points", type=int, default=20_000)
     ap.add_argument("--publishers", type=int, default=2)
+    ap.add_argument("--envelope", choices=["point", "batch"], default="point",
+                    help="per-point messages, or Windrow's batched envelope: one message per 10-point equip "
+                         "per tick (Baler#234)")
     ap.add_argument("--topic-pattern", default=f"{PREFIX}/#",
                     help="the listener's subscription (default: only the bench's topics, so a stray "
                          "scale generator doesn't skew it)")
@@ -262,13 +312,13 @@ def main(argv=None) -> None:
               "config": {k: v for k, v in vars(args).items() if "password" not in k}, "runs": runs}
     path = common.RESULTS / f"{result['run_id']}-listener-bench.json"
     path.write_text(json.dumps(result, indent=1, default=str))
-    print("\n| Workers | Stored/s (mid 80%) | Per worker | Worker CPU % (each) | Batcher writing % (each) | "
+    print("\n| Envelope | MQTT messages | Workers | Stored/s (mid 80%) | Per worker | Worker CPU % (each) | Batcher writing % (each) | "
           "Postgres CPU % | Broker CPU % | Missing |")
-    print("|---|---|---|---|---|---|---|---|")
+    print("|---|---|---|---|---|---|---|---|---|---|")
     for r in runs:
         cpus = ", ".join(str(w["cpu_pct_mean"]) for w in r["per_worker"].values())
         busy = ", ".join(str(w["flush_busy_pct_mean"]) for w in r["per_worker"].values())
-        print(f"| {r['workers']} | {r['stored_rps_mid80']} | {r['stored_rps_per_worker']} | {cpus} | {busy} | "
+        print(f"| {r['envelope']} | {r['mqtt_messages']} | {r['workers']} | {r['stored_rps_mid80']} | {r['stored_rps_per_worker']} | {cpus} | {busy} | "
               f"{r['postgres_cpu_pct_mean']} | {r['broker_cpu_pct_mean']} | {r['missing']} |")
     print(f"-> {path}")
 
