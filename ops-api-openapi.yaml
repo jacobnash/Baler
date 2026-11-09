@@ -543,6 +543,29 @@ paths:
               schema: { $ref: "#/components/schemas/Freshness" }
         "400": { description: Missing or malformed prefix }
         "401": { description: Not through the gateway }
+  /metrics:
+    get:
+      operationId: getOpsMetrics
+      summary: Overload signals as Prometheus text
+      description: >-
+        Prometheus text exposition (format 0.0.4) of what /status judges ingest
+        and the rule daemons by (#235): end-to-end ingest lag
+        (baler_ingest_newest_reading_age_seconds) and per source prefix,
+        the listener's queue depth, the age of its oldest uncommitted reading,
+        last batch write time, redelivered (DUP) messages and throughput, the
+        broker's dropped-message counter, each rule daemon's reading-feed lag
+        and misses, and their cycle times and evaluations. The scale ladder
+        and the post-deploy verify job read the same endpoint. Process-wide
+        numbers, so a site-restricted login can't read it (gateway resource
+        "metrics"); per-prefix lines are limited to the caller's sites.
+        Viewer, or an API key.
+      responses:
+        "200":
+          description: Metrics
+          content:
+            text/plain:
+              schema: { type: string }
+        "401": { description: Not through the gateway }
   /gateway-errors:
     get:
       operationId: getGatewayErrors
@@ -784,6 +807,27 @@ components:
                   missed_batches: { type: integer }
                   last_missed_at: { type: ["string", "null"], format: date-time }
                   updated_at: { type: string, format: date-time }
+            ingest:
+              type: object
+              description: >-
+                Overload numbers (#235), the same ones GET /metrics exports: lag_s is
+                now minus the newest stored reading; the queue figures are the busiest
+                listener worker's. An oldest uncommitted reading older than
+                OPS_QUEUE_AGE_DEGRADED_SECONDS (or a queue 80% full) turns the Ingest
+                listener card degraded, older than OPS_QUEUE_AGE_DOWN_SECONDS down;
+                a broker drop in the last hour degraded. Null fields: not reported
+                (no listener heartbeat yet).
+              properties:
+                lag_s: { type: ["number", "null"] }
+                queue: { type: ["integer", "null"] }
+                queue_max: { type: ["integer", "null"] }
+                queue_oldest_age_s: { type: ["number", "null"] }
+                last_flush_s: { type: ["number", "null"] }
+                readings_per_s: { type: ["number", "null"] }
+                redelivered: { type: ["integer", "null"] }
+                workers: { type: ["integer", "null"] }
+                broker_dropped_since_start: { type: ["integer", "null"] }
+                broker_last_drop_at: { type: ["string", "null"], format: date-time }
             cards:
               type: array
               description: >-

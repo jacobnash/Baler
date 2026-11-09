@@ -290,10 +290,71 @@ def _infer_ingest(building: dict[str, Any], *, platform_ok: bool) -> tuple[str, 
     age = (datetime.now(timezone.utc) - last_dt).total_seconds()
     if age > QUIET_INGEST_SECONDS:
         return "quiet", f"last ingest {int(age)}s ago"
+    stale = _listener_heartbeat_state(building)
+    if stale:
+        return stale
+    behind = _queue_state(building)
+    if behind:
+        return behind
     dropped = _drop_state(building)
     if dropped:
         return dropped
-    return "ok", f"last ingest {int(age)}s ago"
+    lst = building.get("listener") or {}
+    queue = f", queue {lst['queue']}" if lst.get("queue") is not None else ""
+    return "ok", f"last ingest {int(age)}s ago{queue}"
+
+
+# The listener's own backlog (#235), from its heartbeat: how long the oldest
+# reading received but not yet committed has waited, and how full the
+# busiest worker's queue is. Past the degraded age, readings are later than
+# the ladder's p95 lag budget (30 s); past the down age, ingest is falling
+# behind for good. A full queue means paho has stopped reading the socket
+# and the backlog is growing at the broker, where its limit drops it.
+QUEUE_AGE_DEGRADED_SECONDS = float(os.environ.get("OPS_QUEUE_AGE_DEGRADED_SECONDS", "30"))
+QUEUE_AGE_DOWN_SECONDS = float(os.environ.get("OPS_QUEUE_AGE_DOWN_SECONDS", "300"))
+QUEUE_FILL_DEGRADED = 0.8
+
+
+def _queue_state(building: dict[str, Any]) -> tuple[str, str] | None:
+    lst = building.get("listener") or {}
+    age = float(lst.get("oldest_age_s") or 0)
+    queue, cap = int(lst.get("queue") or 0), int(lst.get("queue_max") or 0)
+    if age > QUEUE_AGE_DOWN_SECONDS:
+        return "down", (f"the listener's oldest uncommitted reading is {age:.0f} s old (queue {queue}): ingest is "
+                        "not keeping up - see the scale-test page's limiter notes")
+    if age > QUEUE_AGE_DEGRADED_SECONDS:
+        return "degraded", f"the listener's oldest uncommitted reading is {age:.0f} s old (queue {queue})"
+    if cap and queue >= QUEUE_FILL_DEGRADED * cap:
+        return "degraded", (f"a listener worker's queue is {queue}/{cap}: it can't keep up - "
+                            f"raise BALER_LISTENER_WORKERS ({lst.get('workers')} now)")
+    return None
+
+
+def _listener_heartbeat_state(building: dict[str, Any]) -> tuple[str, str] | None:
+    """("down", why) when the listener supervisor's heartbeat is stale.
+    A missing one isn't judged: data freshness above already covers it."""
+    beat = (building.get("heartbeats") or {}).get("mqtt_listener")
+    if beat is None:
+        return None
+    age = (datetime.now(timezone.utc) - datetime.fromisoformat(beat)).total_seconds()
+    if age > HEARTBEAT_STALE_SECONDS:
+        return "down", f"the listener's last heartbeat was {int(age)}s ago"
+    return None
+
+
+def ingest_summary(building: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+    """The overload numbers on /ops/status (#235), the same ones
+    /ops/metrics exports: end-to-end lag (now minus the newest stored
+    reading), the listener's backlog and throughput, and broker drops."""
+    now = now or datetime.now(timezone.utc)
+    lst = building.get("listener") or {}
+    last = building.get("last_ingest_at")
+    lag = round(max(0.0, (now - datetime.fromisoformat(last)).total_seconds()), 1) if last else None
+    return {"lag_s": lag, "queue": lst.get("queue"), "queue_max": lst.get("queue_max"),
+            "queue_oldest_age_s": lst.get("oldest_age_s"), "last_flush_s": lst.get("last_flush_s"),
+            "readings_per_s": lst.get("readings_per_s"), "redelivered": lst.get("redelivered"),
+            "workers": lst.get("workers"), "broker_dropped_since_start": lst.get("broker_dropped_since_start"),
+            "broker_last_drop_at": lst.get("broker_last_drop_at")}
 
 
 # The ingest card stays degraded this long after the broker last dropped
@@ -671,6 +732,7 @@ def collect_status(scope=None) -> dict[str, Any]:
             "disabled_derivation_targets": building.get("disabled_derivation_targets", 0),
             "needs_first_org": building.get("org_count", 0) == 0,
             "reading_feed": building.get("reading_feed", {}),
+            "ingest": ingest_summary(building),
             "cards": cards,
         },
         "platform": [c for c in ordered if c["layer"] == "platform"],

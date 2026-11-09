@@ -231,3 +231,29 @@ def test_a_pre_233_listener_summarizes_to_nothing():
 def test_evaluate_fails_on_listener_restarts_and_tags_storm_lag(over, needle):
     status, reasons = ladder.evaluate(_good_step(**over))
     assert status == "fail" and any(needle in r for r in reasons), reasons
+
+
+def test_ladder_reads_baler_metrics_and_checks_them_against_its_canaries():
+    """#235: the ladder parses what ops_metrics renders, and records whether
+    Baler's own lag and drop numbers agree with its canaries and $SYS."""
+    from datetime import datetime, timedelta, timezone
+
+    from baler import ops_metrics
+
+    now = datetime(2026, 11, 9, tzinfo=timezone.utc)
+    text = ops_metrics.render({"now": now, "newest_reading_at": now - timedelta(seconds=3),
+                               "details": {"mqtt_listener": {"queue": 7, "oldest_age_s": 0.5,
+                                                             "broker_dropped_total": 10}}})
+    m = ladder.parse_prom(text)
+    picked = {k: m.get(name) for k, name in ladder.OPS_METRICS.items()}
+    assert picked["lag_s"] == 3.0 and picked["queue"] == 7 and picked["broker_dropped_total"] == 10
+
+    samples = [{"ops_metrics": {"lag_s": 2.0 + i % 3, "queue": i, "queue_age_s": 0.1, "broker_dropped_total": 10 + (i > 5)}}
+               for i in range(10)]
+    samples.append({"ops_metrics": {"error": "HTTPError 404"}})
+    out = ladder.summarize_ops_metrics(samples, {"p95_s": 3.5}, sys_dropped=1)
+    assert out["samples"] == 10 and out["errors"] == 1 and out["queue_max"] == 9
+    assert out["broker_dropped_delta"] == 1 and out["agrees"] == {"lag": True, "drops": True}
+    off = ladder.summarize_ops_metrics(samples, {"p95_s": 40.0}, sys_dropped=0)
+    assert off["agrees"] == {"lag": False, "drops": False}
+    assert ladder.summarize_ops_metrics([], {}, None) == {"samples": 0, "errors": 0}
