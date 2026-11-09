@@ -33,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 import psycopg
 from opentelemetry import context as otel_context
@@ -53,12 +54,14 @@ from baler.commissioning import (
     llm,
     mirror,
     operator_writes,
+    overrides,
     phases,
     procedures,
     report,
     runner,
     spec,
 )
+from baler.commissioning import schedules as sched_eval
 from baler.commissioning import templates as tpl
 from baler.http_handler_base import BaseAPIHandler, respond_error, respond_json
 from baler.remote_store import RemoteStore
@@ -72,7 +75,7 @@ PORT = 8009
 RUN_STATEMENT_TIMEOUT = "10min"
 
 _PROJECT = re.compile(r"/projects/([^/]+)")
-_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|gate|report|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|agent/sessions|agent/proposals|writes|schedule-writes|schedule-targets)")
+_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|gate|report|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|agent/sessions|agent/proposals|writes|schedule-writes|schedule-targets|schedules|schedules/refresh)")
 _PROJECT_ISSUES = re.compile(r"/projects/([^/]+)/issues/(import|export)")
 _RUN_ISSUES = re.compile(r"/runs/([^/]+)/issues")
 _ISSUE = re.compile(r"/issues/([^/]+)")
@@ -130,6 +133,8 @@ def _check_settings(settings) -> dict:
         economizer.validate_settings(settings["economizer"])
     if "fault_mirroring" in settings:
         mirror.validate_settings(settings["fault_mirroring"])
+    if "overrides" in settings:
+        overrides.validate_settings(settings["overrides"])
     if "phase_gates" in settings:
         gates.validate_mode(settings["phase_gates"])
     if "acceptance" in settings:
@@ -158,6 +163,8 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
     # (no MQTT commander configured) planning works and confirming is 503.
     # `commander` carries audited operator point and schedule writes
     # (Baler#213); without one those answer 503.
+    # `commander` (point_write.Commander) reads schedules and priority
+    # arrays from Windrow for the override tests (Baler#212); never writes.
 
     class CommissioningHandler(BaseAPIHandler):
         TRACER = tracer
@@ -244,6 +251,8 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                     ("POST", "writes"): ("operator_point_write", self._operator_point_write),
                     ("POST", "schedule-writes"): ("operator_schedule_write", self._operator_schedule_write),
                     ("GET", "schedule-targets"): ("schedule_targets", self._schedule_targets),
+                    ("GET", "schedules"): ("list_schedules", self._list_schedules),
+                    ("POST", "schedules/refresh"): ("refresh_schedules", self._refresh_schedules),
                 }
                 hit = table.get((method, sub))
                 return None if hit is None else (hit[0], lambda span, claims: hit[1](span, claims, pid))
@@ -1953,6 +1962,52 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             self._event(project["id"], f"operator_write.{row['status']}", claims, {"write_id": wid, "reason": why})
             respond_json(self, 200, db.public_row(row))
 
+        # ------------------------------------------- override tests (Baler#212)
+
+        def _project_tz(self, p: dict):
+            cfg = overrides.effective((p.get("settings") or {}).get("overrides"))
+            return ZoneInfo(cfg["tz"]) if cfg.get("tz") else ZoneInfo("UTC"), cfg
+
+        def _list_schedules(self, span, claims, pid) -> None:
+            """The BACnet schedules and calendars last read from the
+            project's connections, each with what it commands now."""
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            scopes, _ = self._scopes(p, claims)
+            tz, cfg = self._project_tz(p)
+            now = now_fn()
+            rows = [r for r in repo.list_schedules() if all(s.allows(f"urn:point:{r['topic_prefix']}/x") for s in scopes)]
+            cals: dict[tuple, dict] = {}
+            for r in rows:
+                if r["kind"] == "calendar":
+                    cals.setdefault((r["site"], r["instance"], r["connection_id"]), {})[r["object"]] = r["body"]
+            out = []
+            for r in rows:
+                item = {k: r[k] for k in ("id", "kind", "object", "name", "topic_prefix", "points")}
+                item["read_at"] = db._iso(r["read_at"])
+                item["body"] = r["body"]
+                if r["kind"] == "schedule":
+                    got = sched_eval.value_at(r["body"], now, tz, cals.get((r["site"], r["instance"], r["connection_id"])))
+                    item["now"] = {**got, "unoccupied": sched_eval.is_unoccupied(got["value"], cfg["unoccupied_values"])}
+                out.append(item)
+            respond_json(self, 200, {"tz": str(tz), "schedules": out})
+
+        def _refresh_schedules(self, span, claims, pid) -> None:
+            """Read schedules and calendars from Windrow now (reads only -
+            nothing is written to a controller)."""
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            if commander is None:
+                respond_error(self, 503, "no Windrow command channel is configured on this server")
+                return
+            scopes, _ = self._scopes(p, claims)
+            got = overrides.refresh(repo, commander, scopes, now_fn())
+            self._event(pid, "schedules.refresh", claims, {k: got[k] for k in ("schedules", "calendars")}
+                        | {"errors": got["errors"][:10]})
+            respond_json(self, 200, got)
+
         # ------------------------------------------------------- agent (Cx 10)
 
         def _agent_available(self) -> bool:
@@ -2201,8 +2256,13 @@ def main() -> None:
     # schedule writes on time - now (whatever a restart interrupted) and
     # every tick.
     operator_writes.sweep(repo, writer.commander, now)
+    # Override tests (Baler#212): re-read schedules and priority arrays for
+    # projects that have them enabled, every settings.overrides.refresh_minutes.
+    refresher = overrides.Refresher(repo, writer.commander,
+                                    lambda p: runner.project_scopes(repo, p, {"org_id": p["org_id"], "site_ids": []})[0])
     runner.Scheduler(repo, worker, clock, extra=[lambda t: active.sweep(repo, writer, t),
-                                                 lambda t: operator_writes.sweep(repo, writer.commander, t)])
+                                                 lambda t: operator_writes.sweep(repo, writer.commander, t),
+                                                 refresher.tick])
     server = ThreadingHTTPServer((args.host, args.port), make_handler(repo, worker=worker, executor=executor,
                                                                       commander=writer.commander))
     print(f"commissioning API listening on {args.host}:{args.port}")

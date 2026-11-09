@@ -1,5 +1,5 @@
 """
-0003 audited operator writes (Baler#213): every point, schedule and
+0007 audited operator writes (Baler#213): every point, schedule and
 calendar write a person makes from the UI, with who, why, the level, when
 it ends and how it ended, the before-state and a log of every command sent
 (baler.commissioning.operator_writes).
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 3
+VERSION = 7
 NAME = "operator writes"
 
 WRITES = """

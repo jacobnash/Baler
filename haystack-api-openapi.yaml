@@ -152,6 +152,24 @@ components:
   responses:
     Grid:
       description: A Haystack grid. Error grids have `err` in their meta.
+      headers:
+        X-Baler-Incomplete:
+          description: >-
+            Set when the grid's meta has `incomplete` (Baler#280), with the same
+            text: e.g. a `read` page that stops short. For clients that only
+            hand back rows.
+          schema: {type: string}
+        X-Baler-After:
+          description: "`read` page that stops short: its meta `after`, e.g. `@urn:point:x`."
+          schema: {type: string}
+        X-Baler-Limit:
+          description: "`read` page that stops short: its meta `limit`, the page size used."
+          schema: {type: string}
+        Link:
+          description: >-
+            `read` page that stops short: `<?filter=...&after=...>; rel="next"`,
+            a GET of the next page relative to this request's path (RFC 8288).
+          schema: {type: string}
       content:
         text/zinc:
           schema: {type: string}

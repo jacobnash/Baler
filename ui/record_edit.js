@@ -3,7 +3,7 @@
 // (operator to edit, admin to delete) - every edit is logged server-side
 // and shown here as the record's edit history. Loaded before app.js.
 
-const RECORD_API_URL = new URLSearchParams(location.search).get("ingest") || "/ingest";
+const RECORD_API_URL = apiBase("ingest", "/ingest");
 // Shown read-only in the editor: they come from graph links or live history.
 const RECORD_RESERVED = new Set(["id", "equipRef", "siteRef", "brickClass", "brickHasPart", "brickFeeds", "navId",
   "curVal", "curStatus", "his", "hisStart", "hisEnd", "mod", "writeVal", "point", "equip", "site", "tz", "kind"]);
