@@ -52,6 +52,9 @@ for rec in c.read("ahu"):
 his = c.his_read(c.read("temp and sensor", limit=1)[0]["id"], "yesterday")
 ```
 
+openhay's `read` returns the first page only, 1,000 records by default. For more, see
+[Reading large graphs](#reading-large-graphs-pages).
+
 ## What a record looks like
 
 Records come from the same entity graph everything else reads:
@@ -92,9 +95,30 @@ A page that stops short of the end says so in its grid meta:
 | `limit` | the page size used |
 | `after` | the id of the last record the page covered |
 
-To read on, send the same `filter` (and `limit`) again with `after` set to that Ref. `after` is a
-Baler extension: servers that don't page ignore it, and Haxall never sets the meta. Keep going until a
-page comes back without `after`:
+The same page also says so in its HTTP headers, for clients that hand their caller only the rows:
+
+| header | |
+|---|---|
+| `X-Baler-Incomplete` | the meta's `incomplete` text. Set on any grid whose meta has `incomplete` |
+| `X-Baler-After` | the meta's `after`, e.g. `@urn:point:fbf~2Fahu-3~2Fsat` |
+| `X-Baler-Limit` | the meta's `limit` |
+| `Link` | `<?filter=point&after=%40urn...>; rel="next"`: a GET of the next page, relative to the request's own path ([RFC 8288](https://www.rfc-editor.org/rfc/rfc8288)) |
+
+They're listed in `Access-Control-Expose-Headers`, so a browser client on another origin can read them.
+
+### How a standard Haystack client pages
+
+The Haystack spec's `read` op takes a `limit`, and a grid that stops short may carry grid meta
+`incomplete`. It has no way to ask for the next page. `after` is Baler's extension to fill that gap:
+
+1. Send the `read` as usual: `filter`, and `limit` if you want a page size other than the server's.
+2. If the response's grid meta has `after`, send the same `filter` (and `limit`) again with `after`
+   set to that Ref, as a request-grid column (POST) or a query parameter (GET).
+3. Repeat until a page comes back without `after`. That page is the last. A page can be empty, with
+   no `after`, when the previous one ended exactly on the last match.
+
+Servers that don't page ignore `after`, and Haxall never sets the meta, so a client that follows
+`after` works against any server: against one that doesn't page, the first response is the whole read.
 
 ```python
 import openhay as oh
@@ -111,21 +135,54 @@ while True:
 ```
 
 ```bash
+curl -i -H "Authorization: Bearer $TOKEN" "$BASE/api/read?filter=point"
+# HTTP/1.1 200 OK
+# X-Baler-Incomplete: limit of 1000 reached; pass after to read on
+# X-Baler-After: @urn:point:fbf~2Fahu-3~2Fsat
+# Link: <?filter=point&after=%40urn%3Apoint%3Afbf~2Fahu-3~2Fsat>; rel="next"
 curl -H "Authorization: Bearer $TOKEN" "$BASE/api/read?filter=point&after=@urn:point:fbf~2Fahu-3~2Fsat"
 ```
 
 Pages come in id order and are keyset pages: page *n+1* starts after the last id of page *n*, not at
 an offset. So a walk stays correct while records are added or removed. A record that exists for the
 whole walk is returned exactly once. One added or removed during the walk may or may not appear.
-Every page costs about the same however far in it is. A page can come back empty, with no `after`,
-when the previous one ended exactly on the last match.
+Every page costs about the same however far in it is.
 
-Baler's own clients follow `after` to the end: the Equipment page's tree (`ui/app.js`) and
-`baler.haystack_client.HaystackClient.read` (used by the Haystack puller and `baler_fn`) when it's
-given no `limit`. openhay's `Client.read` and other third-party clients get the first page. To fetch
-everything in one grid instead, pass a `limit` as large as the graph, or set `BALER_READ_LIMIT=0` for
-the whole install (one unbounded grid, as before). That's what reads at scale can't afford: at 100k
-points one grid was 33 MB and took 16 s to build and encode ([Scale test](/scale-test#reads-at-scale-paging-244)).
+### What a client that doesn't page sees
+
+It gets the **first page only**: the first 1,000 records in id order (or `limit`, if it sent one),
+with no error. The grid's meta says `incomplete`, and the headers above say the same, but a client
+that returns only the rows drops both. Its caller can't tell a 1,000-record answer from a complete
+one. On a site with 1,000 matches or fewer nothing changes: one grid, no extra meta.
+
+| client | follows `after`? |
+|---|---|
+| Equipment page (`ui/app.js` `haystackRead`) | yes |
+| `baler.haystack_client.HaystackClient.read` (Haystack puller, Ops → Sources, `baler_fn`, the notebook image) | yes, unless given a `limit`; the result carries `.after`/`.incomplete` |
+| `baler_fn.connect().read` / `read_df` | yes, unless given a `limit`; `read_page` for one page |
+| `baler.openhay_paging.read` / `openhay_paging.Client` | yes: Baler's wrapper around openhay |
+| openhay `Client.read` | **no**: first page, meta dropped. Use `openhay_paging`, or `call("read")` as above |
+| phable `read_all` | **no**: first page; the returned grid's `meta` has `after` |
+| Windrow's Haystack source pointed at a Baler | **no** (openhay's `read`); see below |
+| SkySpark/Axon `read`/`readAll` via a connector, other clients | no, unless they follow `after` themselves |
+
+With openhay, Baler's wrapper is a drop-in until openhay follows `after` itself:
+
+```python
+from baler import openhay_paging
+
+c = openhay_paging.Client("http://localhost:8080/api/demo", user="admin@acme.example", password="change-me")
+recs = c.read("point")             # every page; recs.after is None
+page = c.read_page("point", 500)   # one page; pass page.after to read_page for the next
+```
+
+If a client can't be changed, there are two ways to give it a complete answer:
+
+- **Send a `limit`** as large as the graph. The read comes back in one grid.
+- **Set `BALER_READ_LIMIT=0`** for the whole install: every read without a `limit` is one unbounded
+  grid, as before #244. That's what reads at scale can't afford: at 100k points one grid was 33 MB
+  and took 16 s to build and encode ([Scale test](/scale-test#reads-at-scale-paging-244)).
+  Raising it (say, to 20000) is the middle ground for a site that knows its size.
 
 Reads by `id`, `nav`, `watchSub`/`watchPoll` and `hisRead` aren't paged.
 

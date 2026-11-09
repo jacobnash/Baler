@@ -40,7 +40,8 @@ except ImportError:
     if REQUIRED:
         raise
     pytest.skip("openhay not installed (pip install -e '.[haystack]')", allow_module_level=True)
-from baler import openhay_paging  # noqa: E402 - needs openhay, imported just above
+from baler import openhay_paging
+
 HAXALL_API = os.environ.get("HAXALL_API", "")
 HAXALL_USER = os.environ.get("HAXALL_SU_USERNAME", "su")
 HAXALL_PASS = os.environ.get("HAXALL_SU_PASSWORD", "")

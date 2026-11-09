@@ -178,8 +178,7 @@ def _meta_text(value: Any) -> str | None:
         return None
     if value is True or value == "m:" or (isinstance(value, dict) and value.get("_kind") == "marker"):
         return "incomplete"
-    text = str(value)
-    return text[2:] if text.startswith("s:") else text
+    return str(value).removeprefix("s:")
 
 
 class HaystackClient:

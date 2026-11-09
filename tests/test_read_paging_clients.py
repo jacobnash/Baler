@@ -155,7 +155,7 @@ def test_2500_records_come_back_whole_through_the_client(server):
 def test_2500_records_come_back_whole_through_baler_fn(server):
     bc = BalerClient(server, "t")
     bc.haystack._session.headers["X-Gateway-Secret"] = SECRET
-    assert len(bc.read("point and sensor")) == N
+    assert len(bc.read("point")) == N
 
 
 @needs_openhay
@@ -200,10 +200,10 @@ def test_a_short_page_says_so_in_headers_and_links_the_next_page(server):
 
 @needs_openhay
 def test_link_from_a_post_read_carries_its_filter_and_limit(big_backend):
-    req = oh.Grid.from_rows([{"filter": "point and sensor", "limit": oh.Number(10)}])
+    req = oh.Grid.from_rows([{"filter": "point or sensor", "limit": oh.Number(10)}])
     h = ha.paging_headers("read", req, ha.dispatch(big_backend, "read", req))
     assert urllib.parse.parse_qs(h["Link"].split(">")[0].lstrip("<?")) == {
-        "filter": ["point and sensor"], "limit": ["10"], "after": [h["X-Baler-After"]]}
+        "filter": ["point or sensor"], "limit": ["10"], "after": [h["X-Baler-After"]]}
     whole = ha.dispatch(big_backend, "read", oh.Grid.from_rows([{"filter": "point", "limit": oh.Number(N)}]))
     assert ha.paging_headers("read", req, whole) == {}
 
@@ -240,3 +240,19 @@ def test_openhay_paging_client_is_a_drop_in(big_backend, monkeypatch):
     monkeypatch.setattr(openhay_paging.Client, "call", lambda self, op, req=None: _InProcess(big_backend).call(op, req))
     c = openhay_paging.Client("http://unused")
     assert len(c.read("point")) == N and c.read_page("point", 3).after is not None
+
+
+@needs_openhay
+def test_openhay_paging_client_hands_over_to_native_paging(monkeypatch):
+    """Once Baler's openhay pin pages natively (Client.read_page exists),
+    the wrapper delegates to it instead of running its own loop."""
+    page = oh.Grid(meta={"after": oh.Ref("p9"), "incomplete": "limit of 1 reached", "limit": oh.Number(1)},
+                   cols=[oh.Col("id")], rows=[{"id": oh.Ref("p9")}])
+    monkeypatch.setattr(openhay_paging, "NATIVE_PAGING", True)
+    monkeypatch.setattr(oh.Client, "read_page", lambda self, f, limit=None, after=None: page, raising=False)
+    monkeypatch.setattr(oh.Client, "read", lambda self, f, limit=None: [{"id": oh.Ref("a")}, {"id": oh.Ref("b")}])
+    monkeypatch.setattr(openhay_paging.Client, "call", lambda self, op, req=None: pytest.fail("own loop ran"))
+    c = openhay_paging.Client("http://unused")
+    assert [r["id"].id for r in c.read("point")] == ["a", "b"]
+    got = c.read_page("point", 1)
+    assert got.after == "p9" and got.limit == 1 and got.incomplete == "limit of 1 reached"
