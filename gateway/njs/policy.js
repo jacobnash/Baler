@@ -305,6 +305,15 @@ const ROUTES = [
   ["GET",    /^\/cx\/projects\/[^/]+\/agent\/proposals$/,        "commissioning", "viewer"],
   ["POST",   /^\/cx\/agent-proposals\/[^/]+\/accept$/,          "commissioning", "operator"],
   ["POST",   /^\/cx\/agent-proposals\/[^/]+\/reject$/,          "commissioning", "operator"],
+  // Performance baselines and degradation (#215)
+  ["POST",   /^\/cx\/projects\/[^/]+\/baselines$/,            "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/baselines$/,            "commissioning", "viewer"],
+  ["GET",    /^\/cx\/baselines\/[^/]+\/degradation$/,          "commissioning", "viewer"],
+  // Replace-vs-keep savings cases (#216)
+  ["POST",   /^\/cx\/projects\/[^/]+\/savings-cases$/,        "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/savings-cases$/,        "commissioning", "viewer"],
+  ["GET",    /^\/cx\/savings-cases\/[^/]+$/,                  "commissioning", "viewer"],
+  ["PATCH",  /^\/cx\/savings-cases\/[^/]+$/,                  "commissioning", "operator"],
   // Spaces (#209)
   ["GET",    /^\/cx\/space-types$/,                         "commissioning", "viewer"],
   ["GET",    /^\/cx\/projects\/[^/]+\/spaces$/,               "commissioning", "viewer"],
@@ -316,6 +325,11 @@ const ROUTES = [
   ["PUT",    /^\/cx\/spaces\/[^/]+\/serving$/,                "commissioning", "operator"],
   // Readiness (#210)
   ["GET",    /^\/cx\/spaces\/[^/]+\/readiness$/,              "commissioning", "viewer"],
+  // Continuous compliance (#207)
+  ["POST",   /^\/cx\/projects\/[^/]+\/compliance\/runs$/,     "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/compliance\/runs$/,     "commissioning", "viewer"],
+  ["GET",    /^\/cx\/compliance-runs\/[^/]+$/,                "commissioning", "viewer"],
+  ["GET",    /^\/cx\/spaces\/[^/]+\/compliance$/,             "commissioning", "viewer"],
   // Requirement packs (#205): org library; publishing freezes a version (admin)
   ["GET",    /^\/cx\/pack-schema$/,                         "commissioning", "viewer"],
   ["GET",    /^\/cx\/packs$/,                               "commissioning", "viewer"],
@@ -332,6 +346,8 @@ const ROUTES = [
   ["GET",    /^\/cx\/pack-extractions\/[^/]+$/,               "commissioning", "viewer"],
   ["POST",   /^\/cx\/pack-proposals\/[^/]+\/accept$/,          "commissioning", "operator"],
   ["POST",   /^\/cx\/pack-proposals\/[^/]+\/reject$/,          "commissioning", "operator"],
+  // Hunting per loop (#214)
+  ["GET",    /^\/cx\/projects\/[^/]+\/hunting$/,              "commissioning", "viewer"],
 
   // auth_api - POST /auth/login has its own exact-match nginx location
   // with no js_access at all (can't require a token to get a token), so

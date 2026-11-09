@@ -149,8 +149,9 @@ def build(repo, project: dict, target: dict, all_spaces: list[dict], now: dateti
     limitations = []
     if not per:
         limitations.append("no rooms under this space: nothing could be judged")
-    if not REQUIREMENT_SOURCES:
-        limitations.append("no requirement packs are applied yet, so requirements are inconclusive for every room")
+    if per and not any(r["criteria"]["requirements"]["items"] for r in per):
+        limitations.append("no requirement has been evaluated for any room yet (adopt and confirm a requirement pack; "
+                           "continuous compliance judges it), so requirements are inconclusive")
     return {"project": {"id": project["id"], "name": project["name"]},
             "space": {"id": target["id"], "name": target["name"], "kind": target.get("kind")},
             "generated_at": now.isoformat(), "status": status, "verdict": verdict(status), "counts": counts,

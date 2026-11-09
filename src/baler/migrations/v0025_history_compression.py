@@ -1,5 +1,5 @@
 """
-0022 history compression events (#337): what baler.history_keeper did to
+0025 history compression events (#337): what baler.history_keeper did to
 each point_history chunk, and why it failed when it did.
 
 TimescaleDB's compression policy reports a failed run as "columnstore
@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 22
+VERSION = 25
 NAME = "history compression events"
 
 EVENTS = """

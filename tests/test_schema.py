@@ -39,7 +39,10 @@ RELEASED = {
     "v0019_spaces.py": "8ea63b1fe98775a210f0e10a1a74f2330ef3e360f91703dae9a5eb64ce56d246",
     "v0020_requirement_packs.py": "bf07e04a20094a50b491447d9dc6a29af42df28f5929813ad7b0749ad891e7f1",
     "v0021_pack_proposals.py": "e671a941b4d26b864101b74bbd9c36dcd3017825b201f74b4129b7dc34901425",
-    "v0022_history_compression.py": "c396f03e305e2b6ec68a694734a82d8b1c43e61bb886ff2648761fce62c816d0",
+    "v0022_compliance_log.py": "76bb046143b96e005e4eb5d5ec272e036c0697c6442db30eb57ddc09a72bc942",
+    "v0023_performance_baselines.py": "aaab2593e1d34b4c193d9a06442af11af7b5443f08c9499360b097d22291246d",
+    "v0024_savings_cases.py": "ab1b3ad721ca8a9f2b87d58e957419347ae996de295fab2381afb326d16634de",
+    "v0025_history_compression.py": "1d2f17ada00283d014917b3ce1a7e52c34abf955f98c432f9aaae7575f57e53c",
 }
 
 

@@ -323,6 +323,10 @@ services:
       <<: *daemon-env
       # rules/webhooks/derivations stores: a volume, not the checkout (#30)
       BALER_DATA_DIR: /data
+      # Blank-safe (blank = 200000 / 5000): what one pass holds in memory
+      # (#336, see .env.example).
+      BALER_DERIVATION_READ_BUDGET: ${BALER_DERIVATION_READ_BUDGET:-}
+      BALER_DERIVATION_WRITE_BATCH: ${BALER_DERIVATION_WRITE_BATCH:-}
     volumes:
       - .:/app
       - baler-data:/data

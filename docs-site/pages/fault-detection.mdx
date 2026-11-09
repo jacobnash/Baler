@@ -97,6 +97,15 @@ staleness from, so a point that was misconfigured from day one and never
 ingested anything will never trigger this rule. It only catches a point
 that *stops* reporting after having reported at least once.
 
+**`hunting`** — faulted when the point reversed direction more than
+`max_reversals_per_hour` times over the trailing `window_seconds`,
+counting only moves larger than `deadband` (noise isn't motion). It
+reads raw samples and judges only points sampled every 60 s or faster: a
+point sampled slower is neither faulted nor resolved, because a 4-minute
+oscillation is invisible in 15-minute data. The fault's detail carries the
+metrics (reversals/h, period, amplitude, travel/h). See [Hunting](/hunting)
+for the per-loop report against the start-up baseline.
+
 ## The roster is live, not configured
 
 A His-mode rule's set of points to evaluate isn't a separate list you
