@@ -16,12 +16,20 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import psycopg
 
-from baler import alerts, errors, heartbeat, reading_feed, timeseries
+from baler import (
+    alerts,
+    errors,
+    heartbeat,
+    history_keeper,
+    mfa,
+    reading_feed,
+    timeseries,
+)
 
 COMPONENTS: list[dict[str, Any]] = [
     {
@@ -108,6 +116,13 @@ COMPONENTS: list[dict[str, Any]] = [
         "layer": "jobs",
         "service": "derivation_engine",
         "probe": "inferred_derivations",
+    },
+    {
+        "id": "history_compression",
+        "label": "History compression",
+        "layer": "jobs",
+        "service": "history_keeper",
+        "probe": "inferred_compression",
     },
     {
         "id": "backups",
@@ -243,6 +258,13 @@ def _building_signals(scope=None) -> dict[str, Any]:
             out["heartbeats"] = {s: t.astimezone(timezone.utc).isoformat()
                                  for s, t in heartbeat.latest(conn).items()}
             conn.rollback()  # latest() may have hit a missing table
+            # How often each process started lately (service_runtime, #277):
+            # a daemon in a restart loop - OOM-killed and restarted by
+            # compose every couple of minutes (#336) - beats between kills,
+            # so its heartbeat alone looks healthy. Counts only, so every
+            # caller sees them.
+            out["recent_starts"] = _recent_start_counts(conn)
+            conn.rollback()
             # The rule daemons' place in the reading feed (#243): lag, misses.
             out["reading_feed"] = reading_feed.consumer_status(conn)
             conn.rollback()
@@ -255,6 +277,13 @@ def _building_signals(scope=None) -> dict[str, Any]:
             out["restore_drill"] = details.get("restore_drill")
             # fault_detector's quality sweep (#268): its watermark lag.
             out["quality"] = (details.get("fault_detector") or {}).get("quality")
+            # point_history compression (#337): the keeper's last pass (true
+            # on-disk bytes vs chunk stats, partial and failing chunks), read
+            # live from the catalog only when no keeper has reported (a
+            # catalog read per chunk is too much for every request).
+            out["history_keeper"] = details.get(history_keeper.SERVICE)
+            conn.rollback()
+            out["compression"] = out["history_keeper"] or history_keeper.compression_status(conn)
             conn.rollback()
             # Process starts and unhandled exceptions (baler.errors), and what
             # the alerter (baler.alerts) currently has open (#277). Install-
@@ -265,6 +294,11 @@ def _building_signals(scope=None) -> dict[str, Any]:
                 conn.rollback()
                 out["alerts"] = alerts.open_alerts(conn)
                 conn.rollback()
+                # Two-step sign-in secrets stored without BALER_MFA_KEY (#278).
+                try:
+                    out["mfa_unsealed"] = mfa.unsealed_count(conn)
+                except psycopg.Error:
+                    conn.rollback()
             try:
                 org_row = conn.execute("SELECT COUNT(*) FROM orgs").fetchone()
                 out["org_count"] = int(org_row[0]) if org_row else 0
@@ -285,10 +319,71 @@ def _infer_ingest(building: dict[str, Any], *, platform_ok: bool) -> tuple[str, 
     age = (datetime.now(timezone.utc) - last_dt).total_seconds()
     if age > QUIET_INGEST_SECONDS:
         return "quiet", f"last ingest {int(age)}s ago"
+    stale = _listener_heartbeat_state(building)
+    if stale:
+        return stale
+    behind = _queue_state(building)
+    if behind:
+        return behind
     dropped = _drop_state(building)
     if dropped:
         return dropped
-    return "ok", f"last ingest {int(age)}s ago"
+    lst = building.get("listener") or {}
+    queue = f", queue {lst['queue']}" if lst.get("queue") is not None else ""
+    return "ok", f"last ingest {int(age)}s ago{queue}"
+
+
+# The listener's own backlog (#235), from its heartbeat: how long the oldest
+# reading received but not yet committed has waited, and how full the
+# busiest worker's queue is. Past the degraded age, readings are later than
+# the ladder's p95 lag budget (30 s); past the down age, ingest is falling
+# behind for good. A full queue means paho has stopped reading the socket
+# and the backlog is growing at the broker, where its limit drops it.
+QUEUE_AGE_DEGRADED_SECONDS = float(os.environ.get("OPS_QUEUE_AGE_DEGRADED_SECONDS", "30"))
+QUEUE_AGE_DOWN_SECONDS = float(os.environ.get("OPS_QUEUE_AGE_DOWN_SECONDS", "300"))
+QUEUE_FILL_DEGRADED = 0.8
+
+
+def _queue_state(building: dict[str, Any]) -> tuple[str, str] | None:
+    lst = building.get("listener") or {}
+    age = float(lst.get("oldest_age_s") or 0)
+    queue, cap = int(lst.get("queue") or 0), int(lst.get("queue_max") or 0)
+    if age > QUEUE_AGE_DOWN_SECONDS:
+        return "down", (f"the listener's oldest uncommitted reading is {age:.0f} s old (queue {queue}): ingest is "
+                        "not keeping up - see the scale-test page's limiter notes")
+    if age > QUEUE_AGE_DEGRADED_SECONDS:
+        return "degraded", f"the listener's oldest uncommitted reading is {age:.0f} s old (queue {queue})"
+    if cap and queue >= QUEUE_FILL_DEGRADED * cap:
+        return "degraded", (f"a listener worker's queue is {queue}/{cap}: it can't keep up - "
+                            f"raise BALER_LISTENER_WORKERS ({lst.get('workers')} now)")
+    return None
+
+
+def _listener_heartbeat_state(building: dict[str, Any]) -> tuple[str, str] | None:
+    """("down", why) when the listener supervisor's heartbeat is stale.
+    A missing one isn't judged: data freshness above already covers it."""
+    beat = (building.get("heartbeats") or {}).get("mqtt_listener")
+    if beat is None:
+        return None
+    age = (datetime.now(timezone.utc) - datetime.fromisoformat(beat)).total_seconds()
+    if age > HEARTBEAT_STALE_SECONDS:
+        return "down", f"the listener's last heartbeat was {int(age)}s ago"
+    return None
+
+
+def ingest_summary(building: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+    """The overload numbers on /ops/status (#235), the same ones
+    /ops/metrics exports: end-to-end lag (now minus the newest stored
+    reading), the listener's backlog and throughput, and broker drops."""
+    now = now or datetime.now(timezone.utc)
+    lst = building.get("listener") or {}
+    last = building.get("last_ingest_at")
+    lag = round(max(0.0, (now - datetime.fromisoformat(last)).total_seconds()), 1) if last else None
+    return {"lag_s": lag, "queue": lst.get("queue"), "queue_max": lst.get("queue_max"),
+            "queue_oldest_age_s": lst.get("oldest_age_s"), "last_flush_s": lst.get("last_flush_s"),
+            "readings_per_s": lst.get("readings_per_s"), "redelivered": lst.get("redelivered"),
+            "workers": lst.get("workers"), "broker_dropped_since_start": lst.get("broker_dropped_since_start"),
+            "broker_last_drop_at": lst.get("broker_last_drop_at")}
 
 
 # The ingest card stays degraded this long after the broker last dropped
@@ -337,8 +432,9 @@ def _feed_state(building: dict[str, Any], consumer: str) -> tuple[str, str] | No
         return None
     last = feed.get("last_missed_at")
     if last and (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() < FEED_MISS_WINDOW_SECONDS:
-        return "degraded", (f"missed {feed['missed_readings']} reading(s) in all, the last at {last}: "
-                            "fell more than the reading feed's retention behind")
+        rule = reading_feed.consumer_rule(consumer)
+        return "degraded", (f"{consumer} missed {feed['missed_readings']} reading(s) in all, the last at {last} "
+                            f"(fell more than the reading feed's retention behind): {rule['miss_means']}")
     if feed.get("lag_s", 0) > FEED_LAG_DEGRADED_SECONDS:
         return "degraded", f"behind on the reading feed by {feed['lag_s']:.0f} s ({feed.get('lag_readings', 0)} readings)"
     return None
@@ -368,11 +464,39 @@ def _infer_faults(building: dict[str, Any], *, platform_ok: bool) -> tuple[str, 
     stale = _heartbeat_state(building, "fault_detector")
     if stale:
         return stale
-    behind = _feed_state(building, "fault_detector") or _quality_state(building)
+    behind = (_feed_state(building, "fault_detector") or _quality_state(building)
+              or _feed_state(building, "quality"))
     if behind:
         return behind
     n = building.get("open_faults", 0)
     return "ok", f"running; {n} open fault(s)"
+
+
+def _restart_window() -> tuple[int, float]:
+    """(starts, seconds): the alerter's own restart-loop threshold
+    (BALER_ALERT_RESTART_COUNT / _WINDOW_SECONDS), so the card and the
+    `restarts:` alert agree."""
+    cfg = alerts.Config.from_env()
+    return cfg.restart_count, cfg.restart_window_s
+
+
+def _recent_start_counts(conn) -> dict[str, int]:
+    """{process: starts within the restart window}, {} without the table."""
+    _, window = _restart_window()
+    since = datetime.now(timezone.utc) - timedelta(seconds=window)
+    return {s: sum(1 for t in times if t >= since) for s, times in errors.recent_starts(conn).items()}
+
+
+def _restart_state(building: dict[str, Any], process: str) -> tuple[str, str] | None:
+    """("degraded", why) when the process started restart-count times or
+    more within the window: it is crash- or OOM-looping (#336) even though
+    each incarnation beats its heartbeat until it dies."""
+    count, window = _restart_window()
+    n = (building.get("recent_starts") or {}).get(process, 0)
+    if count <= 0 or n < count:
+        return None
+    return "degraded", (f"restart loop: started {n} times in the last {window / 60:.0f} min "
+                        "(OOM-killed? see `docker compose ps` and dmesg)")
 
 
 def _infer_derivations(building: dict[str, Any], *, platform_ok: bool) -> tuple[str, str | None]:
@@ -381,7 +505,7 @@ def _infer_derivations(building: dict[str, Any], *, platform_ok: bool) -> tuple[
     stale = _heartbeat_state(building, "derivation_engine")
     if stale:
         return stale
-    behind = _feed_state(building, "derivation_engine")
+    behind = _restart_state(building, "baler-derivation-engine") or _feed_state(building, "derivation_engine")
     if behind:
         return behind
     disabled = building.get("disabled_derivation_targets", 0)
@@ -405,6 +529,61 @@ def _age_s(iso: str | None) -> float | None:
 
 def _ago(seconds: float) -> str:
     return f"{seconds / 86400:.1f} d ago" if seconds >= 86400 else f"{seconds / 3600:.1f} h ago"
+
+
+# Compressed chunks taking more than this many times their stats size on
+# disk (late rows not yet recompressed, or space not yet reclaimed) make the
+# History compression card degraded (#337).
+COMPRESSION_DISK_RATIO_DEGRADED = float(os.environ.get("OPS_COMPRESSION_DISK_RATIO_DEGRADED", "2.0"))
+
+
+def compression_state(building: dict[str, Any], *, platform_ok: bool = True) -> tuple[str, str]:
+    """The History compression card (#337): chunks whose compression keeps
+    failing, with their real error; compressed chunks much bigger on disk
+    than the stats say; and whether the keeper that retries and
+    recompresses them is running. "off" on an install that has never run
+    history_keeper (no point_history compression to judge)."""
+    if not platform_ok:
+        return "down", "historian unreachable"
+    comp = building.get("compression") or {}
+    keeper = building.get("history_keeper")
+    if not comp and not keeper:
+        return "off", "no point_history compression here (no TimescaleDB, or history_keeper never ran)"
+    if keeper is None:
+        not_running = ("history_keeper isn't running: chunks the compression policy fails on aren't retried, "
+                       "and late rows wait for the policy")
+        stale: tuple[str, str] | None = ("degraded", not_running)
+    else:
+        stale = _heartbeat_state(building, history_keeper.SERVICE)
+    if stale and stale[0] == "down":
+        return stale
+    problems = []
+    for f in comp.get("failing") or []:
+        problems.append(f"{f['chunk']}: {f['action']} failed {f['attempts']}x, last {f['at']} "
+                        f"(SQLSTATE {f.get('sqlstate')}): {f.get('message')}"
+                        + (f" - {f['detail']}" if f.get("detail") else "") + f"; next try {f['next_try_at']}")
+    ratio = comp.get("on_disk_vs_stats")
+    if ratio and ratio > COMPRESSION_DISK_RATIO_DEGRADED:
+        problems.append(f"compressed chunks take {comp['compressed_on_disk_bytes'] / 1e9:.2f} GB on disk vs "
+                        f"{comp['compressed_stats_bytes'] / 1e9:.2f} GB in chunk stats ({ratio}x): "
+                        f"{(comp.get('chunks') or {}).get('partial', 0)} chunk(s) with late rows awaiting recompression")
+    last_policy = ((keeper or {}).get("policy") or {}).get("last_error")
+    if problems:
+        return "degraded", "; ".join(problems)
+    if stale:
+        return stale
+    c = comp.get("chunks") or {}
+    detail = (f"{c.get('compressed', 0)} of {c.get('total', 0)} chunk(s) compressed, "
+              f"{(comp.get('compressed_on_disk_bytes') or 0) / 1e9:.2f} GB on disk "
+              f"({ratio or '-'}x the chunk stats' {(comp.get('compressed_stats_bytes') or 0) / 1e9:.2f} GB)")
+    if c.get("partial"):
+        detail += f"; {c['partial']} with late rows, recompressed once they settle"
+    if (comp.get("policy") or {}).get("paused"):
+        detail += "; the compression policy is paused (alter_job scheduled => false): nothing is compressed"
+    if last_policy:
+        detail += (f"; the policy last failed {last_policy['at']} ({last_policy.get('message')}), its chunks since "
+                   "retried")
+    return "ok", detail
 
 
 def backup_state(report: dict[str, Any] | None) -> tuple[str, str]:
@@ -477,6 +656,9 @@ def _probe_one(
     elif probe == "inferred_derivations":
         platform_ok = platform_states.get("historian") == "ok"
         state, detail = _infer_derivations(building, platform_ok=platform_ok)
+    elif probe == "inferred_compression":
+        platform_ok = platform_states.get("historian") == "ok"
+        state, detail = compression_state(building, platform_ok=platform_ok)
     elif probe == "inferred_backup":
         state, detail = backup_state(building.get("backup"))
     elif probe == "inferred_drill":
@@ -506,13 +688,21 @@ def building_cards(building: dict[str, Any]) -> list[dict[str, Any]]:
     seen = int(building.get("points_seen_last_hour") or 0)
     faults = int(building.get("open_faults") or 0)
     disabled = int(building.get("disabled_derivation_targets") or 0)
-    return [
+    cards = [
         card("last_ingest", "Last ingest", "ok" if last else "quiet", last or "none yet"),
         card("points_last_hour", "Points (last hour)", "ok" if seen > 0 else "quiet", str(seen)),
         card("open_faults", "Open faults", "degraded" if faults else "ok", str(faults), "alarms.html"),
         card("disabled_targets", "Disabled analysis targets", "degraded" if disabled else "ok", str(disabled),
              "derivations.html"),
     ]
+    # Advisory, shown only when it applies: authenticators stored unsealed
+    # because BALER_MFA_KEY isn't set (#278). Sign-in still works.
+    unsealed = int(building.get("mfa_unsealed") or 0)
+    if unsealed:
+        cards.append(card("mfa_unsealed", "Unsealed two-step secrets", "degraded",
+                          f"{unsealed} authenticator secret(s) stored without BALER_MFA_KEY: set it, then have "
+                          "those users set up two-step sign-in again", "#users-section"))
+    return cards
 
 
 def _rank_summary(states: list[str]) -> str:
@@ -658,6 +848,8 @@ def collect_status(scope=None) -> dict[str, Any]:
             "disabled_derivation_targets": building.get("disabled_derivation_targets", 0),
             "needs_first_org": building.get("org_count", 0) == 0,
             "reading_feed": building.get("reading_feed", {}),
+            "compression": building.get("compression", {}),
+            "ingest": ingest_summary(building),
             "cards": cards,
         },
         "platform": [c for c in ordered if c["layer"] == "platform"],

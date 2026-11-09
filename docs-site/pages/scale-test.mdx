@@ -152,7 +152,10 @@ acknowledges publishes its ACL denies.
 `SCALE_MEM_<SERVICE>`; the defaults are in `compose.scale.yml`, e.g. postgres 2 CPUs / 6 GB and
 mqtt_listener 1 CPU / 1 GB). `ladder.py` clamps CPU caps to the host's CPU count, because Docker
 refuses a cap above it. `SCALE_CPUSET=2-5` pins the whole stack to some host CPUs. Each
-container's log is capped at 3 × 50 MB, because postgres runs with `log_statement=all`.
+container's log is capped at 3 × 50 MB. Postgres logs as `docker-compose.yml`'s does
+(`BALER_PG_LOG_STATEMENT`, default `none`): it used to log every statement, and at 20,000
+readings/s that rotated the compression policy's `WARNING` naming why a chunk failed out of the
+log within seconds (#337).
 Everything else (images, commands, Postgres settings, durability) is exactly what
 `docker-compose.yml` runs.
 
@@ -395,6 +398,7 @@ gap is how Docker counts, and part is real disk traffic:
 | `cx_run_s` | creating a 1 h Cx run over site 0 (500 points) and waiting for it | Commissioning verification time. |
 | `limiter`, `evidence` | the evidence sampler during the soak and probes, Jaeger after them | What limited the step, and why: see [Reading the limiter](#reading-the-limiter-269). |
 | `probes[].trace` | Jaeger's `/api/v3/traces` for the probe's API, over the probe's own time window | Per-span self time of the median request, its share of the request, and the time outside any span (gateway, network). |
+| `ops_metrics` | `GET /ops/metrics` through the gateway, every sample | **What Baler itself reports** (#235), against the ladder's own measurements: p95/max of `baler_ingest_newest_reading_age_seconds` (now minus the newest stored reading), the listener's deepest queue and oldest uncommitted reading, and the broker's drop counter. `agrees.lag`: Baler's p95 lag is within max(5 s, 25%) of the canaries' p95; `agrees.drops`: its drop count moved as much as `$SYS` did. A disagreement prints a warning; it doesn't fail the step. |
 | `durability.comparable` | `SHOW fsync / synchronous_commit / full_page_writes` on the server **and** on an ingest-path connection (from inside the listener container) | `true` only if all three are on end to end. A non-durable run is never labelled comparable. |
 
 The ladder adds two rules to the test org, so per-point rule load is realistic: a Cur-mode
@@ -407,6 +411,39 @@ supervisor restarts while the other workers carry on - then `postgres`), brings 
 drains, and reports `missing_acked`. That is
 the number of readings the broker acknowledged that never reached `point_history`. Batching
 and group commit are fine; losing acknowledged readings is not.
+
+## Overload is visible: `/ops/status` and `/ops/metrics` (#235)
+
+Outside the ladder, the same signals are Baler's own:
+
+- **`mqtt_listener`'s heartbeats** (each worker `mqtt_listener/<n>` every 5 s, folded into the
+  supervisor's `mqtt_listener`): readings/s, messages/s, batches/s, queue depth and peak against the
+  cap, the **age of the oldest reading received but not yet committed**, the last batch's write
+  time, seconds spent writing, seconds blocked on a full queue, **redelivered (DUP) messages**, and
+  the broker's drop counter (`$SYS/broker/publish/messages/dropped`, read with the `$SYS` read-only
+  ACL entry in `mosquitto/acl`).
+- **`/ops/status`** has `building.ingest` (lag, queue, oldest uncommitted reading, throughput,
+  drops). The Ingest listener card turns **degraded** when the oldest uncommitted reading is older
+  than `OPS_QUEUE_AGE_DEGRADED_SECONDS` (30, the ladder's p95 budget), a worker's queue is 80% full,
+  or the broker dropped messages in the last hour; **down** past `OPS_QUEUE_AGE_DOWN_SECONDS` (300)
+  or when the listener's heartbeat is stale. The rule daemons' cards already go degraded on
+  reading-feed lag or misses (#243).
+- **`GET /ops/metrics`** (viewer or an API key; not a site-restricted login, the numbers are
+  process-wide) is Prometheus text with all of the above plus per-prefix ingest lag (from
+  `point_registry`, coarse by 30 s, cached 30 s, the stalest 500 prefixes), heartbeat ages, each
+  rule daemon's feed lag and misses, and their cycle times (`baler_rules_cycle_seconds`) and
+  evaluations. A scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: baler
+    metrics_path: /ops/metrics
+    authorization: { credentials_file: /etc/prometheus/baler-api-key }  # an API key (POST /auth/api-keys, admin)
+    static_configs: [{ targets: ["baler.example:8080"] }]
+```
+
+The ladder records what `/ops/metrics` said in each step (`ops_metrics` above), and the post-deploy
+verify job judges it against budgets ([post-deploy verify](post-deploy-verify), dataflow).
 
 ## Long soak: disk and compression (#245)
 
@@ -436,6 +473,8 @@ generator at `--points` for `--duration` seconds (default 6 h) and records:
 | | whether a compression run is in progress (polled every 2 s) | `pg_stat_activity` |
 | | the 5m/1h aggregates' watermark age; canary lag, cumulative (`lag`) and **for this sample's window** (`lag_window`: p50/p95/max of the canaries stored in it, plus how many are still pending and the oldest one's age); restarts | catalog, canary, `docker inspect` |
 | | **broker drops** (`broker`: total, since the first sample, since the previous one) | mqtt_listener's supervisor heartbeat, `broker_dropped_total` ([#272](https://github.com/jacobnash/Baler/pull/272)) |
+| | per compressed chunk (`disk.compressed`): **true bytes on disk** next to the chunk stats' figure, and whether late rows await recompression (`partial`); `compressed_now`/`recompressed_now`: chunks that finished compressing, or had their late rows recompressed, since the previous sample, whoever did it (#337) | `chunks_detailed_size`, `chunk_compression_stats`, `chunk_status` |
+| | **checkpoints** (`checkpoints`: timed vs requested, buffers, write/sync ms, and the change since the last sample; nash-srv's 6 h soak had 2,471, every one requested) and `feed`: every reading-feed consumer's offset, lag and misses; `keeper`: what history_keeper is working on | `pg_stat_checkpointer` (`pg_stat_bgwriter` before Postgres 17), `reading_feed_consumers`, its heartbeat |
 | | `detector`: fault_detector's last His sweep time and stale candidates, last quality sweep time and rows; `pg`: the newest chunk's heap and index bytes, cumulative `blks_read`/`blks_hit`, autovacuums running on chunks, the longest active statement | fault_detector heartbeat, `chunks_detailed_size`, `pg_stat_database`, `pg_stat_progress_vacuum`, `pg_stat_activity` |
 | `--probe-every` (600 s) | every read probe in `budgets.json` plus its `soak_probes`: history over the last hour and across the hot/compressed boundary, `hisRead(pastWeek)` for 100 and 1,000 points. Rounds that overlapped a compression run are marked | gateway |
 | `--late-every` (1800 s) | late data into the newest compressed chunk, over MQTT: every point's reading there **replayed** (same ts, new value: a spool or retained replay) and a new reading **backfilled** 1.23 s after it (Windrow's trend backfill). Then each must be stored exactly once, with the new value. Paced: `--late-rate` messages/s (default a tenth of the soak's rate, at least 200/s) and never more than `--late-window` (500) awaiting a PUBACK; the oldest gets `--late-ack-timeout` (60 s). Each entry records the lag just before and while it ran | generator account |
@@ -465,8 +504,17 @@ At the end it compares stored with acknowledged readings over the soak (minus it
 checks `point_history_5m` against the raw fold over the newest compressed hour, and writes
 `results/<run>-soak.json`. `summary` holds the numbers; `status`/`reasons` the verdict.
 
+At the end it also reads what `history_keeper` did since the start (`keeper`: each compress,
+recompress and reclaim, the policy's failed runs, the real error of each failure) and the chunks
+still failing (`compression_end`), and records the server's `max_wal_size`, `checkpoint_timeout`,
+`shared_buffers` and log settings in `settings.pg`.
+
 **Pass** needs all of these (`soak.evaluate_soak`, tested in `tests/test_scale_soak.py`). The
-steady phase starts after `compress_after` + 2 chunks + one schedule:
+steady phase starts where the first chunk finished compressing, as observed (`summary.warm_s`,
+`warm_from`). It used to be `compress_after` + 2 chunks + one schedule after the soak's start, as
+if the hypertable started empty there: nash-srv's 6 h soak (#337), whose stack had been ingesting
+before it, got "1783 s steady after a 19800 s warm-up, 0 compression cycle(s)" though compression
+had run 11 times from t = 12,000 s. The formula is used only when nothing compressed at all.
 
 - **Hot window bounded:** hot bytes in the second half of the steady phase at most 1.25× the
   first half's; no chunk uncompressed longer past its end than `compress_after` + chunk + 2 ×
@@ -474,12 +522,23 @@ steady phase starts after `compress_after` + 2 chunks + one schedule:
 - **Disk grows at the compressed rate:** total bytes per stored row, between two samples a whole
   number of chunk intervals apart (the same point of the hot sawtooth), at most 2× the measured
   compressed bytes per row.
-- **Compression keeps up:** no failed run. `compression_margin` reports median compression rows/s
-  over ingest rows/s (one background worker).
+- **Compression keeps up:** no chunk still failing to compress at the end (a failed policy run
+  that `history_keeper` then retried doesn't fail the soak; its real error is in
+  `summary.keeper_errors`). Without history_keeper, any failed run fails it. `compression_margin`
+  reports median compression rows/s over ingest rows/s (one background worker).
+- **Disk comes back after late rows:** every compressed chunk with no late rows waiting takes at
+  most 2× its chunk-stats size on disk at the end (`summary.settled_on_disk_vs_stats_max`;
+  `compressed_on_disk_bytes` vs `compressed_stats_bytes` overall, `partial_chunks_end`).
 - **Ingest:** ≥ 99% stored, no lost canaries, no broker drops during the soak, p95 lag under 30 s
   overall and in each sample window taken during compression (the window's own p95, not the
   cumulative one, which a single early burst holds up for hours), no growing backlog, no
   restarts. `summary.lag_window_p95_max` and `lag_windows_over_budget` say when lag was worst.
+- **Reading feed:** no missed readings at a consumer that needs every one (`fault_detector`,
+  `derivation_engine`, `tag_ingest`). `quality`'s misses are reported in `summary.feed_misses`
+  and don't fail the run: its window pass reads `point_history`, so a miss leaves only late rows
+  unflagged ([the rule](/fault-detection#scaling-and-missed-readings)). The ladder's steps judge
+  feed misses the same way. `summary.checkpoints` has timed vs requested checkpoints and how far
+  apart they came.
 - **Reads:** every probe round in budget, and at least one round during a compression run
   (otherwise `inconclusive`).
 - **Aggregates:** the 5-minute aggregate equals the raw fold over a compressed hour; watermarks no
@@ -487,8 +546,9 @@ steady phase starts after `compress_after` + 2 chunks + one schedule:
 - **Late data:** at least one late round, every replay and backfill stored once. Rounds that
   failed in the harness are listed in `summary.late_round_errors` and don't fail the run; if no
   round completed at all, the verdict is `inconclusive` (late data untested), not `pass`.
-- At least 2 chunk intervals and 2 compression cycles in the steady phase, or the verdict is
-  `inconclusive: soak too short`.
+- At least 2 chunk intervals and 4 compression cycles (a chunk compressed, or its late rows
+  recompressed) in the steady phase, or the verdict is `inconclusive: soak too short` (#337:
+  compression has to keep pace over 4 cycles while taking late writes).
 
 On nash-srv, the real one (6 h at 100k points, after `init`):
 
@@ -989,6 +1049,47 @@ overruns. On this host the step limiter was ingest (generator and listener under
 fault_detector: its headroom ratios at 50k were His cycle 0.67, quality watermark 0.27, quality
 sweep 0.06.
 
+### Batched envelope (#234): one message per device per poll tick
+
+With Windrow's optional batched envelope (`WINDROW_MQTT_ENVELOPE=batch`, off by default) each device
+sends one `{prefix}/batch` message per poll tick instead of one message per point. The listener
+accepts both envelopes: a batch expands into the same per-point topics, so the stored rows and point
+ids are identical (tested), and the message is acknowledged once its last reading commits, even
+when its readings span two listener batches. The ladder's generator takes `--envelope batch` (one
+message per equip per interval, so 10 points per message by default). Acks and `stored_ratio` still
+count readings. `generator.messages_per_s` records the message rate.
+
+**Local, `listener_bench.py`.** One worker on a shared 4-CPU dev VM under heavy load from other jobs
+(load average about 31). 100k–200k readings of 10k points were queued at the broker, then drained:
+
+| Envelope | MQTT messages | Stored/s (mid 80%) | Worker CPU % | CPU % per 1k readings/s | Batcher writing % | Broker CPU % | Missing |
+|---|---|---|---|---|---|---|---|
+| point | 100,000 | 3,831 | 24.4 | 5.9 | 92.5 | 0.9 | 0 |
+| point | 200,000 | 4,295 | 20.7 | 5.6 | 96.9 | 1.4 | 0 |
+| point | 200,000 | 3,488 | 17.9 | 5.5 | 96.7 | 1.0 | 0 |
+| batch | 10,000 | 4,546 | 12.3 | 1.9 | 79.7 | 0.1 | 0 |
+| batch | 10,000 | 4,436 | 6.0 | 1.5 | 84.5 | 0.1 | 0 |
+| batch | 10,000 | 5,112 | 6.8 | 1.6 | 93.0 | 0.1 | 0 |
+
+The batched envelope sends 10× fewer messages. It uses about 3.4× less listener CPU per reading
+(1.7% vs 5.7% of a core per 1,000 readings/s) and a fraction of the broker's CPU. Nothing was
+missing in either mode. Stored/s is the same within noise here because both modes were
+write-bound: the batcher spent 80–97% of its time writing, on a host whose Postgres shared four
+CPUs with other stacks. So these runs show the listener's and broker's per-message cost dropping,
+not a higher stored rate. Extrapolating the CPU cost alone, one worker would become CPU-bound at
+roughly 18k readings/s per point and roughly 60k readings/s batched. That's an estimate, not a
+measurement. Without paho and the broker, `on_message`'s own CPU drops from 3.7 µs to 2.3 µs per
+reading. The rest of the saving is paho's per-packet work and the per-message acks. The ladder on
+nash-srv (`run --envelope batch` against `run`) measures the end-to-end effect and broker CPU at
+each step:
+
+```sh
+$PY scripts/scale/listener_bench.py --workers 1,2 --envelope point
+$PY scripts/scale/listener_bench.py --workers 1,2 --envelope batch
+$PY scripts/scale/ladder.py run --no-up --steps 100k --envelope batch --continue-on-fail
+$PY scripts/scale/ladder.py crash --points 10000 --envelope batch   # must still lose nothing
+```
+
 ### nash-srv
 
 **Realistic profiles (#273), to run.** Each profile and N starts on a clean stack (`down` then
@@ -1111,12 +1212,86 @@ runs it was 228–265 B/row (241 at 1k points, 265 at 25k). That works out to ab
 raw** at 1M points, which is why
 native compression ([#192](https://github.com/jacobnash/Baler/issues/192), under [#221](https://github.com/jacobnash/Baler/issues/221)) and a narrower row matter. Raw rows are kept, never downsampled. Fill in compressed bytes per row from `db.compression` once #192 lands.
 
+For sizing a deployment from these results (disk, chunk settings, listener workers, servers), see
+[Deployment profiles and sizing](/deployment-profiles) and `python -m baler.sizing`.
+
 ### Baler vs Haxall
 
-Same generator, steps, 5 s rate, probes and CPU/memory caps against Haxall, with durability on
-for both. Tracked as [#236](https://github.com/jacobnash/Baler/issues/236). **Not run yet.** The
-harness records Baler's side (durability read live, the crash test); the Haxall target, bridge
-and probes are #236's work.
+This runs the same generator, steps, 5 s rate, canary, comparable probes and CPU/memory caps
+against Haxall, with durability on for both
+([#236](https://github.com/jacobnash/Baler/issues/236)). **The harness is in place, but the
+measured side-by-side is pending** a nash-srv run (commands below). It needs the Haxall image,
+which this harness doesn't publish.
+
+**What runs**
+
+- `ladder.py up|run|crash|down --target haxall` starts `scripts/scale/compose.haxall.yml` as its
+  own compose project, `<SCALE_PROJECT>-haxall` (`scale-haxall` by default). It runs behind the
+  same guard as the Baler stack: ports off live, on 127.0.0.1, volumes under
+  `BALER_VOLUME_PREFIX`. The project includes:
+  - the same broker image, config and ACL;
+  - Haxall from the image CI's haxall-matrix job builds (`windrow/docker/haxall.Dockerfile`,
+    Haxall 4.0.6, initialized the same way);
+  - `scripts/scale/haxall_bridge.py` in Baler's image, in its own container.
+- **Caps.** Haxall is storage, ingest API and read API in one process, so by default it gets the
+  sum of Baler's caps for those: postgres + oxigraph + haystack_api + ingest_api, which is
+  5 CPUs and 14 GiB with the defaults. The bridge gets `mqtt_listener`'s cap, and both brokers get
+  the same cap. Baler's rule daemons aren't counted, because the Haxall run evaluates no rules. The
+  caps are written into each result (`cpu_caps`). Override them with
+  `SCALE_CPUS_HAXALL`/`SCALE_MEM_HAXALL` and `SCALE_CPUS_HAXALL_BRIDGE`/`SCALE_MEM_HAXALL_BRIDGE`.
+- **Ingest** goes through a batched `hisWrite` bridge, not Windrow's demo bridge. Windrow's bridge
+  makes one Axon eval per reading, stamped `now()`. `haxall_bridge.py` works like Baler's
+  listener:
+  - It uses a persistent session with manual acks. A message is acknowledged only after the
+    `hisWrite` holding its reading returns, so `crash` means the same thing on both sides.
+  - Readings keep their payload `ts`.
+  - It sends one Haystack `hisWrite` per flush as a batch write (a value column per point, with
+    `id` in the column meta). If Haxall refuses batch writes, it falls back to one `hisWrite` per
+    point per flush and records `mode` and `batch_refused`.
+  - It reports its own limit apart from Haxall's: `step.bridge` holds its CPU, queue, batch size
+    and `hisWrite` latency, from `BRIDGE_STATS` lines in its log.
+- **Points** are provisioned as Haxall records by Axon `commit`, with ids taken from their topics
+  (`fbf/scale/s00000/e00000/sat` → `@scale.s00000.e00000.sat`). They get the same markers and
+  `scaleHis1/100/1000` groups as the generator's tags give Baler.
+- **Probes** go through Haxall's own Haystack API: `read` for the filter and curVal rows, and Axon
+  for `hisRead` of 1, 100 and 1,000 points over today. The equip rollup probe is
+  `readAll(point and his and equipRef->ahu and scaleHis1000).hisRead(today())`. Haxall has no
+  curVal for points that no connector drives, so the curVal probes time the same `read` request.
+- **Stored rows** are a `hisRead` count over the soak's seconds, using the same payload-ts window
+  as Baler's `point_history` count. **Lag** is measured from the canary point's `hisRead`.
+- **Durability.** Each result records what Haxall's settings were found to be (its project
+  files mentioning sync/flush, JVM options, and the volume its database is on), next to
+  `crash --target haxall` (kill -9 `haxall`, then `haxall_bridge`). A Haxall result is labelled
+  `comparable` only once `SCALE_HAXALL_DURABILITY` names how its history is fsync'd. If Haxall's
+  store has no fsync-on-commit setting, put its database on a sync-mounted volume (below). That's
+  stricter than Postgres's group commit, so say so next to the numbers. Either way, `crash` must
+  lose nothing.
+
+**On nash-srv** (with the `windrow` submodule checked out):
+
+```sh
+git submodule update --init windrow
+$PY scripts/scale/ladder.py init --force   # or add SCALE_HAXALL_SU_PASSWORD etc. to an existing scale.env
+# Durability parity: read Haxall 4.0.6's history store (hxd HxdHisExt -> rt.db.his, folio) for its
+# flush/fsync behaviour, then either set it on (SCALE_HAXALL_JAVA_OPTS or the haxall command in
+# compose.haxall.yml) or give Haxall a sync-mounted volume:
+#   truncate -s 40G /srv/scale-haxall.img && mkfs.ext4 -q /srv/scale-haxall.img
+#   LOOP=$(sudo losetup -f --show /srv/scale-haxall.img)
+#   docker volume create --driver local --opt type=ext4 --opt device=$LOOP --opt o=sync,dirsync scale_haxall-var-sync
+#   # scale.env: SCALE_HAXALL_VAR_VOLUME=scale_haxall-var-sync  SCALE_HAXALL_VAR_EXTERNAL=true
+# and record how in scale.env: SCALE_HAXALL_DURABILITY=<setting or "sync-mounted volume">
+$PY scripts/scale/ladder.py up --target haxall
+$PY scripts/scale/ladder.py crash --target haxall --points 10000
+$PY scripts/scale/ladder.py run --target haxall --no-up --steps 10k,25k,50k,100k --continue-on-fail
+$PY scripts/scale/ladder.py down --target haxall
+# Baler on the same steps (if not already measured at this commit), then the table:
+$PY scripts/scale/ladder.py run --steps 10k,25k,50k,100k --continue-on-fail
+$PY scripts/scale/ladder.py table results/<baler-run>-ladder.json --haxall results/<haxall-run>-ladder.json
+```
+
+Run one stack at a time, so the two runs never share the host's CPUs.
+
+Results (pending: filled in from `ladder.py table ... --haxall ...`):
 
 | Step | Baler stored/s | Haxall stored/s | Baler p95 lag | Haxall p95 lag | Baler read filter | Haxall read filter | Baler hisRead 1000 | Haxall hisRead 1000 | Baler RAM / disk | Haxall RAM / disk |
 |---|---|---|---|---|---|---|---|---|---|---|

@@ -1,0 +1,71 @@
+---
+title: Pack extraction
+---
+
+Packs grow from documents people already hold (Baler#206, epic #221 §3.1).
+You upload your own copy of a standard edition, an owner design guide or a
+local code, and a model **proposes** requirement rows for a draft
+[requirement pack](/requirement-packs). A person accepts, corrects or
+rejects every one. Baler never ships standard text; this reads text you
+own, and keeps the quotes in your own database.
+
+It is the same pattern as Cx 7's spec extraction
+([Commissioning LLM](/commissioning-llm)).
+
+## How it works
+
+1. Import or create a **draft** pack, then send the PDF:
+
+   ```bash
+   curl -X POST $BALER/cx/packs/$PACK/extract -H "Authorization: Bearer $T" \
+     -d '{"filename": "owner-guide-2027.pdf", "data": "'$(base64 -w0 owner-guide-2027.pdf)'"}'
+   # 202 {"id": "...", "status": "queued", "sha256": "..."}
+   curl $BALER/cx/pack-extractions/$ID        # poll until completed or failed
+   curl $BALER/cx/packs/$PACK/proposals       # what the model proposes
+   ```
+
+2. Each proposal has a `row` (a pack row) and a `source`: the document, its
+   sha256, the page and the **verbatim quote** the row was read from.
+3. Accept, with corrections if the reading was wrong:
+
+   ```bash
+   curl -X POST $BALER/cx/pack-proposals/$P/accept \
+     -d '{"row": {"criterion": {"quantity": "relative_humidity", "op": "between", "min": 23, "max": 58, "unit": "%RH"}}}'
+   ```
+
+   or reject (`POST /cx/pack-proposals/{id}/reject`).
+4. An accepted row joins the draft pack **unconfirmed**. Its numbers are
+   still confirmed by a person in the pack (#205) before the row is active.
+
+## The rules
+
+- **Quotes are checked.** The PDF's text layer is read locally, page by page,
+  and every proposal's quote must really be on a page of your PDF, or it is
+  dropped and counted in the extraction's notes (models invent quotes). A
+  quote found on a different page than cited moves the citation to that
+  page.
+- **Rows carry citations only.** An accepted row gets `citation: {ref, page}`.
+  The quote stays on the proposal as provenance, in your org's own
+  database; it is never copied into the pack, so a pack you export or share
+  carries no text from the document.
+- **The PDF isn't kept.** Only its sha256, name and size are recorded.
+  Keeping documents is the document store's job (#201).
+- **Only quantities an engine can judge from data** are proposed today:
+  pressure to adjacent, total and outdoor ACH, temperature, relative
+  humidity, airflow. Each defaults to the `procedure` engine's `range`
+  criterion. Others (filtration, for example) are dropped with a note.
+- **A model is required.** `BALER_LLM_PROVIDER` picks it (`anthropic` or an
+  OpenAI-compatible endpoint, see `.env.example`). With `none` the endpoint
+  answers 501. Both providers get the text layer with page markers, so a
+  scanned PDF needs OCR first.
+
+## Storage
+
+Migration `0021_pack_proposals` adds `cx_pack_extractions` and
+`cx_pack_proposals`.
+
+## Not yet
+
+- A review UI (the API is there).
+- Reading page images for scanned documents.
+- Proposing rows for quantities no engine judges yet.

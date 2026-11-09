@@ -33,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 import psycopg
 from opentelemetry import context as otel_context
@@ -41,23 +42,44 @@ from baler import docs_ui, gateway_auth, hisquery, timeseries, tracing, warmup
 from baler.commissioning import (
     active,
     agent,
+    baselines_api,
+    compliance,
+    compliance_api,
+    coverage,
     db,
+    earned_api,
     economizer,
     engine,
+    fleet,
     gates,
     gl36,
     history,
+    hunting_api,
     inventory,
     issues,
     ladder,
     llm,
+    manual,
     mirror,
+    operator_writes,
+    overrides,
+    pack_extract_api,
+    packs_api,
+    passport_api,
     phases,
     procedures,
+    readiness_api,
     report,
+    retest_schedules,
+    routes,
     runner,
+    savings_api,
+    schedules_api,
+    spaces_api,
     spec,
+    test_library,
 )
+from baler.commissioning import schedules as sched_eval
 from baler.commissioning import templates as tpl
 from baler.http_handler_base import BaseAPIHandler, respond_error, respond_json
 from baler.remote_store import RemoteStore
@@ -71,7 +93,7 @@ PORT = 8009
 RUN_STATEMENT_TIMEOUT = "10min"
 
 _PROJECT = re.compile(r"/projects/([^/]+)")
-_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|gate|report|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|agent/sessions|agent/proposals)")
+_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|gate|report|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|fleet-runs|active-schedules|agent/sessions|agent/proposals|writes|schedule-writes|schedule-targets|schedules|schedules/refresh|coverage)")
 _PROJECT_ISSUES = re.compile(r"/projects/([^/]+)/issues/(import|export)")
 _RUN_ISSUES = re.compile(r"/runs/([^/]+)/issues")
 _ISSUE = re.compile(r"/issues/([^/]+)")
@@ -80,6 +102,9 @@ _RISK = re.compile(r"/risks/([^/]+)")
 _PROCEDURE = re.compile(r"/procedures/([^/]+)")
 _PROCEDURE_RUNS = re.compile(r"/procedures/([^/]+)/runs")
 _TEST_RUN = re.compile(r"/test-runs/([^/]+)")
+_TEST_RUN_MANUAL = re.compile(r"/test-runs/([^/]+)/manual-results")
+_MANUAL_RESULT = re.compile(r"/manual-results/([^/]+)")
+_MANUAL_ATTACHMENT = re.compile(r"/manual-attachments/([^/]+)")
 _RUN_DIFF = re.compile(r"/runs/([^/]+)/diff")
 _PROJECT_SPEC = re.compile(r"/projects/([^/]+)/(spec|spec/import|spec/extract|spec/documents|spec/review|alignment|alignment/decisions)")
 _SPEC_DOC = re.compile(r"/spec-documents/([^/]+)")
@@ -89,9 +114,18 @@ _ACTIVE_RUN = re.compile(r"/active-runs/([^/]+)")
 _AGENT_SESSION = re.compile(r"/agent-sessions/([^/]+)")
 _AGENT_SESSION_MSG = re.compile(r"/agent-sessions/([^/]+)/messages")
 _PROPOSAL_SUB = re.compile(r"/agent-proposals/([^/]+)/(accept|reject)")
+_WRITE_SUB = re.compile(r"/writes/([^/]+)/(relinquish|revert)")
 _ACTIVE_RUN_SUB = re.compile(r"/active-runs/([^/]+)/(confirm|abort)")
+_FLEET_RUN = re.compile(r"/fleet-runs/([^/]+)")
+_FLEET_RUN_SUB = re.compile(r"/fleet-runs/([^/]+)/(confirm|abort)")
+_ACTIVE_SCHEDULE = re.compile(r"/active-schedules/([^/]+)")
+_ACTIVE_SCHEDULE_SUB = re.compile(r"/active-schedules/([^/]+)/(approve|revoke)")
 _RUN = re.compile(r"/runs/([^/]+)")
 _RUN_REPORT = re.compile(r"/runs/([^/]+)/report")
+
+# Building-record features (epic #221), each a route table (commissioning.routes).
+EXTENSIONS = (spaces_api, readiness_api, packs_api, pack_extract_api, compliance_api, hunting_api, baselines_api,
+              savings_api, passport_api, schedules_api, earned_api)
 
 
 def _check_prefixes(value) -> list[str]:
@@ -128,6 +162,10 @@ def _check_settings(settings) -> dict:
         economizer.validate_settings(settings["economizer"])
     if "fault_mirroring" in settings:
         mirror.validate_settings(settings["fault_mirroring"])
+    if "compliance" in settings:
+        compliance.validate_settings(settings["compliance"])
+    if "overrides" in settings:
+        overrides.validate_settings(settings["overrides"])
     if "phase_gates" in settings:
         gates.validate_mode(settings["phase_gates"])
     if "acceptance" in settings:
@@ -149,16 +187,25 @@ engine_kwargs = runner.engine_kwargs
 log = logging.getLogger(__name__)
 
 
-def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None):
+def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None, commander=None, fleet_runner=None):
     now_fn = clock or (lambda: datetime.now(timezone.utc))
     worker = worker or runner.RunWorker(repo, now_fn)
     # Active tests (Cx 9) need a point_write route; without an executor
     # (no MQTT commander configured) planning works and confirming is 503.
+    # Fleet runs (Baler#275 d) likewise need `fleet_runner`
+    # (fleet.FleetRunner over a fleet.ChildExecutor).
+    # `commander` carries audited operator point and schedule writes
+    # (Baler#213); without one those answer 503.
+    # `commander` (point_write.Commander) reads schedules and priority
+    # arrays from Windrow for the override tests (Baler#212); never writes.
 
     class CommissioningHandler(BaseAPIHandler):
         TRACER = tracer
         ALLOWED_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
         ALLOWED_HEADERS = "Content-Type, Authorization"
+        REPO = repo  # for the EXTENSIONS' handlers (commissioning.routes)
+        NOW = staticmethod(now_fn)
+        WORKER = worker
 
         # ------------------------------------------------------- plumbing
 
@@ -199,6 +246,11 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
 
         def _route(self, method: str, path: str):
             """(span name, fn(span, claims)) or None."""
+            for ext in EXTENSIONS:
+                found_ext = routes.match(ext.ROUTES, method, path)
+                if found_ext is not None:
+                    ext_name, ext_fn, groups = found_ext
+                    return ext_name, lambda span, claims, fn=ext_fn, g=groups: fn(self, span, claims, *g)
             if path == "/projects":
                 return {"GET": ("list_projects", self._list_projects), "POST": ("create_project", self._create_project)}.get(method)
             if path == "/templates" and method == "GET":
@@ -211,6 +263,8 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 return "active_status", self._active_status
             if path == "/active/kill" and method == "POST":
                 return "active_kill", self._active_kill
+            if path == "/active/library" and method == "GET":
+                return "active_library", self._active_library
             m = _PROJECT_SUB.fullmatch(path)
             if m:
                 pid, sub = m.group(1), m.group(2)
@@ -233,9 +287,20 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                     ("POST", "faults/ingest"): ("ingest_faults", self._ingest_faults),
                     ("GET", "active-runs"): ("list_active_runs", self._list_active_runs),
                     ("POST", "active-runs"): ("plan_active_run", self._plan_active_run),
+                    ("GET", "fleet-runs"): ("list_fleet_runs", self._list_fleet_runs),
+                    ("POST", "fleet-runs"): ("plan_fleet_run", self._plan_fleet_run),
+                    ("GET", "active-schedules"): ("list_active_schedules", self._list_active_schedules),
+                    ("POST", "active-schedules"): ("propose_active_schedule", self._propose_active_schedule),
                     ("GET", "agent/sessions"): ("list_agent_sessions", self._list_agent_sessions),
                     ("POST", "agent/sessions"): ("start_agent_session", self._start_agent_session),
                     ("GET", "agent/proposals"): ("list_agent_proposals", self._list_agent_proposals),
+                    ("GET", "writes"): ("list_operator_writes", self._list_operator_writes),
+                    ("POST", "writes"): ("operator_point_write", self._operator_point_write),
+                    ("POST", "schedule-writes"): ("operator_schedule_write", self._operator_schedule_write),
+                    ("GET", "schedule-targets"): ("schedule_targets", self._schedule_targets),
+                    ("GET", "schedules"): ("list_schedules", self._list_schedules),
+                    ("POST", "schedules/refresh"): ("refresh_schedules", self._refresh_schedules),
+                    ("GET", "coverage"): ("coverage", self._coverage),
                 }
                 hit = table.get((method, sub))
                 return None if hit is None else (hit[0], lambda span, claims: hit[1](span, claims, pid))
@@ -252,8 +317,14 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                               ("POST", "risk"): ("accept_risk", self._accept_risk)}),
                 (_PROPOSAL_SUB, {("POST", "accept"): ("accept_proposal", self._accept_proposal),
                                  ("POST", "reject"): ("reject_proposal", self._reject_proposal)}),
+                (_WRITE_SUB, {("POST", "relinquish"): ("relinquish_operator_write", self._relinquish_operator_write),
+                              ("POST", "revert"): ("revert_operator_write", self._revert_operator_write)}),
                 (_ACTIVE_RUN_SUB, {("POST", "confirm"): ("confirm_active_run", self._confirm_active_run),
                                    ("POST", "abort"): ("abort_active_run", self._abort_active_run)}),
+                (_FLEET_RUN_SUB, {("POST", "confirm"): ("confirm_fleet_run", self._confirm_fleet_run),
+                                  ("POST", "abort"): ("abort_fleet_run", self._abort_fleet_run)}),
+                (_ACTIVE_SCHEDULE_SUB, {("POST", "approve"): ("approve_active_schedule", self._approve_active_schedule),
+                                        ("POST", "revoke"): ("revoke_active_schedule", self._revoke_active_schedule)}),
             ):
                 m = rx.fullmatch(path)
                 if m:
@@ -281,12 +352,19 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 (_PROCEDURE_RUNS, {"POST": ("create_test_run", self._create_test_run), "GET": ("list_test_runs", self._list_test_runs)}),
                 (_PROCEDURE, {"GET": ("get_procedure", self._get_procedure), "PATCH": ("patch_procedure", self._patch_procedure),
                               "DELETE": ("archive_procedure", self._archive_procedure)}),
+                (_TEST_RUN_MANUAL, {"POST": ("record_manual_result", self._record_manual_result),
+                                    "GET": ("list_manual_results", self._list_manual_results)}),
+                (_MANUAL_RESULT, {"PATCH": ("edit_manual_result", self._edit_manual_result)}),
+                (_MANUAL_ATTACHMENT, {"GET": ("get_manual_attachment", self._get_manual_attachment)}),
                 (_TEST_RUN, {"GET": ("get_test_run", self._get_test_run)}),
                 (_RUN_DIFF, {"GET": ("run_diff", self._run_diff)}),
                 (_SPEC_DOC, {"GET": ("get_spec_document", self._get_spec_document)}),
                 (_SPEC_ITEM, {"PATCH": ("patch_spec_item", self._patch_spec_item)}),
                 (_MAPPING, {"DELETE": ("undo_mapping", self._undo_mapping)}),
                 (_ACTIVE_RUN, {"GET": ("get_active_run", self._get_active_run)}),
+                (_FLEET_RUN, {"GET": ("get_fleet_run", self._get_fleet_run)}),
+                (_ACTIVE_SCHEDULE, {"GET": ("get_active_schedule", self._get_active_schedule),
+                                    "PATCH": ("patch_active_schedule", self._patch_active_schedule)}),
                 (_AGENT_SESSION_MSG, {"POST": ("agent_message", self._agent_message)}),
                 (_AGENT_SESSION, {"GET": ("get_agent_session", self._get_agent_session)}),
             ):
@@ -681,7 +759,12 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             with section("procedures") as sp:
                 procs = [x for x in repo.list_procedures(pid) if x["status"] != "archived"]
                 latest = repo.latest_completed_test_runs([pr["id"] for pr in procs])  # one query (#150)
+                # manual results / active tests recorded since a run (Baler#275)
+                latest = {k: (runner.refresh_test_run(repo, v, now_fn()) if v else None) for k, v in latest.items()}
                 sp.set_attribute("procedures", len(procs))
+            with section("coverage"):
+                cov = [{**r, "summary": coverage.sentence(r)} for r in
+                       coverage.compute(procs, latest, self._caller_inventory(equips, self._scopes(p, claims)[0]))] if equips else []
             with section("issues") as sp:
                 iss = [i for i in self._report_issues(pid) if not i.get("equip_uri") or scope.allows(i["equip_uri"])]
                 sp.set_attribute("issues", len(iss))
@@ -715,7 +798,7 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                                            iss, events, alignment, docs, active_runs, active.writes_allowed(),
                                            site=repo.get_site(p["site_id"]) if p.get("site_id") else None,
                                            equipment=equipment,
-                                           acceptance=acceptance, origin=origin)
+                                           acceptance=acceptance, origin=origin, coverage=cov)
             with section("render") as sp:
                 if fmt == "json":
                     respond_json(self, 200, rep)
@@ -914,6 +997,7 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 target = body["status"]
                 changes["status"] = target
                 changes["closed_at"] = now if target == "closed" else None
+                changes["closed_by"] = claims.get("sub") if target == "closed" else None
                 if target == "closed" and issue.get("retest"):
                     rt = issue["retest"]
                     changes["closed_run"] = rt.get("test_run_id") or rt.get("run_id")
@@ -1212,8 +1296,10 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 raise ValueError("started_at must be in the past: a passive test judges history that already exists")
             end = min(start + timedelta(hours=hours), now)
             sub = claims.get("sub")
+            methods = procedures.choose_methods(proc, body.get("methods"))  # 400 before anything is queued
             try:
-                tr = runner.queue_test_run(repo, worker, project, proc, claims, start, end, now, sub, repo.user_email(sub))
+                tr = runner.queue_test_run(repo, worker, project, proc, claims, start, end, now, sub, repo.user_email(sub),
+                                           methods=methods)
             except db.RunActive as exc:
                 respond_json(self, 409, {"error": "this procedure already has a test run in progress", "test_run_id": exc.run_id})
                 return
@@ -1231,6 +1317,7 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             if tr is None or not self._visible(repo.get_project(tr["project_id"]), claims):
                 respond_error(self, 404, "no such test run")
                 return
+            tr = runner.refresh_test_run(repo, tr, now_fn())  # manual results / active tests since it ran
             scope = repo.scope_for(claims)
             out = db.public_row(tr)
             if out.get("equipment"):
@@ -1238,6 +1325,122 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             if out.get("diff"):
                 out["diff"] = {**out["diff"], "changes": [c for c in out["diff"]["changes"] if scope.allows(c["equip_uri"])]}
             respond_json(self, 200, out)
+
+        # ---------------------------------------- manual results (Baler#275)
+
+        def _visible_test_run(self, tr_id: str, claims: dict) -> tuple[dict, dict] | None:
+            tr = repo.get_test_run(tr_id)
+            project = repo.get_project(tr["project_id"]) if tr else None
+            if tr is None or not self._visible(project, claims):
+                respond_error(self, 404, "no such test run")
+                return None
+            assert project is not None
+            return tr, project
+
+        def _public_manual(self, row: dict) -> dict:
+            return db.public_row({**row, "history": [db.public_row(h) for h in row.get("history") or []]})
+
+        def _record_manual_result(self, span, claims, tr_id) -> None:
+            """A person's pass / fail / N-A for one step on one equipment,
+            recorded as the caller (never on someone else's behalf)."""
+            if claims.get("kind") != "session" or not claims.get("sub"):
+                respond_error(self, 403, "a manual result is recorded by a signed-in person, not an API key")
+                return
+            if claims.get("role") not in ("operator", "admin"):  # the gateway's row too; checked here as well
+                respond_error(self, 403, "recording a result needs the operator role")
+                return
+            hit = self._visible_test_run(tr_id, claims)
+            if hit is None:
+                return
+            tr, project = hit
+            if project.get("archived_at"):
+                respond_error(self, 409, "project is archived")
+                return
+            if tr["status"] != "completed":
+                respond_error(self, 409, f"test run is {tr['status']}: record manual results once it has completed")
+                return
+            body = self.read_json_body()
+            cid = body.get("client_id")
+            if isinstance(cid, str) and cid:
+                dup = repo.find_rows(manual.RESULTS, order="recorded_at", project_id=project["id"], client_id=cid)
+                if dup:  # an offline draft sent again: stored once
+                    respond_json(self, 200, self._public_manual(dup[0]))
+                    return
+            scope = repo.scope_for(claims)
+            judged = {e["equip_uri"] for e in tr.get("equipment") or [] if scope.allows(e["equip_uri"])}
+            sub = claims.get("sub")
+            now = now_fn()
+            row, files = manual.new_result(body, tr, tr["procedure"], judged, claims, repo.user_email(sub), repo.user_name(sub), now)
+            repo.put_rows(manual.RESULTS, [row])
+            if files:
+                repo.put_rows(manual.ATTACHMENTS, files)
+            self._event(project["id"], "manual_result.record", claims,
+                        {"manual_result_id": row["id"], "test_run_id": tr_id, "equip_uri": row["equip_uri"],
+                         "step_id": row["step_id"], "status": row["status"], "witness": (row["witness"] or {}).get("name")})
+            runner.refresh_test_run(repo, tr, now)
+            respond_json(self, 201, self._public_manual(row))
+
+        def _list_manual_results(self, span, claims, tr_id) -> None:
+            if self._visible_test_run(tr_id, claims) is None:
+                return
+            scope = repo.scope_for(claims)
+            respond_json(self, 200, [self._public_manual(r) for r in repo.find_rows(manual.RESULTS, order="recorded_at", test_run_id=tr_id)
+                                     if scope.allows(r["equip_uri"])])
+
+        def _edit_manual_result(self, span, claims, rid) -> None:
+            row = repo.get_row(manual.RESULTS, rid)
+            tr = repo.get_test_run(row["test_run_id"]) if row else None
+            project = repo.get_project(row["project_id"]) if row else None
+            if row is None or tr is None or not self._visible(project, claims) or not repo.scope_for(claims).allows(row["equip_uri"]):
+                respond_error(self, 404, "no such manual result")
+                return
+            assert project is not None
+            now = now_fn()
+            try:
+                changes, files = manual.edit(row, self.read_json_body(), claims, now)
+            except manual.NotYours as exc:
+                respond_error(self, 403, str(exc))
+                return
+            repo.update_row(manual.RESULTS, rid, changes)
+            if files:
+                repo.put_rows(manual.ATTACHMENTS, files)
+            self._event(project["id"], "manual_result.edit", claims,
+                        {"manual_result_id": rid, "from": row["status"], "to": changes.get("status", row["status"]),
+                         "reason": changes["history"][-1]["reason"]})
+            runner.refresh_test_run(repo, tr, now)
+            respond_json(self, 200, self._public_manual(repo.get_row(manual.RESULTS, rid) or row))
+
+        def _get_manual_attachment(self, span, claims, aid) -> None:
+            att = repo.get_row(manual.ATTACHMENTS, aid)
+            res = repo.get_row(manual.RESULTS, att["result_id"]) if att else None
+            project = repo.get_project(res["project_id"]) if res else None
+            if att is None or res is None or not self._visible(project, claims) or not repo.scope_for(claims).allows(res["equip_uri"]):
+                respond_error(self, 404, "no such attachment")
+                return
+            data = bytes(att["data"])
+            self.send_response(200)
+            self.send_header("Content-Type", att["media_type"])
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition", f'attachment; filename="{att["filename"].replace(chr(34), "")}"')
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("ETag", f'"{att["sha256"]}"')
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _coverage(self, span, claims, pid) -> None:
+            """Tested vs sampled per equipment class and method (Baler#275)."""
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            scopes, _ = self._scopes(p, claims)
+            procs = [x for x in repo.list_procedures(pid) if x["status"] == "active"]
+            now = now_fn()
+            latest = {}
+            for pr in procs:
+                got = next((t for t in repo.list_test_runs(pr["id"], 20) if t["status"] == "completed"), None)
+                latest[pr["id"]] = runner.refresh_test_run(repo, got, now) if got else None
+            rows = coverage.compute(procs, latest, inventory.build(repo.store, scopes))
+            respond_json(self, 200, [{**r, "summary": coverage.sentence(r)} for r in rows])
 
         def _run_diff(self, span, claims, rid) -> None:
             """Reconcile a run against an earlier one (default: the
@@ -1669,8 +1872,18 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 steps = active.validate_steps(steps, equip)
             elif kind == "custom":
                 steps = active.validate_steps(body.get("steps"), equip)
+            elif kind == "library":
+                # a standard test (Baler#275 slice c), compiled to concrete steps
+                # against the latest values, then validated like any other
+                test = body.get("test")
+                if not test_library.applies(str(test), equip):
+                    raise ValueError(f"test must be a library test for this equipment's class (library: {', '.join(test_library.BY_ID)})")
+                with repo.history() as h:
+                    latest = h.latest([p_["id"] for p_ in equip["points"]])
+                steps = active.validate_steps(test_library.compile_steps(test, equip, latest), equip)
+                kind = f"library:{test}"
             else:
-                raise ValueError("kind is command_response or custom")
+                raise ValueError("kind is command_response, custom or library")
             run = active.new_run(pid, equip["id"], kind, steps, start, end, claims.get("sub"), now_fn())
             repo.put_rows("cx_active_runs", [run])
             self._event(pid, "active_run.plan", claims, {"active_run_id": run["id"], "equip_uri": equip["id"], "writes": len(run["plan"])})
@@ -1732,15 +1945,29 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             self._event(project["id"], "active_run.abort", claims, {"active_run_id": rid, "was": run["status"]})
             respond_json(self, 202, db.public_row(repo.get_row("cx_active_runs", rid) or run))
 
+        def _active_library(self, span, claims) -> None:
+            """The standard active tests, with their limits and expected
+            results (Baler#275 slice c)."""
+            respond_json(self, 200, [test_library.public(t) for t in test_library.TESTS])
+
         def _active_kill(self, span, claims) -> None:
             """Every running active run in the caller's org stops, and
             every level they hold is relinquished now (admin)."""
             if not self._require_admin(claims):
                 return
-            stopped = []
+            stopped, fleets = [], []
             for p in repo.list_projects(claims["org_id"], include_archived=True):
                 if not self._visible(p, claims):
                     continue
+                # Fleets first (Baler#275 d), so no coordinator starts another
+                # member after its live children are flagged below; a member
+                # started in between still stops at its first check
+                # (fleet.ChildExecutor) and is relinquished with the rest.
+                for f in repo.find_rows(fleet.TABLE, project_id=p["id"]):
+                    if f["status"] in ("confirmed", "running"):
+                        fleet.flag_stop(repo, None, f["id"], "kill switch")
+                        fleets.append(f["id"])
+                        self._event(p["id"], "fleet_run.kill", claims, {"fleet_run_id": f["id"]})
                 for r in repo.find_rows("cx_active_runs", project_id=p["id"]):
                     if r["status"] in ("confirmed", "running"):
                         repo.update_row("cx_active_runs", r["id"], {"abort_requested": True})
@@ -1756,7 +1983,489 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                             relinquished.append(point)
                         except Exception as exc:  # noqa: BLE001 - reported; the sweeper retries
                             relinquished.append(f"FAILED {point}: {exc}")
-            respond_json(self, 200, {"aborted": stopped, "relinquished": relinquished})
+            if fleet_runner is not None:
+                for fid in fleets:
+                    relinquished += fleet.relinquish_children(repo, fleet_runner.writer, repo.get_row(fleet.TABLE, fid) or {"id": fid, "members": []})
+            respond_json(self, 200, {"aborted": stopped, "fleets": fleets, "relinquished": relinquished})
+
+        # ------------------------------------------ fleet runs (Baler#275 d)
+
+        def _visible_fleet(self, fid: str, claims: dict) -> tuple[dict, dict] | None:
+            f = repo.get_row(fleet.TABLE, fid)
+            project = repo.get_project(f["project_id"]) if f else None
+            if f is None or project is None or not self._visible(project, claims) or \
+                    not all(repo.scope_for(claims).allows(m["equip_uri"]) for m in f["members"]):
+                respond_error(self, 404, "no such fleet run")
+                return None
+            return f, project
+
+        def _list_fleet_runs(self, span, claims, pid) -> None:
+            if self._project(pid, claims) is None:
+                return
+            scope = repo.scope_for(claims)
+            rows = [fleet.public(f) for f in reversed(repo.find_rows(fleet.TABLE, project_id=pid))
+                    if all(scope.allows(m["equip_uri"]) for m in f["members"])]
+            respond_json(self, 200, rows)
+
+        def _get_fleet_run(self, span, claims, fid) -> None:
+            hit = self._visible_fleet(fid, claims)
+            if hit is not None:
+                respond_json(self, 200, fleet.public(hit[0]))
+
+        def _plan_fleet_run(self, span, claims, pid) -> None:
+            """The fleet dry run: every write across every member, the
+            schedule, and the plan hash to confirm with. Nothing commanded."""
+            if not self._require_admin(claims):
+                return
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            if p.get("archived_at"):
+                respond_error(self, 409, "project is archived")
+                return
+            body = self.read_json_body()
+            previous = None
+            if body.get("retest_of") is not None:
+                hit = self._visible_fleet(str(body["retest_of"]), claims)
+                if hit is None:
+                    return
+                previous = hit[0]
+                if previous["project_id"] != pid:
+                    raise ValueError("retest_of must be a fleet run of this project")
+            scopes, _ = self._scopes(p, claims)
+            equips = inventory.build(repo.store, scopes)
+            f = fleet.plan(repo, p, equips, body, claims.get("sub"), now_fn(), previous)
+            repo.put_rows(fleet.TABLE, [f])
+            span.set_attribute("members", len(f["members"]))
+            self._event(pid, "fleet_run.plan", claims, {"fleet_run_id": f["id"], "members": len(f["members"]),
+                                                        "writes": len(f["plan"]), "plan_hash": f["plan_hash"],
+                                                        "retest_of": f["retest_of"]})
+            respond_json(self, 201, {**fleet.public(f), "writes_allowed": active.writes_allowed()})
+
+        def _confirm_fleet_run(self, span, claims, fid) -> None:
+            """Start a planned fleet: the same envelope as one run (admin,
+            the switch, inside its window), and the body repeats the plan
+            hash - which must still be the hash of the stored plan, every
+            member of which must still validate against the inventory."""
+            if not self._require_admin(claims):
+                return
+            if not active.writes_allowed():
+                respond_error(self, 403, "active tests are switched off for this deployment (BALER_CX_ALLOW_WRITES=1 enables them)")
+                return
+            hit = self._visible_fleet(fid, claims)
+            if hit is None:
+                return
+            f, project = hit
+            body = self.read_json_body()
+            if body.get("confirm") != f["plan_hash"]:
+                raise ValueError("confirm by sending {\"confirm\": \"<this fleet's plan_hash>\"} after reading the plan")
+            if fleet_runner is None:
+                respond_error(self, 503, "no point_write route is configured on this server")
+                return
+            if f["status"] != "planned":
+                respond_error(self, 409, f"fleet run is {f['status']}")
+                return
+            now = now_fn()
+            ws, we = fleet._dt(f["window_start"]), fleet._dt(f["window_end"])
+            if not ws <= now < we:
+                respond_error(self, 409, f"outside the scheduled window ({ws.isoformat()} - {we.isoformat()})")
+                return
+            scopes, _ = self._scopes(project, claims)
+            problems = fleet.verify(f, inventory.build(repo.store, scopes))
+            if problems:
+                respond_error(self, 409, "the plan changed since it was listed - plan it again: " + "; ".join(problems[:5]))
+                return
+            repo.update_row(fleet.TABLE, fid, {"status": "confirmed", "confirmed_by": claims.get("sub"), "confirmed_at": now,
+                                                "heartbeat_at": now})
+            self._event(project["id"], "fleet_run.confirm", claims, {"fleet_run_id": fid, "plan_hash": f["plan_hash"],
+                                                                     "members": len(f["members"]), "writes": len(f["plan"])})
+            fleet_runner.start(fid)
+            respond_json(self, 202, fleet.public(repo.get_row(fleet.TABLE, fid) or f))
+
+        def _abort_fleet_run(self, span, claims, fid) -> None:
+            """Stop a fleet (operator, the safe direction): no member starts
+            again, every live member stops at its next check, and every level
+            the fleet's members hold is relinquished now. A planned fleet is
+            cancelled."""
+            hit = self._visible_fleet(fid, claims)
+            if hit is None:
+                return
+            f, project = hit
+            relinquished: list[str] = []
+            if f["status"] == "planned":
+                repo.update_row(fleet.TABLE, fid, {"status": "cancelled", "finished_at": now_fn()})
+            elif f["status"] in ("confirmed", "running"):
+                relinquished = fleet.flag_stop(repo, fleet_runner.writer if fleet_runner else None, fid,
+                                               f"aborted by {claims.get('sub')}")
+            self._event(project["id"], "fleet_run.abort", claims, {"fleet_run_id": fid, "was": f["status"],
+                                                                   "relinquished": len(relinquished)})
+            respond_json(self, 202, fleet.public(repo.get_row(fleet.TABLE, fid) or f))
+
+        # ------------------------------- scheduled active retests (Baler#275 e)
+
+        def _visible_schedule(self, sid: str, claims: dict) -> tuple[dict, dict] | None:
+            s = repo.get_row(retest_schedules.TABLE, sid)
+            project = repo.get_project(s["project_id"]) if s else None
+            if s is None or project is None or not self._visible(project, claims) or \
+                    not all(repo.scope_for(claims).allows(u) for u in s["scope"]["equip_uris"]):
+                respond_error(self, 404, "no such schedule")
+                return None
+            return s, project
+
+        def _list_active_schedules(self, span, claims, pid) -> None:
+            if self._project(pid, claims) is None:
+                return
+            scope = repo.scope_for(claims)
+            respond_json(self, 200, [retest_schedules.public(s, now_fn())
+                                     for s in reversed(repo.find_rows(retest_schedules.TABLE, project_id=pid))
+                                     if all(scope.allows(u) for u in s["scope"]["equip_uris"])])
+
+        def _get_active_schedule(self, span, claims, sid) -> None:
+            hit = self._visible_schedule(sid, claims)
+            if hit is not None:
+                respond_json(self, 200, retest_schedules.public(hit[0], now_fn()))
+
+        def _propose_active_schedule(self, span, claims, pid) -> None:
+            """Propose a repeating fleet retest: its scope and windows, with
+            a dry run of the next window. Nothing runs until an admin
+            approves it, and then only with BALER_CX_ALLOW_WRITES on."""
+            if not self._require_admin(claims):
+                return
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            if p.get("archived_at"):
+                respond_error(self, 409, "project is archived")
+                return
+            body = self.read_json_body()
+            now = now_fn()
+            scopes, _ = self._scopes(p, claims)
+            equips = inventory.build(repo.store, scopes)
+            scope, timing = retest_schedules.parse(body, equips, now)
+            s = retest_schedules.new(pid, str(body.get("name") or ""), scope, timing, claims.get("sub"), now)
+            nxt = retest_schedules.next_window(timing, now)
+            if nxt is None:
+                raise ValueError("no scheduled window starts before valid_until")
+            ws = datetime.fromisoformat(nxt)
+            we = min(ws + timedelta(minutes=timing["window_minutes"]), datetime.fromisoformat(timing["valid_until"]))
+            preview = fleet.plan(repo, p, equips, {"equip_uris": scope["equip_uris"], "window_start": ws.isoformat(),
+                                                   "window_end": we.isoformat(), "kind": scope["kind"], "test": scope["test"],
+                                                   **{k: scope[k] for k in ("response_minutes", "concurrency_per_system", "max_concurrent",
+                                                                            "stagger_seconds", "max_failures")}},
+                                 claims.get("sub"), now)
+            repo.put_rows(retest_schedules.TABLE, [s])
+            self._event(pid, "active_schedule.propose", claims, {"schedule_id": s["id"], "approval_hash": s["approval_hash"],
+                                                                 "equipment": len(scope["equip_uris"]), "timing": timing})
+            respond_json(self, 201, {**retest_schedules.public(s, now),
+                                     "preview": {"window_start": ws.isoformat(), "window_end": we.isoformat(),
+                                                 "members": len(preview["members"]), "skipped": preview["skipped"],
+                                                 "plan": preview["plan"]},
+                                     "writes_allowed": active.writes_allowed()})
+
+        def _approve_active_schedule(self, span, claims, sid) -> None:
+            """An admin - a signed-in person - approves exactly the proposed
+            scope and windows by typing the approval hash. Approving never
+            turns writes on."""
+            if not self._require_admin(claims):
+                return
+            if claims.get("kind") != "session" or not claims.get("sub"):
+                respond_error(self, 403, "a schedule is approved by a signed-in person, not an API key")
+                return
+            hit = self._visible_schedule(sid, claims)
+            if hit is None:
+                return
+            s, project = hit
+            body = self.read_json_body()
+            if body.get("confirm") != s["approval_hash"]:
+                raise ValueError("approve by sending {\"confirm\": \"<this schedule's approval_hash>\"} after reading it")
+            if s["status"] != "proposed":
+                respond_error(self, 409, f"schedule is {s['status']}")
+                return
+            now = now_fn()
+            if s["approval_hash"] != retest_schedules.approval_hash(s):
+                respond_error(self, 409, "the stored schedule no longer matches its approval hash - propose it again")
+                return
+            if retest_schedules._dt(s["timing"]["valid_until"]) <= now:
+                respond_error(self, 409, "valid_until has already passed")
+                return
+            envelope = {"scope": s["scope"], "timing": s["timing"], "hash": s["approval_hash"]}
+            repo.update_row(retest_schedules.TABLE, sid, {
+                "status": "approved", "approval": envelope, "approved_by": claims.get("sub"), "approved_at": now,
+                "approver_claims": {"org_id": claims.get("org_id"), "site_ids": list(claims.get("site_ids") or [])},
+                "updated_at": now})
+            self._event(project["id"], "active_schedule.approve", claims, {"schedule_id": sid, "approval_hash": s["approval_hash"],
+                                                                           "scope": s["scope"], "timing": s["timing"]})
+            respond_json(self, 200, retest_schedules.public(repo.get_row(retest_schedules.TABLE, sid) or s, now))
+
+        def _patch_active_schedule(self, span, claims, sid) -> None:
+            """Narrow a schedule: never wider than what was approved."""
+            if not self._require_admin(claims):
+                return
+            hit = self._visible_schedule(sid, claims)
+            if hit is None:
+                return
+            s, project = hit
+            body = self.read_json_body()
+            now = now_fn()
+            try:
+                changes = retest_schedules.patch(s, body, now)
+            except PermissionError as exc:
+                respond_error(self, 409, str(exc))
+                return
+            repo.update_row(retest_schedules.TABLE, sid, changes)
+            self._event(project["id"], "active_schedule.edit", claims, {"schedule_id": sid, "changed": sorted(body)})
+            respond_json(self, 200, retest_schedules.public(repo.get_row(retest_schedules.TABLE, sid) or s, now))
+
+        def _revoke_active_schedule(self, span, claims, sid) -> None:
+            """Stop scheduling (operator, the safe direction); a fleet the
+            schedule has running is stopped and relinquished too."""
+            hit = self._visible_schedule(sid, claims)
+            if hit is None:
+                return
+            s, project = hit
+            now = now_fn()
+            if s["status"] in ("proposed", "approved"):
+                repo.update_row(retest_schedules.TABLE, sid, {"status": "revoked", "revoked_by": claims.get("sub"), "revoked_at": now,
+                                                              "updated_at": now})
+            stopped = None
+            last = repo.get_row(fleet.TABLE, s["last_fleet_id"]) if s.get("last_fleet_id") else None
+            if last is not None and last["status"] in ("confirmed", "running"):
+                fleet.flag_stop(repo, fleet_runner.writer if fleet_runner else None, last["id"], "its schedule was revoked")
+                stopped = last["id"]
+            self._event(project["id"], "active_schedule.revoke", claims, {"schedule_id": sid, "was": s["status"],
+                                                                          "stopped_fleet_run_id": stopped})
+            respond_json(self, 200, retest_schedules.public(repo.get_row(retest_schedules.TABLE, sid) or s, now))
+
+        # ------------------------------------------ operator writes (Baler#213)
+
+        def _require_person(self, claims: dict, role: str) -> bool:
+            """A person's session at `role` or above: an API key can't make
+            an operator write, and nobody writes on someone else's behalf."""
+            rank = {"viewer": 1, "operator": 2, "admin": 3}
+            if claims.get("kind") != "session" or not claims.get("sub"):
+                respond_error(self, 403, "operator writes are made by a signed-in person, not an API key")
+                return False
+            if rank.get(str(claims.get("role")), 0) < rank[role]:
+                respond_error(self, 403, f"this write needs the {role} role")
+                return False
+            return True
+
+        def _writes_project(self, pid: str, claims: dict) -> dict | None:
+            p = self._project(pid, claims)
+            if p is None:
+                return None
+            if p.get("archived_at"):
+                respond_error(self, 409, "project is archived")
+                return None
+            if commander is None:
+                respond_error(self, 503, "no Windrow command channel is configured on this server")
+                return None
+            return p
+
+        def _list_operator_writes(self, span, claims, pid) -> None:
+            """Every operator write on the project, newest first, and with
+            ?point= Baler's priority array for that point."""
+            if self._project(pid, claims) is None:
+                return
+            scope = repo.scope_for(claims)
+            rows = [db.public_row(r) for r in reversed(repo.find_rows(operator_writes.TABLE, project_id=pid))
+                    if r["kind"] != "point" or scope.allows(r["target"])]
+            out: dict = {"writes": rows, "levels": list(operator_writes.LEVELS),
+                         "max_hold_minutes": operator_writes.MAX_HOLD.total_seconds() / 60}
+            point = parse_qs(urlparse(self.path).query).get("point", [None])[0]
+            if point:
+                if not scope.allows(point):
+                    respond_error(self, 404, "no such point")
+                    return
+                out["priority_array"] = repo.point_levels(point)
+            respond_json(self, 200, out)
+
+        def _visible_write(self, wid: str, claims: dict) -> tuple[dict, dict] | None:
+            row = repo.get_row(operator_writes.TABLE, wid)
+            project = repo.get_project(row["project_id"]) if row else None
+            if row is None or project is None or not self._visible(project, claims) or (
+                    row["kind"] == "point" and not repo.scope_for(claims).allows(row["target"])):
+                respond_error(self, 404, "no such write")
+                return None
+            return row, project
+
+        def _operator_point_write(self, span, claims, pid) -> None:
+            if not self._require_person(claims, "operator"):
+                return
+            p = self._writes_project(pid, claims)
+            if p is None:
+                return
+            body = self.read_json_body()
+            scopes, _ = self._scopes(p, claims)
+            now = now_fn()
+            req = operator_writes.point_write(body, inventory.build(repo.store, scopes), now)
+            with repo.history() as h:
+                got = h.latest([req["point"]]).get(req["point"])
+            latest = {"ts": got[0].isoformat(), "value": got[1] if isinstance(got[1], (int, float, str, bool)) else str(got[1])} if got else None
+            row = operator_writes.new_row(pid, "point", req["point"], claims, repo.user_email(claims.get("sub")), req["reason"], now,
+                                          equip_uri=req["equip_uri"], level=req["level"], value=req["value"],
+                                          expires_at=req["expires_at"])
+            try:
+                row = operator_writes.write_point(repo, commander, row, req["replace"], now, latest)
+            except operator_writes.Conflict as exc:
+                respond_error(self, 409, str(exc))
+                return
+            except Exception as exc:  # noqa: BLE001 - the site refused or didn't answer; recorded on the row
+                self._event(pid, "operator_write.failed", claims, {"write_id": row["id"], "point": req["point"], "error": str(exc)[:300]})
+                respond_error(self, 502, f"the write wasn't applied: {exc}")
+                return
+            self._event(pid, "operator_write.point", claims, {"write_id": row["id"], "point": req["point"], "value": req["value"],
+                                                               "level": req["level"], "reason": req["reason"],
+                                                               "expires_at": req["expires_at"].isoformat()})
+            respond_json(self, 201, db.public_row(row))
+
+        def _relinquish_operator_write(self, span, claims, wid) -> None:
+            if not self._require_person(claims, "operator"):
+                return
+            hit = self._visible_write(wid, claims)
+            if hit is None:
+                return
+            row, project = hit
+            if row["kind"] != "point":
+                respond_error(self, 400, "a schedule or calendar write is reverted: POST /writes/{id}/revert")
+                return
+            if row["status"] != operator_writes.ACTIVE:
+                respond_error(self, 409, f"write is {row['status']}")
+                return
+            if commander is None:
+                respond_error(self, 503, "no Windrow command channel is configured on this server")
+                return
+            why = operator_writes.reason(self.read_json_body())
+            try:
+                row = operator_writes.relinquish(repo, commander, row, now_fn(), claims.get("sub"), why)
+            except Exception as exc:  # noqa: BLE001 - logged on the row; the sweeper retries at expiry
+                respond_error(self, 502, f"the relinquish wasn't applied (the sweeper retries): {exc}")
+                return
+            self._event(project["id"], "operator_write.relinquished", claims, {"write_id": wid, "reason": why})
+            respond_json(self, 200, db.public_row(row))
+
+        def _schedule_targets(self, span, claims, pid) -> None:
+            """The schedule and calendar objects on the project's
+            connections, read live (?site=&instance=)."""
+            p = self._writes_project(pid, claims)
+            if p is None:
+                return
+            q = parse_qs(urlparse(self.path).query)
+            site, instance = q.get("site", [None])[0], q.get("instance", [None])[0]
+            if not site or not instance:
+                raise ValueError("site and instance name the Windrow instance")
+            scopes, _ = self._scopes(p, claims)
+            out = []
+            for c in commander.command(site, instance, "list_connections", {}, timeout=operator_writes.COMMAND_TIMEOUT_S) or []:
+                if not isinstance(c, dict) or not all(s.allows(f"urn:point:{c.get('topic_prefix')}/x") for s in scopes):
+                    continue
+                snap = commander.command(site, instance, operator_writes.READ_SCHEDULES, {"id": c["id"]},
+                                         timeout=operator_writes.COMMAND_TIMEOUT_S) or {}
+                out.append({"connection_id": c["id"], "topic_prefix": c.get("topic_prefix"),
+                            "schedules": snap.get("schedules") or [], "calendars": snap.get("calendars") or []})
+            respond_json(self, 200, out)
+
+        def _operator_schedule_write(self, span, claims, pid) -> None:
+            if not self._require_person(claims, "admin"):
+                return
+            p = self._writes_project(pid, claims)
+            if p is None:
+                return
+            now = now_fn()
+            req = operator_writes.schedule_write(self.read_json_body(), now)
+            scopes, _ = self._scopes(p, claims)
+            conn = operator_writes.connection(commander, req["site"], req["instance"], req["connection_id"])
+            if conn is None or not all(s.allows(f"urn:point:{conn.get('topic_prefix')}/x") for s in scopes):
+                respond_error(self, 404, "no such connection in this project")
+                return
+            target = f"{req['site']}/{req['instance']}/{req['connection_id']}/{req['object']}"
+            row = operator_writes.new_row(pid, req["kind"], target, claims, repo.user_email(claims.get("sub")), req["reason"], now,
+                                          site=req["site"], instance=req["instance"], connection_id=req["connection_id"],
+                                          value={"kind": req["kind"], "object": req["object"], "fields": req["fields"]},
+                                          expires_at=req["revert_at"])
+            try:
+                row = operator_writes.write_schedule(repo, commander, row, now)
+            except ValueError:  # the object isn't on that connection: a 400, nothing sent
+                raise
+            except Exception as exc:  # noqa: BLE001 - recorded on the row
+                self._event(pid, "operator_write.failed", claims, {"write_id": row["id"], "target": target, "error": str(exc)[:300]})
+                respond_error(self, 502, f"the write wasn't applied: {exc}")
+                return
+            self._event(pid, f"operator_write.{req['kind']}", claims,
+                        {"write_id": row["id"], "target": target, "fields": sorted(req["fields"]), "reason": req["reason"],
+                         "revert_at": req["revert_at"].isoformat() if req["revert_at"] else None, "permanent": req["permanent"]})
+            respond_json(self, 201, db.public_row(row))
+
+        def _revert_operator_write(self, span, claims, wid) -> None:
+            if not self._require_person(claims, "admin"):
+                return
+            hit = self._visible_write(wid, claims)
+            if hit is None:
+                return
+            row, project = hit
+            if row["kind"] == "point":
+                respond_error(self, 400, "a point write is relinquished: POST /writes/{id}/relinquish")
+                return
+            if row["status"] not in (operator_writes.ACTIVE, "permanent"):
+                respond_error(self, 409, f"write is {row['status']}")
+                return
+            if commander is None:
+                respond_error(self, 503, "no Windrow command channel is configured on this server")
+                return
+            why = operator_writes.reason(self.read_json_body())
+            try:
+                row = operator_writes.revert_schedule(repo, commander, row, now_fn(), claims.get("sub"), why)
+            except Exception as exc:  # noqa: BLE001 - logged on the row
+                respond_error(self, 502, f"the revert wasn't applied: {exc}")
+                return
+            self._event(project["id"], f"operator_write.{row['status']}", claims, {"write_id": wid, "reason": why})
+            respond_json(self, 200, db.public_row(row))
+
+        # ------------------------------------------- override tests (Baler#212)
+
+        def _project_tz(self, p: dict):
+            cfg = overrides.effective((p.get("settings") or {}).get("overrides"))
+            return ZoneInfo(cfg["tz"]) if cfg.get("tz") else ZoneInfo("UTC"), cfg
+
+        def _list_schedules(self, span, claims, pid) -> None:
+            """The BACnet schedules and calendars last read from the
+            project's connections, each with what it commands now."""
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            scopes, _ = self._scopes(p, claims)
+            tz, cfg = self._project_tz(p)
+            now = now_fn()
+            rows = [r for r in repo.list_schedules() if all(s.allows(f"urn:point:{r['topic_prefix']}/x") for s in scopes)]
+            cals: dict[tuple, dict] = {}
+            for r in rows:
+                if r["kind"] == "calendar":
+                    cals.setdefault((r["site"], r["instance"], r["connection_id"]), {})[r["object"]] = r["body"]
+            out = []
+            for r in rows:
+                item = {k: r[k] for k in ("id", "kind", "object", "name", "topic_prefix", "points")}
+                item["read_at"] = db._iso(r["read_at"])
+                item["body"] = r["body"]
+                if r["kind"] == "schedule":
+                    got = sched_eval.value_at(r["body"], now, tz, cals.get((r["site"], r["instance"], r["connection_id"])))
+                    item["now"] = {**got, "unoccupied": sched_eval.is_unoccupied(got["value"], cfg["unoccupied_values"])}
+                out.append(item)
+            respond_json(self, 200, {"tz": str(tz), "schedules": out})
+
+        def _refresh_schedules(self, span, claims, pid) -> None:
+            """Read schedules and calendars from Windrow now (reads only -
+            nothing is written to a controller)."""
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            if commander is None:
+                respond_error(self, 503, "no Windrow command channel is configured on this server")
+                return
+            scopes, _ = self._scopes(p, claims)
+            got = overrides.refresh(repo, commander, scopes, now_fn())
+            self._event(pid, "schedules.refresh", claims, {k: got[k] for k in ("schedules", "calendars")}
+                        | {"errors": got["errors"][:10]})
+            respond_json(self, 200, got)
 
         # ------------------------------------------------------- agent (Cx 10)
 
@@ -1999,11 +2708,31 @@ def main() -> None:
 
     writer = active.Writer(repo, point_write.Commander())
     executor = active.Executor(repo, writer, clock)
+    fleet_runner = fleet.FleetRunner(repo, fleet.ChildExecutor(repo, writer, clock), clock)
+    # Fleets (Baler#275 d) a restart interrupted: failed, their members failed,
+    # and every level they held relinquished - from the persisted fleet state.
+    fleet.recover(repo, writer, now)
     for r in repo.find_rows("cx_active_runs", status="running") + repo.find_rows("cx_active_runs", status="confirmed"):
         repo.update_row("cx_active_runs", r["id"], {"status": "failed", "error": db.INTERRUPTED, "finished_at": now})
     active.sweep(repo, writer, now)
-    runner.Scheduler(repo, worker, clock, extra=[lambda t: active.sweep(repo, writer, t)])
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(repo, worker=worker, executor=executor))
+    # Operator writes (Baler#213): relinquish expired point writes and revert
+    # schedule writes on time - now (whatever a restart interrupted) and
+    # every tick.
+    operator_writes.sweep(repo, writer.commander, now)
+    # Override tests (Baler#212): re-read schedules and priority arrays for
+    # projects that have them enabled, every settings.overrides.refresh_minutes.
+    refresher = overrides.Refresher(repo, writer.commander,
+                                    lambda p: runner.project_scopes(repo, p, {"org_id": p["org_id"], "site_ids": []})[0])
+    runner.Scheduler(repo, worker, clock, extra=[lambda t: active.sweep(repo, writer, t),
+                                                 lambda t: fleet.sweep(repo, writer, t),
+                                                 # scheduled retests (Baler#275 e): only approved, only with the switch on
+                                                 retest_schedules.Ticker(repo, fleet_runner),
+                                                 lambda t: operator_writes.sweep(repo, writer.commander, t),
+                                                 refresher.tick,
+                                                 # continuous compliance (Baler#207): adopted packs on their schedule
+                                                 lambda t: compliance.tick(repo, worker, t)])
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(repo, worker=worker, executor=executor,
+                                                                      commander=writer.commander, fleet_runner=fleet_runner))
     print(f"commissioning API listening on {args.host}:{args.port}")
     server.serve_forever()
 

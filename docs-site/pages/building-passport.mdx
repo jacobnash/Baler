@@ -1,0 +1,69 @@
+---
+title: Building passport
+---
+
+> When the building is sold, show when the pumps were changed, that they were
+> replaced with a different brand, what the chiller has lost in efficiency
+> since it was installed, and that replacing it would save $X a year.
+
+The building passport is the handover and sale package: a readable report
+over the whole record, plus the [building export](/building-export)
+(Baler#219, epic #221 §11). ASHRAE Std 202 already names the handover
+deliverables (systems manual, issues log, final and end-of-warranty Cx
+reports, training records). The passport adds everything since.
+
+```bash
+curl $BALER/cx/projects/$P/passport                  # JSON
+curl "$BALER/cx/projects/$P/passport?format=html"    # printable
+```
+
+## What it holds
+
+Per **position** (the equipment record the points hang on):
+
+| Part | From |
+|---|---|
+| Start-up baseline vs today | the first completed start-up or power-on test the equipment was judged in, and its latest test of any kind (Cx 6) |
+| Issues | open, risk-accepted (with the reason) and closed (Cx 4) |
+| Open faults | on the position's points |
+| Efficiency | performance baselines and their model quality (#215) |
+| Replace vs keep | savings cases with every assumption and its source (#216) |
+| Install/remove history, warranties, deferred maintenance | the asset registry (#197), warranties (#198) and deferred maintenance (#200), when they're in the record |
+
+Then **compliance history per space** (#209 spaces, #207 continuous
+compliance): pass/fail/inconclusive counts, the last failure, and the pack
+versions each space was judged by. Then **documents** (Cx 7 spec documents
+by sha256, and the document store's, #201) and the **Std 202
+deliverables**, each marked in Baler or not recorded.
+
+## It says what it doesn't hold
+
+A passport that silently leaves things out is worse than none. Every part
+this install doesn't hold yet is listed under `not_in_this_record`, with
+the issue that builds it, and at the top of the printable page. Parts in
+tables a version may not have (baselines, savings cases, compliance logs)
+are read when the table is there. The asset registry, warranties and
+deferred maintenance answer through `passport.SECTION_SOURCES` once they
+land. The passport builds no model of its own for them: positions and
+assets stay separate, and asset history hangs off the position.
+
+It is read in the project's own scope, like the Cx report, and never names
+equipment the caller can't see. Each generation is a project event
+(`passport.generate`).
+
+## In the building export
+
+`python -m baler.export` now also writes the building-record tables as JSON
+Lines when the install has them: spaces and adjacency, adopted pack versions,
+compliance runs and log, performance baselines, savings cases, schedules,
+activities, evidence links and sign-offs. Missing tables are skipped. Pack
+versions are org-level, so only the versions the exported projects adopted
+are included.
+
+## Not yet
+
+- A PDF rendering (print the HTML page today).
+- A capital plan rolled up from replace-vs-keep cases and deferred
+  maintenance (FCI).
+- The passport as a file inside the export (today the export carries the
+  data and the API renders the report).

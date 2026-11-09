@@ -231,3 +231,62 @@ def test_a_pre_233_listener_summarizes_to_nothing():
 def test_evaluate_fails_on_listener_restarts_and_tags_storm_lag(over, needle):
     status, reasons = ladder.evaluate(_good_step(**over))
     assert status == "fail" and any(needle in r for r in reasons), reasons
+
+
+def test_batch_envelope_is_windrows_bytes():
+    # Windrow's mqtt_sink.batch_payload for one poll tick (Baler#234)
+    assert common.batch_envelope(1.5, {"sat": 71.5, "fan": True}) == b'{"ts": 1.5, "points": {"sat": 71.5, "fan": true}}'
+
+
+def test_a_generator_batch_stores_the_same_rows_as_per_point(monkeypatch):
+    """--envelope batch: the same equip tick, as one message, lands as the
+    same (topic, value, ts) rows the per-point messages do (Baler#234)."""
+    shape = common.Shape(10)
+    prefix = shape.equip_prefix(0)
+    pts = shape.equip_points(0)
+    values = {label: common.value_at(t[4], idx, 3) for idx, label, t in pts}
+    per_point, batched = [], []
+    monkeypatch.setattr(mqtt_listener, "ingest_reading",
+                        lambda store, conn, topic, value, ts, quality=None: per_point.append((topic, value, ts)))
+    monkeypatch.setattr(mqtt_listener, "ingest_readings",
+                        lambda store, conn, rows: batched.extend((r[0], r[1], r[2]) for r in rows))
+    on_message = mqtt_listener.make_on_message(store=None, ts_conn=None)
+    for label, v in values.items():
+        on_message(None, None, SimpleNamespace(topic=f"{prefix}/{label}", payload=common.envelope(label, v, 9.0)))
+    on_message(None, None, SimpleNamespace(topic=f"{prefix}/batch", payload=common.batch_envelope(9.0, values)))
+    assert batched == [(t, mqtt_listener.binary_state(v), ts) for t, v, ts in per_point] and len(batched) == 10
+
+
+def test_loadgen_counts_a_batch_puback_as_its_readings():
+    acks = loadgen.Acks()
+    acks.sent(1, 100, readings=10)
+    acks.on_publish(None, None, 1)
+    acks.on_publish(None, None, 2)  # acked before sent() returned
+    acks.sent(2, 101, readings=5)
+    assert acks.acked == 15 and acks.take_buckets() == {100: 10, 101: 5}
+
+
+def test_ladder_reads_baler_metrics_and_checks_them_against_its_canaries():
+    """#235: the ladder parses what ops_metrics renders, and records whether
+    Baler's own lag and drop numbers agree with its canaries and $SYS."""
+    from datetime import datetime, timedelta, timezone
+
+    from baler import ops_metrics
+
+    now = datetime(2026, 11, 9, tzinfo=timezone.utc)
+    text = ops_metrics.render({"now": now, "newest_reading_at": now - timedelta(seconds=3),
+                               "details": {"mqtt_listener": {"queue": 7, "oldest_age_s": 0.5,
+                                                             "broker_dropped_total": 10}}})
+    m = ladder.parse_prom(text)
+    picked = {k: m.get(name) for k, name in ladder.OPS_METRICS.items()}
+    assert picked["lag_s"] == 3.0 and picked["queue"] == 7 and picked["broker_dropped_total"] == 10
+
+    samples = [{"ops_metrics": {"lag_s": 2.0 + i % 3, "queue": i, "queue_age_s": 0.1, "broker_dropped_total": 10 + (i > 5)}}
+               for i in range(10)]
+    samples.append({"ops_metrics": {"error": "HTTPError 404"}})
+    out = ladder.summarize_ops_metrics(samples, {"p95_s": 3.5}, sys_dropped=1)
+    assert out["samples"] == 10 and out["errors"] == 1 and out["queue_max"] == 9
+    assert out["broker_dropped_delta"] == 1 and out["agrees"] == {"lag": True, "drops": True}
+    off = ladder.summarize_ops_metrics(samples, {"p95_s": 40.0}, sys_dropped=0)
+    assert off["agrees"] == {"lag": False, "drops": False}
+    assert ladder.summarize_ops_metrics([], {}, None) == {"samples": 0, "errors": 0}

@@ -44,9 +44,11 @@ paths:
         `mode` is `"cur"` (evaluated in real time against live MQTT
         readings) or `"his"` (evaluated periodically against
         `point_history`). `type` is `"range"` (Cur-only), or `"stuck"`/
-        `"stale"` (His-only). Extra fields depend on `type`: `range` needs
+        `"stale"`/`"hunting"` (His-only). Extra fields depend on `type`: `range` needs
         `min`/`max`; `stuck` needs `stuck_seconds`; `stale` needs
-        `max_age_seconds`.
+        `max_age_seconds`; `hunting` needs `window_seconds` and
+        `max_reversals_per_hour` (optional `deadband`), and judges only
+        points sampled every 60 s or faster.
       requestBody:
         required: true
         content:
@@ -63,6 +65,9 @@ paths:
               stale:
                 summary: Batch missing-heartbeat check
                 value: { "name": "zone-temp-stale", "mode": "his", "type": "stale", "applies_to": { "topic_glob": "fbf/mock-ahu-1/*" }, "max_age_seconds": 900 }
+              hunting:
+                summary: Oscillation (hunting) of valve commands over raw samples
+                value: { "name": "chw-valve-hunting", "mode": "his", "type": "hunting", "applies_to": { "brick_class": "Valve_Command" }, "window_seconds": 3600, "max_reversals_per_hour": 12, "deadband": 2.0 }
               brick_class:
                 summary: Ontology-scoped check - every point of this Brick class, any building/naming scheme
                 value: { "name": "zone-temp-out-of-range-any-building", "mode": "cur", "type": "range", "applies_to": { "brick_class": "Zone_Air_Temperature_Sensor" }, "min": 60.0, "max": 80.0 }
@@ -351,7 +356,7 @@ components:
           enum: [cur, his]
         type:
           type: string
-          enum: [range, stuck, stale]
+          enum: [range, stuck, stale, hunting]
         applies_to:
           type: object
           description: |
@@ -383,6 +388,15 @@ components:
         max_age_seconds:
           type: number
           description: stale only.
+        window_seconds:
+          type: number
+          description: hunting only. The window the reversals are counted over.
+        max_reversals_per_hour:
+          type: number
+          description: hunting only. More direction changes per hour than this is hunting.
+        deadband:
+          type: number
+          description: hunting only. Moves no larger than this don't count as a reversal (noise). Default 0.
         severity:
           type: string
           description: >-

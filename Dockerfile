@@ -6,7 +6,8 @@
 # source in a throwaway Rust stage. bookworm here so the wheel's glibc
 # floor is no newer than the runtime image's.
 FROM rust:1-slim-bookworm AS openhay
-ARG OPENHAY_REF=main
+# Pinned to an openhay commit; bump together with pyproject.toml's haystack extra.
+ARG OPENHAY_REF=dd6fe357cba3e1de694dec3134f2c569ebaf9884
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip \
     && pip3 install --break-system-packages --no-cache-dir "maturin>=1.5,<2"
 # BuildKit resolves the ref to a commit and caches this layer by that commit:

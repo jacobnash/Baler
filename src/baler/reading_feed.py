@@ -279,9 +279,47 @@ def topic_of(point_uri: str) -> str:
     return point_uri.removeprefix(URI_PREFIX)
 
 
+# What a missed reading means for each consumer (#337), and whether a miss
+# is a real loss (`required`: the soak and ladder verdicts fail on it) or a
+# gap the consumer covers another way (reported, with this meaning, but not
+# a failure). A consumer not listed is treated as required.
+CONSUMER_RULES: dict[str, dict] = {
+    "fault_detector": {
+        "required": True,
+        "miss_means": "Cur-mode rules and controller alarms never evaluated these readings: faults they would "
+                      "have opened or cleared were not (His-mode rules still see them in point_history)",
+    },
+    "derivation_engine": {
+        "required": True,
+        "miss_means": "derived points were not recomputed for the points in these readings until those points "
+                      "report again or the periodic sweep reaches them",
+    },
+    "tag_ingest": {
+        "required": True,
+        "miss_means": "tag and equip messages in these batches were never applied to the model",
+    },
+    # baler.quality's sweeper judges every reading from point_history in its
+    # window pass; it reads the feed only to find rows committed after the
+    # pass that covered their ts (late rows). Missing a batch can't leave an
+    # on-time reading unjudged, only a late one in that batch.
+    "quality": {
+        "required": False,
+        "miss_means": "the late-row watcher didn't see these batches: every reading that arrived on time was "
+                      "still judged by the window pass (it reads point_history, not the feed), but readings in "
+                      "them that arrived after the pass covering their timestamp were not checked for range, "
+                      "spike or unit flags. No reading is lost; some late readings may carry no quality flag",
+    },
+}
+
+
+def consumer_rule(name: str) -> dict:
+    return CONSUMER_RULES.get(name, {"required": True, "miss_means": "readings this consumer never processed"})
+
+
 def consumer_status(conn) -> dict[str, dict]:
     """Every consumer's offset, lag and misses, for /ops/status and the
-    scale ladder. {} before the feed exists."""
+    scale ladder, each with what a miss means for it (CONSUMER_RULES).
+    {} before the feed exists."""
     try:
         rows = conn.execute(
             """
@@ -297,5 +335,6 @@ def consumer_status(conn) -> dict[str, dict]:
     return {name: {"seq": seq, "missed_readings": mr, "missed_batches": mb,
                    "last_missed_at": lm.isoformat() if lm else None, "updated_at": up.isoformat(),
                    "lag_batches": int(lb), "lag_readings": int(lr),
-                   "lag_s": round((now - oldest).total_seconds(), 1) if oldest else 0.0}
+                   "lag_s": round((now - oldest).total_seconds(), 1) if oldest else 0.0,
+                   "miss_required": consumer_rule(name)["required"], "miss_means": consumer_rule(name)["miss_means"]}
             for name, seq, mr, mb, lm, up, lb, lr, oldest in rows}

@@ -413,3 +413,148 @@ def test_soak_has_the_late_pacing_options():
     soak.add_parser(sub, lambda p: None)
     a = ap.parse_args(["soak", "--points", "100", "--late-rate", "50", "--late-window", "100"])
     assert (a.late_rate, a.late_window, a.late_ack_timeout) == (50.0, 100, 60.0)
+
+
+# --- #337: the verdict on compression cycles, disk vs stats, feed misses -------
+
+
+def _nash_srv_shaped(cycles=True):
+    """nash-srv's 6 h soak (#337) in outline: 1 h chunks, compress_after 3 h,
+    the policy every 30 min, the steady phase measured from the soak's start
+    although the stack had been ingesting before it. The first chunk
+    compressed at t=12,000 s; late rounds every 1,800 s from 12,627 s; the
+    policy recompressed the chunks they touched."""
+    r = _result(n=720, every=30.0)
+    r["settings"] = {"chunk_interval_s": 3600.0, "compress_after_s": 10800.0, "schedule_s": 1800.0}
+    r["runs"] = []
+    for s in r["samples"]:
+        s["compressed_now"], s["recompressed_now"] = [], []
+    if cycles:
+        by_t = {s["t"]: s for s in r["samples"]}
+        for t in (12000.0, 15600.0, 19200.0):
+            by_t[t]["compressed_now"] = [f"c{int(t)}"]
+        for t in (13500.0, 17100.0, 20700.0):
+            by_t[t]["recompressed_now"] = [f"c{int(t)}"]
+    return r
+
+
+def test_the_warm_up_starts_where_compression_did_not_at_a_formula():
+    """The verdict said "1783 s steady after a 19800 s warm-up, 0 compression
+    cycle(s)" for a soak with 11 compression runs (#337)."""
+    r = _nash_srv_shaped()
+    _verdict(r)
+    s = r["summary"]
+    assert (s["warm_s"], s["warm_from"]) == (12000.0, "the first chunk compressed")
+    assert s["steady_s"] == 21600.0 - 12000.0
+    assert s["compression_cycles_steady"] == s["compression_cycles"] == 6 and s["recompressions"] == 3
+    assert not any("too short" in x for x in r.get("reasons", []) + soak.evaluate_soak(r)[1])
+
+
+def test_a_soak_with_too_few_cycles_or_none_is_inconclusive():
+    r = _nash_srv_shaped()
+    for s in r["samples"]:
+        s["recompressed_now"] = []
+    status, reasons = _verdict(r)  # 3 cycles: fewer than MIN_CYCLES
+    assert status == "inconclusive" and "3 compression cycle(s)" in reasons[0] and f"{soak.MIN_CYCLES} cycles" in reasons[0]
+    r = _nash_srv_shaped(cycles=False)
+    status, reasons = _verdict(r)
+    assert status == "inconclusive" and "no chunk compressed" in reasons[0]
+    assert r["summary"]["warm_s"] == 10800 + 3600 + 1800 + 3600
+
+
+def test_runs_count_as_cycles_in_a_result_from_before_the_samples_said():
+    r = _result()  # no compressed_now in its samples
+    _verdict(r)
+    assert r["summary"]["warm_s"] == AFTER + CHUNK  # the first run that compressed a chunk
+    assert r["summary"]["compression_cycles_steady"] == len(r["runs"])
+
+
+def _with_compressed(r, chunks):
+    r["compression_end"] = {"compressed": chunks, "failing": []}
+    return r
+
+
+def test_compressed_chunks_must_come_back_near_their_stats_size():
+    mb = 1_000_000
+    ok = _with_compressed(_result(), {"a": {"disk": 600 * mb, "stats": 565 * mb, "partial": False},
+                                      "b": {"disk": 12_000 * mb, "stats": 194 * mb, "partial": True}})
+    status, reasons = _verdict(ok)
+    assert status == "pass", reasons  # b still has late rows waiting: not judged yet
+    assert ok["summary"]["settled_on_disk_vs_stats_max"]["ratio"] == 1.06
+    assert ok["summary"]["compressed_on_disk_vs_stats"] == round(12_600 / 759, 2)
+    assert ok["summary"]["partial_chunks_end"] == 1
+    bad = _with_compressed(_result(), {"a": {"disk": 12_000 * mb, "stats": 565 * mb, "partial": False}})
+    status, reasons = _verdict(bad)
+    assert status == "fail" and any("12000 MB on disk vs 565 MB in chunk stats" in x for x in reasons), reasons
+
+
+def test_a_failed_policy_run_retried_by_the_keeper_passes_and_shows_its_cause():
+    r = _result()
+    r["runs"][2]["status"] = "Failed"
+    r["keeper"] = [
+        {"t": 1300.0, "at": 0.0, "chunk": "point_history", "action": "policy", "ok": False, "sqlstate": "22000",
+         "message": "columnstore policy failure Failed to convert '1' chunks to columnstore.", "detail": None,
+         "duration_s": None},
+        {"t": 1310.0, "at": 0.0, "chunk": "_hyper_1_9_chunk", "action": "compress", "ok": False, "sqlstate": "55P03",
+         "message": "canceling statement due to lock timeout", "detail": None, "duration_s": 5.0},
+        {"t": 1620.0, "at": 0.0, "chunk": "_hyper_1_9_chunk", "action": "compress", "ok": True, "sqlstate": None,
+         "message": None, "detail": None, "duration_s": 3.0}]
+    r["compression_end"] = {"compressed": {}, "failing": []}
+    status, reasons = _verdict(r)
+    assert status == "pass", reasons
+    s = r["summary"]
+    assert s["keeper"] == {"compress": {"ok": 1, "failed": 1}, "policy": {"ok": 0, "failed": 1}}
+    assert [e["sqlstate"] for e in s["keeper_errors"]] == ["22000", "55P03"]
+    # still failing at the end: a failure, with the real error
+    r["compression_end"]["failing"] = [{"chunk": "_hyper_1_9_chunk", "action": "compress", "sqlstate": "55P03",
+                                        "message": "canceling statement due to lock timeout", "detail": None}]
+    status, reasons = _verdict(r)
+    assert status == "fail" and any("_hyper_1_9_chunk still failing" in x and "lock timeout" in x for x in reasons)
+
+
+def _feeds(r, missed):
+    for i, s in enumerate(r["samples"]):
+        last = i == len(r["samples"]) - 1
+        s["feed"] = {name: {"missed_readings": n if last else 0, "missed_batches": 1 if last and n else 0,
+                            "lag_s": 1.0, "lag_readings": 0} for name, n in missed.items()}
+    return r
+
+
+def test_a_miss_fails_only_at_a_consumer_that_needs_every_reading():
+    """quality's window pass reads point_history; its feed only finds late
+    rows, so its miss is reported under that rule, not failed on (#337)."""
+    r = _feeds(_result(), {"fault_detector": 0, "derivation_engine": 0, "tag_ingest": 0, "quality": 3_007_304})
+    status, reasons = _verdict(r)
+    assert status == "pass", reasons
+    q = r["summary"]["feed_misses"]["quality"]
+    assert (q["missed_readings"], q["required"]) == (3_007_304, False)
+    r = _feeds(_result(), {"fault_detector": 0, "derivation_engine": 12, "quality": 0})
+    status, reasons = _verdict(r)
+    assert status == "fail" and any("derivation_engine missed 12 readings" in x for x in reasons)
+
+
+def test_the_harness_and_baler_agree_on_which_misses_are_real():
+    import ladder
+
+    from baler import reading_feed
+
+    assert ladder.FEED_MISS_REQUIRED == {k: v["required"] for k, v in reading_feed.CONSUMER_RULES.items()}
+    step = {"rules": {"quality": {"feed": {"missed_readings_delta": 5}},
+                      "fault_detector": {"feed": {"missed_readings_delta": 2}}}}
+    reasons = ladder.evaluate(step)[1]
+    assert any(x.startswith("fault_detector missed 2") for x in reasons)
+    assert not any(x.startswith("quality") for x in reasons)
+
+
+def test_checkpoints_timed_vs_requested():
+    a = {"timed": 3, "requested": 10, "buffers": 100, "write_ms": 1, "sync_ms": 1}
+    b = {"timed": 3, "requested": 410, "buffers": 900, "write_ms": 2, "sync_ms": 2}
+    assert soak.checkpoint_delta(b, a) == {**b, "timed_delta": 0, "requested_delta": 400, "buffers_delta": 800}
+    assert soak.checkpoint_delta(a, None) == a
+    r = _result()
+    for i, s in enumerate(r["samples"]):
+        s["checkpoints"] = {"timed": 0, "requested": i * 3, "buffers": 0, "write_ms": 0, "sync_ms": 0}
+    _verdict(r)
+    ck = r["summary"]["checkpoints"]
+    assert (ck["timed"], ck["requested"], ck["requested_share"]) == (0, 3 * (len(r["samples"]) - 1), 1.0)
+    assert ck["seconds_apart"] == 5.0  # every 15 s sample saw 3
