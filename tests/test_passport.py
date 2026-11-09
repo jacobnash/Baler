@@ -54,7 +54,7 @@ def test_passport_per_position(api):
 
 
 def test_sections_come_from_the_modules_that_own_them(api):
-    base, repo = api
+    base, _repo = api
     pid = hx.project(base)["id"]
     passport.SECTION_SOURCES["assets"] = lambda repo, project, uri: (
         [{"event": "install", "make": "WEG", "at": "2031-07-14", "reason": "bearing failure"}] if uri == fx.AHU else [])
