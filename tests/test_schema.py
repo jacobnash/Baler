@@ -45,6 +45,7 @@ RELEASED = {
     "v0025_schedules.py": "0bba79126def2795d1a8e51e138a9a647d48d7376a9dcfb2c001f24fd1697f04",
     "v0026_schedule_evidence.py": "5233dcc0908bf5665b33c8e41807183feba767b8b82bb6eac68845f6915e19c7",
     "v0027_history_compression.py": "49250a8fe9a521ecc39a2608eea5fa3126290b4b21bec55f184ef71d9af3fe5d",
+    "v0028_pack_extraction_rights.py": "d5c5389d94818917e22f20ee6fdc3fd33ccd2594265418bee51716a4e7b354b4",
 }
 
 
