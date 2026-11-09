@@ -58,6 +58,7 @@ supported, never a silent wrong answer.
 
 from __future__ import annotations
 
+import bisect
 import json
 import os
 import re
@@ -82,6 +83,10 @@ DEFAULT_LIMIT = 10_000
 # Values a /his response may carry in total, raw or rolled up (#33); a
 # request can ask for another budget, or 0 for none.
 DEFAULT_MAX_SAMPLES = 200_000
+# Series a /his response carries at most (Baler#244): readAll(equip) at 100k
+# points was 42 MB and 15 s, 63% of it describing points. Pages follow in
+# point-id order (run_query's `after`); 0 turns the bound off.
+DEFAULT_SERIES_LIMIT = int(os.environ.get("BALER_HIS_SERIES_LIMIT") or "1000")
 
 # Auto-downsampling (run_query's max_samples, the chart page's /his): the
 # bucket widths it picks from, and the narrowest worth folding - below this
@@ -1159,6 +1164,10 @@ def _any_flag(expr: str) -> bool:
     return "F" in text and bool(_ANY_FLAG.fullmatch(text))
 
 
+# Nested Dict values' nodes (ingest._dict_triples; store.DICT_NS).
+DICT_NS = "urn:baler:dict:"
+
+
 def compile_filter(node, graph: GraphVocab | None = None, scope=None) -> str:
     """One SELECT over every subject in the graph. Each leaf test of the
     filter is a subject-set (see _Compiler), left-joined once; the whole
@@ -1181,8 +1190,12 @@ def compile_filter(node, graph: GraphVocab | None = None, scope=None) -> str:
         f"  OPTIONAL {{ {{ SELECT DISTINCT ?s (true AS ?{m}) WHERE {{ {pattern} }} }} }}"
         for m, pattern in compiler.flags
     )
-    # nested Dict nodes (urn:baler:dict:) are values, never records
-    record = "FILTER(isIRI(?s) && !STRSTARTS(STR(?s), \"urn:baler:dict:\"))"
+    # Records are IRIs, and not nested Dict nodes (urn:baler:dict:, values,
+    # never records). match_entities drops the rest, not this query: per
+    # candidate, STR(?s) cost Oxigraph a dictionary lookup and even isIRI(?s)
+    # a term decode - 1.1 s of a 1.2 s `point` match at 100k points, against
+    # ~0.1 s for the match itself (Baler#244). Each ?s is judged on its own,
+    # so dropping them after the fact is the same answer.
     if compiler.flags and _any_flag(leaf_logic):
         # Matches exactly when ?s is in some leaf set (`point`, `equip`,
         # `ahu or vav`): the union of the sets is the answer, so neither
@@ -1198,7 +1211,7 @@ def compile_filter(node, graph: GraphVocab | None = None, scope=None) -> str:
         return (
             PREFIXES
             + f"SELECT ?s WHERE {{\n  {{ SELECT DISTINCT ?s WHERE {{ {union} }} }}\n"
-            + f"  FILTER(isIRI(?s)) FILTER(!STRSTARTS(STR(?s), \"urn:baler:dict:\")){subject}{scoped}\n}}"
+            + f"  {subject}{scoped}\n}}"
         )
     if compiler.flags and _false_without_flags(leaf_logic):
         # Nothing outside every leaf set can match, so the candidates are
@@ -1207,9 +1220,9 @@ def compile_filter(node, graph: GraphVocab | None = None, scope=None) -> str:
         # read, even `site` (Baler#107). The ?s ?cp ?co join keeps "is a
         # subject", as the full scan had it (a path can reach a bare object).
         union = " UNION ".join(f"{{ {pattern} }}" for _, pattern in compiler.flags)
-        candidates = f"  {{ SELECT DISTINCT ?s WHERE {{ {{ SELECT DISTINCT ?s WHERE {{ {union} }} }} ?s ?cp ?co . {record} }} }}\n"
+        candidates = f"  {{ SELECT DISTINCT ?s WHERE {{ {{ SELECT DISTINCT ?s WHERE {{ {union} }} }} ?s ?cp ?co . }} }}\n"
     else:
-        candidates = f"  {{ SELECT DISTINCT ?s WHERE {{ ?s ?p ?o . {record} }} }}\n"
+        candidates = "  { SELECT DISTINCT ?s WHERE { ?s ?p ?o . } }\n"
     return (
         PREFIXES
         + "SELECT DISTINCT ?s WHERE {\n"
@@ -1416,8 +1429,12 @@ def match_entities(store, node, graph: GraphVocab | None = None, scope=None) -> 
     after the fact is the same result as excluding them as candidates,
     minus a per-candidate NOT EXISTS that cost ~0.4s per query."""
     graph = graph if graph is not None else graph_vocab(store)
-    rows = store.query(compile_filter(node, graph, scope))
-    return sorted(uri for uri in (str(row.s) for row in rows) if not graph.is_schema(uri))
+    query = compile_filter(node, graph, scope)
+    if hasattr(store, "iter_tsv"):  # TSV terms: an IRI is `<...>`, a blank node `_:b`, a literal `"..."`
+        found = (t[1:-1] for t in (row[0] for row in store.iter_tsv(query)) if t[:1] == "<")
+    else:  # rdflib terms
+        found = (str(t) for t in (row.s for row in store.query(query)) if type(t).__name__ == "URIRef")
+    return sorted(uri for uri in found if not uri.startswith(DICT_NS) and not graph.is_schema(uri))
 
 
 def visible_uris(store, uris: list[str], scope) -> list[str]:
@@ -1441,7 +1458,7 @@ def expand_to_points(store, entity_uris: list[str]) -> list[str]:
         return []
     points = {uri for uri in entity_uris if uri.startswith("urn:point:")}
     values = " ".join(f"<{_uri(u)}>" for u in entity_uris)
-    rows = store.query(
+    query = (
         PREFIXES
         + f"""SELECT DISTINCT ?point WHERE {{
             VALUES ?m {{ {values} }}
@@ -1449,7 +1466,10 @@ def expand_to_points(store, entity_uris: list[str]) -> list[str]:
             ?e brick:hasPoint ?point .
         }}"""
     )
-    points.update(str(row.point) for row in rows)
+    if hasattr(store, "iter_tsv"):  # 100k points: 0.46 s as TSV, 0.79 s as JSON rows (Baler#244)
+        points.update(t[1:-1] for t in (row[0] for row in store.iter_tsv(query)) if t[:1] == "<")
+    else:
+        points.update(str(row.point) for row in store.query(query))
     return sorted(points)
 
 
@@ -1656,11 +1676,20 @@ def _read_history(ts_conn, point_uris: list[str], date_span: Span, rollup_spec_i
 
 
 def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limit: int = DEFAULT_LIMIT, scope=None,
-              max_samples: int | None = None) -> dict:
+              max_samples: int | None = None, series_limit: int | None = None, after: str | None = None) -> dict:
     """The whole read(...).hisRead(...).hisRollup(...) pipeline against
     live stores. Raises HisQueryError for a `read` (singular) that matches
     nothing - Axon's read() throws UnknownRecErr for the same case; a
-    readAll with no matches is an empty, successful result."""
+    readAll with no matches is an empty, successful result.
+
+    `series_limit` bounds the points read (None: all): the page is the
+    first that many points, in point-id order, after the point id `after`.
+    The result's `pointCount` is every point the expression reaches, and
+    `after` is the page's last point id when more follow (pass it back as
+    `after`), else None. Describing, labelling and reading history only
+    happen for the page, so a page costs the same at any graph size. The
+    page's series are still sorted for display (equip, dis), and post
+    calls (sort, hisInterpolate, ...) apply to the page."""
     from baler import timeseries
 
     date_span = resolve_span(query.span_text, now, tz)
@@ -1680,6 +1709,13 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
         if scope is not None:
             point_uris = scope.filter(point_uris)
         sp.set_attribute("points", len(point_uris))
+    point_count = len(point_uris)
+    if after is not None:
+        point_uris = point_uris[bisect.bisect_right(point_uris, after):]
+    next_after = None
+    if series_limit is not None and len(point_uris) > series_limit:
+        point_uris = point_uris[:series_limit]
+        next_after = point_uris[-1]
     # The points' graph metadata (Oxigraph) and their history (Postgres)
     # don't depend on each other: describe_points runs on its own thread
     # while this one reads labels and history, instead of one after the
@@ -1738,6 +1774,9 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
         "limit": limit,
         "matched": matched[:_MATCHED_PREVIEW],
         "matchedCount": len(matched),
+        "pointCount": point_count,
+        "seriesLimit": series_limit,
+        "after": next_after,
         "hints": hints_for_empty_result(query.filter, graph) if not matched else [],
         "series": series,
     }

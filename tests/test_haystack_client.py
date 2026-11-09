@@ -55,6 +55,25 @@ def test_decode_haystack_scalar_passes_through_native_json_types():
     assert _decode_haystack_scalar("plain string, no kind prefix") == "plain string, no kind prefix"
 
 
+@pytest.mark.parametrize("after", [{"_kind": "ref", "val": "p1"}, "r:p1 Zone Temp"])  # Hayson, JSON v3
+def test_read_follows_pages_to_the_end_unless_given_a_limit(after):
+    """A paging server (Baler#244) names the last id of a short page in meta
+    `after`: read() without a limit fetches every page; with one, one page."""
+    calls = []
+    pages = {None: {"meta": {"after": after}, "rows": [{"id": "r:p1"}]}, "@p1": {"meta": {}, "rows": [{"id": "r:p2"}]}}
+
+    class Client(HaystackClient):
+        def _get(self, op, params=None, _retry_on_401=True):
+            calls.append(dict(params))
+            return pages[params.get("after")]
+
+    c = Client("http://unused", TEST_USER, TEST_PASSWORD)
+    assert [r["id"] for r in c.read("point")] == ["p1", "p2"]
+    assert calls == [{"filter": "point"}, {"filter": "point", "after": "@p1"}]
+    calls.clear()
+    assert [r["id"] for r in c.read("point", limit=1)] == ["p1"] and len(calls) == 1
+
+
 @pytest.mark.integration
 def test_about_succeeds_after_full_scram_handshake():
     server, _ = _make_fake_haxall_server({"about": {"rows": [{"productName": "FakeHaxall", "version": "n:4.0"}]}})
