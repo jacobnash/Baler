@@ -172,8 +172,12 @@ function renderNodes() {
     if (btn) {
       old.delete(key);
     } else {
+      // No aria-label: the name comes from the content, so it matches what
+      // is shown (WCAG 2.5.3, axe label-content-name-mismatch). The dot's
+      // online/offline goes in as visually hidden text after the label.
       btn = el("button", { type: "button", className: "node" }, [
-        el("span", { className: "node-name" }, [el("span", { className: "dot" }), el("span", { className: "node-label" })]),
+        el("span", { className: "node-name" }, [el("span", { className: "dot" }), el("span", { className: "node-label" }),
+                                                el("span", { className: "sr-only node-state" })]),
         el("span", { className: "node-meta" }),
       ]);
       btn.dataset.key = key;
@@ -182,8 +186,8 @@ function renderNodes() {
     const dot = btn.querySelector(".dot");
     dot.className = `dot ${n.online ? "online" : "offline"}`;
     btn.querySelector(".node-label").textContent = n.label;
+    btn.querySelector(".node-state").textContent = `, ${n.online ? "online" : "offline"}:`;
     btn.querySelector(".node-meta").textContent = nodeMeta(n);
-    btn.setAttribute("aria-label", `${n.label}, ${n.online ? "online" : "offline"}: ${nodeMeta(n)}`);
     btn.setAttribute("aria-pressed", state.node && nodeKey(state.node) === key ? "true" : "false");
     if (box.children[i] !== btn) box.insertBefore(btn, box.children[i] || null);
   });
@@ -493,7 +497,7 @@ function renderDevices() {
     const actions = el("td", { className: "actions" });
     if (isAdmin()) {
       if (d.status === "pending") {
-        actions.append(button("Add connector…", { className: "primary", label: `Add a connector for ${what}`, fk: `add:${d.id}`, disabled: off,
+        actions.append(button("Add connector…", { className: "primary", label: `Add connector for ${what}`, fk: `add:${d.id}`, disabled: off,
                                                   onClick: () => openConnector({ kind: d.protocol, device: d }) }));
       }
       if (d.status !== "ignored") {
@@ -506,7 +510,7 @@ function renderDevices() {
                                            onClick: () => run(() => act("set_device_status", { id: d.id, status: "pending" }), "Device restored") }));
       }
       if (d.default_credential_flag) {
-        actions.append(button("Recheck login", { label: `Recheck the factory login on ${what}`, fk: `recheck:${d.id}`, disabled: off,
+        actions.append(button("Recheck login", { label: `Recheck login on ${what} (the factory default)`, fk: `recheck:${d.id}`, disabled: off,
                                                  onClick: () => run(() => act("recheck_credentials", { id: d.id }), "Rechecked") }));
       }
     }

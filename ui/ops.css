@@ -41,8 +41,11 @@
 .ops-card.state-quiet .state,
 .ops-card.state-degraded .state { color: var(--color-warning); }
 .ops-card.state-down .state { color: var(--color-critical); }
-/* a job this install doesn't run yet (e.g. no backup has reported) */
-.ops-card.state-off .state { color: var(--muted, inherit); opacity: 0.7; }
+/* a job this install doesn't run yet (e.g. no backup has reported). Plain
+   --muted, no extra opacity: --muted is picked to clear WCAG AA on the page
+   background, and opacity 0.7 on top took it to 3.0:1 (light) and 3.8:1
+   (dark). */
+.ops-card.state-off .state { color: var(--muted); }
 
 .ops-cta {
   border: 1px dashed var(--border);
