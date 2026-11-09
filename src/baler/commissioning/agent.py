@@ -54,6 +54,7 @@ from baler.commissioning import (
     llm,
     phases,
     procedures,
+    record_tools,
     runner,
     spec,
 )
@@ -414,6 +415,13 @@ IMPL: dict[str, Callable[[Ctx, dict], object]] = {
     "open_faults": t_open_faults, "propose": t_propose,
 }
 assert set(IMPL) == {t["name"] for t in TOOLS}
+
+# Read-only tools across the building record (#220): offered only for the
+# parts this install has (record_tools.available); writes stay proposals.
+for _tool, _fn in record_tools.available():
+    TOOLS.append(_tool)
+    IMPL[_tool["name"]] = _fn
+SYSTEM += record_tools.PROMPT
 
 
 def call_tool(ctx: Ctx, name: str, args) -> tuple[str, bool]:

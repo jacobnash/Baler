@@ -61,8 +61,10 @@ chunk, because that path is the cheapest. Late data comes from:
 Writes into an already-compressed chunk **still work**. Inserts, upserts
 (`ON CONFLICT ... DO UPDATE`, last write wins as always), `ON CONFLICT DO
 NOTHING` replays and deletes all succeed. TimescaleDB decompresses only the
-batches the write touches, and the policy recompresses the chunk on its next
-run. `hisWrite` and `haystack_import` can write history of any age and take
+batches the write touches, and the policy, or `history_keeper` once the late
+rows settle, recompresses the chunk (see [Late rows, failed runs and
+`history_keeper`](#late-rows-failed-runs-and-history_keeper-337) for what that
+costs on disk). `hisWrite` and `haystack_import` can write history of any age and take
 this path. `tests/test_history_compression.py` covers all of these against the
 pinned image.
 
@@ -84,6 +86,103 @@ overwriting a row and adding a new one) into compressed chunks.
 A bulk SQL load of your own that rewrites a large old range in **one**
 statement or transaction should decompress the chunk first (below), or `SET
 timescaledb.max_tuples_decompressed_per_dml_transaction = 0` for that session.
+
+## Late rows, failed runs and `history_keeper` (#337)
+
+nash-srv's 6 h soak at 100k points showed what the policy alone leaves undone:
+
+- **A failed run hides its cause.** The policy catches each chunk's error and
+  logs it as a `WARNING` ("converting chunk ... failed"), the real message in
+  its `DETAIL`, then fails the run with `columnstore policy failure: Failed to
+  convert '1' chunks to columnstore` (SQLSTATE 22000). That last line is all
+  `timescaledb_information.job_errors` keeps. The scale stack logged every
+  statement into a 150 MB rotating log, so the `WARNING` was gone in seconds.
+  `docker-compose.yml` now starts Postgres with `log_min_messages=warning` and a
+  `log_line_prefix` that names the process type and job (`background worker
+  Columnstore Policy [1002]`), and the scale overlay no longer logs every
+  statement.
+- **Late rows inflate compressed chunks, and recompression doesn't give the
+  disk back.** A late row decompresses its point's whole batch (up to 1,000
+  rows; with 1-hour chunks at 5 s, the point's whole hour) into the chunk's
+  heap and its three indexes. One late reading per point puts the whole chunk
+  back on disk uncompressed. Recompression moves the rows back into the
+  columnstore but only deletes them from the heap: the heap keeps its size
+  until `VACUUM` truncates it, and the old batches stay as dead space in the
+  compressed relation. `chunk_compression_stats` still reports the size at
+  compression time. Measured on the pinned image (2,000 points, 1 hour, one
+  late row per point): 12 MB compressed, 229 MB after the late rows, 241 MB
+  after the policy's recompression, 12 MB after `VACUUM`, `REINDEX` and
+  `VACUUM FULL` of the compressed relation. On nash-srv: 565 MB in the stats,
+  12 GB on disk.
+
+The `history_keeper` service (`python -m baler.history_keeper`, a pass every
+`BALER_HISTORY_KEEPER_INTERVAL_S`, default 300 s) closes those gaps:
+
+| Step | What it does |
+|---|---|
+| Policy failures | Copies new failed runs of the policy job from `job_errors` into `history_compression_events` and logs them. |
+| Retry | Compresses each chunk that should be compressed by now (older than `compress_after` plus one policy schedule) and isn't. On failure it records the SQLSTATE, message, detail and context, and retries with backoff (5 min, doubling to 6 h). |
+| Recompress | Recompresses a chunk with late rows (status *partial*) once it has had no writes for `BALER_HISTORY_RECOMPRESS_SETTLE_S` (600 s), or after `BALER_HISTORY_RECOMPRESS_MAX_DEFER_S` (3600 s) whatever. |
+| Reclaim | After a recompression, or when a compressed chunk takes more than `BALER_HISTORY_RECLAIM_RATIO` (1.5) × its stats size on disk: `VACUUM` the chunk (truncates the emptied heap), `REINDEX TABLE CONCURRENTLY` it (empty but full-size indexes; writes into the chunk carry on meanwhile), `VACUUM` its compressed relation, and `VACUUM FULL` that relation only if it is still over the ratio. |
+
+It does nothing while the policy job is running (the two would queue on the
+same locks) or paused (`alter_job(..., scheduled => false)`), at most
+`BALER_HISTORY_KEEPER_MAX_CHUNKS` (4) compress or recompress actions per pass,
+oldest chunk first, and gives up on a lock after 5 s until the next pass.
+
+**On `/ops/status`** the *History compression* card (Jobs) lists every chunk
+whose last attempt failed, with its real error and next retry, and the
+compressed chunks' true bytes on disk next to the chunk stats' figure. It turns
+degraded when a chunk is failing, or when on-disk is over
+`OPS_COMPRESSION_DISK_RATIO_DEGRADED` (2.0) × stats; down when the keeper's
+heartbeat is stale. `building.compression` has the numbers.
+
+**The cost of a late-write storm, and the policy for one.** Until it is
+recompressed, each chunk a late round touches costs about its uncompressed size
+on disk, since one late row per point decompresses the whole chunk (about 16 GB
+for an hour of 100k points every 5 s). Recompressing it costs a full
+compression of the chunk: about 470 s for that hour on nash-srv, at about
+150,000 rows/s. So during a storm (a spool replay, a trend backfill):
+
+1. the keeper waits for each touched chunk to settle (no writes for 600 s), so
+   a chunk being backfilled isn't recompressed, then decompressed again, on
+   every pass; a chunk still taking writes after an hour is recompressed anyway;
+2. then recompresses each touched chunk once, oldest first, at most 4 per pass,
+   and reclaims its disk;
+3. keep free disk for the uncompressed size of every chunk a storm can touch
+   before it settles. For a spool replay that is the outage's length of
+   chunks, about 18 GB per hour of 100k points.
+
+The `REINDEX` is `CONCURRENTLY` because plain `REINDEX` holds a lock that
+blocks writes into the chunk while it runs, and the writes into these chunks
+are late rows from the listener, which acknowledges a reading over MQTT only
+after its batch commits: a stalled batch becomes broker backpressure, then
+drops. If the concurrent form fails, its leftover invalid index copies are
+dropped and plain `REINDEX` runs only on a settled chunk (no writes for
+`BALER_HISTORY_RECOMPRESS_SETTLE_S`); otherwise it waits for a later reclaim.
+Each event records the form that ran (`message`: `reindex: concurrently`,
+`reindex: plain (...)` or `reindex: skipped (...)`).
+
+`VACUUM FULL` takes an `ACCESS EXCLUSIVE` lock on the compressed relation, so
+reads of that chunk wait while it copies the compressed data (seconds for an
+hour of 100k points). The keeper uses it only when plain `VACUUM` leaves the
+relation over the ratio, and not again on the same chunk until it grows.
+
+```sql
+-- what the keeper did, and why it failed
+SELECT at, chunk, action, ok, sqlstate, message, detail, duration_s,
+       pg_size_pretty(disk_before) AS before, pg_size_pretty(disk_after) AS after,
+       pg_size_pretty(stats_bytes) AS stats
+FROM history_compression_events ORDER BY at DESC LIMIT 20;
+```
+
+`python -m baler.history_keeper --once [--chunk schema.name]` runs one pass and
+prints it. `tests/test_history_keeper.py` forces a failure (a lock held on the
+chunk) and checks that the keeper records `55P03 canceling statement due to
+lock timeout`, while the policy says only "Failed to convert '1' chunks", and
+that a later retry compresses the chunk. It also writes a late round into a
+compressed chunk and checks that it is recompressed once settled and back
+within 2× of the stats size on disk.
 
 ## Chunk interval and `compress_after` at high ingest rates
 
@@ -249,7 +348,9 @@ SELECT pg_size_pretty(before_compression_total_bytes) AS before,
 FROM hypertable_compression_stats('point_history');
 SELECT round(hypertable_size('point_history')::numeric / (SELECT count(*) FROM point_history), 1) AS bytes_per_sample;
 
--- per chunk
+-- per chunk. total_bytes is the truth on disk; after_compression_total_bytes
+-- (hypertable_compression_stats above, chunk_compression_stats per chunk) is
+-- the size at compression time, before any late rows (#337)
 SELECT c.chunk_name, c.range_start, c.range_end, c.is_compressed, pg_size_pretty(d.total_bytes)
 FROM timescaledb_information.chunks c
 JOIN chunks_detailed_size('point_history') d USING (chunk_name)
