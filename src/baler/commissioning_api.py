@@ -42,6 +42,8 @@ from baler import docs_ui, gateway_auth, hisquery, timeseries, tracing, warmup
 from baler.commissioning import (
     active,
     agent,
+    compliance,
+    compliance_api,
     coverage,
     db,
     economizer,
@@ -116,7 +118,7 @@ _RUN = re.compile(r"/runs/([^/]+)")
 _RUN_REPORT = re.compile(r"/runs/([^/]+)/report")
 
 # Building-record features (epic #221), each a route table (commissioning.routes).
-EXTENSIONS = (spaces_api, readiness_api, packs_api, pack_extract_api)
+EXTENSIONS = (spaces_api, readiness_api, packs_api, pack_extract_api, compliance_api)
 
 
 def _check_prefixes(value) -> list[str]:
@@ -153,6 +155,8 @@ def _check_settings(settings) -> dict:
         economizer.validate_settings(settings["economizer"])
     if "fault_mirroring" in settings:
         mirror.validate_settings(settings["fault_mirroring"])
+    if "compliance" in settings:
+        compliance.validate_settings(settings["compliance"])
     if "overrides" in settings:
         overrides.validate_settings(settings["overrides"])
     if "phase_gates" in settings:
@@ -2717,7 +2721,9 @@ def main() -> None:
                                                  # scheduled retests (Baler#275 e): only approved, only with the switch on
                                                  retest_schedules.Ticker(repo, fleet_runner),
                                                  lambda t: operator_writes.sweep(repo, writer.commander, t),
-                                                 refresher.tick])
+                                                 refresher.tick,
+                                                 # continuous compliance (Baler#207): adopted packs on their schedule
+                                                 lambda t: compliance.tick(repo, worker, t)])
     server = ThreadingHTTPServer((args.host, args.port), make_handler(repo, worker=worker, executor=executor,
                                                                       commander=writer.commander, fleet_runner=fleet_runner))
     print(f"commissioning API listening on {args.host}:{args.port}")

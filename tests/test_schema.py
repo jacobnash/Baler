@@ -39,6 +39,7 @@ RELEASED = {
     "v0019_spaces.py": "8ea63b1fe98775a210f0e10a1a74f2330ef3e360f91703dae9a5eb64ce56d246",
     "v0020_requirement_packs.py": "bf07e04a20094a50b491447d9dc6a29af42df28f5929813ad7b0749ad891e7f1",
     "v0021_pack_proposals.py": "e671a941b4d26b864101b74bbd9c36dcd3017825b201f74b4129b7dc34901425",
+    "v0022_compliance_log.py": "76bb046143b96e005e4eb5d5ec272e036c0697c6442db30eb57ddc09a72bc942",
 }
 
 

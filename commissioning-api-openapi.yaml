@@ -2266,6 +2266,79 @@ paths:
               schema: { $ref: "#/components/schemas/PackAdoption" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/compliance/runs:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Packs]
+      operationId: listCxComplianceRuns
+      summary: The project's compliance runs, newest first
+      responses:
+        "200":
+          description: Runs
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ComplianceRun" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Packs]
+      operationId: startCxComplianceRun
+      summary: Run the adopted packs' active rows against the spaces now (operator)
+      responses:
+        "202":
+          description: The queued run
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ComplianceRun" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /compliance-runs/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Packs]
+      operationId: getCxComplianceRun
+      summary: A compliance run and its results
+      responses:
+        "200":
+          description: The run
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/ComplianceRun" }
+                  - type: object
+                    required: [results]
+                    properties:
+                      results: { type: array, items: { $ref: "#/components/schemas/ComplianceLogRow" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /spaces/{id}/compliance:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Spaces]
+      operationId: getCxSpaceCompliance
+      summary: A space's compliance log (for surveys)
+      parameters:
+        - { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 3660 } }
+        - { name: format, in: query, schema: { type: string, enum: [json, html] } }
+      responses:
+        "200":
+          description: The log (text/html for format=html)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [space, days, log]
+                properties:
+                  space: { type: object }
+                  days: { type: integer }
+                  every_hours: { type: [number, "null"] }
+                  log: { type: array, items: { $ref: "#/components/schemas/ComplianceLogRow" } }
+            text/html:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /packs/{id}/extract:
     parameters:
       - { $ref: "#/components/parameters/ProjectId" }
@@ -4069,3 +4142,35 @@ components:
         decided_by: { type: [string, "null"] }
         decided_at: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
+    ComplianceRun:
+      type: object
+      required: [id, project_id, status, window_end, started_at]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        status: { type: string, enum: [queued, running, completed, failed] }
+        triggered_by: { type: [string, "null"] }
+        window_end: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: [string, "null"] }
+        summary: { type: [object, "null"] }
+        error: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+    ComplianceLogRow:
+      type: object
+      required: [space_id, pack_id, version, row_id, title, citation, status, window_start, window_end, evidence]
+      properties:
+        id: { type: string }
+        run_id: { type: string }
+        space_id: { type: string }
+        pack_ref: { type: string }
+        pack_id: { type: string }
+        version: { type: string }
+        row_id: { type: string }
+        title: { type: string }
+        citation: { type: object }
+        status: { type: string, enum: [pass, fail, inconclusive] }
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
+        evidence: { type: object }
+        note: { type: [string, "null"] }

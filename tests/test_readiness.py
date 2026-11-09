@@ -40,9 +40,10 @@ def api(monkeypatch):
     store.graph.add((URIRef(fx.AHU), BRICK.feeds, URIRef(fx.VAV)))
     repo = hx.repo(store=store)
     base, server = hx.serve(monkeypatch, repo)
+    saved = list(readiness.REQUIREMENT_SOURCES)
     yield base, repo
     server.shutdown()
-    readiness.REQUIREMENT_SOURCES.clear()
+    readiness.REQUIREMENT_SOURCES[:] = saved
 
 
 def _space(base, pid, **body):
@@ -73,7 +74,7 @@ def test_suite_readiness_report(api):
     assert {k: v["status"] for k, v in room["criteria"].items()} == {
         "requirements": "inconclusive", "tests": "inconclusive", "tab_report": "inconclusive", "issues": "pass"}
     assert [c["equip_uri"] for c in room["serving_chain"]] == [fx.VAV, fx.AHU]
-    assert any("requirement packs" in x for x in rep["limitations"])
+    assert any("requirement pack" in x for x in rep["limitations"])
 
     # evidence arrives: both serving units tested, TAB linked, a requirement source passes
     _passed_test(repo, pid, [fx.VAV, fx.AHU])

@@ -39,6 +39,7 @@ from baler.migrations import (
     v0019_spaces,
     v0020_requirement_packs,
     v0021_pack_proposals,
+    v0022_compliance_log,
 )
 
 ALL = (
@@ -63,4 +64,5 @@ ALL = (
     v0019_spaces,
     v0020_requirement_packs,
     v0021_pack_proposals,
+    v0022_compliance_log,
 )

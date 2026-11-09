@@ -316,6 +316,11 @@ const ROUTES = [
   ["PUT",    /^\/cx\/spaces\/[^/]+\/serving$/,                "commissioning", "operator"],
   // Readiness (#210)
   ["GET",    /^\/cx\/spaces\/[^/]+\/readiness$/,              "commissioning", "viewer"],
+  // Continuous compliance (#207)
+  ["POST",   /^\/cx\/projects\/[^/]+\/compliance\/runs$/,     "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/compliance\/runs$/,     "commissioning", "viewer"],
+  ["GET",    /^\/cx\/compliance-runs\/[^/]+$/,                "commissioning", "viewer"],
+  ["GET",    /^\/cx\/spaces\/[^/]+\/compliance$/,             "commissioning", "viewer"],
   // Requirement packs (#205): org library; publishing freezes a version (admin)
   ["GET",    /^\/cx\/pack-schema$/,                         "commissioning", "viewer"],
   ["GET",    /^\/cx\/packs$/,                               "commissioning", "viewer"],
