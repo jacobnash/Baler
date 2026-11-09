@@ -292,6 +292,14 @@ check("commissioning (/cx/): reads viewer, changes operator, archive admin, site
     assert.equal(policy.resolveRoute("DELETE", "/cx/manual-results/m1"), null);
     assert.equal(policy.resolveRoute("GET", "/cx/manual-attachments/a1").minRole, "viewer");
     assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/coverage").minRole, "viewer");
+    // Baler#217 construction schedules: their own paths, not #212's /schedules
+    assert.equal(policy.resolveRoute("POST", "/cx/projects/p1/construction-schedules").minRole, "operator");
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/construction-schedules").minRole, "viewer");
+    assert.equal(policy.resolveRoute("GET", "/cx/construction-schedules/s1/activities").minRole, "viewer");
+    // Baler#218 earned evidence: under /construction-schedules, like #217
+    assert.equal(policy.resolveRoute("GET", "/cx/construction-schedules/s1/earned-evidence").minRole, "viewer");
+    assert.equal(policy.resolveRoute("GET", "/cx/construction-schedules/s1/link-suggestions").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/schedule-links/l1/signoff").minRole, "operator");
     // Cx 6 procedures
     assert.equal(policy.resolveRoute("GET", "/cx/procedure-templates").minRole, "viewer");
     assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/procedures").minRole, "viewer");
@@ -388,6 +396,16 @@ check("an enrolment-only session reaches only enrolment (#278)", () => {
     assert.equal(policy.mfaAllows({ kind: "session", role: "viewer", amr: ["pwd", "otp"] }, "GET", "/ingest/points"), true);
     assert.equal(policy.mfaAllows({ kind: "api_key", role: "service" }, "POST", "/api/demo/hisWrite"), true);
     assert.equal(policy.mfaAllows({ kind: "session", mfa_enroll: "true" }, "GET", "/ingest/points"), true);
+});
+
+check("cx issues from results (#341): a viewer can't open one, single or bulk", () => {
+    for (const [m, uri] of [["POST", "/cx/projects/p1/issues"], ["POST", "/cx/runs/r1/issues"]]) {
+        const minRole = policy.resolveRoute(m, uri).minRole;
+        assert.equal(minRole, "operator", uri);
+        assert.equal(policy.roleSatisfies("viewer", minRole), false, uri);
+    }
+    assert.equal(policy.resolveRoute("POST", "/cx/issues/i1/risk").minRole, "admin");   // waiving
+    assert.equal(policy.resolveRoute("DELETE", "/cx/risks/k1").minRole, "admin");       // revoking
 });
 
 console.log(`\n${passed} passed`);

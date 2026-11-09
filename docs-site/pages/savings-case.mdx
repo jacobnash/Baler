@@ -1,0 +1,65 @@
+---
+title: Replace-vs-keep savings case
+---
+
+> ...and that replacing it would save $X a year.
+
+"Replacing CH-2 saves about $10k a year" is only as good as its stated
+tariff and run hours. A savings case shows every assumption it rests on,
+where each came from, and lets anyone change it (Baler#216, epic #221
+§8.3).
+
+## Assumptions
+
+| Key | Unit | Where it comes from |
+|---|---|---|
+| `current_kw_per_ton` | kW/ton | **measured**: the existing chiller's actual kW/ton over the last year, at the conditions its [baseline](/performance-baselines) was fitted on |
+| `annual_ton_hours` | ton-h/yr | **measured**: the load point over the last year (hours below 10 % of peak left out), scaled to a year |
+| `replacement_kw_per_ton` | kW/ton | **you**: the replacement's rated kW/ton at a comparable load, from its submittal |
+| `tariff_per_kwh` | $/kWh | **you** |
+| `demand_charge_per_kw_month`, `peak_tons` | $/kW-month, ton | **you**; 0 (no demand saving) if not given |
+| `replacement_cost` | $ | **you** |
+| `remaining_life_years` | yr | **you**: your judgement of the existing chiller's remaining life. ASHRAE's public service-life database is a reference (cite it with the date you read it); Baler copies no table from it. |
+
+Every assumption is stored as `{value, unit, label, source, note}`, with
+`source` one of `measured`, `user` or `default`. The required ones are never
+guessed: a case missing one is refused and names it. The measured ones say
+how they were measured. Cost and tariff are always yours; Baler has no
+price list.
+
+## The result
+
+```
+annual kWh saved = ton-hours × (current kW/ton − replacement kW/ton)
+annual $        = kWh × tariff + 12 × demand charge × peak tons × kW/ton saved
+simple payback  = replacement cost ÷ annual $
+```
+
+The case also gives the savings over the remaining life, whether it pays
+back within it, and a **sensitivity table**: the payback with the tariff and
+the ton-hours each 20 % lower and higher, so you can see how far the answer
+leans on each. If the replacement isn't more efficient than the existing
+chiller as measured, the case says so and shows no saving.
+
+## Using it
+
+```bash
+curl -X POST $BALER/cx/projects/$P/savings-cases -d '{
+  "baseline_id": "'$B'",
+  "assumptions": {"replacement_kw_per_ton": 0.50, "tariff_per_kwh": 0.11,
+                  "replacement_cost": 420000, "remaining_life_years": 6}}'
+
+# disagree with a measured value, or change the tariff: recomputed and recorded
+curl -X PATCH $BALER/cx/savings-cases/$C -d '{"assumptions": {
+  "annual_ton_hours": {"value": 900000, "note": "metered by the utility last year"}}}'
+```
+
+Each edit is appended to the case's `history` with what changed and the
+value before. Assumptions you didn't touch keep their source.
+
+## Not yet
+
+- Discounting (NPV) and escalation of the tariff.
+- Maintenance cost differences and refrigerant phase-out as inputs.
+- Boilers, fans and pumps (needs their baselines, #215).
+- The case in the building passport (#219).

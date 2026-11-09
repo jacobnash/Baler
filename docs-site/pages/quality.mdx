@@ -87,10 +87,20 @@ re-judged the last hour of every point, inline in the His-mode loop: 25 s at
 - **Late rows from the reading feed.** A row committed after the pass that
   covered its ts (a spool replay, a trend backfill, a gateway catching up)
   is late. Every committed batch is a [reading feed](/fault-detection) row,
-  written in the same transaction as its history, so the sweep's thread
-  watches the feed (consumer `quality`) and records each late reading in
-  `quality_late` in the same statement that moves its offset. The next pass
-  judges those rows with their own neighbours and deletes them. A late row
+  written in the same transaction as its history, so a watcher on its own
+  thread and connection reads the feed every 5 s (consumer `quality`) and
+  records each late reading in `quality_late` in the same statement that
+  moves its offset. The next pass judges those rows with their own
+  neighbours and deletes them. The watcher used to run on the sweep's thread,
+  between passes: at 100k points a pass took up to 253 s, and on top of
+  everything else that left the watcher past the feed's retention, so
+  nash-srv's 6 h soak pruned 3,007,304 readings from under it (#337). While
+  a pass is judging `(since, until]` the watcher counts every row up to
+  `until` as late, so a row committed after the pass read its point isn't
+  lost between the two. A miss at `quality` leaves only late rows unflagged
+  (on-time ones are judged from `point_history` whatever), so it is reported
+  under [its rule](/fault-detection#scaling-and-missed-readings) but doesn't
+  fail a scale run. A late row
   in a compressed chunk is read where it is and written only if it is
   flagged: one segment batch decompressed, nothing for a clean row.
 - **Bounded passes.** A new install, or one that was stopped, starts an hour

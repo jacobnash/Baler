@@ -133,6 +133,57 @@ def test_formula_derivation_writes_attaches_and_derives(ts_conn, fault_conn, hea
 
 
 @pytest.mark.integration
+def test_a_pass_larger_than_the_read_budget_computes_every_row_from_its_own_inputs(
+        ts_conn, fault_conn, health_conn, monkeypatch):
+    """#336: 40 equips x 2 inputs x 30 readings (2,400) against a read
+    budget of 200 readings and a write batch of 7: the pass runs in chunks
+    against real Postgres, and every equip's output is computed from its
+    own inputs' full windows, not a neighbour's or a truncated one."""
+    from datetime import timedelta
+
+    from baler import derivation_engine
+    from baler.timeseries import write_point_values
+
+    monkeypatch.setattr(derivation_engine, "READ_BUDGET", 200)
+    monkeypatch.setattr(derivation_engine, "WRITE_BATCH", 7)
+    reads = []
+    real_bulk = derivation_engine.timeseries.read_range_bulk
+    monkeypatch.setattr(derivation_engine.timeseries, "read_range_bulk",
+                        lambda conn, uris, start, end: reads.append(len(uris)) or real_bulk(conn, uris, start, end))
+    store = Store()
+    now = datetime.now(timezone.utc)
+    history = []
+    for e in range(40):
+        equip = topic_prefix_to_equip_uri(f"test-de/bulk/e{e}")
+        for name, base in (("a", 1000.0 * e), ("b", 0.0)):
+            p = topic_to_point_uri(f"test-de/bulk/e{e}/{name}")
+            link_point_to_equip(store, p, equip)
+            history += [(str(p), base + i, now - timedelta(seconds=10 * i)) for i in range(30)]
+    write_point_values(ts_conn, history)
+    derivation = {
+        "id": "test-de:bulk", "kind": "formula",
+        "select": """
+            PREFIX brick: <https://brickschema.org/schema/Brick#>
+            SELECT ?target ?a ?b WHERE {
+                ?target brick:hasPoint ?a, ?b .
+                FILTER(STRSTARTS(STR(?a), "urn:point:test-de/bulk/") && STRENDS(STR(?a), "/a")
+                       && STRENDS(STR(?b), "/b"))
+            }""",
+        "target_var": "target", "input_vars": ["a", "b"], "window_seconds": 3600, "output": {}, "depends_on": [],
+        # sum of a's window minus b's: 30 * base(a), only if each got all 30 of its own readings
+        "fn_source": "def run(inputs, row):\n    return sum(v for _, v in inputs['a']) - sum(v for _, v in inputs['b'])",
+    }
+
+    trace = evaluate_derivations(store, ts_conn, fault_conn, health_conn, [derivation], now=now)
+
+    assert len(trace) == 40 and len(reads) > 1 and max(reads) * 30 <= 200
+    for entry in trace:
+        e = int(entry["target"].rsplit("/e", 1)[1])
+        assert entry["computed_value"] == 30 * 1000.0 * e
+        assert read_latest(ts_conn, entry["would_write_uri"]) == 30 * 1000.0 * e
+
+
+@pytest.mark.integration
 def test_formula_derivation_returning_none_writes_nothing(ts_conn, fault_conn, health_conn):
     store = Store()
     now = datetime.now(timezone.utc)
@@ -438,11 +489,18 @@ def test_e2e_derivation_averages_bacnet_and_modbus_sourced_sensors_over_real_bro
             and _is_tagged(modbus_point)
         )
 
-    for _ in range(30):  # up to ~3s, no arbitrary long sleep
+    # Poll until both readings and both tag sets are in, up to 20 s (CI
+    # runners under load took over the old 3 s), and fail here if they never
+    # arrive rather than at the classify asserts below with a misleading "miss".
+    deadline = time.monotonic() + 20
+    ingested = False
+    while time.monotonic() < deadline:
         listener.loop(timeout=0.1)
         if _both_ingested():
+            ingested = True
             break
     listener.disconnect()
+    assert ingested, "both points and both tag sets should be ingested within 20 s"
 
     assert read_latest(ts_conn, str(bacnet_point)) == 70.0
     assert read_latest(ts_conn, str(modbus_point)) == 74.0

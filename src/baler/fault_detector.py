@@ -49,6 +49,7 @@ from baler import (
     heartbeat,
     his_checks,
     json_store,
+    oscillation,
     quality,
     reading_feed,
     timeseries,
@@ -480,6 +481,29 @@ def _stale_verdicts(ts_conn, matcher: _Matcher, rule: dict, now: datetime) -> di
     return {u: his_checks.is_stale(newest[u][0] if u in newest else None, now, max_age) for u in candidates}
 
 
+def _hunting_verdicts(ts_conn, matcher: _Matcher, rule: dict, now: datetime) -> dict[str, dict]:
+    """{point: oscillation.metrics} over the rule's window, for the rule's
+    points that reported in it. Raw samples (good quality only), never a
+    rollup: a 4-minute oscillation is invisible in 5-minute buckets."""
+    start = now - timedelta(seconds=rule["window_seconds"])
+    where, params = _prefix_filter([matcher.prefix(rule)])
+    rows = ts_conn.execute(f"SELECT point_uri FROM point_registry WHERE last_ts >= %s{where}",
+                           [start - timedelta(seconds=timeseries.REGISTRY_GRANULARITY_S), *params]).fetchall()
+    candidates = [u for (u,) in rows if matcher.matches(rule, u)]
+    if not candidates:
+        return {}
+    samples: dict[str, list] = {}
+    for uri, ts, value in ts_conn.execute(
+            f"SELECT point_uri, ts, value FROM point_history WHERE point_uri = ANY(%s) AND ts >= %s AND ts <= %s "
+            f"AND value IS NOT NULL AND {quality.GOOD_SQL} ORDER BY point_uri, ts", (candidates, start, now)).fetchall():
+        samples.setdefault(uri, []).append((ts, value))
+    return {u: oscillation.metrics(samples[u], float(rule.get("deadband", 0.0))) for u in samples}
+
+
+def is_hunting(rule: dict, m: dict) -> bool:
+    return bool(m.get("judgeable")) and m["reversals_per_hour"] > float(rule["max_reversals_per_hour"])
+
+
 def _open_points(fault_conn, rule_id: str) -> list[str]:
     return [u for (u,) in fault_conn.execute(
         "SELECT point_uri FROM faults WHERE rule_id = %s AND ended_at IS NULL", (rule_id,)).fetchall()]
@@ -515,7 +539,7 @@ def evaluate_his_rules(
     now = now or datetime.now(timezone.utc)
     matcher = matcher or _Matcher(store)
     matcher.reset()
-    his = [r for r in rules if r.get("mode") == "his" and r.get("type") in ("stuck", "stale") and matcher.usable(r)]
+    his = [r for r in rules if r.get("mode") == "his" and r.get("type") in ("stuck", "stale", "hunting") and matcher.usable(r)]
     stats = {"rules": len(his), "points_faulted": 0, "stuck_rows_points": 0, "stale_candidates": 0}
 
     windows: dict[float, list[dict]] = {}
@@ -529,9 +553,16 @@ def evaluate_his_rules(
     for rule in his:
         with tracer.start_as_current_span("fault_detector.evaluate_his_rule") as span:
             span.set_attribute("rule_id", rule["id"])
+            details: dict[str, dict] = {}
+            unjudged: set[str] = set()  # hunting: too sparse to say either way; an open fault stays open
             if rule["type"] == "stuck":
                 faulted = {u for u, (n, d) in counts[rule["stuck_seconds"]].items()
                            if his_checks.stuck_verdict(n, d) and matcher.matches(rule, u)}
+            elif rule["type"] == "hunting":
+                found = _hunting_verdicts(ts_conn, matcher, rule, now)
+                faulted = {u for u, m in found.items() if is_hunting(rule, m)}
+                unjudged = {u for u, m in found.items() if not m.get("judgeable")}
+                details = {u: {"source": "hunting", **found[u]} for u in faulted}
             else:
                 verdicts = _stale_verdicts(ts_conn, matcher, rule, now)
                 stats["stale_candidates"] += len(verdicts)
@@ -540,11 +571,13 @@ def evaluate_his_rules(
             stats["points_faulted"] += len(faulted)
 
             for point_uri in sorted(faulted):
-                fault_id = _open_if_new(fault_conn, open_faults, rule, point_uri, now, None)
+                detail = details.get(point_uri)
+                fault_id = _open_if_new(fault_conn, open_faults, rule, point_uri, now, detail)
                 if fault_id is not None:
-                    _fire_webhooks(webhooks_path, "fault.opened", rule["id"], point_uri, "open", None)
+                    _fire_webhooks(webhooks_path, "fault.opened", rule["id"], point_uri, "open", detail)
 
-            still_open = [u for u in _open_points(fault_conn, rule["id"]) if u not in faulted and matcher.matches(rule, u)]
+            still_open = [u for u in _open_points(fault_conn, rule["id"])
+                          if u not in faulted and u not in unjudged and matcher.matches(rule, u)]
             for point_uri in sorted(_registered(ts_conn, still_open)):
                 fault_id = _close_if_open(fault_conn, open_faults, rule["id"], point_uri, now)
                 if fault_id is not None:
@@ -671,31 +704,48 @@ def run_quality(store, interval: float, status: heartbeat.Status, stop: threadin
     """The quality thread (#268): baler.quality's incremental sweep on its
     own connection, so His-mode rules keep their interval while it runs.
     A pass every `interval` seconds (back to back while it's catching
-    up), and the late-row watcher in between. Its figures are the
-    heartbeat's `quality`, written by the other threads' beats."""
+    up). The late-row watcher runs on a thread and connection of its own
+    (#337): on this one it only read the reading feed between passes, so
+    a pass that ran for minutes left it behind by that much and the feed
+    pruned batches it hadn't read. Its figures are the heartbeat's
+    `quality`, written by the other threads' beats."""
     conn = connect()
-    sweeper = quality.Sweeper(conn, store, interval=interval)
+    sweeper = quality.Sweeper(conn, store, interval=interval, watch_conn=connect())
     sweeper.start()
+    stop = stop or threading.Event()
+    watcher = threading.Thread(target=watch_quality, args=(sweeper, status, stop), name="quality-watch", daemon=True)
+    watcher.start()
     last = -interval
-    while stop is None or not stop.is_set():
-        if time.monotonic() - last >= interval or sweeper.behind():
-            last = time.monotonic()
-            sweeper.watch()  # anything late so far is recorded before the pass moves the watermark
-            with tracer.start_as_current_span("fault_detector.quality_sweep") as span:
-                counts = sweeper.sweep()
-                for k, v in counts.items():
-                    if isinstance(v, (int, float, str)):
-                        span.set_attribute(k, v)
-            if counts["sweep_s"] > interval:
-                print(f"fault detector: quality sweep took {counts['sweep_s']:.1f} s, longer than its "
-                      f"{interval:.0f} s interval ({counts['rows']} rows, watermark {sweeper.lag_s():.0f} s behind)",
-                      flush=True)
+    try:
+        while not stop.is_set():
+            if time.monotonic() - last >= interval or sweeper.behind():
+                last = time.monotonic()
+                with tracer.start_as_current_span("fault_detector.quality_sweep") as span:
+                    counts = sweeper.sweep()
+                    for k, v in counts.items():
+                        if isinstance(v, (int, float, str)):
+                            span.set_attribute(k, v)
+                if counts["sweep_s"] > interval:
+                    print(f"fault detector: quality sweep took {counts['sweep_s']:.1f} s, longer than its "
+                          f"{interval:.0f} s interval ({counts['rows']} rows, watermark {sweeper.lag_s():.0f} s behind)",
+                          flush=True)
+            if not watcher.is_alive():
+                raise RuntimeError("the quality late-row watcher thread died")
+            stop.wait(QUALITY_WATCH_S)
+    finally:
+        stop.set()
+
+
+def watch_quality(sweeper: quality.Sweeper, status: heartbeat.Status, stop: threading.Event) -> None:
+    """The late-row watcher (#337): drains the reading feed every
+    QUALITY_WATCH_S whatever the sweep is doing, and keeps the heartbeat's
+    `quality` figures fresh. An exception ends it, and run_quality (the
+    thread's owner) raises in turn, so the daemon restarts both."""
+    while not stop.is_set():
         sweeper.watch()
         status.update("quality", sweeper.status())
-        if stop is not None:
-            stop.wait(QUALITY_WATCH_S)
-        else:
-            time.sleep(QUALITY_WATCH_S)
+        stop.wait(QUALITY_WATCH_S)
+
 
 if __name__ == "__main__":
     main()

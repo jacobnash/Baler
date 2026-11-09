@@ -127,15 +127,42 @@ def big_backend():
     mp.undo()
 
 
-@pytest.fixture
-def server(big_backend, monkeypatch):
+@contextmanager
+def _serving(handler, monkeypatch):
     monkeypatch.setenv("BALER_GATEWAY_SECRET", SECRET)
     monkeypatch.delenv("BALER_JWT_SECRET", raising=False)
     monkeypatch.setattr(ha, "READ_LIMIT", 1000)  # the shipped default
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), ha.make_handler(big_backend, None))
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{srv.server_port}"
-    srv.shutdown()
+    try:
+        yield f"http://127.0.0.1:{srv.server_port}"
+    finally:
+        srv.shutdown()
+
+
+@pytest.fixture
+def server(big_backend, monkeypatch):
+    with _serving(ha.make_handler(big_backend, None), monkeypatch) as base:
+        yield base
+
+
+@pytest.fixture
+def gateway(big_backend, monkeypatch):
+    """The server as openhay's native (Rust) client reaches it: behind a
+    stand-in for the gateway, which adds its secret header to every request
+    it passes on (the native client has no way to add one itself)."""
+    backend_handler = ha.make_handler(big_backend, None)
+
+    class Gatewayed(backend_handler):
+        def parse_request(self):
+            ok = super().parse_request()
+            if ok:
+                del self.headers["X-Gateway-Secret"]
+                self.headers["X-Gateway-Secret"] = SECRET
+            return ok
+
+    with _serving(Gatewayed, monkeypatch) as base:
+        yield base
 
 
 def _client(base):
@@ -212,18 +239,38 @@ class _InProcess:
     """openhay.Client's `call`, answered by Baler's own dispatch (the
     native client can't add the gateway's secret header)."""
 
-    def __init__(self, backend):
-        self.backend = backend
+    def __init__(self, backend, max_page=None):
+        self.backend, self.max_page = backend, max_page
 
     def call(self, op, req=None):
+        if self.max_page is not None and req is not None:  # a server that caps the page size
+            row = dict(req.rows[0])
+            asked = int(row["limit"].val) if "limit" in row else self.max_page
+            row["limit"] = oh.Number(min(asked, self.max_page))
+            req = oh.Grid.from_rows([row])
         return ha.dispatch(self.backend, op, req if req is not None else oh.Grid())
 
 
 @needs_openhay
-def test_openhay_wrapper_follows_after_where_openhays_read_stops(big_backend, monkeypatch):
+def test_openhays_native_read_follows_after(gateway):
+    """Baler's openhay pin pages natively (openhay #9): its own Client.read
+    comes back whole from Baler, and read_page hands back the cursor."""
+    assert openhay_paging.NATIVE_PAGING
+    c = oh.Client(f"{gateway}/api/demo")
+    recs = c.read("point")
+    assert len(recs) == N and len({r["id"].id for r in recs}) == N
+    assert len(c.read("point", 1500)) == 1500  # past one page, stops at limit
+    page = c.read_page("point", 1000)
+    assert len(page.rows) == 1000 and page.meta["after"].id == page.rows[-1]["id"].id
+
+
+@needs_openhay
+def test_protocol_level_read_follows_after_with_any_openhay(big_backend, monkeypatch):
+    """The module-level read/read_page page through `call("read")` alone,
+    so they hold for an openhay that predates native paging too."""
     monkeypatch.setattr(ha, "READ_LIMIT", 1000)
     c = _InProcess(big_backend)
-    assert len(oh.Client.read(c, "point")) == 1000  # openhay's own read: the first page, meta dropped
+    assert len(c.call("read", oh.Grid.from_rows([{"filter": "point"}])).rows) == 1000  # one request: one page
     recs = openhay_paging.read(c, "point")
     assert len(recs) == N and recs.complete and recs.pages == 3
     assert all(isinstance(r["id"], oh.Ref) for r in recs)
@@ -232,14 +279,38 @@ def test_openhay_wrapper_follows_after_where_openhays_read_stops(big_backend, mo
     nxt = openhay_paging.read_page(c, "point", 500, oh.Ref(page.after))
     assert nxt[0]["id"].id > page.after
     assert len(openhay_paging.read(c, "point", limit=7)) == 7
+    # Against a server whose pages are smaller than the limit asked for, it
+    # reads on until it has them, as openhay's own read does, and `after`
+    # continues from there.
+    capped = _InProcess(big_backend, max_page=400)
+    some = openhay_paging.read(capped, "point", limit=1000)
+    assert len(some) == 1000 and some.pages == 3 and some.after == some[-1]["id"].id
+    assert [r["id"] for r in some] == [r["id"] for r in recs[:1000]]
+    assert len(openhay_paging.read(capped, "point", limit=N + 10)) == N
 
 
 @needs_openhay
-def test_openhay_paging_client_is_a_drop_in(big_backend, monkeypatch):
-    monkeypatch.setattr(ha, "READ_LIMIT", 1000)
-    monkeypatch.setattr(openhay_paging.Client, "call", lambda self, op, req=None: _InProcess(big_backend).call(op, req))
-    c = openhay_paging.Client("http://unused")
-    assert len(c.read("point")) == N and c.read_page("point", 3).after is not None
+@pytest.mark.parametrize("native", [True, False], ids=["native-paging", "own-loop"])
+def test_openhay_paging_client_is_a_drop_in(gateway, monkeypatch, native):
+    """openhay_paging.Client over HTTP returns the full set across pages and
+    exposes `after` on one page, whether openhay pages (the pin) or the
+    wrapper's own loop does (an older openhay)."""
+    monkeypatch.setattr(openhay_paging, "NATIVE_PAGING", native)
+    c = openhay_paging.Client(f"{gateway}/api/demo")
+    recs = c.read("point")
+    assert isinstance(recs, Records) and recs.after is None
+    assert len(recs) == N and len({r["id"].id for r in recs}) == N
+    assert len(c.read("point", 1500)) == 1500
+    page = c.read_page("point", 3)
+    assert isinstance(page, Records) and len(page) == 3 and page.after == page[-1]["id"].id
+    assert page.limit == 3 and not page.complete
+    seen, after = list(page), page.after
+    while after is not None:
+        nxt = c.read_page("point", 1000, after)
+        assert nxt[0]["id"].id > after
+        seen += nxt
+        after = nxt.after
+    assert len(seen) == N and len({r["id"].id for r in seen}) == N
 
 
 @needs_openhay

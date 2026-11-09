@@ -30,7 +30,11 @@ fails is recorded and the soak goes on (#245: a late round that overflowed
 paho's message ids ended nash-srv's first 6 h soak at 3.5 h). Each sample
 also carries the lag of its own window (not only cumulative), the broker's
 drop counter (mqtt_listener's supervisor heartbeat), fault_detector's
-sweep times and a few Postgres diagnostics.
+sweep times and a few Postgres diagnostics, and (#337) each compressed
+chunk's true bytes on disk next to its chunk-stats size, the chunks that
+finished compressing or recompressing since the last sample, checkpoints
+(timed vs requested) and every reading-feed consumer's misses. At the end
+it reads what history_keeper did, with the real error of each failure.
 
 `evaluate_soak` (pure, tested) turns that into pass/fail against #245's
 acceptance. Results go to scripts/scale/results/<run>-soak.json; see
@@ -61,6 +65,13 @@ LATE_BACKFILL_OFFSET_S = 1.234567  # well inside a 5 s sample spacing
 # Acceptance (#245)
 HOT_GROWTH_MAX = 1.25  # hot bytes, second half of the steady phase vs the first
 GROWTH_VS_COMPRESSED_MAX = 2.0  # phase-aligned growth per stored row vs compressed bytes per row
+# #337: compression keeps pace over at least this many cycles (a policy run
+# or a history_keeper action that compressed or recompressed a chunk) in
+# the steady phase, while taking late writes.
+MIN_CYCLES = 4
+# #337: a compressed chunk with no late rows waiting (not partial) takes at
+# most this many times its chunk-stats size on disk at the end of the soak.
+DISK_VS_STATS_MAX = 2.0
 
 
 # ----------------------------------------------------------------- settings and disk
@@ -74,8 +85,12 @@ def settings(conn) -> dict:
         LEFT JOIN timescaledb_information.jobs j
                ON j.proc_name = 'policy_compression' AND j.hypertable_name = 'point_history'
         WHERE d.hypertable_name = 'point_history' AND d.column_name = 'ts'""").fetchone()
-    return {"chunk_interval_s": float(row[0]), "compress_after_s": float(row[1]) if row[1] is not None else None,
-            "schedule_s": float(row[2]) if row[2] is not None else None, "job_id": row[3], "job_config": row[4]}
+    out = {"chunk_interval_s": float(row[0]), "compress_after_s": float(row[1]) if row[1] is not None else None,
+           "schedule_s": float(row[2]) if row[2] is not None else None, "job_id": row[3], "job_config": row[4]}
+    # what checkpoint pressure is read against (#337)
+    out["pg"] = {k: conn.execute(f"SHOW {k}").fetchone()[0]
+                 for k in ("max_wal_size", "checkpoint_timeout", "shared_buffers", "log_min_messages", "log_statement")}
+    return out
 
 
 def disk(conn) -> dict:
@@ -93,11 +108,89 @@ def disk(conn) -> dict:
     stats = conn.execute("SELECT before_compression_total_bytes, after_compression_total_bytes "
                          "FROM hypertable_compression_stats('point_history')").fetchone()
     out["before_compression_bytes"], out["after_compression_bytes"] = (int(stats[0] or 0), int(stats[1] or 0)) if stats else (0, 0)
+    # compressed_bytes above is the truth on disk; after_compression_bytes
+    # is chunk_compression_stats', from when each chunk was compressed, and
+    # doesn't see late rows decompressed into the chunk or the dead space a
+    # recompression leaves (#337). Per compressed chunk, both:
+    out["compressed"] = compressed_chunks(conn)
+    out["partial_chunks"] = sum(1 for c in out["compressed"].values() if c["partial"])
     try:
         out["wal_bytes"] = int(conn.execute("SELECT COALESCE(sum(size), 0) FROM pg_ls_waldir()").fetchone()[0])
     except Exception:  # noqa: BLE001 - needs pg_monitor; the image's role is a superuser
         out["wal_bytes"] = None
     return out
+
+
+def compressed_chunks(conn) -> dict:
+    """Each compressed chunk's true bytes on disk (heap, indexes, its
+    compressed relation) next to the chunk stats' figure, and whether it
+    holds late rows awaiting recompression (status bit 8, partial)."""
+    rows = conn.execute("""
+        SELECT format('%I.%I', c.chunk_schema, c.chunk_name), d.total_bytes, s.after_compression_total_bytes,
+               _timescaledb_functions.chunk_status(format('%I.%I', c.chunk_schema, c.chunk_name)::regclass)
+        FROM timescaledb_information.chunks c
+        JOIN chunks_detailed_size('point_history') d ON d.chunk_schema = c.chunk_schema AND d.chunk_name = c.chunk_name
+        LEFT JOIN chunk_compression_stats('point_history') s
+               ON s.chunk_schema = c.chunk_schema AND s.chunk_name = c.chunk_name
+        WHERE c.hypertable_name = 'point_history' AND c.is_compressed""").fetchall()
+    return {name: {"disk": int(disk or 0), "stats": int(st) if st is not None else None,
+                   "partial": bool((status or 0) & 8)} for name, disk, st, status in rows}
+
+
+def checkpoints(conn) -> dict:
+    """Checkpoints so far, timed (checkpoint_timeout) vs requested (WAL
+    reached max_wal_size, or forced): nash-srv's soak had 2,471, every one
+    requested (#337). pg_stat_checkpointer on Postgres 17, pg_stat_bgwriter
+    before."""
+    try:
+        r = conn.execute("SELECT num_timed, num_requested, buffers_written, write_time, sync_time "
+                         "FROM pg_stat_checkpointer").fetchone()
+    except Exception:  # noqa: BLE001 - Postgres 16: in pg_stat_bgwriter
+        conn.rollback()
+        r = conn.execute("SELECT checkpoints_timed, checkpoints_req, buffers_checkpoint, checkpoint_write_time, "
+                         "checkpoint_sync_time FROM pg_stat_bgwriter").fetchone()
+    return {"timed": int(r[0]), "requested": int(r[1]), "buffers": int(r[2]),
+            "write_ms": round(float(r[3] or 0)), "sync_ms": round(float(r[4] or 0))}
+
+
+def checkpoint_delta(now: dict, prev: dict | None) -> dict:
+    """This sample's checkpoints with the change since the previous one.
+    Pure (tested)."""
+    out = dict(now)
+    if prev:
+        out.update({f"{k}_delta": now[k] - prev[k] for k in ("timed", "requested", "buffers") if k in prev})
+    return out
+
+
+def keeper_events(conn, since: float) -> list[dict]:
+    """What baler.history_keeper did since `since` (epoch s): each compress,
+    recompress and reclaim with its real error when it failed, and the
+    compression policy's failed runs (#337). [] on a Baler without it."""
+    try:
+        rows = conn.execute("""
+            SELECT extract(epoch FROM at), chunk, action, ok, sqlstate, message, detail, duration_s,
+                   disk_before, disk_after, stats_bytes
+            FROM history_compression_events WHERE at >= to_timestamp(%s) ORDER BY at""", (since,)).fetchall()
+    except Exception:  # noqa: BLE001 - no history_keeper (before #337)
+        conn.rollback()
+        return []
+    return [{"at": float(at), "chunk": chunk, "action": action, "ok": ok, "sqlstate": st, "message": msg,
+             "detail": det, "duration_s": dur, "disk_before": b, "disk_after": a, "stats_bytes": sb}
+            for at, chunk, action, ok, st, msg, det, dur, b, a, sb in rows]
+
+
+def failing_chunks(conn) -> list[dict]:
+    """Chunks whose newest history_keeper attempt failed (#337), with the
+    error. [] on a Baler without it."""
+    try:
+        rows = conn.execute("""
+            SELECT DISTINCT ON (chunk) chunk, action, ok, sqlstate, message, detail
+            FROM history_compression_events WHERE action <> 'policy' AND to_regclass(chunk) IS NOT NULL
+            ORDER BY chunk, at DESC""").fetchall()
+    except Exception:  # noqa: BLE001
+        conn.rollback()
+        return []
+    return [{"chunk": c, "action": a, "sqlstate": st, "message": m, "detail": d} for c, a, ok, st, m, d in rows if not ok]
 
 
 def chunks(conn, compress_after_s: float | None) -> dict:
@@ -541,6 +634,8 @@ def cmd_soak(args) -> None:
         prev_t = soak_start
         broker_first: dict | None = None
         broker_prev: dict | None = None
+        ckpt_prev: dict | None = None
+        comp_prev: dict = {}
         while time.time() - soak_start < args.duration:
             time.sleep(args.sample_every)
             now = time.time()
@@ -570,6 +665,18 @@ def cmd_soak(args) -> None:
             elif not last_job:
                 last_job = job
             seen = {n: dict(c, inserts=max(c["inserts"], seen.get(n, {}).get("inserts", 0))) for n, c in ch["all"].items()}
+            # compression work finished since the last sample, whoever did it
+            # (the policy or history_keeper): chunks newly compressed, and
+            # chunks whose late rows were recompressed (partial -> not)
+            comp_now = disk_now.get("compressed", {})
+            recompressed = [n for n, c in comp_now.items() if not c["partial"] and (comp_prev.get(n) or {}).get("partial")]
+            comp_prev = comp_now
+            try:
+                ckpt = checkpoint_delta(checkpoints(conn), ckpt_prev)
+                ckpt_prev = ckpt
+            except Exception as exc:  # noqa: BLE001 - diagnostics only
+                conn.rollback()
+                ckpt = {"error": repr(exc)[:200]}
             st = ladder.read_stats(stats_file)
             broker = broker_drops(ladder.listener_status(conn), broker_first, broker_prev)
             if broker_first is None and broker["dropped_total"] is not None:
@@ -580,6 +687,9 @@ def cmd_soak(args) -> None:
                       "disk": disk_now, "oldest_hot_end_age_s": ch["oldest_hot_end_age_s"], "backlog": ch["backlog"],
                       "chunks": len(ch["all"]), "job": {k: v for k, v in job.items() if k != "next_start"},
                       "compressing": state["running"] or job.get("status") == "Running",
+                      "compressed_now": newly, "recompressed_now": recompressed, "checkpoints": ckpt,
+                      "feed": ladder.feed_status(conn), "keeper": (ladder.heartbeat_details(conn, ("history_keeper",))
+                                                                   .get("history_keeper") or {}).get("working_on"),
                       "watermark_age_s": wm_now, "lag": canary.stats(soak_start),
                       "lag_window": canary_window(canary, prev_t, now), "broker": broker,
                       "detector": detector_status(ladder.heartbeat_details(conn)), "pg": pg_diag(conn),
@@ -680,6 +790,10 @@ def cmd_soak(args) -> None:
     pts = [f"urn:point:{shape.equip_prefix(g)}/{common.TEMPLATES[j][0]}" for g in range(min(5, shape.equips)) for j in range(2)]
     result["cagg_check"] = cagg_check(conn, pts)
     result["db"] = ladder.db_metrics(conn)
+    # history_keeper's actions and the policy's failed runs, with the real
+    # errors, on the soak's clock; and the chunks still failing at the end
+    result["keeper"] = [dict(e, t=round(e["at"] - soak_start, 1)) for e in keeper_events(conn, soak_start)]
+    result["compression_end"] = {"compressed": compressed_chunks(conn), "failing": failing_chunks(conn)}
     states1 = ladder.container_states()
     result["containers"] = {svc: {**c, "restarts_delta": c["restarts"] - states0.get(svc, {}).get("restarts", 0)}
                             for svc, c in states1.items()}
@@ -688,6 +802,11 @@ def cmd_soak(args) -> None:
     result["status"], result["reasons"] = evaluate_soak(result)
     conn.close()
     path = ladder.write_result(result)
+    tolerated = {n: m["missed_readings"] for n, m in (result["summary"].get("feed_misses") or {}).items()
+                 if m["missed_readings"] and not m["required"]}
+    if tolerated:
+        print(f"soak: reading-feed misses at consumers that cover them another way (not a failure, see "
+              f"baler.reading_feed.CONSUMER_RULES): {tolerated}", flush=True)
     print(f"\nsoak: {result['status']} {result['reasons']}\n{result['summary']}\n-> {path}")
 
 
@@ -705,14 +824,48 @@ def _p95(sample: dict) -> float | None:
     return w.get("p95_s") if w is not None else (sample.get("lag") or {}).get("p95_s")
 
 
+def compression_cycles(result: dict) -> list[tuple[float, str]]:
+    """When compression work finished: [(t, what)], oldest first. From the
+    samples (a chunk newly compressed, or its late rows recompressed,
+    whoever did it), else from the policy runs that compressed chunks (a
+    result from before #337). Pure."""
+    samples = result.get("samples", [])
+    if any("compressed_now" in s for s in samples):
+        out = []
+        for s in samples:
+            if s.get("compressed_now"):
+                out.append((s["t"], "compressed " + ", ".join(s["compressed_now"])))
+            if s.get("recompressed_now"):
+                out.append((s["t"], "recompressed " + ", ".join(s["recompressed_now"])))
+        return out
+    return [(r["t"], f"policy run compressed {r['chunks']} chunk(s)") for r in result.get("runs", [])
+            if r.get("chunks") and r.get("t") is not None]
+
+
+def warm_up(result: dict) -> tuple[float, str]:
+    """Where the steady phase starts: when the first chunk compressed
+    (observed). It used to be compress_after + 2 chunks + a schedule from
+    the soak's start, which assumed the hypertable started empty there: on
+    nash-srv (#337) it said "1783 s steady after a 19800 s warm-up, 0
+    compression cycles" when compression had run 11 times from t=12,000 s.
+    The formula is left only for a soak in which nothing compressed (it's
+    too short whatever). Pure."""
+    cfg = result["settings"]
+    first = [t for t, what in compression_cycles(result) if what.startswith(("compressed", "policy"))]
+    if first:
+        return first[0], "the first chunk compressed"
+    chunk, after, sched = cfg["chunk_interval_s"], cfg.get("compress_after_s") or 0, cfg.get("schedule_s") or 0
+    return after + chunk + sched + chunk, "no chunk compressed: compress_after + 2 chunks + a schedule"
+
+
 def summarize(result: dict) -> dict:
     """The numbers the acceptance is judged on. Pure (tested)."""
     cfg = result["settings"]
-    chunk, after, sched = cfg["chunk_interval_s"], cfg.get("compress_after_s") or 0, cfg.get("schedule_s") or 0
+    chunk = cfg["chunk_interval_s"]
     samples = result.get("samples", [])
-    warm = after + chunk + sched + chunk  # the first chunk compressed, and one more cycle
+    warm, warm_why = warm_up(result)
     steady = [s for s in samples if s["t"] >= warm]
-    out: dict = {"warm_s": warm, "steady_samples": len(steady),
+    out: dict = {"warm_s": warm, "warm_from": warm_why, "steady_samples": len(steady),
                  "steady_s": round(steady[-1]["t"] - steady[0]["t"], 1) if len(steady) > 1 else 0}
     runs = [r for r in result.get("runs", []) if r.get("rows")]
     out["compression_runs"] = len(result.get("runs", []))
@@ -777,7 +930,58 @@ def summarize(result: dict) -> dict:
     rounds = [r for r in rounds if not r.get("harness_error")]
     out["probe_rounds"] = len(rounds)
     out["probe_rounds_during_compression"] = sum(1 for r in rounds if r.get("during_compression"))
-    out["compression_cycles_steady"] = sum(1 for r in result.get("runs", []) if r.get("t", 0) >= warm and r.get("chunks"))
+    cycles = compression_cycles(result)
+    out["compression_cycles"] = len(cycles)
+    out["compression_cycles_steady"] = sum(1 for t, _ in cycles if t >= warm)
+    out["recompressions"] = sum(1 for _, what in cycles if what.startswith("recompressed"))
+    # True on-disk bytes of the compressed chunks vs the chunk stats (#337).
+    # Settled: chunks with no late rows waiting (not partial), at the end.
+    comp_end = (result.get("compression_end") or {}).get("compressed") or (last.get("compressed") or {})
+    settled = {n: c for n, c in comp_end.items() if not c.get("partial") and c.get("stats")}
+    if comp_end:
+        on_disk, stats = sum(c["disk"] for c in comp_end.values()), sum(c.get("stats") or 0 for c in comp_end.values())
+        out["compressed_on_disk_bytes"], out["compressed_stats_bytes"] = on_disk, stats
+        out["compressed_on_disk_vs_stats"] = round(on_disk / stats, 2) if stats else None
+        out["partial_chunks_end"] = sum(1 for c in comp_end.values() if c.get("partial"))
+    if settled:
+        worst = max(settled, key=lambda n: settled[n]["disk"] / settled[n]["stats"])
+        out["settled_on_disk_vs_stats_max"] = {"chunk": worst, "ratio": round(settled[worst]["disk"] / settled[worst]["stats"], 2),
+                                               "disk": settled[worst]["disk"], "stats": settled[worst]["stats"]}
+    ratios = [s["disk"]["compressed_bytes"] / s["disk"]["after_compression_bytes"] for s in samples
+              if (s.get("disk") or {}).get("after_compression_bytes")]
+    if ratios:
+        out["compressed_on_disk_vs_stats_max"] = round(max(ratios), 2)
+    if "compressed_bytes_per_row" in out and last.get("after_compression_bytes") and rows_compressed:
+        out["stats_bytes_per_row"] = round(last["after_compression_bytes"] / rows_compressed, 2)
+    # checkpoints over the soak (#337: all 2,471 of nash-srv's were requested)
+    ck = [s["checkpoints"] for s in samples if "timed" in (s.get("checkpoints") or {})]
+    if len(ck) > 1:
+        out["checkpoints"] = {"timed": ck[-1]["timed"] - ck[0]["timed"], "requested": ck[-1]["requested"] - ck[0]["requested"]}
+        n = out["checkpoints"]["timed"] + out["checkpoints"]["requested"]
+        out["checkpoints"]["requested_share"] = round(out["checkpoints"]["requested"] / n, 3) if n else None
+        span = samples[-1]["t"] - samples[0]["t"]
+        out["checkpoints"]["seconds_apart"] = round(span / n, 1) if n else None
+    # reading-feed consumers: misses over the soak, each under its rule
+    feeds = [s["feed"] for s in samples if s.get("feed")]
+    if feeds:
+        misses = {}
+        for name, f in feeds[-1].items():
+            first = next((x[name] for x in feeds if name in x), f)
+            d = f["missed_readings"] - first["missed_readings"]
+            misses[name] = {"missed_readings": d, "missed_batches": f["missed_batches"] - first["missed_batches"],
+                            "required": ladder.feed_miss_required(name),
+                            "lag_s_max": max((x[name]["lag_s"] for x in feeds if name in x), default=None)}
+        out["feed_misses"] = misses
+    # history_keeper: what it did, and the policy's failed runs
+    events = result.get("keeper", [])
+    if events:
+        out["keeper"] = {a: {"ok": sum(1 for e in events if e["action"] == a and e["ok"]),
+                             "failed": sum(1 for e in events if e["action"] == a and not e["ok"])}
+                         for a in sorted({e["action"] for e in events})}
+        rec = [e["duration_s"] for e in events if e["action"] == "recompress" and e["ok"] and e.get("duration_s")]
+        out["keeper_recompress_s_max"] = max(rec, default=None)
+        out["keeper_errors"] = [{"t": e["t"], "chunk": e["chunk"], "action": e["action"], "sqlstate": e["sqlstate"],
+                                 "message": e["message"], "detail": e["detail"]} for e in events if not e["ok"]][:20]
     return out
 
 
@@ -794,9 +998,10 @@ def evaluate_soak(result: dict) -> tuple[str, list[str]]:
         other.append(f"live-safety: the live install on this host degraded for {t.get('degraded_for_s')} s "
                      f"({ {k: v for k, v in t.items() if k not in ('degraded_for_s', 'at_t')} }); "
                      f"stopped at t={t.get('at_t')} s (not a Baler ceiling)")
-    if s.get("steady_s", 0) < 2 * chunk or s.get("compression_cycles_steady", 0) < 2:
-        other.append(f"soak too short: {s.get('steady_s', 0):.0f} s steady after a {s['warm_s']:.0f} s warm-up, "
-                     f"{s.get('compression_cycles_steady', 0)} compression cycle(s); needs 2 chunk intervals and 2 cycles")
+    if s.get("steady_s", 0) < 2 * chunk or s.get("compression_cycles_steady", 0) < MIN_CYCLES:
+        other.append(f"soak too short: {s.get('steady_s', 0):.0f} s steady after a {s['warm_s']:.0f} s warm-up "
+                     f"({s.get('warm_from')}), {s.get('compression_cycles_steady', 0)} compression cycle(s) in it "
+                     f"({s.get('compression_cycles', 0)} in all); needs 2 chunk intervals and {MIN_CYCLES} cycles")
     # disk plateaus
     if s.get("hot_bytes_max_second_half") is not None and s["hot_bytes_max_second_half"] > \
             HOT_GROWTH_MAX * s["hot_bytes_max_first_half"]:
@@ -814,10 +1019,22 @@ def evaluate_soak(result: dict) -> tuple[str, list[str]]:
                            f"{GROWTH_VS_COMPRESSED_MAX:g}x the compressed {s['compressed_bytes_per_row']} B/row")
     elif not other:
         reasons.append("no steady-state growth measurement (no compressed rows or no aligned window)")
-    for r in result.get("runs", []):
-        if r.get("status") not in (None, "Success"):
-            reasons.append(f"compression run at t={r.get('t')} s: {r['status']}")
-            break
+    # Compression failures (#337): a failed policy run is a failure unless
+    # history_keeper retried its chunks (no chunk still failing at the end);
+    # either way its real error is in the summary (keeper_errors).
+    failed_runs = [r for r in result.get("runs", []) if r.get("status") not in (None, "Success")]
+    failing_end = (result.get("compression_end") or {}).get("failing") or []
+    if failed_runs and not result.get("keeper"):
+        reasons.append(f"compression run at t={failed_runs[0].get('t')} s: {failed_runs[0]['status']} "
+                       "(no history_keeper to retry it or record why)")
+    for f in failing_end:
+        reasons.append(f"chunk {f['chunk']} still failing to {f['action']} at the end: SQLSTATE {f.get('sqlstate')} "
+                       f"{f.get('message')}" + (f" ({f['detail']})" if f.get("detail") else ""))
+    worst = s.get("settled_on_disk_vs_stats_max")
+    if worst and worst["ratio"] > DISK_VS_STATS_MAX:
+        reasons.append(f"compressed chunk {worst['chunk']} takes {worst['disk'] / 1e6:.0f} MB on disk vs "
+                       f"{worst['stats'] / 1e6:.0f} MB in chunk stats ({worst['ratio']}x > {DISK_VS_STATS_MAX:g}x) "
+                       "with no late rows waiting: recompression didn't give the disk back")
     # ingest
     ing = result.get("ingest") or {}
     if ing and (ing.get("stored_ratio") is None or ing["stored_ratio"] < ladder.MIN_STORED_RATIO):
@@ -831,6 +1048,13 @@ def evaluate_soak(result: dict) -> tuple[str, list[str]]:
         reasons.append(f"growing backlog: lag median {lag['first_third_median_s']} -> {lag['last_third_median_s']} s")
     if (s.get("lag_p95_during_compression_max") or 0) >= ladder.MAX_P95_LAG_S:
         reasons.append(f"p95 lag {s['lag_p95_during_compression_max']} s during compression")
+    # reading-feed consumers (#337): a miss at a consumer that needs every
+    # reading is a real loss; quality's covers late rows only (its window
+    # pass reads history), so it is reported in feed_misses, not failed on
+    for name, m in (s.get("feed_misses") or {}).items():
+        if m["missed_readings"] and m["required"]:
+            reasons.append(f"{name} missed {m['missed_readings']:,} readings in {m['missed_batches']} batch(es) "
+                           "(fell more than the reading feed's retention behind)")
     if s.get("broker_dropped"):
         reasons.append(f"broker dropped {s['broker_dropped']:,} deliveries during the soak (a subscriber can't keep up)")
     # reads

@@ -16,12 +16,20 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import psycopg
 
-from baler import alerts, errors, heartbeat, mfa, reading_feed, timeseries
+from baler import (
+    alerts,
+    errors,
+    heartbeat,
+    history_keeper,
+    mfa,
+    reading_feed,
+    timeseries,
+)
 
 COMPONENTS: list[dict[str, Any]] = [
     {
@@ -108,6 +116,13 @@ COMPONENTS: list[dict[str, Any]] = [
         "layer": "jobs",
         "service": "derivation_engine",
         "probe": "inferred_derivations",
+    },
+    {
+        "id": "history_compression",
+        "label": "History compression",
+        "layer": "jobs",
+        "service": "history_keeper",
+        "probe": "inferred_compression",
     },
     {
         "id": "backups",
@@ -243,6 +258,13 @@ def _building_signals(scope=None) -> dict[str, Any]:
             out["heartbeats"] = {s: t.astimezone(timezone.utc).isoformat()
                                  for s, t in heartbeat.latest(conn).items()}
             conn.rollback()  # latest() may have hit a missing table
+            # How often each process started lately (service_runtime, #277):
+            # a daemon in a restart loop - OOM-killed and restarted by
+            # compose every couple of minutes (#336) - beats between kills,
+            # so its heartbeat alone looks healthy. Counts only, so every
+            # caller sees them.
+            out["recent_starts"] = _recent_start_counts(conn)
+            conn.rollback()
             # The rule daemons' place in the reading feed (#243): lag, misses.
             out["reading_feed"] = reading_feed.consumer_status(conn)
             conn.rollback()
@@ -255,6 +277,13 @@ def _building_signals(scope=None) -> dict[str, Any]:
             out["restore_drill"] = details.get("restore_drill")
             # fault_detector's quality sweep (#268): its watermark lag.
             out["quality"] = (details.get("fault_detector") or {}).get("quality")
+            # point_history compression (#337): the keeper's last pass (true
+            # on-disk bytes vs chunk stats, partial and failing chunks), read
+            # live from the catalog only when no keeper has reported (a
+            # catalog read per chunk is too much for every request).
+            out["history_keeper"] = details.get(history_keeper.SERVICE)
+            conn.rollback()
+            out["compression"] = out["history_keeper"] or history_keeper.compression_status(conn)
             conn.rollback()
             # Process starts and unhandled exceptions (baler.errors), and what
             # the alerter (baler.alerts) currently has open (#277). Install-
@@ -403,8 +432,9 @@ def _feed_state(building: dict[str, Any], consumer: str) -> tuple[str, str] | No
         return None
     last = feed.get("last_missed_at")
     if last and (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() < FEED_MISS_WINDOW_SECONDS:
-        return "degraded", (f"missed {feed['missed_readings']} reading(s) in all, the last at {last}: "
-                            "fell more than the reading feed's retention behind")
+        rule = reading_feed.consumer_rule(consumer)
+        return "degraded", (f"{consumer} missed {feed['missed_readings']} reading(s) in all, the last at {last} "
+                            f"(fell more than the reading feed's retention behind): {rule['miss_means']}")
     if feed.get("lag_s", 0) > FEED_LAG_DEGRADED_SECONDS:
         return "degraded", f"behind on the reading feed by {feed['lag_s']:.0f} s ({feed.get('lag_readings', 0)} readings)"
     return None
@@ -434,11 +464,39 @@ def _infer_faults(building: dict[str, Any], *, platform_ok: bool) -> tuple[str, 
     stale = _heartbeat_state(building, "fault_detector")
     if stale:
         return stale
-    behind = _feed_state(building, "fault_detector") or _quality_state(building)
+    behind = (_feed_state(building, "fault_detector") or _quality_state(building)
+              or _feed_state(building, "quality"))
     if behind:
         return behind
     n = building.get("open_faults", 0)
     return "ok", f"running; {n} open fault(s)"
+
+
+def _restart_window() -> tuple[int, float]:
+    """(starts, seconds): the alerter's own restart-loop threshold
+    (BALER_ALERT_RESTART_COUNT / _WINDOW_SECONDS), so the card and the
+    `restarts:` alert agree."""
+    cfg = alerts.Config.from_env()
+    return cfg.restart_count, cfg.restart_window_s
+
+
+def _recent_start_counts(conn) -> dict[str, int]:
+    """{process: starts within the restart window}, {} without the table."""
+    _, window = _restart_window()
+    since = datetime.now(timezone.utc) - timedelta(seconds=window)
+    return {s: sum(1 for t in times if t >= since) for s, times in errors.recent_starts(conn).items()}
+
+
+def _restart_state(building: dict[str, Any], process: str) -> tuple[str, str] | None:
+    """("degraded", why) when the process started restart-count times or
+    more within the window: it is crash- or OOM-looping (#336) even though
+    each incarnation beats its heartbeat until it dies."""
+    count, window = _restart_window()
+    n = (building.get("recent_starts") or {}).get(process, 0)
+    if count <= 0 or n < count:
+        return None
+    return "degraded", (f"restart loop: started {n} times in the last {window / 60:.0f} min "
+                        "(OOM-killed? see `docker compose ps` and dmesg)")
 
 
 def _infer_derivations(building: dict[str, Any], *, platform_ok: bool) -> tuple[str, str | None]:
@@ -447,7 +505,7 @@ def _infer_derivations(building: dict[str, Any], *, platform_ok: bool) -> tuple[
     stale = _heartbeat_state(building, "derivation_engine")
     if stale:
         return stale
-    behind = _feed_state(building, "derivation_engine")
+    behind = _restart_state(building, "baler-derivation-engine") or _feed_state(building, "derivation_engine")
     if behind:
         return behind
     disabled = building.get("disabled_derivation_targets", 0)
@@ -471,6 +529,61 @@ def _age_s(iso: str | None) -> float | None:
 
 def _ago(seconds: float) -> str:
     return f"{seconds / 86400:.1f} d ago" if seconds >= 86400 else f"{seconds / 3600:.1f} h ago"
+
+
+# Compressed chunks taking more than this many times their stats size on
+# disk (late rows not yet recompressed, or space not yet reclaimed) make the
+# History compression card degraded (#337).
+COMPRESSION_DISK_RATIO_DEGRADED = float(os.environ.get("OPS_COMPRESSION_DISK_RATIO_DEGRADED", "2.0"))
+
+
+def compression_state(building: dict[str, Any], *, platform_ok: bool = True) -> tuple[str, str]:
+    """The History compression card (#337): chunks whose compression keeps
+    failing, with their real error; compressed chunks much bigger on disk
+    than the stats say; and whether the keeper that retries and
+    recompresses them is running. "off" on an install that has never run
+    history_keeper (no point_history compression to judge)."""
+    if not platform_ok:
+        return "down", "historian unreachable"
+    comp = building.get("compression") or {}
+    keeper = building.get("history_keeper")
+    if not comp and not keeper:
+        return "off", "no point_history compression here (no TimescaleDB, or history_keeper never ran)"
+    if keeper is None:
+        not_running = ("history_keeper isn't running: chunks the compression policy fails on aren't retried, "
+                       "and late rows wait for the policy")
+        stale: tuple[str, str] | None = ("degraded", not_running)
+    else:
+        stale = _heartbeat_state(building, history_keeper.SERVICE)
+    if stale and stale[0] == "down":
+        return stale
+    problems = []
+    for f in comp.get("failing") or []:
+        problems.append(f"{f['chunk']}: {f['action']} failed {f['attempts']}x, last {f['at']} "
+                        f"(SQLSTATE {f.get('sqlstate')}): {f.get('message')}"
+                        + (f" - {f['detail']}" if f.get("detail") else "") + f"; next try {f['next_try_at']}")
+    ratio = comp.get("on_disk_vs_stats")
+    if ratio and ratio > COMPRESSION_DISK_RATIO_DEGRADED:
+        problems.append(f"compressed chunks take {comp['compressed_on_disk_bytes'] / 1e9:.2f} GB on disk vs "
+                        f"{comp['compressed_stats_bytes'] / 1e9:.2f} GB in chunk stats ({ratio}x): "
+                        f"{(comp.get('chunks') or {}).get('partial', 0)} chunk(s) with late rows awaiting recompression")
+    last_policy = ((keeper or {}).get("policy") or {}).get("last_error")
+    if problems:
+        return "degraded", "; ".join(problems)
+    if stale:
+        return stale
+    c = comp.get("chunks") or {}
+    detail = (f"{c.get('compressed', 0)} of {c.get('total', 0)} chunk(s) compressed, "
+              f"{(comp.get('compressed_on_disk_bytes') or 0) / 1e9:.2f} GB on disk "
+              f"({ratio or '-'}x the chunk stats' {(comp.get('compressed_stats_bytes') or 0) / 1e9:.2f} GB)")
+    if c.get("partial"):
+        detail += f"; {c['partial']} with late rows, recompressed once they settle"
+    if (comp.get("policy") or {}).get("paused"):
+        detail += "; the compression policy is paused (alter_job scheduled => false): nothing is compressed"
+    if last_policy:
+        detail += (f"; the policy last failed {last_policy['at']} ({last_policy.get('message')}), its chunks since "
+                   "retried")
+    return "ok", detail
 
 
 def backup_state(report: dict[str, Any] | None) -> tuple[str, str]:
@@ -543,6 +656,9 @@ def _probe_one(
     elif probe == "inferred_derivations":
         platform_ok = platform_states.get("historian") == "ok"
         state, detail = _infer_derivations(building, platform_ok=platform_ok)
+    elif probe == "inferred_compression":
+        platform_ok = platform_states.get("historian") == "ok"
+        state, detail = compression_state(building, platform_ok=platform_ok)
     elif probe == "inferred_backup":
         state, detail = backup_state(building.get("backup"))
     elif probe == "inferred_drill":
@@ -732,6 +848,7 @@ def collect_status(scope=None) -> dict[str, Any]:
             "disabled_derivation_targets": building.get("disabled_derivation_targets", 0),
             "needs_first_org": building.get("org_count", 0) == 0,
             "reading_feed": building.get("reading_feed", {}),
+            "compression": building.get("compression", {}),
             "ingest": ingest_summary(building),
             "cards": cards,
         },

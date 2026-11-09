@@ -41,6 +41,7 @@ import functools
 import json
 import os
 import statistics
+import threading
 import time
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
@@ -486,11 +487,28 @@ class Sweeper:
       (`name` in reading_feed_consumers): lag and misses show in
       /ops/status like any rule daemon's.
 
-    Not thread-safe: one thread owns it and its connection."""
+    The pass (sweep) and the watcher (watch) may run on two threads, each
+    with its own connection (`watch_conn`), and should at scale (#337):
+    on one thread the watcher only drained the feed between passes, and a
+    pass that ran for minutes (253 s at 100k points) left it that far
+    behind on top of whatever else it was behind by, past the feed's
+    retention: 3,007,304 readings pruned unread in nash-srv's 6 h soak.
+    `_lock` keeps the two consistent: while a pass is judging (since,
+    until], the watcher counts every row with ts <= until as late (a row
+    committed after the pass read its point would otherwise fall between
+    them), and the pass sets that bound only between two watcher
+    statements, so every batch committed after the bound is set is judged
+    against it. A row counted late that the window also judged is judged
+    twice: harmless, flags only fill NULLs.
+
+    Each of sweep() and watch() is for one thread at a time."""
 
     def __init__(self, conn, store, name: str = "quality", interval: float = 300.0,
-                 overlap: timedelta = OVERLAP, max_span: timedelta | None = None, log=None):
+                 overlap: timedelta = OVERLAP, max_span: timedelta | None = None, log=None, watch_conn=None):
         self.conn, self.store, self.name = conn, store, name
+        self.watch_conn = watch_conn or conn
+        self._lock = threading.Lock()
+        self._pass_until: datetime | None = None  # the window's end while a pass is judging it
         self.interval, self.base_overlap = interval, overlap
         # The overlap in force: never shrinks between two passes (a watch
         # that left a row unrecorded must find it in the next window), and
@@ -500,7 +518,7 @@ class Sweeper:
         self.last_delay_s = 0.0   # ...and over the cycle before it
         self.max_span = max_span or timedelta(seconds=max(2 * interval, 60.0))
         self.log = log or functools.partial(print, flush=True)
-        self.consumer = reading_feed.FeedConsumer(conn, name, log=self.log)
+        self.consumer = reading_feed.FeedConsumer(self.watch_conn, name, log=self.log)
         self.judged_to: datetime | None = None
         self.last: dict = {}
         self.sweeps = 0
@@ -560,14 +578,23 @@ class Sweeper:
             "SELECT point_uri FROM point_registry WHERE last_ts > %s",
             (since - timedelta(seconds=timeseries.REGISTRY_GRANULARITY_S),)).fetchall()}
         uris = sorted(recent.intersection(meta))
-        counts = judge_window(self.conn, meta, uris, since, until)
+        with self._lock:  # between two watcher statements: see the class docstring
+            self._pass_until = until
+        try:
+            counts = judge_window(self.conn, meta, uris, since, until)
+        except BaseException:
+            with self._lock:
+                self._pass_until = None
+            raise
         window_s = time.monotonic() - t0 - meta_s
         self.conn.execute("UPDATE quality_watermark SET judged_to = %s, updated_at = now() WHERE sweeper = %s",
                           (until, self.name))
-        self.judged_to = until
-        used = self.overlap
-        self.last_delay_s, self.delay_s = self.delay_s, 0.0
-        self.overlap = self._overlap_for(self.last_delay_s)
+        with self._lock:
+            self.judged_to = until
+            self._pass_until = None
+            used = self.overlap
+            self.last_delay_s, self.delay_s = self.delay_s, 0.0
+            self.overlap = self._overlap_for(self.last_delay_s)
         t1 = time.monotonic()
         late = self.conn.execute(
             "SELECT point_uri, ts FROM quality_late WHERE sweeper = %s ORDER BY point_uri, ts LIMIT %s",
@@ -597,13 +624,18 @@ class Sweeper:
             return 0
         found = 0
         while True:
-            below = self.judged_to - self.overlap
-            n, readings, late, seq, mr, mb, last, delay = self.conn.execute(
-                _WATCH_SQL, {"seq": self.consumer.seq, "limit": limit, "below": below, "name": self.name}).fetchone()
+            with self._lock:  # the bound and the statement together: see the class docstring
+                assert self.judged_to is not None
+                below = self.judged_to - self.overlap
+                if self._pass_until is not None:
+                    below = max(below, self._pass_until)
+                n, readings, late, seq, mr, mb, last, delay = self.watch_conn.execute(
+                    _WATCH_SQL, {"seq": self.consumer.seq, "limit": limit, "below": below,
+                                 "name": self.name}).fetchone()
+                if n and delay is not None and readings >= DELAY_MIN_READINGS:
+                    self._widen(float(delay))
             if not n:
                 return found
-            if delay is not None and readings >= DELAY_MIN_READINGS:
-                self._widen(float(delay))
             self.consumer.seq = seq
             self.watched_readings += int(readings)
             found += int(late)

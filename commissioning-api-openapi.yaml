@@ -1374,6 +1374,120 @@ paths:
                             priority: { type: integer }
                             unoccupied: { type: boolean }
         "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/schedule-links:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Projects]
+      operationId: listCxScheduleLinks
+      summary: Links from schedule activities to evidence
+      responses:
+        "200":
+          description: Links
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ScheduleLink" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Projects]
+      operationId: addCxScheduleLink
+      summary: Link an activity (by code) to evidence (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [activity_code, kind, params]
+              properties:
+                activity_code: { type: string }
+                kind: { type: string, enum: [points_online, procedure_passed, form_signed] }
+                params: { type: object }
+                note: { type: string }
+      responses:
+        "201":
+          description: The link
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScheduleLink" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /schedule-links/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    delete:
+      tags: [Projects]
+      operationId: deleteCxScheduleLink
+      summary: Remove a link and its sign-offs (operator)
+      responses:
+        "204": { description: Removed }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /schedule-links/{id}/signoff:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Projects]
+      operationId: signCxScheduleLink
+      summary: A person signs off a form_signed link (operator)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                document: { type: object, properties: { title: { type: string }, ref: { type: string } } }
+                note: { type: string }
+      responses:
+        "201":
+          description: The sign-off
+          content:
+            application/json:
+              schema: { type: object, required: [id, link_id, signed_at] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /construction-schedules/{id}/earned-evidence:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Projects]
+      operationId: getCxEarnedEvidence
+      summary: Done by the data, due but not evidenced, marked done with no evidence
+      parameters:
+        - { name: as_of, in: query, schema: { type: string, format: date-time } }
+      responses:
+        "200":
+          description: The report
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [schedule, as_of, counts, done_by_data, due_not_evidenced, marked_done_no_evidence, not_linked]
+                properties:
+                  schedule: { $ref: "#/components/schemas/Schedule" }
+                  as_of: { type: string }
+                  activities: { type: integer }
+                  linked: { type: integer }
+                  counts: { type: object }
+                  done_by_data: { type: array, items: { type: object } }
+                  due_not_evidenced: { type: array, items: { type: object } }
+                  marked_done_no_evidence: { type: array, items: { type: object } }
+                  ahead_of_schedule_status: { type: array, items: { type: object } }
+                  not_linked: { type: array, items: { type: object } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /construction-schedules/{id}/link-suggestions:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Projects]
+      operationId: getCxScheduleLinkSuggestions
+      summary: Proposed links (never applied) from activity names that name equipment
+      responses:
+        "200":
+          description: Proposals
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, required: [activity_code, kind, params, why] } }
+        "404": { $ref: "#/components/responses/NotFound" }
   /projects/{id}/schedules/refresh:
     parameters:
       - { $ref: "#/components/parameters/ProjectId" }
@@ -2121,6 +2235,307 @@ paths:
       summary: Interactive docs for this API
       responses:
         "200": { description: HTML }
+  /projects/{id}/construction-schedules:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Projects]
+      operationId: listCxConstructionSchedules
+      summary: Imported schedule versions, newest first
+      responses:
+        "200":
+          description: Schedules
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Schedule" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Projects]
+      operationId: importCxConstructionSchedule
+      summary: Import a P6 XER or MS Project XML (MSPDI) schedule (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                filename: { type: string }
+                data: { type: string, description: The file, base64 }
+      responses:
+        "201":
+          description: The schedule version
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Schedule" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /construction-schedules/{id}/activities:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Projects]
+      operationId: listCxConstructionScheduleActivities
+      summary: A schedule's activities
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [not_started, in_progress, complete] } }
+        - { name: milestones, in: query, schema: { type: boolean } }
+      responses:
+        "200":
+          description: Activities by planned start
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ScheduleActivity" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/passport:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Projects]
+      operationId: getCxPassport
+      summary: The building passport (handover and sale package)
+      description: |
+        Per position: start-up test vs latest, issues and accepted risks,
+        open faults, and, where this record has them, efficiency baselines,
+        replace-vs-keep cases, asset history, warranties and deferred
+        maintenance; compliance history per space; documents; the Std 202
+        deliverables. `not_in_this_record` names each part this install
+        doesn't hold yet and the issue that builds it.
+      parameters:
+        - { name: format, in: query, schema: { type: string, enum: [json, html] } }
+      responses:
+        "200":
+          description: The passport (text/html for format=html)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [project, generated_at, positions, documents, std_202_deliverables, not_in_this_record]
+                properties:
+                  project: { type: object }
+                  generated_at: { type: string, format: date-time }
+                  generated_by: { type: [string, "null"] }
+                  positions: { type: array, items: { type: object, required: [equip_uri, issues, open_faults] } }
+                  compliance_by_space: { type: [array, "null"], items: { type: object } }
+                  documents: { type: array, items: { type: object } }
+                  std_202_deliverables: { type: array, items: { type: object } }
+                  not_in_this_record: { type: object, additionalProperties: { type: string } }
+                  export: { type: string }
+            text/html:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/baselines:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Runs]
+      operationId: listCxBaselines
+      summary: Performance baselines fitted for the project's equipment
+      responses:
+        "200":
+          description: Baselines
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/PerformanceBaseline" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Runs]
+      operationId: fitCxBaseline
+      summary: Fit a baseline (chiller kW/ton vs load and ECWT) over a known-good period (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [equip_uri, points, fit_start, fit_end]
+              properties:
+                equip_uri: { type: string }
+                asset_id: { type: [string, "null"], description: "The installed asset, once the asset registry (#197) knows it" }
+                kind: { type: string, enum: [chiller_kw_per_ton] }
+                points:
+                  type: object
+                  description: "kw and ecwt, and tons or chw_flow_gpm + chw_supply_f + chw_return_f"
+                  properties:
+                    kw: { type: string }
+                    ecwt: { type: string }
+                    tons: { type: string }
+                    chw_flow_gpm: { type: string }
+                    chw_supply_f: { type: string }
+                    chw_return_f: { type: string }
+                fit_start: { type: string, format: date-time }
+                fit_end: { type: string, format: date-time }
+                note: { type: string }
+      responses:
+        "201":
+          description: The baseline, with its model and Guideline 14 statistics
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PerformanceBaseline" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /baselines/{id}/degradation:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Runs]
+      operationId: getCxDegradation
+      summary: Actual vs predicted at matched conditions since the baseline
+      parameters:
+        - { name: start, in: query, schema: { type: string, format: date-time } }
+        - { name: end, in: query, schema: { type: string, format: date-time } }
+        - { name: bucket, in: query, schema: { type: string, enum: [month, week] } }
+        - { name: alert_pct, in: query, description: "Your own threshold (a setting, not a standard)", schema: { type: number } }
+      responses:
+        "200":
+          description: The degradation report
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [baseline, hours_total, hours_matched, buckets, overall]
+                properties:
+                  baseline: { $ref: "#/components/schemas/PerformanceBaseline" }
+                  start: { type: string }
+                  end: { type: string }
+                  hours_total: { type: integer }
+                  hours_matched: { type: integer }
+                  hours_outside_fit_range: { type: integer }
+                  buckets: { type: array, items: { type: object } }
+                  overall: { type: [object, "null"] }
+                  alert_pct: { type: [number, "null"] }
+                  alert: { type: [boolean, "null"] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/savings-cases:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Runs]
+      operationId: listCxSavingsCases
+      summary: Replace-vs-keep cases
+      responses:
+        "200":
+          description: Cases
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/SavingsCase" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Runs]
+      operationId: createCxSavingsCase
+      summary: A replace-vs-keep case from a baseline; measured inputs filled in, the rest yours (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [baseline_id]
+              properties:
+                baseline_id: { type: string }
+                title: { type: string }
+                assumptions: { type: object, description: "key: number or {value, note}" }
+      responses:
+        "201":
+          description: The case
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SavingsCase" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /savings-cases/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Runs]
+      operationId: getCxSavingsCase
+      summary: A savings case
+      responses:
+        "200":
+          description: The case
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SavingsCase" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Runs]
+      operationId: editCxSavingsCase
+      summary: Change any assumption and recompute (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { assumptions: { type: object } } }
+      responses:
+        "200":
+          description: The case
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SavingsCase" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/hunting:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Runs]
+      operationId: getCxHunting
+      summary: Hunting per control loop, against each equipment's start-up baseline
+      description: |
+        Error zero crossings and command reversals per hour, period,
+        amplitude and travel, from raw samples (a series sampled slower
+        than once a minute is not judged). `hunting` when the rate is over
+        `ratio` x the start-up baseline, or over `min_reversals_per_hour`
+        with no baseline; then the onset day and setpoint edits / asset
+        events around it.
+      parameters:
+        - { name: hours, in: query, schema: { type: number, minimum: 1, maximum: 168 } }
+        - { name: days, in: query, description: How far back to look for the onset, schema: { type: integer, minimum: 1, maximum: 60 } }
+        - { name: ratio, in: query, schema: { type: number } }
+        - { name: min_reversals_per_hour, in: query, schema: { type: number } }
+        - { name: command_deadband, in: query, description: "Command moves within this many % are noise (default 2)", schema: { type: number } }
+        - { name: error_deadband, in: query, description: "Error within this band around zero is noise, in the variable's units (default 0.5)", schema: { type: number } }
+        - { name: equip, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: One row per loop
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [generated_at, hours, hunting, loops]
+                properties:
+                  generated_at: { type: string, format: date-time }
+                  hours: { type: number }
+                  settings: { type: object }
+                  hunting: { type: integer }
+                  loops:
+                    type: array
+                    items:
+                      type: object
+                      required: [equip_uri, loop, verdict, now, commands]
+                      properties:
+                        equip_uri: { type: string }
+                        loop: { type: string }
+                        label: { type: string }
+                        sensor: { type: [string, "null"] }
+                        setpoint: { type: [string, "null"] }
+                        commands: { type: array, items: { type: string } }
+                        now: { type: object }
+                        baseline: { type: [object, "null"] }
+                        rate_per_hour: { type: [number, "null"] }
+                        baseline_rate_per_hour: { type: [number, "null"] }
+                        ratio: { type: [number, "null"] }
+                        threshold_per_hour: { type: number }
+                        verdict: { type: string, enum: [hunting, steady, inconclusive] }
+                        onset: { type: [string, "null"] }
+                        changes: { type: array, items: { type: object } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /pack-schema:
     get:
       tags: [Packs]
@@ -2289,6 +2704,79 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PackAdoption" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/compliance/runs:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Packs]
+      operationId: listCxComplianceRuns
+      summary: The project's compliance runs, newest first
+      responses:
+        "200":
+          description: Runs
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ComplianceRun" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Packs]
+      operationId: startCxComplianceRun
+      summary: Run the adopted packs' active rows against the spaces now (operator)
+      responses:
+        "202":
+          description: The queued run
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ComplianceRun" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /compliance-runs/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Packs]
+      operationId: getCxComplianceRun
+      summary: A compliance run and its results
+      responses:
+        "200":
+          description: The run
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/ComplianceRun" }
+                  - type: object
+                    required: [results]
+                    properties:
+                      results: { type: array, items: { $ref: "#/components/schemas/ComplianceLogRow" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /spaces/{id}/compliance:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Spaces]
+      operationId: getCxSpaceCompliance
+      summary: A space's compliance log (for surveys)
+      parameters:
+        - { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 3660 } }
+        - { name: format, in: query, schema: { type: string, enum: [json, html] } }
+      responses:
+        "200":
+          description: The log (text/html for format=html)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [space, days, log]
+                properties:
+                  space: { type: object }
+                  days: { type: integer }
+                  every_hours: { type: [number, "null"] }
+                  log: { type: array, items: { $ref: "#/components/schemas/ComplianceLogRow" } }
+            text/html:
+              schema: { type: string }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
   /packs/{id}/extract:
@@ -4094,3 +4582,142 @@ components:
         decided_by: { type: [string, "null"] }
         decided_at: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
+    ComplianceRun:
+      type: object
+      required: [id, project_id, status, window_end, started_at]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        status: { type: string, enum: [queued, running, completed, failed] }
+        triggered_by: { type: [string, "null"] }
+        window_end: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: [string, "null"] }
+        summary: { type: [object, "null"] }
+        error: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+    ComplianceLogRow:
+      type: object
+      required: [space_id, pack_id, version, row_id, title, citation, status, window_start, window_end, evidence]
+      properties:
+        id: { type: string }
+        run_id: { type: string }
+        space_id: { type: string }
+        pack_ref: { type: string }
+        pack_id: { type: string }
+        version: { type: string }
+        row_id: { type: string }
+        title: { type: string }
+        citation: { type: object }
+        status: { type: string, enum: [pass, fail, inconclusive] }
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
+        evidence: { type: object }
+        note: { type: [string, "null"] }
+    PerformanceBaseline:
+      type: object
+      required: [id, project_id, equip_uri, kind, points, fit_start, fit_end, model, status]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        equip_uri: { type: string }
+        asset_id: { type: [string, "null"] }
+        kind: { type: string }
+        points: { type: object }
+        fit_start: { type: string, format: date-time }
+        fit_end: { type: string, format: date-time }
+        model:
+          type: object
+          properties:
+            coefficients: { type: array, items: { type: number } }
+            features: { type: array, items: { type: string } }
+            n_hours: { type: integer }
+            cvrmse_pct: { type: number }
+            nmbe_pct: { type: number }
+            ranges: { type: object }
+            quality: { type: object }
+        status: { type: string, enum: [active, superseded] }
+        note: { type: [string, "null"] }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+    SavingsCase:
+      type: object
+      required: [id, project_id, equip_uri, title, assumptions, result, history]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        equip_uri: { type: string }
+        asset_id: { type: [string, "null"] }
+        baseline_id: { type: [string, "null"] }
+        title: { type: string }
+        assumptions:
+          type: object
+          additionalProperties:
+            type: object
+            required: [value, unit, label, source]
+            properties:
+              value: { type: [number, "null"] }
+              unit: { type: string }
+              label: { type: string }
+              source: { type: string, enum: [measured, user, default] }
+              note: { type: [string, "null"] }
+        result:
+          type: object
+          properties:
+            annual_kwh_saved: { type: number }
+            annual_savings: { type: number }
+            simple_payback_years: { type: [number, "null"] }
+            savings_over_remaining_life: { type: [number, "null"] }
+            sensitivity: { type: array, items: { type: object } }
+            formula: { type: string }
+        history: { type: array, items: { type: object } }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Schedule:
+      type: object
+      required: [id, project_id, filename, sha256, format, activities, created_at]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        filename: { type: string }
+        sha256: { type: string }
+        format: { type: string, enum: [xer, mspdi] }
+        source_project: { type: [string, "null"] }
+        data_date: { type: [string, "null"] }
+        activities: { type: integer }
+        info: { type: [object, "null"] }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+    ScheduleActivity:
+      type: object
+      required: [id, schedule_id, code, name, status, predecessors]
+      properties:
+        id: { type: string }
+        schedule_id: { type: string }
+        project_id: { type: string }
+        code: { type: string }
+        name: { type: string }
+        wbs: { type: [string, "null"] }
+        planned_start: { type: [string, "null"] }
+        planned_finish: { type: [string, "null"] }
+        actual_start: { type: [string, "null"] }
+        actual_finish: { type: [string, "null"] }
+        percent_complete: { type: [number, "null"] }
+        status: { type: string, enum: [not_started, in_progress, complete] }
+        milestone: { type: boolean }
+        summary: { type: boolean }
+        predecessors: { type: array, items: { type: string } }
+    ScheduleLink:
+      type: object
+      required: [id, project_id, activity_code, kind, params]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        activity_code: { type: string }
+        kind: { type: string, enum: [points_online, procedure_passed, form_signed] }
+        params: { type: object }
+        note: { type: [string, "null"] }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+

@@ -140,7 +140,7 @@ def make_handler(rules_path: str, webhooks_path: str, ts_pool):
                 "id": json_store.new_id(),
                 "name": body["name"],
                 "mode": body["mode"],  # "cur" | "his"
-                "type": body["type"],  # "range" | "stuck" | "stale"
+                "type": body["type"],  # "range" | "stuck" | "stale" | "hunting"
                 "applies_to": body["applies_to"],
                 **{k: v for k, v in body.items() if k not in ("name", "mode", "type", "applies_to")},
             }
