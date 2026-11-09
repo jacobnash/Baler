@@ -26,7 +26,7 @@ const withParam = (value) => "?api=" + encodeURIComponent(value);
 test("no override, or an empty one, uses the fallback silently", () => {
   for (const search of ["", "?other=1", "?api="]) {
     const { apiBase, warnings } = load(search);
-    assert.equal(apiBase("api", "/api"), "/api");
+    assert.equal(apiBase("api", "/api"), ORIGIN + "/api");
     assert.deepEqual(warnings, []);
   }
 });
@@ -34,16 +34,16 @@ test("no override, or an empty one, uses the fallback silently", () => {
 test("same-origin paths are accepted", () => {
   for (const [value, want] of [["/api", "/api"], ["/x/y", "/x/y"], ["/x/y/", "/x/y"], ["/api-2_v.1", "/api-2_v.1"]]) {
     const { apiBase, warnings } = load(withParam(value));
-    assert.equal(apiBase("api", "/fallback"), want, value);
+    assert.equal(apiBase("api", "/fallback"), ORIGIN + want, value);
     assert.deepEqual(warnings, [], value);
   }
 });
 
 test("the right parameter is read", () => {
   const { apiBase } = load("?ingest=%2Fmy-ingest&ops=%2Fmy-ops");
-  assert.equal(apiBase("ingest", "/ingest"), "/my-ingest");
-  assert.equal(apiBase("ops", "/ops"), "/my-ops");
-  assert.equal(apiBase("cx", "/cx"), "/cx");
+  assert.equal(apiBase("ingest", "/ingest"), ORIGIN + "/my-ingest");
+  assert.equal(apiBase("ops", "/ops"), ORIGIN + "/my-ops");
+  assert.equal(apiBase("cx", "/cx"), ORIGIN + "/cx");
 });
 
 const REJECTED = [
@@ -72,12 +72,14 @@ const REJECTED = [
   "/ap\u007fi",
   "/ap\u2028i",
   "/api%0a",
+  "/api?x=1",
+  "/api#x",
 ];
 
 test("anything but a same-origin path falls back with a warning", () => {
   for (const value of REJECTED) {
     const { apiBase, warnings } = load(withParam(value));
-    assert.equal(apiBase("api", "/api"), "/api", JSON.stringify(value));
+    assert.equal(apiBase("api", "/api"), ORIGIN + "/api", JSON.stringify(value));
     assert.equal(warnings.length, 1, JSON.stringify(value));
   }
 });
@@ -85,8 +87,30 @@ test("anything but a same-origin path falls back with a warning", () => {
 test("a raw (unencoded) query string is handled the same way", () => {
   for (const search of ["?api=//other.example", "?api=https://other.example", "?api=%2F%2Fother.example", "?api=/%2F%2Fother"]) {
     const { apiBase } = load(search);
-    assert.equal(apiBase("api", "/api"), "/api", search);
+    assert.equal(apiBase("api", "/api"), ORIGIN + "/api", search);
   }
+});
+
+test("the result is always an absolute URL on the page's own origin", () => {
+  const values = ["/api", "/x/y", "/a/../../b", "/./c", "/a:b", "/@other.example", "/x/y///"];
+  for (const value of values.concat(REJECTED)) {
+    const { apiBase } = load(withParam(value));
+    const got = apiBase("api", "/api");
+    assert.ok(got.startsWith(ORIGIN + "/"), `${JSON.stringify(value)} -> ${got}`);
+    assert.equal(new URL(got).origin, ORIGIN, JSON.stringify(value));
+    assert.ok(!got.endsWith("/"), `${JSON.stringify(value)} -> ${got} (callers append paths)`);
+    assert.equal(new URL(got + "/sources").origin, ORIGIN, JSON.stringify(value));
+  }
+  assert.equal(load(withParam("/a/../../b")).apiBase("api", "/api"), ORIGIN + "/b");
+  assert.equal(load(withParam("/x/y///")).apiBase("api", "/api"), ORIGIN + "/x/y");
+});
+
+test("the host comes from location.origin, whatever the origin is", () => {
+  const warnings = [];
+  const ctx = { URL, URLSearchParams, location: { origin: "http://localhost:8080", search: "?ops=%2Fops2" }, console: { warn: (m) => warnings.push(m) } };
+  vm.runInNewContext(SRC, ctx);
+  assert.equal(ctx.apiBase("ops", "/ops"), "http://localhost:8080/ops2");
+  assert.equal(ctx.apiBase("auth", "/auth"), "http://localhost:8080/auth");
 });
 
 test("every page script takes its API base through apiBase()", () => {
@@ -94,7 +118,7 @@ test("every page script takes its API base through apiBase()", () => {
   const dir = new URL("./", import.meta.url);
   const names = ["api", "auth", "ingest", "ops", "fault", "cx", "derivation", "windrow", "validate"];
   const re = new RegExp(`\\.get\\(["'](?:${names.join("|")})["']\\)`);
-  for (const f of ["alarms", "app", "auth", "connectors", "cx", "derivations", "devices", "his", "mapping", "ops", "orphans", "record_edit", "sources"]) {
+  for (const f of ["alarms", "app", "auth", "connectors", "cx", "derivations", "devices", "his", "mapping", "ops", "orphans", "record_edit", "reset", "sources"]) {
     const src = readFileSync(new URL(`${f}.js`, dir), "utf8");
     assert.ok(!re.test(src), `${f}.js reads an API base from the query string without apiBase()`);
   }
