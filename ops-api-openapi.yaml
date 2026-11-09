@@ -640,6 +640,54 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object}}}}
       responses:
         "201": {description: The removed and installed events, content: {application/json: {schema: {type: object}}}}
+  # PM schedules (#199). docs-site/pages/pm-schedules.mdx.
+  /pm/tasks:
+    get:
+      operationId: listPMTasks
+      summary: Every PM task
+      responses:
+        "200": {description: Tasks, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+    post:
+      operationId: createPMTask
+      summary: Add a PM task (calendar, run_hours or condition)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: The task, content: {application/json: {schema: {type: object}}}}
+  /pm/tasks/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    patch:
+      operationId: patchPMTask
+      summary: Edit or pause a task (audited)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: The task, content: {application/json: {schema: {type: object}}}}
+  /pm/tasks/{id}/complete:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: completePMTask
+      summary: Record PM done on an asset
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: The completion, content: {application/json: {schema: {type: object}}}}
+  /pm/tasks/{id}/completions:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listPMCompletions
+      summary: Completions of a task
+      responses:
+        "200": {description: Completions, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+  /pm/due:
+    get:
+      operationId: pmDue
+      summary: Due PM work, most urgent first (filter status)
+      responses:
+        "200": {description: Due items, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+  /pm/due/export:
+    get:
+      operationId: pmDueExport
+      summary: Due work as CSV, or active tasks as COBie Job rows (format csv or cobie-job)
+      responses:
+        "200": {description: CSV, content: {text/csv: {schema: {type: string}}}}
 components:
   schemas:
     Freshness:

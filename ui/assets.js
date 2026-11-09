@@ -80,8 +80,46 @@ function onSubmit(id, fn) {
   });
 }
 
+async function loadPM() {
+  const items = await api("/pm/due");
+  const tbody = document.querySelector("#pm-due-table tbody");
+  fill("#pm-due-table tbody", items, ["status", "title", (i) => i.asset.tag || i.asset.serial || i.asset_id, "basis",
+    (i) => `${i.since.slice(0, 10)} (${i.since_what})`,
+    (i) => i.due_at ? i.due_at.slice(0, 10) : i.run_hours != null ? `${i.run_hours} h run` : i.value != null ? i.value : "", () => ""]);
+  [...tbody.children].forEach((tr, n) => {
+    const b = Object.assign(document.createElement("button"), { type: "button", textContent: "Done" });
+    b.addEventListener("click", async () => {
+      try {
+        await api(`/pm/tasks/${encodeURIComponent(items[n].task_id)}/complete`, { method: "POST", body: JSON.stringify({ asset_id: items[n].asset_id }) });
+        await loadPM();
+      } catch (err) { say(`error: ${err.message}`); }
+    });
+    tr.lastChild.appendChild(b);
+  });
+}
+
+async function downloadCSV(path, name) {
+  const res = await fetch(`${OPS_URL}${path}`, { headers: authHeaders() });
+  if (!res.ok) { say(`download failed: ${res.status}`); return; }
+  const url = URL.createObjectURL(await res.blob());
+  Object.assign(document.createElement("a"), { href: url, download: name }).click();
+  URL.revokeObjectURL(url);
+}
+
 initAuth(() => {
   loadAssets().catch((err) => say(`error: ${err.message}`));
+  loadPM().catch((err) => say(`error: ${err.message}`));
+  document.getElementById("pm-csv").addEventListener("click", (ev) => { ev.preventDefault(); downloadCSV("/pm/due/export?format=csv", "pm-due.csv"); });
+  document.getElementById("pm-cobie").addEventListener("click", (ev) => { ev.preventDefault(); downloadCSV("/pm/due/export?format=cobie-job", "cobie-job.csv"); });
+  onSubmit("pm-form", async (f) => {
+    const body = formJSON(f);
+    for (const k of ["interval_days"]) if (body[k]) body[k] = parseInt(body[k], 10);
+    for (const k of ["interval_hours", "condition_value"]) if (body[k]) body[k] = Number(body[k]);
+    if (body.trigger !== "condition") { delete body.condition_op; delete body.condition_point; delete body.condition_value; }
+    await api("/pm/tasks", { method: "POST", body: JSON.stringify(body) });
+    f.reset();
+    await loadPM();
+  });
   onSubmit("filter-form", loadAssets);
   onSubmit("create-form", async (f) => {
     const a = await api("/assets", { method: "POST", body: JSON.stringify(formJSON(f)) });
