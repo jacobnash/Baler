@@ -411,6 +411,42 @@ queued behind that replay until mosquitto's 10,000-message queue overflowed.
 
 **Max sustained points:** _(nash-srv)_ · **First bottleneck at each step:** _(nash-srv)_
 
+### Long soak, local proxy (#245)
+
+**A proxy, not the acceptance run.** Same 4-vCPU dev VM as above (load average 5.6 at start,
+postgres capped at 2 CPUs / 6 GB), run `20261108T235904Z`: 2,000 points every 5 s (400 rows/s),
+with everything scaled down so several compression cycles fit in under an hour: 5-minute chunks,
+`compress_after` 10 minutes, policy every 2.5 minutes (derived). 45-minute soak after a 60 s
+warm-up; the steady phase (after `compress_after` + 2 chunks + a schedule) was the last 22.5
+minutes, 4 compression cycles. Verdict: **pass**.
+
+| | Measured |
+|---|---|
+| Hot (uncompressed) bytes, max in first / second half of the steady phase | 85.1 MB / 84.8 MB: flat |
+| Oldest uncompressed chunk past its end, max | 669 s (bound 1,202 s); backlog never above 1 chunk |
+| Disk growth, phase-aligned over 1,208 s | **15.1 B per row**, against 220 B raw: 521 MB/day at this rate instead of 7.6 GB |
+| Compressed bytes per row / ratio | 15.7 B / 13.3× (small batches: 60 rows per point per 5-minute chunk; nash-srv's 7-day chunks measured 5 B) |
+| Compression runs | 19 (7 with a chunk), each 0.5–2.2 s, median **198,000 rows/s** in one background worker, 495× the ingest rate |
+| Ingest | 1,084,801 acknowledged, 1,084,801 stored; canary p95 0.48 s, max 1.17 s, none lost; no restarts |
+| Reads | 8 probe rounds, all in budget. Slowest median: `readAll(equip) hisRead(today)` 1.81 s (budget 2.0 s); `hisRead(pastWeek)` for 1,000 points at most 1.43 s (budget 10 s); history across the compressed boundary 4–6 ms |
+| Late writes into compressed chunks | 4 rounds × ~2,000 points, each a replay (same ts) and a backfill (new ts), at 400 msg/s: every row stored once, new values, 0 duplicates, landed in 15 s |
+| Aggregates | `point_history_5m` equal to the raw fold over a compressed hour; its watermark at most 814 s behind |
+
+What the proxy does **not** show, and the nash-srv run has to:
+
+- Compression at the real chunk size. Runs here took under 2.3 s, so only 1 of 8 probe rounds and
+  none of the 15 s lag samples overlapped one (`lag_p95_during_compression_max` is empty). At 100k
+  points a 1-hour chunk is about 72 M rows: at nash-srv's earlier ~33,000 rows/s that would be 36
+  minutes per hour in one worker, so whether it keeps up there is exactly the open question
+  (`compression_margin` answers it).
+- The 1-hour aggregate: with its 1-hour end offset its watermark never moved inside this soak.
+- Read probes at 100k points, which the ladder already shows are the first wall (above).
+
+Earlier local finding, from the same work: a 2,000-point overwrite batch into compressed chunks
+failed TimescaleDB's 100,000-row decompression cap and would have put mqtt_listener into a
+restart loop; writers now lift that cap per transaction
+([History compression](/history-compression)).
+
 ### Disk growth
 
 At 1M points every 5 s, that's 200,000 rows/s, or 17.3 billion rows/day. Bytes per row comes

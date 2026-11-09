@@ -471,9 +471,13 @@ def summarize(result: dict) -> dict:
     out["compression_runs"] = len(result.get("runs", []))
     out["compression_rows_per_s_median"] = round(statistics.median(r["rows_per_s"] for r in runs)) if runs else None
     out["compression_duration_s_max"] = max((r["duration_s"] for r in result.get("runs", [])), default=None)
-    stored_rps = (result.get("ingest") or {}).get("stored_rps")
-    if out["compression_rows_per_s_median"] and stored_rps:
-        out["compression_margin"] = round(out["compression_rows_per_s_median"] / stored_rps, 1)
+    # Ingest rate: what the broker acknowledged (stored_rps, from the chunks'
+    # pg_stat counters, also counts the rows decompression and recompression
+    # move, so it reads high once late writes hit compressed chunks).
+    ing = result.get("ingest") or {}
+    rate = ing.get("offered_rps") or ing.get("stored_rps")
+    if out["compression_rows_per_s_median"] and rate:
+        out["compression_margin"] = round(out["compression_rows_per_s_median"] / rate, 1)
     last = samples[-1]["disk"] if samples else {}
     if last.get("after_compression_bytes"):
         out["compression_ratio"] = round(last["before_compression_bytes"] / last["after_compression_bytes"], 1)
@@ -496,7 +500,7 @@ def summarize(result: dict) -> dict:
         if span >= chunk:
             end = steady[-1]
             begin = min(steady, key=lambda s: abs(s["t"] - (end["t"] - span)))
-            rows = end["stored_total"] - begin["stored_total"]
+            rows = rate * (end["t"] - begin["t"]) if rate else end["stored_total"] - begin["stored_total"]
             if rows > 0:
                 out["aligned_window_s"] = round(end["t"] - begin["t"], 1)
                 out["growth_bytes_per_row"] = round((end["disk"]["total_bytes"] - begin["disk"]["total_bytes"]) / rows, 2)

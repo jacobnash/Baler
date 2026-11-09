@@ -46,7 +46,7 @@ def _result(n=240, every=15.0, hot_growth=0.0, comp_b=COMP_B, backlog_end=0, lag
              "ok": late_ok}]
     return {"settings": {"chunk_interval_s": CHUNK, "compress_after_s": AFTER, "schedule_s": SCHED},
             "samples": samples, "runs": runs, "probe_rounds": rounds, "late": late,
-            "ingest": {"stored_ratio": 1.0, "stored_rps": RPS}, "lag": {"p95_s": lag, "lost": 0},
+            "ingest": {"stored_ratio": 1.0, "offered_rps": RPS, "stored_rps": RPS}, "lag": {"p95_s": lag, "lost": 0},
             "cagg_check": {"checked": True, "equal": True},
             "containers": {"mqtt_listener": {"restarts_delta": 0, "status": "running"}}}
 
