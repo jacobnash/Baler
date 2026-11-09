@@ -443,29 +443,29 @@ def _worker_args(args) -> argparse.Namespace:
     return args if isinstance(args, argparse.Namespace) else argparse.Namespace(**args)
 
 
-def run_worker(index: int, args, retire_id: str | None = None) -> None:
-    """One worker: a persistent MQTT 5 session on the shared subscription,
-    its own batcher and Postgres connection, a heartbeat every few seconds.
-    With retire_id, drain and delete that session instead (retire_session)."""
+def _session(client_id: str, args, store, ts_conn, prune: bool) -> tuple:
+    """A manual-ack MQTT 5 client and its batcher. Manual acks: a reading
+    is acknowledged once its batch is committed (ReadingBatcher), so an
+    unstored reading is never one the broker has forgotten."""
+    client = mqtt_util.make_client(client_id=client_id, manual_ack=True, v5=True)
+    batcher = ReadingBatcher(client, store, ts_conn, max_rows=args.batch_rows, max_wait=args.batch_ms / 1000,
+                             feed=args.feed, feed_retention_s=args.feed_retention, prune_every=5.0 if prune else 0)
+    client.on_message = make_on_message(store, ts_conn, batcher)
+    return client, batcher
+
+
+def run_worker(index: int, args) -> None:
+    """One worker: a persistent MQTT 5 session on the shared subscription
+    (stable id, never expires: what the broker queued for this worker, and
+    what it hadn't acknowledged, is still there when it comes back), its
+    own batcher and Postgres connection, a heartbeat every few seconds.
+    Worker 0 also prunes the reading feed (one pruner per listener)."""
     args = _worker_args(args)
     tracing.init_tracing("baler-mqtt-listener")
     store = RemoteStore()
-    ts_conn = connect()
-    client_id = retire_id or worker_client_id(index)
-    # Manual acks: a reading is acknowledged once its batch is committed
-    # (ReadingBatcher), so an unstored reading is never one the broker has
-    # forgotten. A persistent session (stable id, never expires): what the
-    # broker queued for this worker, and what it hadn't acknowledged, is
-    # still there when it comes back.
-    client = mqtt_util.make_client(client_id=client_id, manual_ack=True, v5=True)
-    batcher = ReadingBatcher(client, store, ts_conn, max_rows=args.batch_rows, max_wait=args.batch_ms / 1000,
-                             feed=args.feed, feed_retention_s=args.feed_retention,
-                             prune_every=5.0 if index == 0 and not retire_id else 0)
-    client.on_message = make_on_message(store, ts_conn, batcher)
+    client_id = worker_client_id(index)
+    client, batcher = _session(client_id, args, store, connect(), prune=index == 0)
     client.on_disconnect = make_on_disconnect(batcher)
-    if retire_id:
-        retire_session(client, batcher, args)
-        return
     on_fresh = (lambda c: RetainedSnapshot(args, store).start()) if index == 0 and args.retained_snapshot else None
     client.on_connect = make_on_connect(shared(args.topic_pattern, args.share_group), batcher, on_fresh=on_fresh)
     batcher.start()
@@ -523,8 +523,17 @@ def retire_session(client, batcher: ReadingBatcher, args, idle_s: float = 3.0, t
 
 
 def run_retire(args, client_ids: list[str]) -> None:
+    """The supervisor's one-off sweep: retire_session for each id, in turn."""
+    args = _worker_args(args)
+    tracing.init_tracing("baler-mqtt-listener")
+    store, ts_conn = RemoteStore(), connect()
+    retired = []
     for cid in client_ids:
-        run_worker(-1, args, retire_id=cid)
+        client, batcher = _session(cid, args, store, ts_conn, prune=False)
+        if retire_session(client, batcher, args):
+            retired.append(cid)
+    print(f"retire sweep: {len(client_ids)} unused listener client id(s) checked, "
+          f"{len(retired)} session(s) retired {retired}", flush=True)
 
 
 def _heartbeats(service: str, client_id: str, batcher: ReadingBatcher) -> None:
@@ -543,6 +552,9 @@ def _heartbeats(service: str, client_id: str, batcher: ReadingBatcher) -> None:
                   "messages_per_s": round((st["received"] - last["received"]) / dt, 1),
                   "cpu_pct": round(100 * (cpu - last_cpu) / dt, 1),
                   "blocked_s_delta": round(st["blocked_s"] - last["blocked_s"], 2),
+                  # share of the interval the batcher spent writing: near
+                  # 100 with spare CPU means Postgres, not Python, is the wall
+                  "flush_busy_pct": round(100 * (st["flush_s"] - last["flush_s"]) / dt, 1),
                   "interval_s": round(dt, 1)}
         last_t, last_cpu, last = now, cpu, st
         try:
@@ -633,11 +645,11 @@ class Supervisor:
         self.restarts: dict[str, int] = {}
         self.stopping = False
 
-    def spawn(self, name: str, kind: str, index: int = 0, retire_ids: list[str] | None = None, restart: bool = True) -> None:
+    def spawn(self, name: str, kind: str, index: int = 0, retire_ids: list[str] | None = None) -> None:
         p = self.ctx.Process(target=_child, args=(kind, index, vars(self.args), retire_ids), name=name, daemon=False)
         p.start()
         self.children[name] = {"proc": p, "kind": kind, "index": index, "retire_ids": retire_ids,
-                               "restart": restart, "backoff": self.children.get(name, {}).get("backoff", 1.0),
+                               "backoff": self.children.get(name, {}).get("backoff", 1.0),
                                "started": time.monotonic(), "due": None}
 
     def tick(self) -> None:
@@ -646,17 +658,14 @@ class Supervisor:
             p = c["proc"]
             if c["due"] is not None:
                 if now >= c["due"]:
-                    self.spawn(name, c["kind"], c["index"], c["retire_ids"], c["restart"])
+                    self.spawn(name, c["kind"], c["index"], c["retire_ids"])
                 continue
             if p.is_alive():
                 if now - c["started"] > 60:
                     c["backoff"] = 1.0  # stayed up: the next failure restarts fast again
                 continue
             code = p.exitcode
-            if code == 0 and not c["restart"]:
-                del self.children[name]
-                continue
-            if code == 0 and c["kind"] == "retire":
+            if code == 0 and c["kind"] == "retire":  # the sweep is done
                 del self.children[name]
                 continue
             self.restarts[name] = self.restarts.get(name, 0) + 1
@@ -727,7 +736,7 @@ def main(argv=None) -> None:
     signal.signal(signal.SIGTERM, sup.stop)
     signal.signal(signal.SIGINT, sup.stop)
     if args.retire:
-        sup.spawn("retire", "retire", retire_ids=retire_ids(args.workers), restart=True)
+        sup.spawn("retire", "retire", retire_ids=retire_ids(args.workers))
     for i in range(args.workers):
         sup.spawn(f"worker-{i}", "worker", i)
     if args.feed:

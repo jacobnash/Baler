@@ -7,6 +7,8 @@ pattern readwrite cmd/%u/#
 user baler
 topic readwrite #
 topic readwrite $CONTROL/dynamic-security/#
+# mqtt_listener's supervisor counts the broker's dropped messages (#233).
+topic read $SYS/broker/publish/messages/dropped
 
 user healthcheck
 topic read $SYS/broker/uptime
