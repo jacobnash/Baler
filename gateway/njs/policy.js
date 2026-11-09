@@ -295,6 +295,10 @@ const ROUTES = [
   ["PATCH",  /^\/cx\/manual-results\/[^/]+$/,                    "commissioning", "operator"],
   ["GET",    /^\/cx\/manual-attachments\/[^/]+$/,                "commissioning", "viewer"],
   ["GET",    /^\/cx\/projects\/[^/]+\/coverage$/,                "commissioning", "viewer"],
+  // Construction schedules (#217)
+  ["POST",   /^\/cx\/projects\/[^/]+\/construction-schedules$/, "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/construction-schedules$/, "commissioning", "viewer"],
+  ["GET",    /^\/cx\/construction-schedules\/[^/]+\/activities$/, "commissioning", "viewer"],
   // Cx 10 (Baler#46): the agent. Talking to it is a change (it can start
   // passive runs and propose); accepting a proposal is the change itself,
   // and the backend requires admin for an active-test proposal.

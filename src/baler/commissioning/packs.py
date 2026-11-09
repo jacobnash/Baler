@@ -1,7 +1,7 @@
 """
 Requirement packs: standards as data (Baler#205, epic #221 §3.2).
 
-Hard-coding "an OR needs 20 ACH" is wrong three ways: the number depends on
+Hard-coding "an OR needs N air changes" is wrong three ways: the number depends on
 the standard's edition, on the jurisdiction, and owners add their own. So a
 requirement is a row of data, in a versioned pack, and is judged by an
 engine Baler already runs. A pack adds the citation, the edition, the
@@ -19,7 +19,7 @@ A row:
 
     {"id": "or-pressure",
      "title": "Pressure relationship to adjacent spaces",
-     "citation": {"ref": "Table 7-1, Operating room", "page": null},
+     "citation": {"ref": "Table N, Operating room", "page": null},
      "applies_to": {"space_type": ["operating_room"], "equip_class": [],
                     "phase": ["acceptance", "operations"]},
      "criterion": {"quantity": "pressure_to_adjacent", "op": ">=",

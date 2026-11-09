@@ -30,7 +30,7 @@ It is the same pattern as Cx 7's spec extraction
 
    ```bash
    curl -X POST $BALER/cx/pack-proposals/$P/accept \
-     -d '{"row": {"criterion": {"quantity": "relative_humidity", "op": "between", "min": 20, "max": 60, "unit": "%RH"}}}'
+     -d '{"row": {"criterion": {"quantity": "relative_humidity", "op": "between", "min": 23, "max": 58, "unit": "%RH"}}}'
    ```
 
    or reject (`POST /cx/pack-proposals/{id}/reject`).
