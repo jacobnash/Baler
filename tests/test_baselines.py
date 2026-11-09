@@ -56,7 +56,7 @@ def test_fit_quality_and_drift():
     rep = performance.degradation(model, _hours(h, FIT_END, fx.NOW), alert_pct=5)
     assert 7.0 <= rep["overall"]["gap_pct"] <= 9.0
     assert rep["hours_outside_fit_range"] >= 60 * 3 - 5 and rep["alert"] is True
-    assert [b["period"] for b in rep["buckets"]][0] == FIT_END.strftime("%Y-%m")
+    assert rep["buckets"][0]["period"] == FIT_END.strftime("%Y-%m")
 
 
 def test_too_little_data_and_flat_data_refused():
