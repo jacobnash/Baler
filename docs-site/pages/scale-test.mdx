@@ -334,6 +334,9 @@ measured 17–25k rows/s against 15–21k for `off`; single-row writes pay the f
 | + durable batched ingest | postgres | 58,999 | 55,296 | 3,703 |
 | + session resume, queue 200,000 | mqtt_listener | 57,000 | 57,000 | **0** |
 | + session resume, queue 200,000 | postgres | 59,000 | 59,000 | **0** |
+| + #233, 3 workers (10k points, 2,000/s) | mqtt_listener (all workers) | 112,001 | 112,001 | **0** |
+| + #233, 3 workers | one worker process (`listener_worker`) | 110,000 | 110,000 | **0** |
+| + #233, 3 workers | postgres | 126,001 | 126,001 | **0** |
 | _nash-srv_ | | | | |
 
 Most of main's loss wasn't the async commit itself. After any listener restart, its
