@@ -19,6 +19,7 @@
       <a href="alarms.html">Alarms</a>
       <a href="derivations.html">Derivations</a>
       <a href="cx.html">Commissioning</a>
+      <a href="assets.html">Assets</a>
       <a href="documents.html">Documents</a>
       <a href="connectors.html">Connectors</a>
       <a href="ops.html">Ops</a>
@@ -84,10 +85,23 @@
       <div id="tools-chips" class="ops-grid"></div>
     </section>
 
+    <section id="alerts-section" hidden>
+      <h2>Alerts sent</h2>
+      <p class="hint">Open alerts the alerter has sent to the configured channels (see the Alerting docs page).</p>
+      <div id="alerts-list" class="ops-list"></div>
+    </section>
+
+    <section id="processes-section" hidden>
+      <h2>Process errors</h2>
+      <p class="hint">Unhandled exceptions and restarts, per process, since the counts began.</p>
+      <div id="processes-list" class="ops-list"></div>
+    </section>
+
     <section id="account-section">
       <h2>Your account</h2>
       <p class="hint"><span id="account-who">…</span>
         <button type="button" id="change-password-btn">Change my password</button></p>
+      <p class="hint" id="mfa-account"></p>
     </section>
 
     <section id="sources-section" hidden>
@@ -131,6 +145,7 @@
       <h2>Users</h2>
       <div class="toolbar"><button type="button" id="new-user-btn">New user</button>
         <span id="users-status" class="hint"></span></div>
+      <div id="org-mfa"></div>
       <table>
         <thead><tr><th>User</th><th>Role</th><th>Sites</th><th>Added</th><th></th></tr></thead>
         <tbody id="users-body"></tbody>
@@ -234,9 +249,11 @@
       </menu>
     </form>
   </dialog>
+  <script src="apibase.js"></script>
   <script src="auth.js"></script>
   <script src="sources.js"></script>
   <script src="users.js"></script>
+  <script src="mfa.js"></script>
   <script src="edge.js"></script>
   <script src="orphans.js"></script>
   <script src="ops.js"></script>

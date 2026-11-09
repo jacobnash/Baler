@@ -98,6 +98,25 @@ WHERE {{
 }}"""
 
 
+# The controller behind a connection's equip (Windrow#24): Windrow publishes
+# these on {prefix}/equip/tags at start and again whenever a rediscovery
+# finds them changed. Unlike every other tag they say what is there *now*,
+# so a new value replaces the old one instead of adding to it - otherwise a
+# swapped controller leaves the equip with two serial numbers and no way to
+# tell which is current. An envelope without them changes nothing.
+INVENTORY_TAGS = (
+    "bacnetDeviceInstance", "bacnetDeviceName", "bacnetVendorName", "bacnetVendorId", "bacnetModelName",
+    "bacnetFirmwareRevision", "bacnetApplicationSoftwareVersion", "bacnetSerialNumber", "bacnetLocation",
+)
+
+_REPLACE = """
+DELETE {{ ?s ?p ?o }}
+WHERE {{
+    VALUES (?s ?p) {{ {values} }}
+    ?s ?p ?o .
+}}"""
+
+
 def _lit(s: str) -> str:
     return json.dumps(s)  # a JSON string is a valid SPARQL string literal
 
@@ -111,6 +130,7 @@ def apply(store, msgs, log=print) -> dict:
         points: set[URIRef] = set()
         equips: dict[URIRef, str] = {}  # haystack equip uri -> its ref
         classify: dict = {}
+        inventory: dict = {}  # (equip uri, tag) -> its triples, the batch's last message winning
         bad = 0
         for topic, value, _ts in msgs:
             k = kind(topic)
@@ -123,7 +143,12 @@ def apply(store, msgs, log=print) -> dict:
                     uri = topic_prefix_to_equip_uri(prefix)
                     tags = data.get("tags", {})
                     labels = data.get("points", [])
-                    new = tag_triples(uri, tags)
+                    if not isinstance(tags, dict):
+                        raise TypeError(f"tags must be a JSON object, got {type(tags).__name__}")
+                    for tag in INVENTORY_TAGS:
+                        if tag in tags:
+                            inventory[(uri, tag)] = tag_triples(uri, {tag: tags[tag]})
+                    new = tag_triples(uri, {t: v for t, v in tags.items() if t not in INVENTORY_TAGS})
                     for label in labels:
                         p = topic_to_point_uri(f"{prefix}/{label}")
                         new += [(uri, BRICK.hasPoint, p), (p, BRICK.isPointOf, uri)]
@@ -147,6 +172,11 @@ def apply(store, msgs, log=print) -> dict:
                 continue
             triples.extend(new)
         span.set_attribute("messages", len(msgs))
+        if inventory:
+            values = " ".join(f"(<{uri}> <{HAYSTACK[tag]}>)" for uri, tag in inventory)
+            store.update(_REPLACE.format(values=values))
+            for new in inventory.values():
+                triples.extend(new)
         span.set_attribute("triples", len(triples))
         store.add_many(triples)
         if points:

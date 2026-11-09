@@ -25,6 +25,7 @@ from baler import (
     mapping_proposals,
     mapping_review,
     ops_freshness,
+    ops_metrics,
     orphans,
     record_edit,
     sources,
@@ -513,6 +514,11 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None, 
                     return
                 self.handle_traced("ops_api.get_gateway_errors", self._gateway_errors_get)
                 return
+            if urlparse(self.path).path == "/metrics":
+                if not self._gateway():
+                    return
+                self.handle_traced("ops_api.get_metrics", self._metrics_get)
+                return
             if self.path == "/status":
                 if not gateway_auth.request_came_through_gateway(self):
                     self.send_response(401)
@@ -522,6 +528,20 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None, 
                 return
             self.send_response(404)
             self.end_headers()
+
+        def _metrics_get(self, span) -> None:
+            """Prometheus text (#235): ingest lag, the listener's backlog,
+            broker drops, the rule daemons' feed lag and cycle times."""
+            with ts_pool.connection() as conn:
+                scope = scope_for(conn, claims_from_header(self.headers.get("Authorization")))
+                body = ops_metrics.render(ops_metrics.collect(conn, scope)).encode()
+            span.set_attribute("bytes", len(body))
+            self.send_response(200)
+            self.send_header("Content-Type", ops_metrics.CONTENT_TYPE)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
 
         def _get_status(self, span) -> None:
             scope = None

@@ -35,7 +35,7 @@ there is dropped and counted, since weaker models invent quotes. With no
 model configured, or the model failing, extraction still returns the rules'
 proposals and says why the model didn't run.
 
-Schema: migration 0004.
+Schema: migration 0017.
 """
 
 from __future__ import annotations

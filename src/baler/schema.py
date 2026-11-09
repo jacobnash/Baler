@@ -22,7 +22,10 @@ How it runs:
 - Each migration runs in its own transaction, under baler.ddl's advisory
   lock (the same key the old connect-time DDL takes, so old and new code
   mid-deploy take turns), and re-reads the recorded versions after taking
-  it, so concurrent starters apply each migration exactly once. Its row in
+  it, so concurrent starters apply each migration exactly once. A whole
+  `upgrade` run also holds a session-level advisory lock of its own
+  (RUN_LOCK_KEY), so one starter applies every pending migration and the
+  others wait, then find nothing left to do. Its row in
   baler_schema_migrations commits with it: a migration that fails leaves
   nothing applied and nothing recorded.
 
@@ -118,10 +121,31 @@ def _lock(conn) -> None:
     conn.execute(VERSION_TABLE_DDL)
 
 
+# One upgrade run at a time (ddl.LOCK_KEY + 2). Held at session level across
+# the whole run, so concurrent starters don't take turns migration by
+# migration (each migration's own transaction still takes ddl.LOCK_KEY, so
+# old connect-time DDL mid-deploy keeps interleaving with it as before).
+RUN_LOCK_KEY = ddl.LOCK_KEY + 2
+
+
 def upgrade(conn, echo=None) -> list[tuple[int, str, str, int]]:
     """Apply every pending migration, in order, each in its own
-    transaction under the lock. Returns (version, name, how, statements)
-    for each one this call applied; [] when the database was current."""
+    transaction under the lock, the whole run under RUN_LOCK_KEY. Returns
+    (version, name, how, statements) for each one this call applied; []
+    when the database was current."""
+    with conn.transaction():
+        # Waiting here can outlast a pool connection's statement_timeout
+        # while another starter runs a long migration; the session lock
+        # survives this transaction's commit.
+        conn.execute("SET LOCAL statement_timeout = 0")
+        conn.execute("SELECT pg_advisory_lock(%s)", (RUN_LOCK_KEY,))
+    try:
+        return _upgrade(conn, echo)
+    finally:
+        conn.execute("SELECT pg_advisory_unlock(%s)", (RUN_LOCK_KEY,))
+
+
+def _upgrade(conn, echo) -> list[tuple[int, str, str, int]]:
     done: list[tuple[int, str, str, int]] = []
     for m in migrations():
         with conn.transaction():

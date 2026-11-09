@@ -1,5 +1,5 @@
 """
-0004 facts extracted from documents, as proposals (#202, epic #221).
+0017 facts extracted from documents, as proposals (#202, epic #221).
 
 - lc_doc_extractions: one extraction run over a stored document: which
   provider and model read it, what it found, any error.
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 4
+VERSION = 17
 NAME = "lifecycle document extraction proposals"
 
 EXTRACTIONS = """
