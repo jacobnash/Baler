@@ -595,7 +595,7 @@ def project_build(project: dict, generated_at: datetime, generated_by: str | Non
                   results: list[dict], procedures: list[dict], latest_test_runs: dict, issues: list[dict],
                   events: list[dict], alignment: dict | None, spec_documents: list[dict], active_runs: list[dict],
                   writes_enabled: bool, site: dict | None = None, equipment: dict[str, dict] | None = None,
-                  acceptance: dict | None = None, origin: str = "") -> dict:
+                  acceptance: dict | None = None, origin: str = "", coverage: list[dict] | None = None) -> dict:
     latest = build(project, run, results, issues, active_runs, origin) if run else None
     verdicts = {s: 0 for s in ORDER}
     for e in (latest or {}).get("equipment", []):
@@ -628,6 +628,7 @@ def project_build(project: dict, generated_at: datetime, generated_by: str | Non
                                    equipment_names=equipment is not None,
                                    unnamed=sorted({r["equip_uri"] for r in results} - set(equipment or {})) if equipment is not None else None),
         "acceptance": acceptance,
+        "coverage": coverage or [],
         "sequences": sequences(procedures, latest_test_runs),
         "phase_history": [e for e in events if e["action"] == "phase.set"],
         "spec": {"items": len(mappings), "matched": sum(1 for m in mappings if m.get("equip_uri")),
@@ -686,6 +687,53 @@ def _equip_label(uri: str, equipment: dict[str, dict]) -> str:
     return f'{escape(name)}{f" <span class=muted>({escape(meta)})</span>" if meta else ""}'
 
 
+def _method_cell(st: dict) -> str:
+    """Which method produced the step's verdict, and the evidence behind it:
+    who checked it (and the witness), or the active run, or the data."""
+    method = st.get("method") or "passive"
+    bits = [escape(method)]
+    m = st.get("manual")
+    if m:
+        who = m.get("recorded_name") or m.get("recorded_email") or m.get("recorded_by") or "?"
+        role = f", {m['recorded_role']}" if m.get("recorded_role") else ""
+        bits.append(f'<span class=muted>{"" if method == "manual" else "also "}checked by {escape(who)}{escape(role)} '
+                    f'{_when(m.get("observed_at"))}: {escape(m["status"])}'
+                    + (f' · witness {escape(m["witness"]["name"])}' if m.get("witness") else "")
+                    + (f' · {m["attachments"]} attachment(s)' if m.get("attachments") else "")
+                    + (f' · edited {m["edits"]}x' if m.get("edits") else "")
+                    + (f'<br>{escape(m["note"])}' if m.get("note") else "") + "</span>")
+    a = st.get("active")
+    if a and method == "active":
+        bits.append(f'<span class=muted>active run {_short(a.get("active_run_id"))} ({escape(str(a.get("run_status")))})</span>')
+    if st.get("machine_status") and method != "passive":
+        bits.append(f'<span class=muted>data: {escape(st["machine_status"])}</span>')
+    if st.get("reason"):
+        bits.append(f'<span class=muted>{escape(st["reason"])}</span>')
+    return "<br>".join(bits)
+
+
+def _contradiction(st: dict) -> str:
+    if not st.get("contradiction"):
+        return ""
+    return (f'<br><span class="s fail">contradiction: a person recorded {escape((st.get("manual") or {}).get("status") or "")}, '
+            f'the data says {escape(st.get("machine_status") or "")}</span>')
+
+
+def _coverage_html(rows: list[dict]) -> str:
+    if not rows:
+        return "<p class=muted>No active procedures, so no test coverage to report.</p>"
+    body = "".join(
+        f'<tr><td>{escape(r["equip_class"].replace("_", " "))}</td><td>{r["in_class"]}</td><td>{r["sampled"]}</td>'
+        f'<td>{r["tested"]}</td><td>{r["passed"]}</td><td>{r["automatic"]}</td><td>{r["by_method"].get("passive", 0)}</td>'
+        f'<td>{r["by_method"].get("active", 0)}</td><td>{r["by_method"].get("manual", 0)}</td><td>{r["witnessed"]}</td>'
+        f'<td class=muted>{escape(r.get("summary") or "")}</td></tr>' for r in rows)
+    return ("<table><caption>Equipment tested by each procedure's latest test run, per equipment class and method</caption>"
+            "<tr><th>Class</th><th>In scope</th><th>Sampled</th><th>Tested</th><th>Passed</th><th>Automatically</th>"
+            "<th>Passive</th><th>Active</th><th>Manual</th><th>Witnessed</th><th></th></tr>" + body + "</table>"
+            "<p class=muted>Tested: at least one step judged pass or fail (inconclusive and N/A are not a test). "
+            "Equipment tested by more than one method counts under each.</p>")
+
+
 def _fpt_html(fpts: list[dict], equipment: dict[str, dict]) -> str:
     if not fpts:
         return "<p class=muted>No test procedures on this project.</p>"
@@ -703,14 +751,15 @@ def _fpt_html(fpts: list[dict], equipment: dict[str, dict]) -> str:
                                     for c in st.get("criteria") or [] for x in c.get("failing") or [])
                 seen = "<br>".join(escape(_obs_text(o)) for c in st.get("criteria") or [] for o in (c.get("observed") or [])[:8])
                 rows.append(f'<tr><td>{_equip_label(e["equip_uri"], equipment)}</td><td>{escape(st.get("title") or st["id"])}</td>'
-                            f'<td>{_verdict(st["status"])}</td><td>{failing}</td><td class=muted>{seen}</td></tr>')
+                            f'<td>{_method_cell(st)}</td><td>{_verdict(st["status"])}{_contradiction(st)}</td><td>{failing}</td>'
+                            f'<td class=muted>{seen}</td></tr>')
         by = (tr.get("summary") or {}).get("by_status") or {}
         blocks.append(f'<h3 id="tr-{escape(str(tr["id"]))}">{escape(f["name"] or "")} <span class=muted>({escape(f["kind"] or "")}) · '
                       f'test run {_short(tr["id"])} · {_when(tr.get("started_at"))} to {_when(tr.get("window_end"))} '
                       f'({_duration(tr.get("started_at"), tr.get("window_end"))})</span></h3>'
                       f'<p class=muted>{by.get("fail", 0)} fail · {by.get("inconclusive", 0)} incomplete · {by.get("pass", 0)} pass</p>'
                       f'<table><caption>{escape(f["name"] or "")}: each step per equipment</caption>'
-                      '<tr><th>Equipment</th><th>Step</th><th>Result</th><th>What failed</th><th>Observed</th></tr>'
+                      '<tr><th>Equipment</th><th>Step</th><th>Method</th><th>Result</th><th>What failed</th><th>Observed</th></tr>'
                       f'{"".join(rows)}</table>')
     return "".join(blocks)
 
@@ -901,6 +950,8 @@ incomplete - never a pass - whether or not it was waived.</p>
 {"<table><caption>Where the installed equipment differs from the specification</caption><tr><th>Deviation</th><th>Spec</th><th>Field</th><th>Interpretation</th></tr>" + devs + "</table>" if devs else "<p class=muted>No deviations.</p>"}
 <h2>Equipment verdicts (latest verification run)</h2>
 {latest_html}
+<h2>Test coverage</h2>
+{_coverage_html(rep.get("coverage") or [])}
 <h2>Procedure / functional test results</h2>
 {_fpt_html(rep["procedures"], equipment)}
 {issues_html(rep["issues"], rep.get("cxa"))}

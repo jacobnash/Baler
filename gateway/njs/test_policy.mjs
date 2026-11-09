@@ -160,6 +160,18 @@ check("post-deploy verification reads (Baler#178): GET only, freshness for viewe
     assert.equal(policy.resolveRoute("DELETE", "/ops/gateway-errors"), null);
 });
 
+check("ops metrics (#235): GET only, viewer and API keys, never a site-restricted login", () => {
+    const route = policy.resolveRoute("GET", "/ops/metrics");
+    assert.equal(route.minRole, "viewer");
+    assert.equal(route.resource, "metrics");
+    assert.equal(policy.roleSatisfies("viewer", route.minRole), true);
+    assert.equal(policy.roleSatisfies("service", route.minRole), true);
+    assert.equal(policy.scopeSatisfies("metrics", { site_ids: ["s1"] }), false);
+    assert.equal(policy.scopeSatisfies("metrics", {}), true);
+    assert.equal(policy.resolveRoute("POST", "/ops/metrics"), null);
+    assert.equal(policy.resolveRoute("GET", "/ops/metrics/x"), null);
+});
+
 check("ops edges (Connectors page): listing for any role, changes and scans admin-only", () => {
     assert.equal(policy.resolveRoute("GET", "/ops/edges").minRole, "viewer");
     assert.equal(policy.resolveRoute("GET", "/ops/edges").resource, "devices");
@@ -259,6 +271,31 @@ check("commissioning (/cx/): reads viewer, changes operator, archive admin, site
     assert.equal(policy.resolveRoute("POST", "/cx/issues/i1/risk").minRole, "admin");
     assert.equal(policy.resolveRoute("DELETE", "/cx/risks/k1").minRole, "admin");
     assert.equal(policy.resolveRoute("DELETE", "/cx/issues/i1"), null);
+    // Baler#213 operator writes: points operator, schedules/calendars admin
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/writes").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/projects/p1/writes").minRole, "operator");
+    assert.equal(policy.resolveRoute("POST", "/cx/writes/w1/relinquish").minRole, "operator");
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/schedule-targets").minRole, "operator");
+    assert.equal(policy.resolveRoute("POST", "/cx/projects/p1/schedule-writes").minRole, "admin");
+    assert.equal(policy.resolveRoute("POST", "/cx/writes/w1/revert").minRole, "admin");
+    assert.equal(policy.resolveRoute("DELETE", "/cx/writes/w1"), null);
+    assert.equal(policy.roleSatisfies("operator", policy.resolveRoute("POST", "/cx/projects/p1/schedule-writes").minRole), false);
+    // Baler#212 override tests: the schedule snapshot and its (read-only) refresh
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/schedules").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/projects/p1/schedules/refresh").minRole, "operator");
+    assert.equal(policy.resolveRoute("PUT", "/cx/projects/p1/schedules"), null);
+    // Baler#275 manual results and coverage, the active-test library
+    assert.equal(policy.resolveRoute("GET", "/cx/active/library").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/test-runs/t1/manual-results").minRole, "operator");
+    assert.equal(policy.resolveRoute("GET", "/cx/test-runs/t1/manual-results").minRole, "viewer");
+    assert.equal(policy.resolveRoute("PATCH", "/cx/manual-results/m1").minRole, "operator");
+    assert.equal(policy.resolveRoute("DELETE", "/cx/manual-results/m1"), null);
+    assert.equal(policy.resolveRoute("GET", "/cx/manual-attachments/a1").minRole, "viewer");
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/coverage").minRole, "viewer");
+    // Baler#217 construction schedules: their own paths, not #212's /schedules
+    assert.equal(policy.resolveRoute("POST", "/cx/projects/p1/construction-schedules").minRole, "operator");
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/construction-schedules").minRole, "viewer");
+    assert.equal(policy.resolveRoute("GET", "/cx/construction-schedules/s1/activities").minRole, "viewer");
     // Cx 6 procedures
     assert.equal(policy.resolveRoute("GET", "/cx/procedure-templates").minRole, "viewer");
     assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/procedures").minRole, "viewer");
@@ -293,6 +330,21 @@ check("commissioning (/cx/): reads viewer, changes operator, archive admin, site
     assert.equal(policy.resolveRoute("GET", "/cx/active-runs/a1").minRole, "viewer");
     assert.equal(policy.resolveRoute("POST", "/cx/active-runs/a1/confirm").minRole, "admin");
     assert.equal(policy.resolveRoute("POST", "/cx/active-runs/a1/abort").minRole, "operator");
+    // Baler#275 fleet runs: plan and confirm admin, abort operator
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/fleet-runs").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/projects/p1/fleet-runs").minRole, "admin");
+    assert.equal(policy.resolveRoute("GET", "/cx/fleet-runs/f1").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/fleet-runs/f1/confirm").minRole, "admin");
+    assert.equal(policy.resolveRoute("POST", "/cx/fleet-runs/f1/abort").minRole, "operator");
+    assert.equal(policy.resolveRoute("DELETE", "/cx/fleet-runs/f1"), null);
+    // Baler#275 scheduled retests: propose, approve, narrow admin; revoke operator
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/active-schedules").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/projects/p1/active-schedules").minRole, "admin");
+    assert.equal(policy.resolveRoute("GET", "/cx/active-schedules/s1").minRole, "viewer");
+    assert.equal(policy.resolveRoute("PATCH", "/cx/active-schedules/s1").minRole, "admin");
+    assert.equal(policy.resolveRoute("POST", "/cx/active-schedules/s1/approve").minRole, "admin");
+    assert.equal(policy.resolveRoute("POST", "/cx/active-schedules/s1/revoke").minRole, "operator");
+    assert.equal(policy.resolveRoute("DELETE", "/cx/active-schedules/s1"), null);
     assert.equal(policy.resolveRoute("DELETE", "/cx/active-runs/a1"), null);
     // Cx 10 agent
     assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/agent/sessions").minRole, "viewer");
@@ -304,6 +356,42 @@ check("commissioning (/cx/): reads viewer, changes operator, archive admin, site
     assert.equal(policy.resolveRoute("POST", "/cx/agent-proposals/x1/reject").minRole, "operator");
     // per-project tenancy is checked by commissioning_api, so not WHOLE_ORG
     assert.equal(policy.scopeSatisfies("commissioning", { site_ids: ["s1"] }), true);
+});
+
+check("MFA and password-reset routes (#278): who may call them", () => {
+    for (const uri of ["/auth/login/mfa", "/auth/password-reset", "/auth/password-reset/confirm"]) {
+        assert.equal(policy.resolveRoute("POST", uri).minRole, null, uri);
+    }
+    assert.equal(policy.resolveRoute("GET", "/auth/password-reset/config").minRole, null);
+    for (const [m, uri] of [["GET", "/auth/me/mfa"], ["POST", "/auth/me/mfa/totp/setup"], ["POST", "/auth/me/mfa/totp/enable"],
+                            ["POST", "/auth/me/mfa/disable"], ["POST", "/auth/me/mfa/recovery-codes"]]) {
+        assert.equal(policy.resolveRoute(m, uri).minRole, "viewer", uri);
+    }
+    for (const [m, uri] of [["GET", "/auth/org"], ["PATCH", "/auth/org"], ["DELETE", "/auth/users/u1/mfa"], ["GET", "/auth/events"]]) {
+        assert.equal(policy.resolveRoute(m, uri).minRole, "admin", uri);
+    }
+    // DELETE /auth/users/<id>/mfa is its own row, not the delete-user row
+    assert.equal(policy.resolveRoute("DELETE", "/auth/users/u1").minRole, "admin");
+    assert.equal(policy.resolveRoute("GET", "/auth/password-reset"), null);
+});
+
+check("an enrolment-only session reaches only enrolment (#278)", () => {
+    const enroll = { kind: "session", role: "admin", mfa_enroll: true };
+    assert.equal(policy.mfaAllows(enroll, "GET", "/auth/me"), true);
+    assert.equal(policy.mfaAllows(enroll, "POST", "/auth/logout"), true);
+    assert.equal(policy.mfaAllows(enroll, "GET", "/auth/me/mfa"), true);
+    assert.equal(policy.mfaAllows(enroll, "POST", "/auth/me/mfa/totp/setup"), true);
+    assert.equal(policy.mfaAllows(enroll, "POST", "/auth/me/mfa/totp/enable?x=1"), true);
+    assert.equal(policy.mfaAllows(enroll, "POST", "/auth/me/mfa/disable"), false);
+    assert.equal(policy.mfaAllows(enroll, "GET", "/auth/users"), false);
+    assert.equal(policy.mfaAllows(enroll, "GET", "/ingest/points"), false);
+    assert.equal(policy.mfaAllows(enroll, "POST", "/api/demo/pointWrite"), false);
+    assert.equal(policy.mfaAllows(enroll, "POST", "/auth/me/password"), false);
+    // everything else is untouched: ordinary sessions, MFA'd sessions, API keys
+    assert.equal(policy.mfaAllows({ kind: "session", role: "viewer" }, "GET", "/ingest/points"), true);
+    assert.equal(policy.mfaAllows({ kind: "session", role: "viewer", amr: ["pwd", "otp"] }, "GET", "/ingest/points"), true);
+    assert.equal(policy.mfaAllows({ kind: "api_key", role: "service" }, "POST", "/api/demo/hisWrite"), true);
+    assert.equal(policy.mfaAllows({ kind: "session", mfa_enroll: "true" }, "GET", "/ingest/points"), true);
 });
 
 console.log(`\n${passed} passed`);

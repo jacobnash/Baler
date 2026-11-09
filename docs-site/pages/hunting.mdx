@@ -1,0 +1,98 @@
+---
+title: Hunting
+---
+
+> Ten years after the building is built, a building engineer can pin-point
+> a hunting motor.
+
+Hunting is a control loop oscillating: sustained or on and off. It costs
+energy, actuator wear and setpoint tracking. NIST's BAS-data FDD method
+flags "unstable, excessively oscillatory regulation"; Chintala et al.
+(ASHRAE 2015) found it common in AHU trend data from ten buildings; Price
+et al. (*Buildings*, 2022) show field fixes. Baler measures it per loop,
+against the equipment's own start-up baseline, not a global number
+(Baler#214, epic #221 §8.1).
+
+It runs over what Baler already has: raw `point_history`, the Cx ladder's
+loop pairs, Cx 6 start-up tests and the fault rules. No new pipeline.
+
+## The metrics
+
+`baler/oscillation.py`, shared by the fault rule and the report:
+
+| Metric | What it is |
+|---|---|
+| `reversals_per_hour` | direction changes of a command or position, counting only moves larger than the deadband |
+| `crossings_per_hour` | sign changes of the error (sensor − setpoint), with hysteresis: it must pass beyond ± the deadband |
+| `period_s` | twice the median time between reversals |
+| `amplitude` | median half peak-to-peak between reversals |
+| `travel_per_hour` | total movement per hour: actuator wear |
+| `median_interval_s` | the sampling it was judged on |
+
+**Sampling matters.** A 4-minute oscillation is invisible in 15-minute
+averages. A series sampled slower than once a minute is reported
+`judgeable: false` with the reason, and nothing is concluded. That is why
+Baler keeps raw history compressed instead of downsampling it
+([History compression](/history-compression)), and why loop points want a
+COV or fast sampling profile at the edge (Windrow#27). A COV point that
+genuinely doesn't move also reports sparse samples, and is shown as not
+judgeable rather than as steady.
+
+## Per loop, against the start-up baseline
+
+```bash
+curl "$BALER/cx/projects/$P/hunting?hours=24&days=7"
+```
+
+- **Loops** are the setpoint pairs the Cx ladder finds (supply air
+  temperature, zone temperature, static pressure, airflow), each with the
+  equipment's analog commands and position feedbacks (valve, damper, speed,
+  frequency, position). Equipment with commands but no setpoint pair still
+  gets its commands measured.
+- **Now**: the metrics over the last `hours`.
+- **Baseline**: the same over the window of the equipment's first completed
+  start-up or functional test (Cx 6). Until the asset registry lands (#197)
+  that is the position's first test; then it becomes the installed asset's,
+  so a replaced motor is never compared against the old one.
+- **Verdict**: `hunting` when the loop's rate (its worst command's
+  reversals/h, else the error's crossings/h) is over `ratio` (default 3) ×
+  the baseline's, or over `min_reversals_per_hour` (default 12) with no
+  baseline; `steady`; or `inconclusive` when nothing could be judged.
+- **Onset**: the first day of the current run of days above that threshold,
+  looking back up to `days`.
+- **What changed**: setpoint edits in the setpoint's own history within a day
+  of the onset, and install/remove events from the asset registry
+  (`hunting.ASSET_EVENTS`, empty until #197).
+
+Deadbands are settings, not truths: `command_deadband` (default 2, in % for
+0–100 commands) and `error_deadband` (default 0.5, in the variable's units).
+The thresholds are configurable for the same reason. They are starting
+points, not values from a standard.
+
+## As a fault rule
+
+A His-mode `hunting` rule in `rules.json` / `POST /fault/rules` runs the same
+metric on every point it applies to, opens a fault (with the metrics in its
+detail) and fires the fault webhooks:
+
+```json
+{"name": "chw-valve-hunting", "mode": "his", "type": "hunting",
+ "applies_to": {"brick_class": "Valve_Command"},
+ "window_seconds": 3600, "max_reversals_per_hour": 12, "deadband": 2.0}
+```
+
+See [Fault detection](/fault-detection).
+
+## Measured, not claimed
+
+The tests use synthetic series (a 4-minute, ±22 % sine at 30 s). This page
+quotes no field detection rate: that needs real loop data with known
+hunting, which we don't have yet.
+
+## Not yet
+
+- A printable per-loop page, and the O&M manual page for the equipment
+  (depends on #201).
+- Learning the baseline window from the asset's install event (#197).
+- Pairing a command with its own loop when an equipment has several loops
+  (today every analog command on the equipment is measured with each loop).

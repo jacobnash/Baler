@@ -55,8 +55,10 @@ So rules declare a `mode`:
 Both modes skip samples flagged bad. A reading the device marks as fault,
 overridden or out of service neither opens nor resolves a Cur-mode fault,
 and `stuck` counts only good samples. The same daemon also runs the
-quality sweep (range, spike, unit), by default every 5 minutes. See
-[Sample quality](/quality).
+quality sweep (range, spike, unit), by default every 5 minutes, on a thread
+and connection of its own: His-mode cycles keep `--his-interval` while it
+runs (#268). The heartbeat's `his.gap_s_max` is the longest start-to-start
+gap over the last 20 cycles. See [Sample quality](/quality).
 
 One important asymmetry: a rule's `topic_glob` is matched against the
 **raw MQTT topic** in Cur mode, but against the **`urn:point:{topic}`
@@ -94,6 +96,15 @@ flagged stale — there's no reliable "first seen" time to measure
 staleness from, so a point that was misconfigured from day one and never
 ingested anything will never trigger this rule. It only catches a point
 that *stops* reporting after having reported at least once.
+
+**`hunting`** — faulted when the point reversed direction more than
+`max_reversals_per_hour` times over the trailing `window_seconds`,
+counting only moves larger than `deadband` (noise isn't motion). It
+reads raw samples and judges only points sampled every 60 s or faster: a
+point sampled slower is neither faulted nor resolved, because a 4-minute
+oscillation is invisible in 15-minute data. The fault's detail carries the
+metrics (reversals/h, period, amplitude, travel/h). See [Hunting](/hunting)
+for the per-loop report against the start-up baseline.
 
 ## The roster is live, not configured
 

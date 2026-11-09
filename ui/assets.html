@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Baler — Assets</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="console.css" />
+</head>
+<body>
+  <header>
+    <h1>Assets</h1>
+    <span id="status">connecting…</span>
+    <nav class="top-nav">
+      <a href="index.html">Equipment tree</a>
+      <a href="his.html">Query</a>
+      <a href="alarms.html">Alarms</a>
+      <a href="derivations.html">Derivations</a>
+      <a href="cx.html">Commissioning</a>
+      <a href="assets.html">Assets</a>
+      <a href="connectors.html">Connectors</a>
+      <a href="ops.html">Ops</a>
+      <a href="/docs" target="_blank" rel="noopener">Docs</a>
+    </nav>
+  </header>
+  <div id="login-gate" class="login-gate">
+    <form id="login-form">
+      <h2>Sign in</h2>
+      <label>Email <input type="email" id="login-email" autocomplete="username" required /></label>
+      <label>Password <input type="password" id="login-password" autocomplete="current-password" required /></label>
+      <button type="submit">Sign in</button>
+      <p id="login-error" class="hint" hidden></p>
+    </form>
+  </div>
+  <main id="main" class="console-main" style="display: none">
+    <section>
+      <h2>Assets</h2>
+      <p class="hint">
+        A <strong>position</strong> is the equipment the points hang on (its URI in the graph) and stays put.
+        An <strong>asset</strong> is the physical thing installed there. Install and remove history is append-only:
+        a replacement adds events, it never edits the old ones. See <a href="/docs/assets" target="_blank" rel="noopener">the docs</a>.
+      </p>
+      <form id="filter-form" class="inline-form">
+        <input id="filter-q" placeholder="search tag, make, model, serial" />
+        <select id="filter-status">
+          <option value="">any status</option><option value="installed">installed</option>
+          <option value="in_stock">in stock</option><option value="retired">retired</option>
+        </select>
+        <button type="submit">Filter</button>
+      </form>
+      <table id="assets-table">
+        <thead><tr><th>Tag</th><th>Type</th><th>Manufacturer</th><th>Model</th><th>Serial</th><th>Status</th><th>Position</th><th>Since</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>New asset</h2>
+      <form id="create-form" class="inline-form">
+        <input name="tag" placeholder="tag" />
+        <input name="asset_type" placeholder="type (motor, pump…)" />
+        <input name="manufacturer" placeholder="manufacturer" />
+        <input name="model" placeholder="model" />
+        <input name="serial" placeholder="serial" />
+        <input name="cost" placeholder="cost" inputmode="decimal" />
+        <button type="submit">Add</button>
+      </form>
+    </section>
+
+    <section id="detail" hidden>
+      <h2 id="detail-title"></h2>
+      <pre id="detail-fields"></pre>
+      <h3>Install / remove history</h3>
+      <table id="history-table">
+        <thead><tr><th>Position</th><th>Installed</th><th>Why</th><th>Removed</th><th>Why</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <h3>Bench tests</h3>
+      <p class="hint">The earliest passing bench test before install is the asset's first baseline.
+        <a href="/docs/bench-tests" target="_blank" rel="noopener">Docs</a>.</p>
+      <table id="bench-table">
+        <thead><tr><th>Tested</th><th>Procedure</th><th>Verdict</th><th>Before install</th><th>Baseline</th><th>Technician</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <form id="bench-form" class="inline-form">
+        <select name="procedure_id" id="bench-procedure"></select>
+        <input name="tested_at" type="datetime-local" />
+        <input name="technician" placeholder="technician" />
+        <textarea name="measurements" rows="2" cols="50" placeholder='measurements: {"stroke-time": 88, "stroke-open": true}'></textarea>
+        <button type="submit">Record bench test</button>
+      </form>
+      <form id="install-form" class="inline-form">
+        <input name="position_uri" placeholder="position URI (urn:equip:…)" size="40" />
+        <input name="at" type="datetime-local" />
+        <input name="reason" placeholder="reason" />
+        <button type="submit">Install</button>
+      </form>
+      <form id="remove-form" class="inline-form">
+        <input name="at" type="datetime-local" />
+        <input name="reason" placeholder="why removed (required)" required />
+        <button type="submit">Remove</button>
+      </form>
+      <h3>Warranties</h3>
+      <table id="warranty-table">
+        <thead><tr><th>Kind</th><th>Provider</th><th>Starts</th><th>Ends</th><th>Status</th><th>Source</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <form id="warranty-form" class="inline-form">
+        <select name="kind"><option>parts_and_labor</option><option>parts</option><option>labor</option><option>extended</option><option>other</option></select>
+        <input name="provider" placeholder="provider" />
+        <input name="starts_on" type="date" title="blank: the asset's first install (start-up)" />
+        <input name="duration_months" placeholder="months" size="6" inputmode="numeric" />
+        <input name="ends_on" type="date" title="or give the end date" />
+        <input name="terms" placeholder="terms" />
+        <button type="submit">Add warranty</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Warranty alerts</h2>
+      <p class="hint">Warranties ending in the next 90 days, and faults or Cx issues that opened on an asset while it was under warranty (past year).</p>
+      <h3>Expiring</h3>
+      <table id="expiring-table"><thead><tr><th>Asset</th><th>Kind</th><th>Ends</th><th>Days left</th></tr></thead><tbody></tbody></table>
+      <h3>Failures under warranty</h3>
+      <table id="failures-table"><thead><tr><th>Opened</th><th>What</th><th>Position</th><th>Asset</th><th>Warranty ends</th></tr></thead><tbody></tbody></table>
+    </section>
+
+    <section>
+      <h2>Preventive maintenance</h2>
+      <p class="hint">What's due, by calendar, by run hours counted from the status point's raw history, or by a
+        condition on a point. Points can be names under the asset's position (e.g. <code>sf-status</code>).
+        Baler isn't a CMMS: export the due work to yours.
+        <a href="/docs/pm-schedules" target="_blank" rel="noopener">Docs</a>.</p>
+      <p><a id="pm-csv" href="#">Download due work (CSV)</a> · <a id="pm-cobie" href="#">COBie Job sheet (CSV)</a></p>
+      <table id="pm-due-table">
+        <thead><tr><th>Status</th><th>Task</th><th>Asset</th><th>Basis</th><th>Since</th><th>Due / measure</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <form id="pm-form" class="inline-form">
+        <input name="title" placeholder="task title" required />
+        <input name="asset_type" placeholder="asset type (fan…)" />
+        <select name="trigger"><option>calendar</option><option value="run_hours">run hours</option><option>condition</option></select>
+        <input name="interval_days" placeholder="days" size="5" inputmode="numeric" />
+        <input name="interval_hours" placeholder="run hours" size="7" inputmode="decimal" />
+        <input name="run_point" placeholder="status point" />
+        <input name="condition_point" placeholder="condition point" />
+        <select name="condition_op"><option>&gt;=</option><option>&gt;</option><option>&lt;=</option><option>&lt;</option></select>
+        <input name="condition_value" placeholder="limit" size="5" inputmode="decimal" />
+        <button type="submit">Add PM task</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Deferred maintenance and FCI</h2>
+      <p class="hint">FCI = open deferred cost / replacement value of the installed assets that have one.
+        Expected service life per type is entered by you, with the reference and the date you read it
+        (Baler ships no values). <a href="/docs/deferred-maintenance" target="_blank" rel="noopener">Docs</a>.</p>
+      <p id="fci-summary"></p>
+      <table id="deferred-table">
+        <thead><tr><th>Title</th><th>Risk</th><th>Cost</th><th>Target year</th><th>Status</th><th>Asset / position</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <form id="deferred-form" class="inline-form">
+        <input name="title" placeholder="deferred work" required />
+        <input name="position_uri" placeholder="position URI" size="30" />
+        <input name="cost" placeholder="cost" size="8" inputmode="decimal" required />
+        <select name="risk"><option>low</option><option selected>medium</option><option>high</option><option>critical</option></select>
+        <input name="target_year" placeholder="target year" size="6" inputmode="numeric" />
+        <button type="submit">Add</button>
+      </form>
+      <h3>Service life</h3>
+      <table id="life-table">
+        <thead><tr><th>Asset</th><th>Installed</th><th>Age</th><th>Expected</th><th>Remaining</th><th>Replacement value</th><th>Reference</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <form id="life-form" class="inline-form">
+        <input name="asset_type" placeholder="asset type" required />
+        <input name="median_years" placeholder="years" size="5" inputmode="decimal" required />
+        <input name="source_title" placeholder="reference (title)" required />
+        <input name="source_url" placeholder="URL" />
+        <input name="retrieved_on" type="date" required title="the date you read it" />
+        <button type="submit">Set expected life</button>
+      </form>
+      <form id="value-form" class="inline-form">
+        <input name="asset_id" placeholder="asset id" required />
+        <input name="replacement_value" placeholder="replacement value" inputmode="decimal" required />
+        <input name="basis" placeholder="basis (quote, estimate…)" />
+        <button type="submit">Record replacement value</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>COBie</h2>
+      <p class="hint">Import a COBie handover workbook (Type, Component, Spare, Job; warranties from Type) to seed
+        assets, warranties, PM tasks and spares. It's a dry run first: check what it would write and skip, then commit.
+        <a href="/docs/cobie" target="_blank" rel="noopener">Docs</a>.</p>
+      <form id="cobie-form" class="inline-form">
+        <input type="file" name="file" accept=".xlsx" required />
+        <textarea name="positions" rows="2" cols="50" placeholder='optional: {"AHU-1": "urn:equip:fbf/site/ahu-1"}'></textarea>
+        <label><input type="checkbox" name="commit" /> commit (not a dry run)</label>
+        <button type="submit">Import</button>
+      </form>
+      <pre id="cobie-result"></pre>
+      <p><a id="cobie-export" href="#">Download COBie workbook (.xlsx)</a></p>
+    </section>
+
+    <section>
+      <h2>Position history</h2>
+      <form id="position-form" class="inline-form">
+        <input name="uri" placeholder="position URI (urn:equip:…)" size="40" required />
+        <button type="submit">Show</button>
+      </form>
+      <table id="position-table">
+        <thead><tr><th>Asset</th><th>Installed</th><th>Removed</th><th>Why removed</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Replacements</h2>
+      <form id="changes-form" class="inline-form">
+        <input name="since" type="date" /> <input name="until" type="date" />
+        <input name="type" placeholder="type (pump…)" /> <input name="manufacturer" placeholder="new brand" />
+        <button type="submit">Find</button>
+      </form>
+      <table id="changes-table">
+        <thead><tr><th>When</th><th>Position</th><th>From</th><th>To</th><th>Why removed</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+  <script src="apibase.js"></script>
+  <script src="auth.js"></script>
+  <script src="assets.js"></script>
+</body>
+</html>

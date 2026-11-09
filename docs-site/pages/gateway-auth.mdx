@@ -100,7 +100,84 @@ then.
 
 `/auth/login` itself has no `js_access` gate at all (a dedicated
 exact-match nginx `location`, not a `policy.js` row) — you can't require
-a valid token to go fetch one.
+a valid token to go fetch one. With two-step sign-in on, the answer is a
+second step instead of a token (below).
+
+## Two-step sign-in (TOTP)
+
+Any user can turn on two-step sign-in in **Ops → Your account**. They add a key to any authenticator
+app (TOTP, RFC 6238: SHA-1, 6 digits, 30 s steps) and confirm a code. They then get ten one-time
+recovery codes, shown once and stored hashed. Admins and operators can turn it on whenever they like;
+it only becomes mandatory when an org admin requires it.
+
+With it on, a correct password is no longer enough:
+
+```
+POST /auth/login       { "email": "...", "password": "..." }
+→ 200 { "mfa_required": true, "mfa_token": "<5-minute token>", "expires_in": 300 }
+POST /auth/login/mfa   { "mfa_token": "...", "code": "123456" }      (or a recovery code)
+→ 200 { "token": "<session JWT, amr: [pwd, otp]>", "user": {...}, "recovery_codes_left": 10 }
+```
+
+- The `mfa_token` is signed with a key *derived from* `BALER_JWT_SECRET`, not with the secret itself.
+  The gateway can never accept it as a bearer token, so it is good for `/auth/login/mfa` only.
+- Each TOTP code works once: the last accepted time step is stored. Codes one step either side of
+  now are accepted, to allow for clock drift. Each recovery code also works once.
+- Five wrong codes in a row lock the account's second factor for 15 minutes (`429`), whichever IP
+  they came from. `/auth/login/mfa` also shares `/auth/login`'s per-IP nginx rate limit.
+- TOTP secrets are sealed at rest with `BALER_MFA_KEY` when it is set (`.env.example`): a random string of at least 32 characters (a shorter one stops auth_api from starting, since the key is derived with HKDF, which does not stretch a password). Without it secrets are stored unsealed: auth_api logs a warning at startup and Ops shows an "Unsealed two-step secrets" card while any exist.
+
+**Requiring it for an org.** In **Ops → Users**, an admin can require two-step sign-in for the org
+(`PATCH /auth/org {"mfa_required": true}`). They must have it on themselves first, so turning it on
+can't lock out the only admin. Turning it on ends the sessions of everyone without it. At their next
+login those users get a session marked `mfa_enroll: true`, which reaches only enrolment:
+
+| Allowed with an enrolment-only session |
+|---|
+| `GET /auth/me`, `POST /auth/logout`, `GET /auth/me/mfa`, `POST /auth/me/mfa/totp/setup`, `POST /auth/me/mfa/totp/enable` |
+
+This is enforced twice: in the gateway (`policy.mfaAllows` in `main.authorize`, which applies to
+every API) and again in `auth_api`. Confirming enrolment returns a normal session and ends the
+others. While the requirement is on, a user can't turn their own MFA off. An admin can reset a
+user's second factor for a lost phone (`DELETE /auth/users/<id>/mfa`); that also ends the user's
+sessions.
+
+**What it doesn't touch.** API keys (`kind: "api_key"`) and edge-node broker credentials never pass
+through any of this and keep working unchanged, including when the org requires MFA. Accounts
+without MFA, in orgs that don't require it, log in exactly as before. Haystack clients that sign in
+with SCRAM (`/api/` HELLO/SCRAM) present a password only. An account with MFA on, or required and
+not yet set up, is refused there: give those clients an API key.
+
+## Password reset
+
+**With outbound email** (`BALER_SMTP_*` and `BALER_PUBLIC_URL` set), the login page offers
+*Forgot your password?*:
+
+```
+POST /auth/password-reset           { "email": "..." }             → 202 (always the same answer)
+POST /auth/password-reset/confirm   { "token": "...", "new_password": "..." } → 204
+```
+
+- The response never says whether the email has an account. The email is sent in the background, so
+  the response time doesn't tell either.
+- The token is 256 random bits, sent as `…/ui/reset.html#token=…`. It sits in the URL fragment, so
+  it never reaches a server log or a `Referer` header. Only its SHA-256 is stored.
+- It expires after `BALER_PASSWORD_RESET_TTL_SECONDS` (default 30 minutes, capped at 60) and works
+  once. Asking again replaces any unused token.
+- It is rate-limited: per IP in nginx (`zone=reset`), and at most 3 emails per account per hour.
+- A reset ends every session the user had. Two-step sign-in stays on, so the next login still asks
+  for a code.
+
+**Without email**, reset stays admin-led (**Ops → Users → Reset password**). The login page and
+`GET /auth/password-reset/config` (`{"self_service": false}`) say so, and `POST
+/auth/password-reset` answers `503` for every email alike.
+
+## Audit trail
+
+Turning MFA on or off, an admin reset, recovery-code use and regeneration, a lockout, password
+reset requests (including rate-limited ones) and completions, and the org requirement changing are
+all recorded in `auth_events`, with who, when and the client IP. Admins read their org's trail at
+`GET /auth/events`.
 
 ## `gateway/njs/policy.js` — the route table
 

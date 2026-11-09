@@ -1,0 +1,60 @@
+---
+title: Schedule import
+---
+
+"Are we on schedule, by the data, not by the meeting?" starts with the
+schedule itself. Baler imports the GC's construction schedule from
+Primavera P6 (XER) or Microsoft Project (MSPDI XML) and stores its
+activities with planned and actual dates (Baler#217, epic #221 §9). The
+earned-evidence report (#218) then matches activities to what the data
+shows.
+
+## Importing
+
+```bash
+curl -X POST $BALER/cx/projects/$P/construction-schedules -H "Authorization: Bearer $T" \
+  -d '{"filename": "update-07.xer", "data": "'$(base64 -w0 update-07.xer)'"}'
+curl "$BALER/cx/construction-schedules/$S/activities?status=in_progress"
+curl "$BALER/cx/construction-schedules/$S/activities?q=AHU-1"
+curl "$BALER/cx/construction-schedules/$S/activities?milestones=true"
+```
+
+The format is detected from the file. Each import is a new **version**
+(`GET /cx/projects/{id}/construction-schedules`, newest first). Old versions are kept, so
+you can see what the schedule said at any update.
+
+## What is read
+
+| | P6 XER | MS Project XML (MSPDI) |
+|---|---|---|
+| Activities | `TASK` | `Project/Tasks/Task` (the project summary task, UID 0, is skipped) |
+| Code | `task_code` | `WBS`, else `ID` |
+| Planned dates | `target_start_date` / `target_end_date` (else early dates) | `Start` / `Finish` |
+| Actual dates | `act_start_date` / `act_end_date` | `ActualStart` / `ActualFinish` |
+| Percent complete | `phys_complete_pct` | `PercentComplete` |
+| Status | `status_code` (else from actual dates) | from actual dates |
+| WBS | `PROJWBS` name | `WBS` |
+| Milestones | `task_type` `TT_Mile` / `TT_FinMile` | `Milestone` |
+| Logic | `TASKPRED` | `PredecessorLink` |
+| Data date | `PROJECT.last_recalc_date` | `StatusDate` |
+
+Dates are kept as the file states them: schedules are local wall time, and
+neither format reliably carries a time zone, so Baler doesn't invent one.
+
+## The parsers
+
+Both are clean-room and use the standard library only. XER is P6's
+tab-separated export (`%T` table, `%F` fields, `%R` rows, `%E` end), read
+as UTF-8 or else Windows-1252. PyP6Xer (LGPL-2.1) is not used, so no extra
+dependency and no licence question. An XML file with a `DOCTYPE` or
+`ENTITY` is refused. Files are capped at 50 MB and 50,000 activities.
+
+## Storage
+
+Migration `0025_schedules` adds `cx_schedules` and `cx_schedule_activities`.
+
+## Not yet
+
+- Linking activities to evidence and the earned-evidence report (#218).
+- Resources, calendars and costs (not needed for evidence).
+- Diffing two versions.
