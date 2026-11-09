@@ -306,4 +306,40 @@ check("commissioning (/cx/): reads viewer, changes operator, archive admin, site
     assert.equal(policy.scopeSatisfies("commissioning", { site_ids: ["s1"] }), true);
 });
 
+check("MFA and password-reset routes (#278): who may call them", () => {
+    for (const uri of ["/auth/login/mfa", "/auth/password-reset", "/auth/password-reset/confirm"]) {
+        assert.equal(policy.resolveRoute("POST", uri).minRole, null, uri);
+    }
+    assert.equal(policy.resolveRoute("GET", "/auth/password-reset/config").minRole, null);
+    for (const [m, uri] of [["GET", "/auth/me/mfa"], ["POST", "/auth/me/mfa/totp/setup"], ["POST", "/auth/me/mfa/totp/enable"],
+                            ["POST", "/auth/me/mfa/disable"], ["POST", "/auth/me/mfa/recovery-codes"]]) {
+        assert.equal(policy.resolveRoute(m, uri).minRole, "viewer", uri);
+    }
+    for (const [m, uri] of [["GET", "/auth/org"], ["PATCH", "/auth/org"], ["DELETE", "/auth/users/u1/mfa"], ["GET", "/auth/events"]]) {
+        assert.equal(policy.resolveRoute(m, uri).minRole, "admin", uri);
+    }
+    // DELETE /auth/users/<id>/mfa is its own row, not the delete-user row
+    assert.equal(policy.resolveRoute("DELETE", "/auth/users/u1").minRole, "admin");
+    assert.equal(policy.resolveRoute("GET", "/auth/password-reset"), null);
+});
+
+check("an enrolment-only session reaches only enrolment (#278)", () => {
+    const enroll = { kind: "session", role: "admin", mfa_enroll: true };
+    assert.equal(policy.mfaAllows(enroll, "GET", "/auth/me"), true);
+    assert.equal(policy.mfaAllows(enroll, "POST", "/auth/logout"), true);
+    assert.equal(policy.mfaAllows(enroll, "GET", "/auth/me/mfa"), true);
+    assert.equal(policy.mfaAllows(enroll, "POST", "/auth/me/mfa/totp/setup"), true);
+    assert.equal(policy.mfaAllows(enroll, "POST", "/auth/me/mfa/totp/enable?x=1"), true);
+    assert.equal(policy.mfaAllows(enroll, "POST", "/auth/me/mfa/disable"), false);
+    assert.equal(policy.mfaAllows(enroll, "GET", "/auth/users"), false);
+    assert.equal(policy.mfaAllows(enroll, "GET", "/ingest/points"), false);
+    assert.equal(policy.mfaAllows(enroll, "POST", "/api/demo/pointWrite"), false);
+    assert.equal(policy.mfaAllows(enroll, "POST", "/auth/me/password"), false);
+    // everything else is untouched: ordinary sessions, MFA'd sessions, API keys
+    assert.equal(policy.mfaAllows({ kind: "session", role: "viewer" }, "GET", "/ingest/points"), true);
+    assert.equal(policy.mfaAllows({ kind: "session", role: "viewer", amr: ["pwd", "otp"] }, "GET", "/ingest/points"), true);
+    assert.equal(policy.mfaAllows({ kind: "api_key", role: "service" }, "POST", "/api/demo/hisWrite"), true);
+    assert.equal(policy.mfaAllows({ kind: "session", mfa_enroll: "true" }, "GET", "/ingest/points"), true);
+});
+
 console.log(`\n${passed} passed`);

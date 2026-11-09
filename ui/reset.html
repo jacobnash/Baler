@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- The emailed link carries its token in the #fragment: never sent to
+       a server, never in a Referer. -->
+  <meta name="referrer" content="no-referrer" />
+  <title>Reset password - Baler</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>Baler</h1>
+    <nav class="top-nav"><a href="index.html">Sign in</a></nav>
+  </header>
+  <div class="login-gate">
+    <form id="request-form" hidden>
+      <h2>Reset your password</h2>
+      <p class="hint">Enter your account's email. If it belongs to an account here, we'll email it a link to choose a new password.</p>
+      <label>Email <input type="email" id="request-email" autocomplete="username" required /></label>
+      <button type="submit">Email me a link</button>
+      <p id="request-msg" class="hint" hidden></p>
+    </form>
+    <form id="confirm-form" hidden>
+      <h2>Choose a new password</h2>
+      <label>New password (12+ characters) <input type="password" id="new-password" autocomplete="new-password" minlength="12" required /></label>
+      <label>New password again <input type="password" id="new-password-again" autocomplete="new-password" minlength="12" required /></label>
+      <button type="submit">Set password</button>
+      <p class="hint">This signs you out everywhere. If you use two-step sign-in, you'll still need your code.</p>
+      <p id="confirm-msg" class="hint" hidden></p>
+    </form>
+    <p id="off-msg" class="hint" hidden>Self-service password reset isn't set up on this Baler. Ask an admin of your organization to reset your password.</p>
+  </div>
+  <script src="reset.js"></script>
+</body>
+</html>

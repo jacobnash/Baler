@@ -21,7 +21,15 @@ import re
 from http.server import ThreadingHTTPServer
 from urllib.parse import urlparse
 
-from baler import auth, broker_accounts, docs_ui, gateway_auth, tracing
+from baler import (
+    auth,
+    broker_accounts,
+    docs_ui,
+    gateway_auth,
+    mfa,
+    password_reset,
+    tracing,
+)
 from baler.http_handler_base import BaseAPIHandler
 from baler.http_handler_base import respond_error as _respond_error
 from baler.http_handler_base import respond_json as _respond_json
@@ -47,13 +55,37 @@ def make_handler(ts_pool, broker=None):
             _respond_error(self, 401, "request did not come through the gateway")
             return False
 
-        def _require_caller(self, span) -> dict | None:
+        def _require_caller(self, span, enroll_ok: bool = False) -> dict | None:
             claims = auth.decode_own_token(self.headers.get("Authorization"))
             if not claims:
                 _respond_error(self, 401, "missing or invalid bearer token")
                 return None
             span.set_attribute("caller_sub", claims["sub"])
+            # The org requires MFA and this user hasn't set it up: the
+            # session reaches only enrolment (also enforced in the gateway,
+            # policy.MFA_ENROLL_ROUTES).
+            if claims.get("mfa_enroll") and not enroll_ok:
+                _respond_error(self, 403, "your org requires multi-factor login: set up an authenticator first")
+                return None
             return claims
+
+        def _ip(self) -> str | None:
+            return self.headers.get("X-Real-IP") or (self.client_address[0] if self.client_address else None)
+
+        def _session_user(self, span) -> tuple[dict, dict] | None:
+            """(claims, user) for a logged-in person (not an API key)."""
+            caller = self._require_caller(span, enroll_ok=True)
+            if not caller:
+                return None
+            if caller.get("kind") != "session":
+                _respond_error(self, 400, "only a logged-in user (not an API key) has multi-factor login")
+                return None
+            with ts_pool.connection() as conn:
+                user = auth.get_user(conn, caller["sub"])
+            if not user:
+                _respond_error(self, 401, "no such user")
+                return None
+            return caller, user
 
         def do_POST(self):
             # Bare paths, matching every other service's convention - the
@@ -62,6 +94,16 @@ def make_handler(ts_pool, broker=None):
             path = urlparse(self.path).path
             if path == "/login":
                 self.handle_traced("auth_api.post_login", self._login)
+                return
+            if path == "/login/mfa":
+                # Public like /login: the second step of the same sign-in.
+                self.handle_traced("auth_api.post_login_mfa", self._login_mfa)
+                return
+            if path == "/password-reset":
+                self.handle_traced("auth_api.post_password_reset", self._password_reset_request)
+                return
+            if path == "/password-reset/confirm":
+                self.handle_traced("auth_api.post_password_reset_confirm", self._password_reset_confirm)
                 return
             if path == "/orgs":
                 # Public, like /login - creating a brand-new org has to
@@ -88,6 +130,18 @@ def make_handler(ts_pool, broker=None):
                 return
             if path == "/me/password":
                 self.handle_traced("auth_api.post_me_password", self._change_own_password)
+                return
+            if path == "/me/mfa/totp/setup":
+                self.handle_traced("auth_api.post_mfa_setup", self._mfa_setup)
+                return
+            if path == "/me/mfa/totp/enable":
+                self.handle_traced("auth_api.post_mfa_enable", self._mfa_enable)
+                return
+            if path == "/me/mfa/disable":
+                self.handle_traced("auth_api.post_mfa_disable", self._mfa_disable)
+                return
+            if path == "/me/mfa/recovery-codes":
+                self.handle_traced("auth_api.post_mfa_recovery_codes", self._mfa_recovery_codes)
                 return
             if path == "/broker-accounts":
                 self.handle_traced("auth_api.post_broker_accounts", self._create_broker_account)
@@ -116,7 +170,20 @@ def make_handler(ts_pool, broker=None):
             if path == "/docs":
                 docs_ui.serve(self)
                 return
+            if path == "/password-reset/config":
+                # Public: the login page asks whether to offer "forgot password".
+                _respond_json(self, 200, {"self_service": password_reset.enabled()})
+                return
             if not self._require_gateway():
+                return
+            if path == "/me/mfa":
+                self.handle_traced("auth_api.get_mfa", self._mfa_get)
+                return
+            if path == "/org":
+                self.handle_traced("auth_api.get_org", self._org_get)
+                return
+            if path == "/events":
+                self.handle_traced("auth_api.get_events", self._events_get)
                 return
             if path == "/api-keys":
                 self.handle_traced("auth_api.get_api_keys", self._list_api_keys)
@@ -162,6 +229,9 @@ def make_handler(ts_pool, broker=None):
                 user_id = m.group(1)
                 self.handle_traced("auth_api.patch_user", lambda span: self._update_user(user_id, span))
                 return
+            if path == "/org":
+                self.handle_traced("auth_api.patch_org", self._org_patch)
+                return
             self.send_response(404)
             self.end_headers()
 
@@ -172,6 +242,11 @@ def make_handler(ts_pool, broker=None):
             if path.startswith("/api-keys/"):
                 key_id = path[len("/api-keys/"):]
                 self.handle_traced("auth_api.delete_api_key", lambda span: self._delete_api_key(key_id, span))
+                return
+            m = re.fullmatch(r"/users/([^/]+)/mfa", path)
+            if m:
+                user_id = m.group(1)
+                self.handle_traced("auth_api.delete_user_mfa", lambda span: self._mfa_admin_reset(user_id, span))
                 return
             m = re.fullmatch(r"/users/([^/]+)", path)
             if m:
@@ -197,14 +272,198 @@ def make_handler(ts_pool, broker=None):
                     span.set_attribute("outcome", "invalid_credentials")
                     _respond_error(self, 401, "invalid email or password")
                     return
+                step = mfa.login_step(conn, user["id"])
+                if step == "mfa":
+                    # Password right, second factor still to come: no session yet.
+                    span.set_attribute("outcome", "mfa_required")
+                    _respond_json(self, 200, {"mfa_required": True, "mfa_token": mfa.issue_mfa_token(user["id"]),
+                                              "expires_in": mfa.MFA_TOKEN_TTL_SECONDS})
+                    return
                 site_ids = auth.user_site_ids(conn, user["id"])
-                token = auth.issue_session_token(user, site_ids)
-            span.set_attribute("outcome", "ok")
+                token = auth.issue_session_token(user, site_ids, mfa="enroll" if step == "enroll" else None)
+            span.set_attribute("outcome", "ok" if step == "session" else "mfa_enrollment_required")
             span.set_attribute("user_id", user["id"])
+            payload = {
+                "token": token,
+                "user": {"id": user["id"], "org_id": user["org_id"], "role": user["role"], "site_ids": site_ids},
+            }
+            if step == "enroll":
+                payload["mfa_enrollment_required"] = True
+            _respond_json(self, 200, payload)
+
+        def _login_mfa(self, span) -> None:
+            body = self.read_json_body()
+            try:
+                with ts_pool.connection() as conn:
+                    user = auth.get_user(conn, mfa.read_mfa_token(str(body["mfa_token"])))
+                    if not user or not auth.get_user_by_email(conn, user["email"]):  # deleted or disabled since
+                        raise mfa.MFAError("the sign-in step expired; enter your password again")
+                    how = mfa.verify(conn, user, str(body.get("code") or body.get("recovery_code") or ""), ip=self._ip())
+                    site_ids = auth.user_site_ids(conn, user["id"])
+                    token = auth.issue_session_token(user, site_ids, mfa="otp")
+                    left = mfa.state(conn, user["id"])["recovery_codes_left"]
+            except mfa.Locked as exc:
+                span.set_attribute("outcome", "locked")
+                _respond_error(self, 429, str(exc))
+                return
+            except mfa.MFAError as exc:
+                span.set_attribute("outcome", "invalid_code")
+                _respond_error(self, 401, str(exc))
+                return
+            span.set_attribute("outcome", "ok")
+            span.set_attribute("factor", how)
             _respond_json(self, 200, {
                 "token": token,
                 "user": {"id": user["id"], "org_id": user["org_id"], "role": user["role"], "site_ids": site_ids},
+                "recovery_codes_left": left,
             })
+
+        # --- password reset (#278): public, rate-limited in nginx and per account
+
+        def _password_reset_request(self, span) -> None:
+            body = self.read_json_body()
+            try:
+                with ts_pool.connection() as conn:
+                    message = password_reset.request(conn, body.get("email"), ip=self._ip())
+            except password_reset.ResetError as exc:
+                _respond_error(self, 503, str(exc))
+                return
+            _respond_json(self, 202, {"status": message})
+
+        def _password_reset_confirm(self, span) -> None:
+            body = self.read_json_body()
+            try:
+                with ts_pool.connection() as conn:
+                    password_reset.confirm(conn, body.get("token"), body.get("new_password"), ip=self._ip())
+            except password_reset.ResetError as exc:
+                _respond_error(self, 400, str(exc))
+                return
+            self.send_response(204)
+            self.end_headers()
+
+        # --- MFA (#278): the caller's own account
+
+        def _mfa_get(self, span) -> None:
+            got = self._session_user(span)
+            if not got:
+                return
+            with ts_pool.connection() as conn:
+                _respond_json(self, 200, mfa.state(conn, got[1]["id"]))
+
+        def _mfa_setup(self, span) -> None:
+            got = self._session_user(span)
+            if not got:
+                return
+            try:
+                with ts_pool.connection() as conn:
+                    result = mfa.start_enrolment(conn, got[1])
+            except mfa.MFAError as exc:
+                _respond_error(self, 409, str(exc))
+                return
+            _respond_json(self, 200, result)
+
+        def _mfa_enable(self, span) -> None:
+            got = self._session_user(span)
+            if not got:
+                return
+            _claims, user = got
+            body = self.read_json_body()
+            try:
+                with ts_pool.connection() as conn:
+                    codes = mfa.confirm_enrolment(conn, user, str(body["code"]), ip=self._ip())
+                    # Other sessions (signed in without the second factor) end;
+                    # this one is replaced by a full, MFA-verified session.
+                    auth.end_user_sessions(conn, user["id"])
+                    token = auth.issue_session_token(user, auth.user_site_ids(conn, user["id"]), mfa="otp")
+            except mfa.MFAError as exc:
+                _respond_error(self, 400, str(exc))
+                return
+            _respond_json(self, 200, {"recovery_codes": codes, "token": token})
+
+        def _mfa_disable(self, span) -> None:
+            got = self._session_user(span)
+            if not got:
+                return
+            _claims, user = got
+            body = self.read_json_body()
+            if not auth.verify_password(str(body.get("password") or ""), user["password_hash"]):
+                _respond_error(self, 401, "password is wrong")
+                return
+            try:
+                with ts_pool.connection() as conn:
+                    mfa.disable(conn, user, str(body.get("code") or ""), ip=self._ip())
+            except mfa.Locked as exc:
+                _respond_error(self, 429, str(exc))
+                return
+            except mfa.MFAError as exc:
+                _respond_error(self, 400, str(exc))
+                return
+            self.send_response(204)
+            self.end_headers()
+
+        def _mfa_recovery_codes(self, span) -> None:
+            got = self._session_user(span)
+            if not got:
+                return
+            body = self.read_json_body()
+            try:
+                with ts_pool.connection() as conn:
+                    codes = mfa.regenerate_recovery_codes(conn, got[1], str(body.get("code") or ""), ip=self._ip())
+            except mfa.Locked as exc:
+                _respond_error(self, 429, str(exc))
+                return
+            except mfa.MFAError as exc:
+                _respond_error(self, 400, str(exc))
+                return
+            _respond_json(self, 200, {"recovery_codes": codes})
+
+        # --- MFA (#278): admin, the caller's own org
+
+        def _org_get(self, span) -> None:
+            caller = self._require_caller(span)
+            if not caller:
+                return
+            with ts_pool.connection() as conn:
+                _respond_json(self, 200, mfa.get_org(conn, caller["org_id"]))
+
+        def _org_patch(self, span) -> None:
+            caller = self._require_caller(span)
+            if not caller:
+                return
+            body = self.read_json_body()
+            if "mfa_required" not in body:
+                raise ValueError("nothing to change: send mfa_required")
+            if caller.get("kind") != "session":
+                _respond_error(self, 400, "change the MFA requirement as a logged-in admin, not with an API key")
+                return
+            try:
+                with ts_pool.connection() as conn:
+                    org = mfa.set_org_required(conn, caller["org_id"], body["mfa_required"], {"id": caller["sub"]},
+                                               ip=self._ip())
+            except mfa.MFAError as exc:
+                _respond_error(self, 409, str(exc))
+                return
+            _respond_json(self, 200, org)
+
+        def _mfa_admin_reset(self, user_id: str, span) -> None:
+            caller = self._require_caller(span)
+            if not caller:
+                return
+            span.set_attribute("target_user_id", user_id)
+            with ts_pool.connection() as conn:
+                found = mfa.admin_reset(conn, caller["org_id"], user_id, caller["sub"], ip=self._ip())
+            if not found:
+                _respond_error(self, 404, "no such user in your org")
+                return
+            self.send_response(204)
+            self.end_headers()
+
+        def _events_get(self, span) -> None:
+            caller = self._require_caller(span)
+            if not caller:
+                return
+            with ts_pool.connection() as conn:
+                _respond_json(self, 200, mfa.list_events(conn, caller["org_id"]))
 
         def _logout(self, span) -> None:
             claims = auth.decode_own_token(self.headers.get("Authorization"))
@@ -251,19 +510,20 @@ def make_handler(ts_pool, broker=None):
             self.end_headers()
 
         def _get_me(self, span) -> None:
-            caller = self._require_caller(span)
+            caller = self._require_caller(span, enroll_ok=True)
             if not caller:
                 return
-            email = name = None
+            email = name = mfa_state = None
             if caller.get("kind") == "session":
                 with ts_pool.connection() as conn:
                     user = auth.get_user(conn, caller["sub"])
                     name = auth.get_display_name(conn, caller["sub"]) if user else None
+                    mfa_state = mfa.state(conn, caller["sub"]) if user else None
                 email = user["email"] if user else None
             _respond_json(self, 200, {
                 "sub": caller["sub"], "org_id": caller["org_id"], "role": caller["role"],
                 "site_ids": caller.get("site_ids", []), "kind": caller.get("kind"), "email": email,
-                "display_name": name,
+                "display_name": name, "mfa": mfa_state, "mfa_enrollment_required": bool(caller.get("mfa_enroll")),
             })
 
         def _create_org(self, span) -> None:
@@ -402,6 +662,9 @@ def make_handler(ts_pool, broker=None):
                 return
             with ts_pool.connection() as conn:
                 users = auth.list_users(conn, caller["org_id"])
+                has_mfa = mfa.mfa_by_user(conn, caller["org_id"])
+            for u in users:
+                u["mfa_enabled"] = has_mfa.get(u["id"], False)
             _respond_json(self, 200, users)
 
         def _delete_user(self, user_id: str, span) -> None:
@@ -441,7 +704,7 @@ def make_handler(ts_pool, broker=None):
             self.end_headers()
 
         def _change_own_password(self, span) -> None:
-            caller = self._require_caller(span)
+            caller = self._require_caller(span)  # not for an enrolment-only session
             if not caller:
                 return
             if caller.get("kind") != "session":
