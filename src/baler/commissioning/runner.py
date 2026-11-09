@@ -452,6 +452,11 @@ class Scheduler:
                 schedule_tick(self.repo, self.worker, self.clock())
             except Exception:
                 log.exception("cx schedule tick failed")
+            for fn in self.extra:  # each on its own: one failing never stops the others
+                try:
+                    fn(self.clock())
+                except Exception:
+                    log.exception("cx schedule: extra tick failed")
 
     def stop(self) -> None:
         self._stop.set()

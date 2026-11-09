@@ -22,6 +22,7 @@ from baler.migrations import (
     v0002_reading_feed,
     v0003_spaces,
     v0004_requirement_packs,
+    v0005_compliance_log,
 )
 
-ALL = (v0001_baseline, v0002_reading_feed, v0003_spaces, v0004_requirement_packs)
+ALL = (v0001_baseline, v0002_reading_feed, v0003_spaces, v0004_requirement_packs, v0005_compliance_log)

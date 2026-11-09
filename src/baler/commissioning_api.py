@@ -41,6 +41,8 @@ from baler import docs_ui, gateway_auth, hisquery, timeseries, tracing, warmup
 from baler.commissioning import (
     active,
     agent,
+    compliance,
+    compliance_api,
     db,
     economizer,
     engine,
@@ -98,7 +100,7 @@ _RUN = re.compile(r"/runs/([^/]+)")
 _RUN_REPORT = re.compile(r"/runs/([^/]+)/report")
 
 # Building-record features (epic #221), each a route table (commissioning.routes).
-EXTENSIONS = (spaces_api, readiness_api, packs_api)
+EXTENSIONS = (spaces_api, readiness_api, packs_api, compliance_api)
 
 
 def _check_prefixes(value) -> list[str]:
@@ -135,6 +137,8 @@ def _check_settings(settings) -> dict:
         economizer.validate_settings(settings["economizer"])
     if "fault_mirroring" in settings:
         mirror.validate_settings(settings["fault_mirroring"])
+    if "compliance" in settings:
+        compliance.validate_settings(settings["compliance"])
     if "phase_gates" in settings:
         gates.validate_mode(settings["phase_gates"])
     if "acceptance" in settings:
@@ -168,6 +172,7 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
         ALLOWED_HEADERS = "Content-Type, Authorization"
         REPO = repo  # for the EXTENSIONS' handlers (commissioning.routes)
         NOW = staticmethod(now_fn)
+        WORKER = worker
 
         # ------------------------------------------------------- plumbing
 
@@ -2016,7 +2021,8 @@ def main() -> None:
     for r in repo.find_rows("cx_active_runs", status="running") + repo.find_rows("cx_active_runs", status="confirmed"):
         repo.update_row("cx_active_runs", r["id"], {"status": "failed", "error": db.INTERRUPTED, "finished_at": now})
     active.sweep(repo, writer, now)
-    runner.Scheduler(repo, worker, clock, extra=[lambda t: active.sweep(repo, writer, t)])
+    runner.Scheduler(repo, worker, clock, extra=[lambda t: active.sweep(repo, writer, t),
+                                              lambda t: compliance.tick(repo, worker, t)])
     server = ThreadingHTTPServer((args.host, args.port), make_handler(repo, worker=worker, executor=executor))
     print(f"commissioning API listening on {args.host}:{args.port}")
     server.serve_forever()
