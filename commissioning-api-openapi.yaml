@@ -2766,16 +2766,24 @@ paths:
         proposal cites the page and quotes the text it was read from; the
         quote must be on that page or the proposal is dropped. The PDF is
         not kept (only its sha256). Needs BALER_LLM_PROVIDER set to a model.
+        On by default; a deployment turns it off with BALER_PACK_EXTRACTION=0
+        (403). Every upload must carry "rights_confirmed": true, confirming
+        "I have the rights to this document and may process it with AI
+        tools."; the extraction records who confirmed and when.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [data]
+              required: [data, rights_confirmed]
               properties:
                 filename: { type: string }
                 data: { type: string, description: The PDF, base64 }
+                rights_confirmed:
+                  type: boolean
+                  const: true
+                  description: The uploader has the rights to this document and may process it with AI tools
       responses:
         "202":
           description: The queued extraction
@@ -2783,6 +2791,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/PackExtraction" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "403":
+          description: Document extraction is turned off on this deployment (BALER_PACK_EXTRACTION=0)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "404": { $ref: "#/components/responses/NotFound" }
         "501":
           description: No model is configured
@@ -4535,6 +4548,8 @@ components:
         created_by: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
         finished_at: { type: [string, "null"] }
+        rights_confirmed_by: { type: [string, "null"], description: Who confirmed the rights to the document (null before migration 0028) }
+        rights_confirmed_at: { type: [string, "null"], format: date-time }
     PackProposal:
       type: object
       required: [id, pack_ref, row, source, status]

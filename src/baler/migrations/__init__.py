@@ -45,6 +45,7 @@ from baler.migrations import (
     v0025_schedules,
     v0026_schedule_evidence,
     v0027_history_compression,
+    v0028_pack_extraction_rights,
 )
 
 ALL = (
@@ -75,4 +76,5 @@ ALL = (
     v0025_schedules,
     v0026_schedule_evidence,
     v0027_history_compression,
+    v0028_pack_extraction_rights,
 )

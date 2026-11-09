@@ -477,6 +477,8 @@ services:
       BALER_LLM_TIMEOUT: ${BALER_LLM_TIMEOUT:-}
       BALER_LLM_MAX_CHARS: ${BALER_LLM_MAX_CHARS:-}
       BALER_LLM_MAX_TOKENS: ${BALER_LLM_MAX_TOKENS:-}
+      # Requirement-pack extraction: on unless 0 (see .env.example).
+      BALER_PACK_EXTRACTION: ${BALER_PACK_EXTRACTION:-1}
       # Active tests (Cx 9) command equipment through point_write only when
       # this is 1. Blank/unset: planning (the dry run) works, nothing is written.
       BALER_CX_ALLOW_WRITES: ${BALER_CX_ALLOW_WRITES:-}

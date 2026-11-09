@@ -3,6 +3,10 @@ HTTP routes for extracting requirement rows from a user's own document
 (Baler#206), under /cx/. The extraction runs on the commissioning worker
 (202, poll GET /pack-extractions/{id}); each proposal is accepted (with
 corrections) or rejected by a person.
+
+BALER_PACK_EXTRACTION=0 turns extraction off on a deployment (default on);
+the rest of packs works either way. Every upload carries
+"rights_confirmed": true, and the extraction records who confirmed and when.
 """
 
 from __future__ import annotations
@@ -10,6 +14,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import os
 import re
 import traceback
 
@@ -23,9 +28,19 @@ EXTRACTIONS = "cx_pack_extractions"
 PROPOSALS = "cx_pack_proposals"
 
 db.ROW_TABLES[EXTRACTIONS] = (("id", "org_id", "pack_ref", "filename", "sha256", "size", "status", "proposals", "info",
-                               "error", "created_by", "created_at", "finished_at"), frozenset({"info"}))
+                               "error", "created_by", "created_at", "finished_at", "rights_confirmed_by",
+                               "rights_confirmed_at"), frozenset({"info"}))
 db.ROW_TABLES[PROPOSALS] = (("id", "org_id", "pack_ref", "extraction_id", "row", "source", "confidence", "status",
                              "decided_by", "decided_at", "created_at"), frozenset({"row", "source"}))
+
+RIGHTS_TEXT = "I have the rights to this document and may process it with AI tools."
+OFF_MESSAGE = "document extraction is turned off on this deployment"
+
+
+def enabled() -> bool:
+    """BALER_PACK_EXTRACTION: on unless set to 0 (or false/off/no)."""
+    return (os.environ.get("BALER_PACK_EXTRACTION") or "1").strip().lower() not in ("0", "false", "off", "no")
+
 
 # Tests swap the model: fn(system, text) -> reply text.
 CHAT = None
@@ -53,12 +68,17 @@ def run(repo, extraction: dict, data: bytes, now_fn) -> None:
 
 
 def _extract(h, span, claims, ref) -> None:
+    if not enabled():
+        respond_error(h, 403, OFF_MESSAGE)
+        return
     pack = packs_api.get_pack(h, ref, claims)
     if not pack:
         return
     if pack["status"] != "draft":
         raise ValueError("proposals go into a draft pack version")
     body = h.read_json_body()
+    if not isinstance(body, dict) or body.get("rights_confirmed") is not True:
+        raise ValueError(f'confirm "rights_confirmed": true: {RIGHTS_TEXT}')
     try:
         raw = base64.b64decode(str(body.get("data") or ""), validate=True)
     except ValueError as exc:
@@ -78,7 +98,8 @@ def _extract(h, span, claims, ref) -> None:
     now = h.NOW()
     ex = {"id": db.new_id(), "org_id": claims["org_id"], "pack_ref": ref, "filename": str(body.get("filename") or "document.pdf")[:200],
           "sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw), "status": "queued", "proposals": 0, "info": None,
-          "error": None, "created_by": claims.get("sub"), "created_at": now, "finished_at": None}
+          "error": None, "created_by": claims.get("sub"), "created_at": now, "finished_at": None,
+          "rights_confirmed_by": claims.get("sub"), "rights_confirmed_at": now}
     h.REPO.put_rows(EXTRACTIONS, [ex])
     repo, now_fn = h.REPO, h.NOW
     h.WORKER.submit(lambda: run(repo, ex, raw, now_fn))

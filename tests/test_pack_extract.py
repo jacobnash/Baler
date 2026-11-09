@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import json
 
 import cx_api_harness as hx
@@ -59,7 +60,8 @@ def test_extract_api_accept_and_reject(monkeypatch):
     try:
         draft = requests.post(f"{base}/packs", json=copy.deepcopy(OWNER), headers=hx.A).json()
         pdf = base64.b64encode(b"%PDF-1.4 fake").decode()
-        ex = hx.check(requests.post(f"{base}/packs/{draft['id']}/extract", json={"filename": "guide.pdf", "data": pdf}, headers=hx.A),
+        ex = hx.check(requests.post(f"{base}/packs/{draft['id']}/extract", json={"filename": "guide.pdf", "data": pdf, "rights_confirmed": True},
+                                    headers=hx.A),
                       "/packs/{id}/extract", "post", 202)
         server.RequestHandlerClass.WORKER.join()
         got = hx.check(requests.get(f"{base}/pack-extractions/{ex['id']}", headers=hx.A), "/pack-extractions/{id}", "get", 200)
@@ -79,7 +81,84 @@ def test_extract_api_accept_and_reject(monkeypatch):
         assert requests.post(f"{base}/pack-proposals/{rh['id']}/accept", headers=hx.A).status_code == 400  # decided already
         hx.check(requests.post(f"{base}/pack-proposals/{dp['id']}/reject", headers=hx.A), "/pack-proposals/{id}/reject", "post", 200)
         assert requests.get(f"{base}/pack-extractions/{ex['id']}", headers=hx.B).status_code == 404
-        assert requests.post(f"{base}/packs/{draft['id']}/extract", json={"data": base64.b64encode(b"hello").decode()},
+        assert requests.post(f"{base}/packs/{draft['id']}/extract", json={"data": base64.b64encode(b"hello").decode(),
+                                                                          "rights_confirmed": True},
                              headers=hx.A).status_code == 400
+    finally:
+        server.shutdown()
+
+
+PDF = base64.b64encode(b"%PDF-1.4 fake").decode()
+
+
+def _draft(base):
+    return requests.post(f"{base}/packs", json=copy.deepcopy(OWNER), headers=hx.A).json()
+
+
+def test_extraction_is_on_by_default(monkeypatch):
+    monkeypatch.delenv("BALER_PACK_EXTRACTION", raising=False)
+    assert pack_extract_api.enabled()
+    for on in ("", "1", "true", " 1 "):
+        monkeypatch.setenv("BALER_PACK_EXTRACTION", on)
+        assert pack_extract_api.enabled(), on
+    for off in ("0", "false", "off", "no", " 0 "):
+        monkeypatch.setenv("BALER_PACK_EXTRACTION", off)
+        assert not pack_extract_api.enabled(), off
+
+
+def test_extraction_off_answers_403_and_packs_still_work(monkeypatch):
+    monkeypatch.setenv("BALER_PACK_EXTRACTION", "0")
+    monkeypatch.setattr(pack_extract_api, "CHAT", fake([GOOD]))
+    monkeypatch.setattr(spec_pdf, "safe_read", lambda data, name: (PAGES, None))
+    base, server = hx.serve(monkeypatch, hx.repo())
+    try:
+        draft = _draft(base)
+        r = requests.post(f"{base}/packs/{draft['id']}/extract", json={"filename": "guide.pdf", "data": PDF,
+                                                                        "rights_confirmed": True}, headers=hx.A)
+        hx.check(r, "/packs/{id}/extract", "post", 403)
+        assert r.json()["error"] == "document extraction is turned off on this deployment"
+        assert server.RequestHandlerClass.REPO.find_rows(pack_extract_api.EXTRACTIONS) == []
+        # the rest of packs is untouched: the draft reads, proposals list (empty)
+        assert requests.get(f"{base}/packs/{draft['id']}", headers=hx.A).status_code == 200
+        assert requests.get(f"{base}/packs/{draft['id']}/proposals", headers=hx.A).json() == []
+    finally:
+        server.shutdown()
+
+
+@pytest.mark.parametrize("extra", [{}, {"rights_confirmed": False}, {"rights_confirmed": "true"}, {"rights_confirmed": 1}])
+def test_rights_confirmation_is_required(monkeypatch, extra):
+    monkeypatch.delenv("BALER_PACK_EXTRACTION", raising=False)
+    calls = []
+    monkeypatch.setattr(pack_extract_api, "CHAT", lambda system, text: calls.append(text) or "{}")
+    monkeypatch.setattr(spec_pdf, "safe_read", lambda data, name: (PAGES, None))
+    base, server = hx.serve(monkeypatch, hx.repo())
+    try:
+        draft = _draft(base)
+        r = requests.post(f"{base}/packs/{draft['id']}/extract", json={"filename": "guide.pdf", "data": PDF, **extra},
+                          headers=hx.A)
+        assert r.status_code == 400, r.text
+        assert "rights_confirmed" in r.json()["error"]
+        assert "I have the rights to this document and may process it with AI tools." in r.json()["error"]
+        assert server.RequestHandlerClass.REPO.find_rows(pack_extract_api.EXTRACTIONS) == [] and calls == []
+    finally:
+        server.shutdown()
+
+
+def test_rights_confirmation_is_recorded(monkeypatch):
+    monkeypatch.delenv("BALER_PACK_EXTRACTION", raising=False)
+    monkeypatch.setattr(pack_extract_api, "CHAT", fake([GOOD]))
+    monkeypatch.setattr(spec_pdf, "safe_read", lambda data, name: (PAGES, None))
+    base, server = hx.serve(monkeypatch, hx.repo())
+    try:
+        draft = _draft(base)
+        ex = hx.check(requests.post(f"{base}/packs/{draft['id']}/extract",
+                                    json={"filename": "guide.pdf", "data": PDF, "rights_confirmed": True}, headers=hx.A),
+                      "/packs/{id}/extract", "post", 202)
+        assert ex["rights_confirmed_by"] == "u-a" and ex["rights_confirmed_at"] == ex["created_at"]
+        assert ex["sha256"] == hashlib.sha256(base64.b64decode(PDF)).hexdigest()
+        server.RequestHandlerClass.WORKER.join()
+        got = hx.check(requests.get(f"{base}/pack-extractions/{ex['id']}", headers=hx.A), "/pack-extractions/{id}", "get", 200)
+        assert got["status"] == "completed" and got["proposals"] == 1
+        assert got["rights_confirmed_by"] == "u-a" and got["rights_confirmed_at"] == ex["created_at"]
     finally:
         server.shutdown()
