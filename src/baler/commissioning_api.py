@@ -60,6 +60,7 @@ from baler.commissioning import (
     overrides,
     phases,
     procedures,
+    readiness_api,
     report,
     retest_schedules,
     routes,
@@ -113,7 +114,7 @@ _RUN = re.compile(r"/runs/([^/]+)")
 _RUN_REPORT = re.compile(r"/runs/([^/]+)/report")
 
 # Building-record features (epic #221), each a route table (commissioning.routes).
-EXTENSIONS = (spaces_api,)
+EXTENSIONS = (spaces_api, readiness_api)
 
 
 def _check_prefixes(value) -> list[str]:
