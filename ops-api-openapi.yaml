@@ -588,6 +588,93 @@ paths:
               schema: { $ref: "#/components/schemas/GatewayErrors" }
         "400": { description: since or until isn't an ISO 8601 time }
         "401": { description: Not through the gateway }
+  # Building lifecycle record (epic #221): the document store (#201).
+  # Full detail: docs-site/pages/documents.mdx.
+  /documents:
+    get:
+      operationId: listDocuments
+      summary: The org's documents (filters kind, target_kind, target)
+      responses:
+        "200": {description: Documents, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+    post:
+      operationId: uploadDocument
+      summary: Upload a file (the body is the file; filename, kind, title in the query)
+      parameters:
+        - {name: filename, in: query, schema: {type: string}}
+        - {name: kind, in: query, schema: {type: string}}
+        - {name: title, in: query, schema: {type: string}}
+      requestBody: {content: {application/octet-stream: {schema: {type: string, format: binary}}}}
+      responses:
+        "200": {description: "Already stored: the existing document", content: {application/json: {schema: {type: object}}}}
+        "201": {description: Stored, content: {application/json: {schema: {type: object}}}}
+        "413": {description: Over 100 MB}
+  /documents/search:
+    get:
+      operationId: searchDocuments
+      summary: Pages matching q, best first, each with a citation (document and page)
+      parameters: [{name: q, in: query, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: Hits, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+  /documents/kinds:
+    get:
+      operationId: documentKinds
+      summary: Document kinds and link target kinds
+      responses:
+        "200": {description: Kinds, content: {application/json: {schema: {type: object}}}}
+  /documents/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getDocument
+      summary: A document's metadata and links
+      responses:
+        "200": {description: The document, content: {application/json: {schema: {type: object}}}}
+        "404": {description: No such document}
+    patch:
+      operationId: patchDocument
+      summary: Edit title, kind, notes, site_id, filename (audited)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: The document, content: {application/json: {schema: {type: object}}}}
+    delete:
+      operationId: deleteDocument
+      summary: Soft delete (admin)
+      responses:
+        "200": {description: Deleted, content: {application/json: {schema: {type: object}}}}
+  /documents/{id}/{part}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+      - {name: part, in: path, required: true, schema: {type: string, enum: [content, verify, audit]}}
+    get:
+      operationId: getDocumentPart
+      summary: The file itself, an integrity re-hash, or the audit trail
+      responses:
+        "200": {description: The file (content) or JSON}
+  /documents/{id}/pages/{page}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+      - {name: page, in: path, required: true, schema: {type: integer}}
+    get:
+      operationId: getDocumentPage
+      summary: One page's text and citation
+      responses:
+        "200": {description: The page, content: {application/json: {schema: {type: object}}}}
+  /documents/{id}/links:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: linkDocument
+      summary: Link the document (or a page) to a position, asset, space, system or phase
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: The link, content: {application/json: {schema: {type: object}}}}
+  /documents/{id}/links/{link_id}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+      - {name: link_id, in: path, required: true, schema: {type: string}}
+    delete:
+      operationId: unlinkDocument
+      summary: Remove a link
+      responses:
+        "200": {description: Removed, content: {application/json: {schema: {type: object}}}}
   # Building lifecycle record (epic #221): positions vs assets (#197).
   # Full field list: docs-site/pages/assets.mdx.
   /assets:

@@ -123,6 +123,19 @@ const ROUTES = [
   ["GET",    /^\/ops\/positions\/asset-at$/,             "assets", "viewer"],
   ["POST",   /^\/ops\/positions\/replace$/,               "assets", "operator"],
 
+  // Document store (#201): deleting (a soft delete) is admin.
+  ["GET",    /^\/ops\/documents$/,                       "documents", "viewer"],
+  ["POST",   /^\/ops\/documents$/,                       "documents", "operator"],
+  ["GET",    /^\/ops\/documents\/search$/,               "documents", "viewer"],
+  ["GET",    /^\/ops\/documents\/kinds$/,                "documents", "viewer"],
+  ["GET",    /^\/ops\/documents\/[^/]+$/,                "documents", "viewer"],
+  ["PATCH",  /^\/ops\/documents\/[^/]+$/,                "documents", "operator"],
+  ["DELETE", /^\/ops\/documents\/[^/]+$/,                "documents", "admin"],
+  ["GET",    /^\/ops\/documents\/[^/]+\/(content|verify|audit)$/, "documents", "viewer"],
+  ["GET",    /^\/ops\/documents\/[^/]+\/pages\/[^/]+$/,     "documents", "viewer"],
+  ["POST",   /^\/ops\/documents\/[^/]+\/links$/,          "documents", "operator"],
+  ["DELETE", /^\/ops\/documents\/[^/]+\/links\/[^/]+$/,   "documents", "operator"],
+
   // commissioning_api (Baler#37): reads viewer, changes operator,
   // archiving a project admin. The backend also checks the caller's org
   // and sites against the project itself.
