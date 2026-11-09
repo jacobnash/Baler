@@ -1,0 +1,199 @@
+name: Security
+
+# Dependency, secret, image and static security scanning (#279). Kept apart
+# from ci.yml so a scanner outage or a new advisory never blocks a deploy
+# (deploy.yml runs off CI, not this workflow).
+#
+# Blocking (fail the PR):  dependency review (new high/critical advisories
+#                          a PR introduces) and secret scanning of the
+#                          PR's own commits.
+# Report-only for now:     full-history secret scan, pip-audit, npm audit,
+#                          the image scan, and CodeQL (its alerts go to the
+#                          repository's code scanning page). These look at
+#                          everything already on main, so they would fail on
+#                          findings that predate them; each turns blocking
+#                          once its existing findings are triaged (see
+#                          docs-site/pages/security-scanning.mdx).
+#
+# Every job runs on a GitHub-hosted runner, starts from read-only
+# permissions, checks out without persisting the token, and is given no
+# repository secrets. Triggers are pull_request (never pull_request_target),
+# so a fork's PR runs with a read-only token and no secrets. Actions are
+# pinned to full commit SHAs (tag in the comment); Dependabot bumps them.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 5 * * 1"  # Mondays 05:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294  # v5.0.0
+        with:
+          config-file: ./.github/dependency-review-config.yml
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks (checksum-verified release binary)
+        run: |
+          curl -sSfL -o gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar -xzf gitleaks.tgz -C "$RUNNER_TEMP" gitleaks
+          rm gitleaks.tgz
+      # Blocking: only the commits this PR adds. --redact keeps any value
+      # out of the log; the rule, file and line are enough to find it.
+      - name: Scan this pull request's commits
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          "$RUNNER_TEMP/gitleaks" git --redact --verbose --no-banner --exit-code 1 \
+            --log-opts="--no-merges ${BASE_SHA}..${HEAD_SHA}" .
+      # Report-only: the whole history. Logs of a public repository are
+      # public, so this step prints only the number of findings, never where
+      # they are; a maintainer reproduces the details locally (see
+      # docs-site/pages/security-scanning.mdx).
+      - name: Scan full history (count only)
+        if: github.event_name != 'pull_request'
+        run: |
+          set +e
+          "$RUNNER_TEMP/gitleaks" git --redact --no-banner --log-level error --exit-code 0 \
+            --report-format json --report-path "$RUNNER_TEMP/gitleaks.json" .
+          n=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))))" "$RUNNER_TEMP/gitleaks.json")
+          rm -f "$RUNNER_TEMP/gitleaks.json"
+          echo "### Secret scan (full history)" >> "$GITHUB_STEP_SUMMARY"
+          echo "$n finding(s). Details are not printed here; see docs-site/pages/security-scanning.mdx." >> "$GITHUB_STEP_SUMMARY"
+          # Report-only for now: a warning, not a failure.
+          if [ "$n" != "0" ]; then echo "::warning title=Secret scan::$n finding(s) in history - triage privately"; fi
+
+  python-deps:
+    name: Python dependency audit (report-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      # Every extra the app image and CI install, except haystack (openhay
+      # builds from git with Rust and has no advisories feed to check).
+      # --no-deps on the project itself: what's audited is its resolved
+      # dependency set, not the editable checkout.
+      - run: python -m pip install "pip-audit==2.9.0"
+      - run: python -m pip install ".[dev,llm,validate,cx-gl36,cx-spec,export]"
+      - name: pip-audit
+        id: audit
+        continue-on-error: true  # report-only for now (see the header)
+        run: |
+          ignores=$(grep -Ev '^\s*(#|$)' .github/security/pip-audit-ignore.txt | sed 's/^/--ignore-vuln /' | tr '\n' ' ')
+          # shellcheck disable=SC2086
+          pip-audit --skip-editable --progress-spinner off $ignores
+      - if: steps.audit.outcome == 'failure'
+        run: echo "::warning title=Python dependency audit::known vulnerabilities in Python dependencies (report-only, see the pip-audit step)"
+
+  npm-deps:
+    name: npm dependency audit (report-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [docs-site, tools/live-check, e2e-haxall]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+        with:
+          persist-credentials: false
+      # Reads the lockfile only: nothing is installed and no package script runs.
+      - id: audit
+        continue-on-error: true  # report-only for now (see the header)
+        run: npm audit --package-lock-only --audit-level=high
+        working-directory: ${{ matrix.dir }}
+      - if: steps.audit.outcome == 'failure'
+        env:
+          DIR: ${{ matrix.dir }}
+        run: echo "::warning title=npm audit (${DIR})::high or critical advisories in ${DIR}/package-lock.json (report-only)"
+
+  image:
+    name: App image scan (report-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+        with:
+          persist-credentials: false
+      # The image every Baler service runs (Dockerfile), built locally and
+      # never pushed. Base image packages and the installed Python packages
+      # are both scanned.
+      - run: docker build -t baler-app:scan .
+      - id: scan
+        continue-on-error: true  # report-only for now (see the header)
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439  # v7.4.2
+        with:
+          image: baler-app:scan
+          only-fixed: true
+          severity-cutoff: high
+          fail-build: true
+          output-format: table
+      - if: steps.scan.outcome == 'failure'
+        run: echo "::warning title=Image scan::fixable high or critical findings in the app image (report-only, see the scan step)"
+
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write  # upload results to code scanning
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript-typescript, actions]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee  # v4.39.0
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+          config: |
+            paths-ignore:
+              - src/baler/commissioning/vendor_constrain
+              - docs-site/node_modules
+              - tests/fixtures
+      - uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee  # v4.39.0
+        with:
+          category: /language:${{ matrix.language }}
