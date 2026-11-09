@@ -87,6 +87,76 @@ def test_unattributed_failure_is_still_named():
     assert v["limiter"] == "unattributed: cx run failed" and v["confidence"] == "low"
 
 
+# ---------------------------------------------------------------- N listener workers (#233)
+
+WORKER = "/usr/local/bin/python -m baler.mqtt_listener --child worker --index {}"
+
+
+def test_listener_process_roles():
+    assert limiter._listener_role(WORKER.format(2)) == "worker 2"
+    assert limiter._listener_role("/usr/local/bin/python -m baler.mqtt_listener --child tags --index 0") == "tag path"
+    assert limiter._listener_role("/usr/local/bin/python -m baler.mqtt_listener") is None  # supervisor, or pre-#233
+
+
+def test_a_gil_bound_worker_is_named_with_the_worker_count():
+    """With N workers the busiest process is one worker: "at one core"
+    means that worker is GIL-bound and more workers help, so the verdict
+    says which worker and how many there are - still the ingest listener."""
+    step, _ = _load(FIXTURES / "listener_gil_bound.json")
+    soak = step["evidence"]["phases"]["soak"]["containers"]["mqtt_listener"]
+    soak.update(cap=4.0, cpu_p90=1.9, throttled=0.0)  # 2 workers under a 4-core cap: not capped
+    soak["procs"] = [{"label": WORKER.format(1), "cpu_mean": 0.97, "cpu_max": 1.0, "hot_thread_mean": 0.9,
+                      "hot_thread_max": 0.95},
+                     {"label": WORKER.format(0), "cpu_mean": 0.95, "cpu_max": 1.0, "hot_thread_mean": 0.88,
+                      "hot_thread_max": 0.93}]
+    step["listener"] = {"worker_count": 2}
+    v = limiter.verdict(step)
+    assert v["limiter"].startswith("ingest listener: mqtt_listener CPU-bound (worker 1"), v["limiter"]
+    assert "2 workers" in v["limiter"] and v["component"] == "ingest listener"
+
+
+def test_without_per_process_figures_the_listener_cpu_is_spread_over_its_workers():
+    """Three workers at 0.6 cores each is 1.8 cores of container CPU: not
+    one process at its one-core limit."""
+    c = {"cap": 4.0, "cpu_p90": 1.8}
+    one = limiter.cpu_saturation("mqtt_listener", c)
+    three = limiter.cpu_saturation("mqtt_listener", c, workers=3)
+    assert one[0] > 1.0 and three[0] < 1.0 and "over 3 workers" in three[1]
+
+
+def test_a_worker_restarted_by_its_supervisor_is_the_limiter():
+    step, _ = _load(FIXTURES / "pass_next_suspect.json")
+    step["listener"] = {"worker_count": 3, "restarts_delta": {"worker-2": 1}}
+    v = limiter.verdict(step)
+    assert v["limiter"] == "ingest listener: mqtt_listener worker-2 restarted 1x" and v["component"] == "ingest listener"
+
+
+def test_the_writer_busy_share_is_per_worker(monkeypatch):
+    """The supervisor's heartbeat sums flush_s over its workers (#233):
+    two workers that each wrote half of a 10 s tick are 50% busy, not
+    100%. A heartbeat without `writers` (one process) reads as before."""
+    beats = []
+
+    class Conn:
+        def execute(self, sql):
+            return SimpleNamespace(fetchone=lambda: ([], 0, beats[-1]))
+
+    clock = [1000.0]
+    monkeypatch.setattr(evidence.time, "time", lambda: clock[0])
+    sampler = evidence.Sampler([], pg_connect=None, docker_root="/nonexistent-docker-root")
+    sampler.device = None
+    busy = []
+    for writers, flush_s in ((2, 0.0), (2, 10.0), (None, 18.0)):
+        beats.append({"queue": 0, "queue_peak": 0, "queue_max": 50000, "rows": 0, "flush_s": flush_s,
+                      **({"writers": writers} if writers else {})})
+        tick = sampler.tick(Conn())
+        if tick is not None:
+            busy.append(tick["listener"]["flush_busy"])
+        clock[0] += 10.0
+    # 10 s written by 2 workers in 10 s; then 8 s by one process in 10 s
+    assert busy == [0.5, 0.8]
+
+
 # ---------------------------------------------------------------- evidence parsing
 
 def test_cgroup_v1_and_v2_parsing():

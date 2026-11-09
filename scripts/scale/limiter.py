@@ -90,10 +90,34 @@ def gen_behind(step: dict) -> float | None:
     return v if v is not None else gen.get("behind_max_s")
 
 
-def cpu_saturation(svc: str, c: dict) -> tuple[float, str] | None:
+def listener_workers(step: dict) -> int:
+    """mqtt_listener's worker processes in this step (#233): its
+    supervisor's heartbeat, via ladder.summarize_listener. 1 for a
+    listener from before #233, which was one process."""
+    return int((step.get("listener") or {}).get("worker_count") or 1)
+
+
+def _listener_role(label: str) -> str | None:
+    """Which mqtt_listener process a /proc label is (#233): the supervisor
+    starts each child as `python -m baler.mqtt_listener ... --child worker
+    --index 2`; a pre-#233 listener's single process has no --child."""
+    words = label.split()
+    if "--child" not in words or words.index("--child") + 1 >= len(words):
+        return None
+    kind = words[words.index("--child") + 1]
+    if kind == "worker" and "--index" in words and words.index("--index") + 1 < len(words):
+        return f"worker {words[words.index('--index') + 1]}"
+    return {"tags": "tag path", "retire": "retire sweep"}.get(kind, kind)
+
+
+def cpu_saturation(svc: str, c: dict, workers: int = 1) -> tuple[float, str] | None:
     """How close a container is to its CPU limit (1.0 = at the threshold)
     and why: throttling, CPU at the cap, or (single-threaded services) a
-    process or thread at one core."""
+    process or thread at one core. `workers`: mqtt_listener's worker
+    processes (#233) - one core is then each worker's limit, not the
+    container's, and the message names the worker, so "at one core" reads
+    as "this worker is GIL-bound: add workers" rather than "the listener
+    is"."""
     if not c:
         return None
     cands = []
@@ -109,13 +133,22 @@ def cpu_saturation(svc: str, c: dict) -> tuple[float, str] | None:
     procs = c.get("procs") or []
     if procs and svc != "postgres":
         p = procs[0]
+        role = _listener_role(p.get("label", "")) if svc == "mqtt_listener" else None
+        of = f", {workers} workers" if role and role.startswith("worker") else ""
+        who = f"{role}: " if role else ""
         cands.append((p.get("hot_thread_mean", 0) / HOT_THREAD,
-                      f"{svc} CPU-bound (busiest thread {_pct(p.get('hot_thread_mean', 0))} of a core)"))
+                      f"{svc} CPU-bound ({who}busiest thread {_pct(p.get('hot_thread_mean', 0))} of a core{of})"))
         if svc in ONE_CORE:
+            one = f"{role} at" if role else "one process at"
             cands.append((p.get("cpu_mean", 0) / ONE_CORE_PROC,
-                          f"{svc} CPU-bound (one process at {_pct(p.get('cpu_mean', 0))} of a core)"))
+                          f"{svc} CPU-bound ({one} {_pct(p.get('cpu_mean', 0))} of a core{of})"))
     elif svc in ONE_CORE and c.get("cpu_p90") is not None:
-        cands.append((c["cpu_p90"] / ONE_CORE_PROC, f"{svc} CPU-bound ({_pct(c['cpu_p90'])} of one core, p90)"))
+        if svc == "mqtt_listener" and workers > 1:
+            # no per-process figures: the container's CPU, spread over its workers
+            cands.append((c["cpu_p90"] / workers / ONE_CORE_PROC,
+                          f"{svc} CPU-bound ({c['cpu_p90']:.2f} cores p90 over {workers} workers)"))
+        else:
+            cands.append((c["cpu_p90"] / ONE_CORE_PROC, f"{svc} CPU-bound ({_pct(c['cpu_p90'])} of one core, p90)"))
     return max(cands, default=None)
 
 
@@ -154,13 +187,13 @@ def ingest_symptoms(step: dict, soak: dict) -> list[str]:
     return out
 
 
-def attribute_ingest(soak: dict) -> tuple[str, list[str], list[str], str]:
+def attribute_ingest(soak: dict, workers: int = 1) -> tuple[str, list[str], list[str], str]:
     """(limiter, evidence, also-saturated, confidence) for an ingest-chain
-    stop."""
+    stop. `workers`: mqtt_listener's worker processes (listener_workers)."""
     cs = soak.get("containers") or {}
     cands: list[tuple[float, str, str]] = []  # (score, text, component)
     for svc, comp in (("mqtt_listener", "ingest listener"), ("mosquitto", "broker"), ("postgres", "postgres")):
-        s = cpu_saturation(svc, cs.get(svc) or {})
+        s = cpu_saturation(svc, cs.get(svc) or {}, workers if svc == "mqtt_listener" else 1)
         if s:
             cands.append((s[0], s[1], comp))
     disk = soak.get("disk") or {}
@@ -339,7 +372,7 @@ def headroom(step: dict) -> list[dict]:
     for svc, c in (soak.get("containers") or {}).items():
         if svc in NOT_BALER:
             continue
-        s = cpu_saturation(svc, c)
+        s = cpu_saturation(svc, c, listener_workers(step) if svc == "mqtt_listener" else 1)
         if s:
             out.append({"part": svc, "ratio": round(s[0], 3), "detail": s[1].replace(" CPU-capped", " CPU").replace(
                 " CPU-bound", " CPU")})
@@ -422,6 +455,12 @@ def verdict(step: dict) -> dict:
             return done(f"{svc} {what}" + (f" (memory {_pct(mem)} of cap)" if mem is not None else ""), svc,
                         "high" if c.get("oom_killed") or (mem or 0) >= MEM else "medium")
 
+    # mqtt_listener's own children (#233): its supervisor restarts a
+    # worker in place, so the container's restart count doesn't show it
+    for child, n in ((step.get("listener") or {}).get("restarts_delta") or {}).items():
+        ev.append(f"mqtt_listener {child} restarted {n}x (by its supervisor)")
+        return done(f"ingest listener: mqtt_listener {child} restarted {n}x", "ingest listener", "medium")
+
     # 3. graph
     if step.get("graph_timeout"):
         return done(f"graph ingest (tags not in Oxigraph after {step['graph_timeout']} s)", "graph", "low")
@@ -430,7 +469,7 @@ def verdict(step: dict) -> dict:
     symptoms = ingest_symptoms(step, soak)
     if symptoms:
         ev.extend(symptoms)
-        name, more, also, conf = attribute_ingest(soak)
+        name, more, also, conf = attribute_ingest(soak, listener_workers(step))
         ev.extend(more)
         pw = (step.get("evidence") or {}).get("pg_writes") or {}
         if pw.get("checkpoints_requested"):

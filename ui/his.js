@@ -201,6 +201,9 @@ function render() {
     parts.push(`<span>rollup <strong>${escapeHtml(r.rollup.fold)}</strong> per <strong>${escapeHtml(r.rollup.interval)}</strong></span>`);
   }
   if (truncated) parts.push(`<span class="field-error">${truncated} series capped at ${r.limit.toLocaleString()} samples - add a .hisRollup(...) for long spans</span>`);
+  // The server reads at most seriesLimit points per request (Baler#244);
+  // this page charts the first of them, in point-id order.
+  if (r.after) parts.push(`<span class="field-error">showing the first ${pointCount.toLocaleString()} of ${r.pointCount.toLocaleString()} points (at most ${r.seriesLimit.toLocaleString()} per query) - narrow the filter to chart the rest</span>`);
   summaryEl.insertAdjacentHTML("beforeend", parts.map((p) => p).join(""));
   if (r.matched.length) {
     const details = document.createElement("details");

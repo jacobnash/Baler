@@ -253,11 +253,27 @@ queues a reading, a writer thread commits up to 5,000 per transaction (a
 only then acknowledges their MQTT messages. Nothing is acknowledged before
 it's durably committed, so a crash of the listener or Postgres leaves the
 unacknowledged readings with the broker, which redelivers them; the writes
-are idempotent on `(point, ts)`. Tags and equip messages are still handled
-one at a time, as they arrive. The queue is bounded: when it's full, the
-backlog waits at the broker (`max_inflight_messages`, `max_queued_messages`
-in `mosquitto/mosquitto.conf`). The [scale test](/scale-test) measures how
-far this goes.
+are idempotent on `(point, ts)`. The queue is bounded: when it's full, the
+backlog waits at the broker (`max_inflight_messages`, `max_queued_messages`,
+`max_queued_bytes` in `mosquitto/mosquitto.conf`), and the wait is counted.
+
+Since #233 `python -m baler.mqtt_listener` is a supervisor with
+`BALER_LISTENER_WORKERS` worker processes (default 1). Each worker is an
+MQTT 5 client on the shared subscription `$share/baler/fbf/#` with a stable
+client id (`baler-mqtt-listener-<n>`) and a persistent session, so the
+broker spreads messages over the workers and keeps each one's
+unacknowledged messages for it across a crash. Every worker appends its
+committed batches to the [reading feed](/fault-detection) under one
+advisory lock held to commit, so the feed's `seq` order is commit order
+whichever worker wrote it. Tags and equip messages aren't handled in
+`on_message` any more: they ride their batch into its feed row, and the
+supervisor's `tag_ingest` process applies them to Oxigraph in batches, in
+commit order, so a tags storm can't stall readings. The supervisor also
+retires the broker sessions of worker ids that no longer exist (storing
+what was queued for them first), takes the broker's retained messages once
+when worker 0's session is new (a shared subscription gets none), restarts
+a child that exits, and logs and counts the broker's own dropped messages.
+The [scale test](/scale-test) measures how far this goes.
 
 <Mermaid chart={`sequenceDiagram
     participant Src as Source (MQTT or push client)
@@ -268,8 +284,8 @@ far this goes.
     participant PG as postgres
 
     alt over MQTT
-        Src->>ML: publish fbf/# envelope
-        ML->>Ing: ingest_readings(batch), then ack the batch
+        Src->>ML: publish fbf/# envelope ($share/baler: one of N workers)
+        ML->>Ing: ingest_readings(batch) + feed row (tags ride it), then ack the batch
     else over HTTP
         Src->>IA: POST /ingest
         IA->>Ing: ingest_reading(envelope)

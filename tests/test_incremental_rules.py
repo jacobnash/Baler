@@ -185,7 +185,8 @@ def test_the_listener_feeds_readings_and_alarms_in_the_batch_transaction(monkeyp
         then("conn")  # inside write_point_values' transaction
 
     monkeypatch.setattr(mqtt_listener, "ingest_readings", ingest)
-    monkeypatch.setattr(mqtt_listener.reading_feed, "append_from_stage", lambda conn, alarms: log.append(("feed", alarms)))
+    monkeypatch.setattr(mqtt_listener.reading_feed, "append_from_stage",
+                        lambda conn, alarms, tags=None: log.append(("feed", alarms)))
     client = AckClient()
     batcher = mqtt_listener.ReadingBatcher(client, store=None, ts_conn=None, feed=True)
     on_message = mqtt_listener.make_on_message(None, None, batcher)

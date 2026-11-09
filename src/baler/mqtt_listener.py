@@ -2,17 +2,33 @@
 One daemon, every protocol. BACnet, Modbus, and native MQTT sources all
 publish the same envelope (see Windrow's docs/adding-a-new-source.md), so one
 listener subscribing to a topic pattern is the whole ingestion surface.
+
+Scale-out (Baler#233): `python -m baler.mqtt_listener` is a supervisor. It
+starts BALER_LISTENER_WORKERS worker processes (default 1), each an MQTT 5
+client on the shared subscription `$share/baler/fbf/#` with its own stable
+client id (baler-mqtt-listener-<n>) and a persistent session, so the broker
+spreads messages across them and keeps each one's unacknowledged messages
+for it across a crash. One process is one GIL: past ~15k readings/s the
+listener was CPU-bound in paho's per-message work, not in Postgres. The
+supervisor also starts the tag path (baler.tag_ingest), retires the
+sessions of workers that no longer exist, watches the broker's drop counter
+and restarts a child that exits. See docs-site/pages/scale-test.mdx.
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import queue
+import signal
+import subprocess
+import sys
 import threading
 import time
 import traceback
+from datetime import datetime, timezone
 from functools import lru_cache
 
 from opentelemetry import trace
@@ -24,17 +40,12 @@ from baler import (
     mqtt_util,
     quality,
     reading_feed,
+    tag_ingest,
     tracing,
 )
 from baler.ingest import (
-    ingest_equip_tags,
-    ingest_haystack_equip_tags,
     ingest_reading,
     ingest_readings,
-    ingest_tags,
-    link_equip_ref,
-    link_point_to_equip,
-    topic_to_point_uri,
 )
 from baler.remote_store import RemoteStore
 from baler.timeseries import connect
@@ -49,9 +60,32 @@ tracer = tracing.get_tracer(__name__)
 # unsigned integers in BACnet, so these two names mean binary only.
 BINARY_STATES = {"active": True, "inactive": False}
 
-# Marks a queued controller alarm (ReadingBatcher.put_alarm) apart from a
-# reading's quality flag.
+# Mark a queued controller alarm (ReadingBatcher.put_alarm) and a queued
+# tags/equip message (put_tags) apart from a reading's quality flag.
 ALARM = object()
+TAGS = object()
+
+# Client ids. Worker n is CLIENT_PREFIX-n, always: its persistent session at
+# the broker (subscription, unacknowledged and queued messages) is found by
+# that id after a crash. LEGACY_CLIENT_ID is the single listener before
+# #233, with a plain (not shared) subscription.
+CLIENT_PREFIX = "baler-mqtt-listener"
+LEGACY_CLIENT_ID = CLIENT_PREFIX
+RETAINED_CLIENT_ID = f"{CLIENT_PREFIX}-retained"
+SHARE_GROUP = "baler"
+# Sessions of worker ids from the worker count up to this are retired at
+# start (see retire_session): a worker that no longer exists still gets its
+# share of every message from the broker, queued until it overflows.
+MAX_WORKERS = 32
+HEARTBEAT_EVERY = 5.0
+
+
+def worker_client_id(index: int) -> str:
+    return f"{CLIENT_PREFIX}-{index}"
+
+
+def shared(topic_pattern: str, group: str = SHARE_GROUP) -> str:
+    return f"$share/{group}/{topic_pattern}"
 
 
 def binary_state(value):
@@ -64,22 +98,14 @@ def _rules(path: str):
     return mapping.load_rules(path)
 
 
-def _classify(store, uri, rules_path: str) -> None:
-    """mapping.classify_on_ingest; a failure here never drops the tags
-    message that was already stored (autotag can still classify it)."""
-    try:
-        cls = mapping.classify_on_ingest(store, uri, _rules(rules_path))
-    except Exception as exc:  # noqa: BLE001 - classification is best-effort on this path
-        print(f"auto-classify of {uri} skipped: {exc!r}")
-        return
-    if cls:
-        print(f"auto-classified {uri} as {cls}")
+def make_on_connect(topic_pattern, batcher: ReadingBatcher | None = None, on_fresh=None):
+    """`on_fresh(client)` runs when the broker had no session for this
+    client (first start, or a broker that lost its state)."""
 
-
-def make_on_connect(topic_pattern, batcher: ReadingBatcher | None = None):
     def on_connect(client, userdata, flags, reason_code, properties):
         if batcher is not None:
             batcher.generation += 1
+            batcher.connected = True
         with tracer.start_as_current_span("mqtt_listener.on_connect") as span:
             span.set_attribute("reason_code", str(reason_code))
             # Subscribing here (not just once before loop_forever()) is
@@ -91,23 +117,40 @@ def make_on_connect(topic_pattern, batcher: ReadingBatcher | None = None):
             # held up readings until the broker's queue overflowed and it
             # dropped them (Baler#190: most of the readings acknowledged
             # during a kill -9 of the listener were lost). A resumed
-            # persistent session (clean_session=False, stable client id)
-            # still has its subscription and its queued backlog.
+            # persistent session (stable client id) still has its
+            # subscription and its queued backlog. (A shared subscription
+            # gets no retained messages at all: see RetainedSnapshot.)
+            #
+            # A shared subscription is (re)subscribed on every connect all
+            # the same: it never replays retained messages, and a resumed
+            # session keeps whatever filter it was created with, so a
+            # changed --topic-pattern would otherwise never take effect.
             present = flags.get("session present") if isinstance(flags, dict) else getattr(flags, "session_present", False)
             span.set_attribute("session_present", bool(present))
-            if present:
+            if present and not topic_pattern.startswith("$share/"):
                 print(f"connected ({reason_code}), resumed session on {topic_pattern}", flush=True)
                 return
             client.subscribe(topic_pattern, qos=1)
-            print(f"connected ({reason_code}), subscribed to {topic_pattern}", flush=True)
+            print(f"connected ({reason_code}), {'resumed session, ' if present else ''}subscribed to {topic_pattern}",
+                  flush=True)
+            if on_fresh is not None and not present:
+                on_fresh(client)
 
     return on_connect
 
 
-def on_disconnect(client, userdata, flags, reason_code, properties=None):
-    with tracer.start_as_current_span("mqtt_listener.on_disconnect") as span:
-        span.set_attribute("reason_code", str(reason_code))
-        print(f"disconnected ({reason_code}) - paho will auto-reconnect")
+def make_on_disconnect(batcher: ReadingBatcher | None = None):
+    def on_disconnect(client, userdata, flags, reason_code, properties=None):
+        if batcher is not None:
+            batcher.connected = False
+        with tracer.start_as_current_span("mqtt_listener.on_disconnect") as span:
+            span.set_attribute("reason_code", str(reason_code))
+            print(f"disconnected ({reason_code}) - paho will auto-reconnect", flush=True)
+
+    return on_disconnect
+
+
+on_disconnect = make_on_disconnect()
 
 
 class ReadingBatcher:
@@ -118,23 +161,32 @@ class ReadingBatcher:
     reading - the per-reading INSERT round trip capped one listener at
     ~1,000 readings/s, with mosquitto dropping what queued past its limit.
 
+    Tags/equip messages and controller alarms ride the same batch: with the
+    reading feed on, they go into the batch's feed row in the same
+    transaction (tags for baler.tag_ingest, alarms for fault_detector), so
+    a tags storm costs this path a few JSON values per batch, never an
+    Oxigraph round trip (#233).
+
     Nothing is acknowledged before it is committed (manual acks, durable
     commits), so a crash anywhere - this process, Postgres - leaves the
     unacknowledged messages with the broker, which redelivers them to this
     persistent session on reconnect; the writes are idempotent on
     (point, ts). The queue is bounded: when it's full, on_message blocks,
     paho stops reading the socket, and the backlog waits at the broker.
+    That wait is counted (blocked_s): it's the first sign this worker can't
+    keep up, before the broker's own queue limit drops anything.
     """
 
     def __init__(self, client, store, ts_conn, max_rows: int = 5000, max_wait: float = 0.25, max_queued: int = 50_000,
                  feed: bool = False, feed_retention_s: float = reading_feed.DEFAULT_RETENTION_S,
-                 prune_every: float = 5.0, beat_every: float = 5.0):
+                 prune_every: float = 5.0, name: str = "reading-batcher"):
         self.client, self.store, self.ts_conn = client, store, ts_conn
         self.max_rows, self.max_wait = max_rows, max_wait
         # The reading feed (#243): each committed batch, readings and
         # controller alarms, is appended to reading_feed in the same
         # transaction, for fault_detector and derivation_engine to read
-        # instead of a QoS 0 subscription of their own.
+        # instead of a QoS 0 subscription of their own. prune_every 0: this
+        # batcher doesn't prune (one pruner per listener, worker 0).
         self.feed, self.feed_retention_s, self.prune_every = feed, feed_retention_s, prune_every
         self._last_prune = 0.0
         self.queue: queue.Queue = queue.Queue(maxsize=max_queued)
@@ -142,28 +194,57 @@ class ReadingBatcher:
         # connection it arrived on (ids are reused), and the broker resends
         # everything unacknowledged after a reconnect anyway.
         self.generation = 0
+        self.connected = False
+        # Counters. received is written by paho's thread only, done by this
+        # thread only: received - done is what's queued or being written.
+        self.received = 0
+        self.done = 0
         self.rows = 0
         self.batches = 0
+        self.tags = 0
+        self.alarms = 0
+        self.blocked_s = 0.0
+        self.blocked_events = 0
         # What the heartbeat reports (Baler#269): seconds spent in flush()
         # (the write path's busy time: near 1 s per second means the writer,
         # not the broker, sets the pace), and the deepest queue since the
-        # last beat.
+        # last beat (take_queue_peak).
         self.flush_s = 0.0
         self.queue_peak = 0
-        self.beat_every = beat_every
-        self._last_beat = 0.0
-        self.thread = threading.Thread(target=self._run, name="reading-batcher", daemon=True)
+        self.last_message_at = 0.0
+        self.thread = threading.Thread(target=self._run, name=name, daemon=True)
 
     def start(self) -> None:
         self.thread.start()
 
+    def _put(self, item) -> None:
+        self.received += 1
+        self.last_message_at = time.monotonic()
+        try:
+            self.queue.put_nowait(item)
+        except queue.Full:
+            t0 = time.monotonic()
+            self.queue.put(item)
+            self.blocked_s += time.monotonic() - t0
+            self.blocked_events += 1
+
     def put(self, msg, topic: str, value, ts, flag: str | None = None) -> None:
-        self.queue.put((self.generation, msg.mid, msg.qos, topic, value, ts, flag))
+        self._put((self.generation, msg.mid, msg.qos, topic, value, ts, flag))
 
     def put_alarm(self, msg, topic: str, event, ts) -> None:
         """A controller alarm (Baler#168): not stored as a reading, but it
         rides the batch into the feed, acknowledged once that commits."""
-        self.queue.put((self.generation, msg.mid, msg.qos, topic, event, ts, ALARM))
+        self._put((self.generation, msg.mid, msg.qos, topic, event, ts, ALARM))
+
+    def put_tags(self, msg, topic: str, value, ts) -> None:
+        """A tags/equip message (#233): into the batch's feed row for
+        tag_ingest (or, without the feed, applied by this thread), and
+        acknowledged once that commits."""
+        self._put((self.generation, msg.mid, msg.qos, topic, value, ts, TAGS))
+
+    @property
+    def pending(self) -> int:
+        return self.received - self.done
 
     def _run(self) -> None:
         try:
@@ -171,16 +252,12 @@ class ReadingBatcher:
             while True:
                 now = time.monotonic()
                 if now - last_report >= 60:
-                    # until /ops/status shows ingest lag and queue depth (#190)
                     n, b = self.rows - last_rows, self.batches - last_batches
                     print(f"ingest: {n / (now - last_report):.0f} readings/s, {b} batches "
-                          f"(avg {n / max(b, 1):.0f} rows), queue {self.queue.qsize()}", flush=True)
+                          f"(avg {n / max(b, 1):.0f} rows), queue {self.queue.qsize()}, "
+                          f"blocked {self.blocked_s:.1f} s in all", flush=True)
                     last_report, last_rows, last_batches = now, self.rows, self.batches
-                self.maybe_beat()
-                try:
-                    batch = [self.queue.get(timeout=self.beat_every)]
-                except queue.Empty:
-                    continue  # idle: still beat
+                batch = [self.queue.get()]
                 self.queue_peak = max(self.queue_peak, self.queue.qsize() + 1)
                 deadline = time.monotonic() + self.max_wait
                 while len(batch) < self.max_rows:
@@ -192,29 +269,21 @@ class ReadingBatcher:
                     except queue.Empty:
                         break
                 self.flush(batch)
-                if self.feed and time.monotonic() - self._last_prune >= self.prune_every:
+                if self.feed and self.prune_every and time.monotonic() - self._last_prune >= self.prune_every:
                     self._last_prune = time.monotonic()
                     self.prune()
         except Exception:  # noqa: BLE001 - infrastructure failure: exit, let the broker redeliver
             # Same contract as the old synchronous path (Postgres/Oxigraph
-            # down -> the container restarts), from a thread: nothing in
+            # down -> the worker restarts), from a thread: nothing in
             # this batch was acknowledged, so nothing is lost.
             traceback.print_exc()
             os._exit(1)
 
-    def maybe_beat(self) -> None:
-        """mqtt_listener's heartbeat (Baler#269): queue depth now and its
-        peak since the last beat, rows and batches written, and seconds
-        spent writing them. One upsert every `beat_every` s, from this
-        thread, on the connection it writes with."""
-        now = time.monotonic()
-        if self.ts_conn is None or now - self._last_beat < self.beat_every:
-            return
-        self._last_beat = now
-        heartbeat.beat(self.ts_conn, "mqtt_listener", {
-            "queue": self.queue.qsize(), "queue_peak": self.queue_peak, "queue_max": self.queue.maxsize,
-            "rows": self.rows, "batches": self.batches, "flush_s": round(self.flush_s, 3)})
-        self.queue_peak = self.queue.qsize()
+    def take_queue_peak(self) -> int:
+        """The deepest the queue got since the last call (the heartbeat
+        thread's, every few seconds), and start the next interval from now."""
+        peak, self.queue_peak = max(self.queue_peak, self.queue.qsize()), self.queue.qsize()
+        return peak
 
     def flush(self, batch: list) -> None:
         t0 = time.monotonic()
@@ -225,19 +294,32 @@ class ReadingBatcher:
 
     def _flush(self, batch: list) -> None:
         with tracer.start_as_current_span("mqtt_listener.flush") as span:
-            readings = [(topic, value, ts, flag) for _, _, _, topic, value, ts, flag in batch if flag is not ALARM]
-            alarms = [[topic, value, ts] for _, _, _, topic, value, ts, flag in batch if flag is ALARM]
+            readings, alarms, tags = [], [], []
+            for _, _, _, topic, value, ts, flag in batch:
+                if flag is ALARM:
+                    alarms.append([topic, value, ts])
+                elif flag is TAGS:
+                    tags.append([topic, value, ts])
+                else:
+                    readings.append((topic, value, ts, flag))
             span.set_attribute("readings", len(readings))
+            span.set_attribute("tags", len(tags))
             if self.feed:
                 ingest_readings(self.store, self.ts_conn, readings,
-                                then=lambda conn: reading_feed.append_from_stage(conn, alarms))
-            elif readings:
-                ingest_readings(self.store, self.ts_conn, readings)
+                                then=lambda conn: reading_feed.append_from_stage(conn, alarms, tags))
+            else:
+                if readings:
+                    ingest_readings(self.store, self.ts_conn, readings)
+                if tags:
+                    tag_ingest.apply(self.store, tags)
             for gen, mid, qos, *_ in batch:
                 if qos and gen == self.generation:
                     self.client.ack(mid, qos)
             self.rows += len(readings)
+            self.tags += len(tags)
+            self.alarms += len(alarms)
             self.batches += 1
+            self.done += len(batch)
 
     def prune(self) -> None:
         """Drop feed batches every consumer has read, and any past the
@@ -252,21 +334,28 @@ class ReadingBatcher:
             print(f"reading feed: {consumer} MISSED {readings} reading(s) in {batches} batch(es): "
                   f"more than {self.feed_retention_s:.0f} s behind, pruned unread", flush=True)
 
+    def stats(self) -> dict:
+        return {"received": self.received, "rows": self.rows, "batches": self.batches, "tags": self.tags,
+                "alarms": self.alarms, "queue": self.queue.qsize(), "blocked_s": round(self.blocked_s, 2),
+                "blocked_events": self.blocked_events, "flush_s": round(self.flush_s, 3),
+                "queue_max": self.queue.maxsize, "connected": self.connected}
 
-def make_on_message(store, ts_conn, batcher: ReadingBatcher | None = None):
+
+def make_on_message(store, ts_conn, batcher: ReadingBatcher | None = None, retained_only: bool = False):
     """Without a batcher every reading is written before on_message returns
-    (and acknowledged then, by paho); with one (main()), readings are
-    queued for it and everything else is handled here and acknowledged
-    explicitly - the client runs with manual acks."""
+    (and acknowledged then, by paho); with one (the workers), readings,
+    tags and alarms are queued for it and anything else is handled here
+    and acknowledged explicitly - the client runs with manual acks.
+    retained_only: skip (acknowledge) live messages, for RetainedSnapshot."""
 
     def on_message(client, userdata, msg):
         """One bad message is logged and skipped, never fatal: this client
         has a persistent session, so a message that crashed it would be
         redelivered after every restart and stop ingest for good (a bare
         `1` on an fbf/ topic did exactly that in CI). Infrastructure errors
-        (Postgres/Oxigraph down) still raise, so the container restarts."""
+        (Postgres/Oxigraph down) still raise, so the worker restarts."""
         try:
-            queued = _handle(msg)
+            queued = False if retained_only and not msg.retain else _handle(msg)
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
             print(f"skipped bad message on {msg.topic}: {exc!r}")
             queued = False
@@ -276,9 +365,9 @@ def make_on_message(store, ts_conn, batcher: ReadingBatcher | None = None):
     def _handle(msg):
         # A span per reading was ~30% of the listener's CPU at 2,000
         # readings/s (span creation plus the exporter encoding them, py-spy,
-        # Baler#190). With a batcher a reading is traced as part of its
-        # batch (mqtt_listener.flush); tags/equip messages keep their span.
-        if batcher is not None and not msg.topic.endswith("/tags"):
+        # Baler#190). With a batcher everything is traced as part of its
+        # batch (mqtt_listener.flush, tag_ingest.apply).
+        if batcher is not None:
             return _handle_in(msg, trace.INVALID_SPAN)
         with tracer.start_as_current_span("mqtt_listener.on_message") as span:
             span.set_attribute("topic", msg.topic)
@@ -290,70 +379,23 @@ def make_on_message(store, ts_conn, batcher: ReadingBatcher | None = None):
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             span.set_attribute("error", str(exc))
             print(f"malformed payload on {msg.topic}: {exc!r}")
-            return
+            return False
         if not isinstance(payload, dict):
             span.set_attribute("error", "payload is not a JSON object")
             print(f"malformed payload on {msg.topic}: expected a JSON object, got {type(payload).__name__}")
-            return
+            return False
 
         value = payload.get("value")
         ts = payload.get("ts")
 
-        # BACnet/Modbus-sourced equip: one message per connection,
-        # {"tags": {...}, "points": [label, ...]} - equip identity is
-        # the connection's own topic_prefix (see
-        # ingest.topic_prefix_to_equip_uri), hasPoint is asserted
-        # directly since the point list is already known at publish
-        # time (windrow's connection_manager._tag_points sibling call).
-        if msg.topic.endswith("/equip/tags"):
-            topic_prefix = msg.topic[: -len("/equip/tags")]
-            try:
-                data = json.loads(value)
-            except (json.JSONDecodeError, TypeError) as exc:
-                span.set_attribute("error", str(exc))
-                print(f"malformed equip payload on {msg.topic}: {exc!r}")
-                return
-            equip_uri = ingest_equip_tags(store, topic_prefix, data.get("tags", {}))
-            for label in data.get("points", []):
-                link_point_to_equip(store, topic_to_point_uri(f"{topic_prefix}/{label}"), equip_uri)
-            _classify(store, equip_uri, mapping.EQUIP_RULES_PATH)
-            return
-
-        # Haystack-sourced equip: one message per equip/site rec,
-        # {topic_prefix}/equip/{haystackRef}/tags - equip identity is
-        # the rec's own Haystack id (see ingest.haystack_ref_to_equip_uri),
-        # matching link_equip_ref's resolution on the point side; no
-        # points list needed here since points link themselves via
-        # their own equipRef tag, not the equip side pushing membership.
-        if "/equip/" in msg.topic and msg.topic.endswith("/tags"):
-            ref = msg.topic[: -len("/tags")].rsplit("/equip/", 1)[1]
-            try:
-                tags = json.loads(value)
-            except (json.JSONDecodeError, TypeError) as exc:
-                span.set_attribute("error", str(exc))
-                print(f"malformed haystack equip payload on {msg.topic}: {exc!r}")
-                return
-            equip_uri = ingest_haystack_equip_tags(store, ref, tags)
-            _classify(store, equip_uri, mapping.EQUIP_RULES_PATH)
-            return
-
-        if msg.topic.endswith("/tags"):
-            real_topic = msg.topic[: -len("/tags")]
-            try:
-                tags = json.loads(value)
-            except (json.JSONDecodeError, TypeError) as exc:
-                span.set_attribute("error", str(exc))
-                print(f"malformed tags payload on {msg.topic}: {exc!r}")
-                return
-            point_uri = ingest_tags(store, real_topic, tags, ts)
-            # No-op unless this point carries an equipRef and the
-            # matching equip's own tags have already landed - safe to
-            # call unconditionally on every tag message, not just the
-            # first one (a point re-tagged after its equip arrives
-            # should still get linked).
-            link_equip_ref(store, point_uri)
-            _classify(store, point_uri, mapping.DEFAULT_RULES_PATH)
-            return
+        # Tags and equip messages (BACnet/Modbus connection equip, Haystack
+        # equip/site recs, point tags): the tag path, baler.tag_ingest.
+        if tag_ingest.is_tags(msg.topic):
+            if batcher is not None:
+                batcher.put_tags(msg, msg.topic, value, ts)
+                return True
+            tag_ingest.apply(store, [(msg.topic, value, ts)])
+            return False
 
         # A controller alarm forwarded by Windrow (Baler#168) is not a
         # reading: fault_detector raises/clears it as a fault. Storing it
@@ -374,11 +416,363 @@ def make_on_message(store, ts_conn, batcher: ReadingBatcher | None = None):
     return on_message
 
 
-def main() -> None:
+# ----------------------------------------------------------------- workers
+
+
+class RetainedSnapshot:
+    """A shared subscription gets no retained messages (MQTT 5, and what
+    mosquitto does), so a listener whose sessions are new - a first start,
+    a broker that lost its state, the upgrade from one listener - would
+    never see the tags Windrow published (retained) before it subscribed.
+    Worker 0, when its session is new, takes them once on a plain
+    subscription of its own: a clean session, retained messages only (live
+    ones go to the shared group and are skipped here), stored through a
+    batcher like any others, until none has arrived for `idle_s`."""
+
+    def __init__(self, args, idle_s: float = 3.0):
+        self.args, self.idle_s = args, idle_s
+        self.store = RemoteStore()  # its own HTTP session: this is another thread
+        self.thread = threading.Thread(target=self._run, name="retained-snapshot", daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def _run(self) -> None:
+        try:
+            a = self.args
+            client = mqtt_util.make_client(client_id=RETAINED_CLIENT_ID, manual_ack=True, v5=True)
+            batcher = ReadingBatcher(client, self.store, connect(), max_rows=a.batch_rows, max_wait=a.batch_ms / 1000,
+                                     feed=a.feed, prune_every=0, name="retained-batcher")
+            subscribed = threading.Event()
+            client.on_connect = lambda c, *_: c.subscribe(a.topic_pattern, qos=1)
+            client.on_subscribe = lambda *_: subscribed.set()
+            client.on_message = make_on_message(self.store, None, batcher, retained_only=True)
+            batcher.start()
+            mqtt_util.connect_v5(client, a.mqtt_host, a.mqtt_port, persistent=False)
+            client.loop_start()
+            t0 = time.monotonic()
+            subscribed.wait(60)
+            batcher.last_message_at = time.monotonic()
+            while time.monotonic() - batcher.last_message_at < self.idle_s or batcher.pending:
+                time.sleep(0.5)
+            client.disconnect()
+            client.loop_stop()
+            print(f"retained snapshot: {batcher.received} retained messages ({batcher.rows} readings, "
+                  f"{batcher.tags} tags) in {time.monotonic() - t0:.1f} s", flush=True)
+        except Exception:  # noqa: BLE001 - worker 0 restarts; its session now exists, see docs
+            traceback.print_exc()
+            os._exit(1)
+
+
+def _worker_args(args) -> argparse.Namespace:
+    return args if isinstance(args, argparse.Namespace) else argparse.Namespace(**args)
+
+
+def _session(client_id: str, args, store, ts_conn, prune: bool) -> tuple:
+    """A manual-ack MQTT 5 client and its batcher. Manual acks: a reading
+    is acknowledged once its batch is committed (ReadingBatcher), so an
+    unstored reading is never one the broker has forgotten."""
+    client = mqtt_util.make_client(client_id=client_id, manual_ack=True, v5=True)
+    batcher = ReadingBatcher(client, store, ts_conn, max_rows=args.batch_rows, max_wait=args.batch_ms / 1000,
+                             feed=args.feed, feed_retention_s=args.feed_retention, prune_every=5.0 if prune else 0)
+    client.on_message = make_on_message(store, ts_conn, batcher)
+    return client, batcher
+
+
+def run_worker(index: int, args) -> None:
+    """One worker: a persistent MQTT 5 session on the shared subscription
+    (stable id, never expires: what the broker queued for this worker, and
+    what it hadn't acknowledged, is still there when it comes back), its
+    own batcher and Postgres connection, a heartbeat every few seconds.
+    Worker 0 also prunes the reading feed (one pruner per listener)."""
+    args = _worker_args(args)
+    tracing.init_tracing("baler-mqtt-listener")
+    store = RemoteStore()
+    client_id = worker_client_id(index)
+    client, batcher = _session(client_id, args, store, connect(), prune=index == 0)
+    client.on_disconnect = make_on_disconnect(batcher)
+    on_fresh = (lambda c: RetainedSnapshot(args).start()) if index == 0 and args.retained_snapshot else None
+    client.on_connect = make_on_connect(shared(args.topic_pattern, args.share_group), batcher, on_fresh=on_fresh)
+    batcher.start()
+    threading.Thread(target=_heartbeats, args=(f"mqtt_listener/{index}", client_id, batcher), daemon=True,
+                     name="heartbeat").start()
+    mqtt_util.connect_v5(client, args.mqtt_host, args.mqtt_port)
+    print(f"worker {index} ({client_id}): {shared(args.topic_pattern, args.share_group)} @ "
+          f"{args.mqtt_host}:{args.mqtt_port}, batches of up to {args.batch_rows} readings / {args.batch_ms} ms", flush=True)
+    client.loop_forever()
+
+
+def retire_session(client, batcher: ReadingBatcher, args, idle_s: float = 3.0, timeout_s: float = 600.0) -> bool:
+    """End a session no worker uses any more - a worker index past the
+    current count, or the pre-#233 single listener's. The broker still
+    queues that client its share of every message (it round-robins a shared
+    group over offline members too, and the old listener's plain
+    subscription gets everything), until the queue overflows and it drops.
+    So: resume the session, unsubscribe, store what was queued (acked after
+    commit like any batch), then disconnect with session expiry 0. A
+    client id with no session costs one connect. Returns whether there was
+    a session."""
+    present = threading.Event()
+    connected = threading.Event()
+
+    def on_connect(c, userdata, flags, reason_code, properties):
+        batcher.generation += 1
+        if getattr(flags, "session_present", False):
+            present.set()
+        connected.set()
+
+    client.on_connect = on_connect
+    mqtt_util.connect_v5(client, args.mqtt_host, args.mqtt_port)
+    client.loop_start()
+    try:
+        if not connected.wait(30):
+            raise RuntimeError(f"retire {client._client_id!r}: no CONNACK")
+        if not present.is_set():
+            return False
+        print(f"retiring the session of {client._client_id.decode()}: draining what the broker queued for it", flush=True)
+        client.unsubscribe([shared(args.topic_pattern, args.share_group), args.topic_pattern])
+        batcher.start()
+        t0 = time.monotonic()
+        batcher.last_message_at = time.monotonic()
+        while (time.monotonic() - batcher.last_message_at < idle_s or batcher.pending) and time.monotonic() - t0 < timeout_s:
+            time.sleep(0.5)
+        if batcher.pending:
+            raise RuntimeError(f"retire {client._client_id!r}: {batcher.pending} messages still unstored after {timeout_s} s")
+        print(f"retired {client._client_id.decode()}: stored {batcher.rows} readings, {batcher.tags} tags "
+              f"in {time.monotonic() - t0:.1f} s", flush=True)
+        return True
+    finally:
+        if connected.is_set():
+            mqtt_util.disconnect_ending_session(client)
+        client.loop_stop()
+
+
+def run_retire(args, client_ids: list[str]) -> None:
+    """The supervisor's one-off sweep: retire_session for each id, in turn."""
+    args = _worker_args(args)
+    tracing.init_tracing("baler-mqtt-listener")
+    store, ts_conn = RemoteStore(), connect()
+    retired = []
+    for cid in client_ids:
+        client, batcher = _session(cid, args, store, ts_conn, prune=False)
+        if retire_session(client, batcher, args):
+            retired.append(cid)
+    print(f"retire sweep: {len(client_ids)} unused listener client id(s) checked, "
+          f"{len(retired)} session(s) retired {retired}", flush=True)
+
+
+def _heartbeats(service: str, client_id: str, batcher: ReadingBatcher) -> None:
+    """Per-worker heartbeat (service_heartbeats, 'mqtt_listener/<n>'): what
+    it stored and how hard it worked over the last interval - readings/s,
+    the process's CPU %, time blocked on a full queue. The scale ladder
+    reads these for per-worker throughput and CPU (#233)."""
+    conn = None
+    last_t, last_cpu, last = time.monotonic(), time.process_time(), batcher.stats()
+    while True:
+        time.sleep(HEARTBEAT_EVERY)
+        now, cpu, st = time.monotonic(), time.process_time(), batcher.stats()
+        dt = max(now - last_t, 1e-9)
+        detail = {**st, "client_id": client_id, "pid": os.getpid(), "queue_peak": batcher.take_queue_peak(),
+                  "readings_per_s": round((st["rows"] - last["rows"]) / dt, 1),
+                  "messages_per_s": round((st["received"] - last["received"]) / dt, 1),
+                  "cpu_pct": round(100 * (cpu - last_cpu) / dt, 1),
+                  "blocked_s_delta": round(st["blocked_s"] - last["blocked_s"], 2),
+                  # share of the interval the batcher spent writing: near
+                  # 100 with spare CPU means Postgres, not Python, is the wall
+                  "flush_busy_pct": round(100 * (st["flush_s"] - last["flush_s"]) / dt, 1),
+                  "interval_s": round(dt, 1)}
+        last_t, last_cpu, last = now, cpu, st
+        conn = _beat(conn, service, detail)
+
+
+def _beat(conn, service: str, detail: dict):
+    """heartbeat.beat on `conn`, (re)connecting first if it's gone - a
+    Postgres restart closes it, and heartbeat.beat never raises, so without
+    this the heartbeat would go stale for good. Returns the connection."""
+    try:
+        if conn is None or conn.closed or conn.broken:
+            conn = connect()
+        heartbeat.beat(conn, service, detail)
+    except Exception as exc:  # noqa: BLE001 - liveness reporting is best-effort
+        print(f"heartbeat {service}: {exc!r}", flush=True)
+        return None
+    return conn
+
+
+def _worker_totals(conn) -> dict:
+    """The workers' heartbeats folded into the supervisor's, in the shape
+    a single listener's had (Baler#269's limiter evidence reads
+    'mqtt_listener'): rows, batches and seconds spent writing summed over
+    the workers, with `writers` to turn the last into a busy share; the
+    busiest worker's queue, its peak since its last beat and its cap
+    (each worker has its own queue, so that's the one that fills first)."""
+    try:
+        if conn is None or conn.closed or conn.broken:
+            return {}
+        rows = [d for (d,) in conn.execute(
+            "SELECT detail FROM service_heartbeats WHERE service ~ '^mqtt_listener/[0-9]+$' "
+            "AND beat_at > now() - interval '30 seconds'") if d]
+    except Exception:  # noqa: BLE001 - liveness reporting is best-effort
+        return {}
+    if not rows:
+        return {}
+    return {"writers": len(rows), "rows": sum(d.get("rows", 0) for d in rows),
+            "batches": sum(d.get("batches", 0) for d in rows),
+            "flush_s": round(sum(d.get("flush_s", 0) for d in rows), 3),
+            "queue": max(d.get("queue", 0) for d in rows), "queue_peak": max(d.get("queue_peak", 0) for d in rows),
+            "queue_max": max(d.get("queue_max", 0) for d in rows),
+            "blocked_s": round(sum(d.get("blocked_s", 0) for d in rows), 2)}
+
+
+def run_tags(args) -> None:
+    args = _worker_args(args)
+    tracing.init_tracing("baler-tag-ingest")
+    tag_ingest.run(RemoteStore(), connect())
+
+
+def _child(kind: str, index: int, args, retire_ids: list[str] | None = None) -> None:
+    if kind == "worker":
+        run_worker(index, args)
+    elif kind == "tags":
+        run_tags(args)
+    elif kind == "retire":
+        run_retire(args, retire_ids or [])
+
+
+# ----------------------------------------------------------------- supervisor
+
+
+class BrokerDrops:
+    """The broker's own count of messages it dropped ($SYS/broker/publish/
+    messages/dropped: queue limits, mostly), read by the supervisor so an
+    overload shows in the listener's log, heartbeat and /ops/status - not
+    only as readings that quietly never arrived. Broker-wide: a QoS 0
+    subscriber falling behind counts too."""
+
+    TOPIC = "$SYS/broker/publish/messages/dropped"
+
+    def __init__(self, args):
+        self.first: int | None = None
+        self.total: int | None = None
+        self.last_logged: int | None = None
+        self.last_drop_at: str | None = None
+        self.client = mqtt_util.make_client(client_id=f"{CLIENT_PREFIX}-sys-{os.getpid()}")
+        self.client.on_connect = lambda c, *_: c.subscribe(self.TOPIC)
+        self.client.on_message = self._msg
+        try:
+            self.client.connect(args.mqtt_host, args.mqtt_port)
+            self.client.loop_start()
+        except OSError as exc:
+            print(f"broker drop counter unavailable: {exc!r}", flush=True)
+
+    def _msg(self, c, u, msg):
+        try:
+            n = int(msg.payload)
+        except ValueError:
+            return
+        if self.first is None:
+            self.first = self.last_logged = n
+        elif n > (self.total or 0):
+            self.last_drop_at = datetime.now(timezone.utc).isoformat()
+        self.total = n
+
+    def check(self) -> None:
+        if self.total is None or self.last_logged is None or self.total <= self.last_logged:
+            return
+        print(f"BROKER DROPPED {self.total - self.last_logged} message(s) (total {self.total - (self.first or 0)} since "
+              "this listener started): the broker's queue for a slow subscriber overflowed. If readings are missing, "
+              "the listener is behind - raise BALER_LISTENER_WORKERS (docs-site scale-test page).", flush=True)
+        self.last_logged = self.total
+
+    def detail(self) -> dict:
+        return {"broker_dropped_since_start": (self.total - self.first) if self.total is not None and self.first is not None else None,
+                "broker_dropped_total": self.total, "broker_last_drop_at": self.last_drop_at}
+
+
+class Supervisor:
+    """Starts and keeps the children: workers 0..N-1, the tag path, and a
+    one-off retire sweep. A child that exits is restarted after a backoff
+    (1 s doubling to 30 s) and counted - in the log and in the
+    'mqtt_listener' heartbeat, which the scale ladder treats like a
+    container restart. Each worker's persistent session means a restart
+    loses nothing it hadn't acknowledged."""
+
+    def __init__(self, args, argv: list[str] | None = None):
+        self.args = args
+        self.argv = list(argv or [])  # the supervisor's own options, passed on to each child
+        self.children: dict[str, dict] = {}
+        self.restarts: dict[str, int] = {}
+        self.stopping = False
+
+    def command(self, kind: str, index: int = 0, retire_ids: list[str] | None = None) -> list[str]:
+        """A child is `python -m baler.mqtt_listener ... --child worker
+        --index 2`: a fresh interpreter (nothing inherited from this
+        process), and a command line that names its role, so `ps` and the
+        scale ladder's per-process CPU (Baler#269 reads each process's
+        cmdline) tell worker 2 from the tag path."""
+        cmd = [sys.executable, "-m", "baler.mqtt_listener", *self.argv, "--child", kind, "--index", str(index)]
+        if retire_ids:
+            cmd += ["--retire-ids", ",".join(retire_ids)]
+        return cmd
+
+    def spawn(self, name: str, kind: str, index: int = 0, retire_ids: list[str] | None = None) -> None:
+        p = subprocess.Popen(self.command(kind, index, retire_ids))
+        self.children[name] = {"proc": p, "kind": kind, "index": index, "retire_ids": retire_ids,
+                               "backoff": self.children.get(name, {}).get("backoff", 1.0),
+                               "started": time.monotonic(), "due": None}
+
+    def tick(self) -> None:
+        now = time.monotonic()
+        for name, c in list(self.children.items()):
+            p = c["proc"]
+            if c["due"] is not None:
+                if now >= c["due"]:
+                    self.spawn(name, c["kind"], c["index"], c["retire_ids"])
+                continue
+            if p.poll() is None:
+                if now - c["started"] > 60:
+                    c["backoff"] = 1.0  # stayed up: the next failure restarts fast again
+                continue
+            code = p.returncode
+            if code == 0 and c["kind"] == "retire":  # the sweep is done
+                del self.children[name]
+                continue
+            self.restarts[name] = self.restarts.get(name, 0) + 1
+            print(f"supervisor: {name} exited (code {code}); restart #{self.restarts[name]} in {c['backoff']:.0f} s",
+                  flush=True)
+            c["due"] = now + c["backoff"]
+            c["backoff"] = min(30.0, c["backoff"] * 2)
+
+    def stop(self, *_):
+        self.stopping = True
+
+    def terminate(self) -> None:
+        for c in self.children.values():
+            if c["proc"].poll() is None:
+                c["proc"].terminate()
+        for c in self.children.values():
+            try:
+                c["proc"].wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                c["proc"].kill()
+
+    def pids(self) -> dict:
+        return {name: c["proc"].pid for name, c in self.children.items() if c["proc"].poll() is None}
+
+
+def retire_ids(workers: int, max_workers: int = MAX_WORKERS) -> list[str]:
+    """Client ids whose sessions no current worker resumes."""
+    return [LEGACY_CLIENT_ID] + [worker_client_id(i) for i in range(workers, max_workers)]
+
+
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mqtt-host", default=os.environ.get("MQTT_HOST", "localhost"))
-    parser.add_argument("--mqtt-port", type=int, default=1883)
+    parser.add_argument("--mqtt-port", type=int, default=int(os.environ.get("MQTT_PORT", "") or 1883))
     parser.add_argument("--topic-pattern", default="fbf/#", help="MQTT subscription filter, e.g. fbf/#")
+    parser.add_argument("--workers", type=int, default=int(os.environ.get("BALER_LISTENER_WORKERS", "") or 1),
+                        help="worker processes on the shared subscription (BALER_LISTENER_WORKERS, default 1)")
+    parser.add_argument("--share-group", default=SHARE_GROUP)
     # Rows per transaction, and the longest a reading waits for its batch.
     # A batch can't usefully exceed the broker's max_inflight_messages
     # (mosquitto/mosquitto.conf): unacknowledged messages are in flight.
@@ -386,35 +780,65 @@ def main() -> None:
     parser.add_argument("--batch-ms", type=float, default=250.0)
     parser.add_argument("--no-feed", dest="feed", action="store_false",
                         help="don't append committed batches to the reading feed (fault_detector and "
-                             "derivation_engine read it; without it they see nothing)")
+                             "derivation_engine read it; without it they see nothing, and tags are applied "
+                             "by the workers themselves)")
     parser.add_argument("--feed-retention", type=float, default=reading_feed.DEFAULT_RETENTION_S,
                         help="seconds a feed batch is kept for a consumer that hasn't read it "
                              "(BALER_FEED_RETENTION_S); past that it is pruned and counted as missed")
-    args = parser.parse_args()
+    parser.add_argument("--no-retire", dest="retire", action="store_false",
+                        help="don't retire the sessions of worker ids past --workers (and the pre-#233 listener's)")
+    parser.add_argument("--no-retained-snapshot", dest="retained_snapshot", action="store_false",
+                        help="don't take the broker's retained messages when worker 0's session is new")
+    # The supervisor starts its children as this module again with these.
+    parser.add_argument("--child", choices=("worker", "tags", "retire"), help=argparse.SUPPRESS)
+    parser.add_argument("--index", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--retire-ids", default="", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    if not 1 <= args.workers <= MAX_WORKERS:
+        parser.error(f"--workers must be 1..{MAX_WORKERS}")
+    return args
 
-    tracing.init_tracing("baler-mqtt-listener")
 
-    store = RemoteStore()
-    ts_conn = connect()
-
-    # clean_session=False + a stable client_id makes the session (and
-    # mosquitto's default queued-message retention, ~1000 messages) survive
-    # both a mid-process reconnect and a listener restart, instead of every
-    # run getting a fresh random id and a fresh (empty) broker-side session.
-    # Manual acks: a reading is acknowledged once its batch is committed
-    # (ReadingBatcher), so an unstored reading is never one the broker has
-    # forgotten.
-    client = mqtt_util.make_client(client_id="baler-mqtt-listener", clean_session=False, manual_ack=True)
-    batcher = ReadingBatcher(client, store, ts_conn, max_rows=args.batch_rows, max_wait=args.batch_ms / 1000,
-                             feed=args.feed, feed_retention_s=args.feed_retention)
-    client.on_connect = make_on_connect(args.topic_pattern, batcher)
-    client.on_disconnect = on_disconnect
-    client.on_message = make_on_message(store, ts_conn, batcher)
-    batcher.start()
-    client.connect(args.mqtt_host, args.mqtt_port)
-    print(f"listening on {args.topic_pattern} @ {args.mqtt_host}:{args.mqtt_port}, "
-          f"batches of up to {args.batch_rows} readings / {args.batch_ms} ms", flush=True)
-    client.loop_forever()
+def main(argv=None) -> None:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    args = parse_args(argv)
+    if args.child:
+        _child(args.child, args.index, args, [i for i in args.retire_ids.split(",") if i])
+        return
+    log = functools.partial(print, flush=True)
+    conn = connect()
+    if args.feed:
+        # Registered before any worker can commit a batch: a new consumer
+        # starts at the feed's head, so registering later would skip the
+        # tags committed in between.
+        reading_feed.FeedConsumer(conn, tag_ingest.CONSUMER, log=log, tags_only=True).start()
+    # Workers' heartbeats are rewritten within HEARTBEAT_EVERY; clearing
+    # them drops those of worker indices that no longer exist.
+    conn.execute("DELETE FROM service_heartbeats WHERE service LIKE 'mqtt\\_listener/%%'")
+    sup = Supervisor(args, argv)
+    signal.signal(signal.SIGTERM, sup.stop)
+    signal.signal(signal.SIGINT, sup.stop)
+    if args.retire:
+        sup.spawn("retire", "retire", retire_ids=retire_ids(args.workers))
+    for i in range(args.workers):
+        sup.spawn(f"worker-{i}", "worker", i)
+    if args.feed:
+        sup.spawn("tags", "tags")
+    drops = BrokerDrops(args)
+    log(f"mqtt_listener: {args.workers} worker(s) on {shared(args.topic_pattern, args.share_group)}"
+        + (", tag path on the reading feed" if args.feed else ""))
+    last_beat = 0.0
+    while not sup.stopping:
+        time.sleep(1)
+        sup.tick()
+        drops.check()
+        if time.monotonic() - last_beat >= HEARTBEAT_EVERY:
+            last_beat = time.monotonic()
+            conn = _beat(conn, "mqtt_listener", {"workers": args.workers, "pids": sup.pids(),
+                                                 "restarts": dict(sup.restarts), **drops.detail(),
+                                                 **_worker_totals(conn)})
+    log("mqtt_listener: stopping")
+    sup.terminate()
 
 
 if __name__ == "__main__":

@@ -53,33 +53,35 @@ def test_values_match_point_kind():
         assert isinstance(v, bool) if pattern == "bool" else isinstance(v, float)
 
 
-def _route(monkeypatch, topic, payload):
-    calls = []
-    for name in ("ingest_equip_tags", "ingest_tags", "ingest_reading", "link_point_to_equip"):
-        monkeypatch.setattr(mqtt_listener, name, lambda *a, _n=name, **kw: calls.append((_n, a)) or "urn:x")
-    monkeypatch.setattr(mqtt_listener, "link_equip_ref", lambda *a: None)
-    monkeypatch.setattr(mqtt_listener, "_classify", lambda *a: None)
-    on_message = mqtt_listener.make_on_message(store=object(), ts_conn=object())
-    on_message(None, None, SimpleNamespace(topic=topic, payload=payload))
-    return calls
-
-
 def test_generator_messages_take_the_listeners_real_paths(monkeypatch):
+    """The generator's equip, tags and reading messages land where Windrow's
+    do: the equip links its points, a point's tags are stored, a reading
+    goes to history (here without a batcher, so all inline)."""
+    from rdflib import URIRef
+
+    from baler.store import BRICK, HAYSTACK, Store
+
     shape = common.Shape(10)
     prefix = shape.equip_prefix(0)
     pts = shape.equip_points(0)
+    store = Store()
+    written = []
+    monkeypatch.setattr(mqtt_listener, "ingest_reading",
+                        lambda store, conn, topic, value, ts, quality=None: written.append((topic, value, ts)))
+    on_message = mqtt_listener.make_on_message(store=store, ts_conn=None)
     equip = common.envelope("equip/tags", json.dumps(common.equip_tags(shape, 0, [p[1] for p in pts])), 1.0)
-    calls = _route(monkeypatch, f"{prefix}/equip/tags", equip)
-    assert calls[0][0] == "ingest_equip_tags" and calls[0][1][1] == prefix
-    assert sum(1 for c in calls if c[0] == "link_point_to_equip") == 10
+    on_message(None, None, SimpleNamespace(topic=f"{prefix}/equip/tags", payload=equip))
+    equip_uri = URIRef(f"urn:equip:{prefix}")
+    assert len(set(store.graph.objects(equip_uri, BRICK.hasPoint))) == 10
 
     idx, label, t = pts[0]
     tags = common.envelope(f"{label}/tags", json.dumps(common.point_tags(shape, 0, idx, label, t)), 1.0)
-    calls = _route(monkeypatch, f"{prefix}/{label}/tags", tags)
-    assert calls[0][0] == "ingest_tags" and calls[0][1][2]["scale"] is True
+    on_message(None, None, SimpleNamespace(topic=f"{prefix}/{label}/tags", payload=tags))
+    point = URIRef(f"urn:point:{prefix}/{label}")
+    assert "scale" in {str(o) for o in store.graph.objects(point, HAYSTACK.hasTag)}
 
-    calls = _route(monkeypatch, f"{prefix}/{label}", common.envelope(label, 70.0, 2.0))
-    assert calls == [("ingest_reading", calls[0][1])] and calls[0][1][2:] == (f"{prefix}/{label}", 70.0, 2.0)
+    on_message(None, None, SimpleNamespace(topic=f"{prefix}/{label}", payload=common.envelope(label, 70.0, 2.0)))
+    assert written == [(f"{prefix}/{label}", 70.0, 2.0)]
 
 
 def _config(project="scale", prefix="scale", ports=((1883, 41883),)):
@@ -193,3 +195,39 @@ def test_evaluate_inconclusive_is_never_a_baler_ceiling(over, needle):
 def test_acked_window():
     stats = {"acked_by_second": {"100": 5, "101": 7, "102": 9}}
     assert ladder.acked_in(stats, 101, 103) == 16
+
+
+# --- #233: per-worker listener figures, child restarts, tags storm ----------
+
+
+def test_summarize_listener_per_worker_restarts_and_drops():
+    def beat(rps, cpu, blocked=0.0):
+        return {"readings_per_s": rps, "cpu_pct": cpu, "blocked_s_delta": blocked}
+
+    samples = [{"listener": {"mqtt_listener/0": beat(9000, 80), "mqtt_listener/1": beat(11000, 90, 1.5),
+                             "mqtt_listener/tags": {"feed": {"lag_s": 0.2}}}},
+               {"listener": {"mqtt_listener/0": beat(11000, 100), "mqtt_listener/1": beat(9000, 70)}}]
+    before = {"mqtt_listener": {"workers": 2, "restarts": {"worker-1": 1}, "broker_dropped_total": 10}}
+    after = {"mqtt_listener": {"workers": 2, "restarts": {"worker-1": 3, "tags": 0}, "broker_dropped_total": 25},
+             "mqtt_listener/tags": {"messages": 7, "feed": {"lag_s": 0.4, "lag_batches": 1}}}
+    out = ladder.summarize_listener(samples, before, after)
+    assert out["workers"]["mqtt_listener/0"] == {"readings_per_s_mean": 10000, "cpu_pct_mean": 90, "cpu_pct_max": 100,
+                                                 "blocked_s": 0}
+    assert out["workers"]["mqtt_listener/1"]["blocked_s"] == 1.5
+    assert "mqtt_listener/tags" not in out["workers"]
+    assert out["readings_per_s_total"] == 20000 and out["worker_count"] == 2
+    assert out["restarts_delta"] == {"worker-1": 2} and out["broker_dropped_delta"] == 15
+    assert out["tag_path"] == {"lag_s": 0.4, "lag_batches": 1, "messages": 7}
+
+
+def test_a_pre_233_listener_summarizes_to_nothing():
+    assert ladder.summarize_listener([{}], {}, {})["workers"] == {}
+
+
+@pytest.mark.parametrize("over, needle", [
+    ({"listener": {"restarts_delta": {"worker-2": 1}}}, "mqtt_listener worker-2 restarted 1x"),
+    ({"tags_storm": {"points": 100000, "lag_p95_s": 45.0}}, "tags storm of 100000 points"),
+])
+def test_evaluate_fails_on_listener_restarts_and_tags_storm_lag(over, needle):
+    status, reasons = ladder.evaluate(_good_step(**over))
+    assert status == "fail" and any(needle in r for r in reasons), reasons

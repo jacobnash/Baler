@@ -20,6 +20,8 @@ pattern readwrite cmd/%u/#
 user baler
 topic readwrite #
 topic readwrite $CONTROL/dynamic-security/#
+# mqtt_listener's supervisor counts the broker's dropped messages (#233).
+topic read $SYS/broker/publish/messages/dropped
 
 # The compose healthcheck (entrypoint.sh creates it with a random password
 # per start, Baler#109): reads the broker's uptime, nothing else.

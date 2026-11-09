@@ -601,3 +601,51 @@ def test_compact_series_is_the_same_history_as_parallel_arrays():
     assert result["series"][0]["history"] == {"ts": [1794009600, 1794009600.25], "value": [1.5, None]}
     assert isinstance(result["series"][0]["history"]["ts"][0], int)
     assert result["series"][1]["history"] == {"ts": [], "value": []}
+
+
+def test_run_query_pages_series_by_point_id(graph, monkeypatch):
+    """seriesLimit (Baler#244): a page of points in id order, describing and
+    reading history for that page only; `after` walks on, and the pages
+    together are exactly the unpaged result."""
+    from baler import timeseries
+
+    read = []
+    monkeypatch.setattr(timeseries, "read_point_labels", lambda conn, uris: {})
+
+    def range_many(conn, uris, start, end, limit, with_quality=False):
+        read.append(list(uris))
+        return {}
+
+    monkeypatch.setattr(timeseries, "read_range_many", range_many)
+    q = h.parse_query("readAll(ahu or vav).hisRead(today)")
+    everything = h.run_query(graph, object(), q, now=NOW)
+    n = everything["pointCount"]
+    assert n == len(everything["series"]) > 2 and everything["after"] is None and everything["seriesLimit"] is None
+    want = sorted(s["id"] for s in everything["series"])
+
+    got, after, pages = [], None, 0
+    while True:
+        read.clear()
+        page = h.run_query(graph, object(), q, now=NOW, series_limit=2, after=after)
+        pages += 1
+        assert len(page["series"]) <= 2 and page["pointCount"] == n and page["seriesLimit"] == 2
+        assert read == [sorted(s["id"] for s in page["series"])]  # history for the page only
+        got += [s["id"] for s in page["series"]]
+        after = page["after"]
+        if after is None:
+            break
+    assert pages == (n + 1) // 2 and sorted(got) == want and len(got) == n  # each point once
+
+
+def test_match_entities_drops_dict_nodes_and_blank_subjects_after_the_query():
+    """compile_filter no longer filters isIRI/STR per candidate in SPARQL
+    (Baler#244); match_entities does it, so the answer is unchanged."""
+    from rdflib import BNode
+
+    s = Store()
+    node = URIRef("urn:baler:dict:abc")
+    s.add_many([(URIRef("urn:point:a"), HAYSTACK.hasTag, Literal("point")),
+                (node, HAYSTACK.hasTag, Literal("point")),
+                (BNode(), HAYSTACK.hasTag, Literal("point"))])
+    assert h.match_entities(s, h.parse_query("point").filter) == ["urn:point:a"]
+    assert "STR(?s)" not in h.compile_filter(h.parse_query("point").filter)

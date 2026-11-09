@@ -36,6 +36,14 @@ x-daemon-env: &daemon-env
   # Blank-safe (blank = 600): how long the reading feed keeps a batch a
   # rule daemon hasn't read yet (mqtt_listener prunes; #243).
   BALER_FEED_RETENTION_S: ${BALER_FEED_RETENTION_S:-}
+  # Blank-safe (blank = 1): mqtt_listener's worker processes on the shared
+  # subscription (#233). Only mqtt_listener reads it. One worker stores
+  # ~15k readings/s on nash-srv; give the container a CPU per worker.
+  BALER_LISTENER_WORKERS: ${BALER_LISTENER_WORKERS:-}
+  # Blank-safe (blank = 1000): page sizes for reads with no limit of their
+  # own - haystack_api's read-by-filter, ingest_api's /his series (#244).
+  BALER_READ_LIMIT: ${BALER_READ_LIMIT:-}
+  BALER_HIS_SERIES_LIMIT: ${BALER_HIS_SERIES_LIMIT:-}
   # Blank-safe: only ops_api reads it (the Connectors page's local Windrow).
   WINDROW_API_URL: ${WINDROW_API_URL:-}
   # Only auth_api.py (issues tokens) actually needs this - blanket-added
@@ -203,6 +211,10 @@ services:
 
   mqtt_listener:
     build: .
+    # A supervisor: BALER_LISTENER_WORKERS worker processes, each its own
+    # MQTT client id and session, plus the tag path (#233). Scale with that
+    # variable, not `--scale`/replicas: worker ids must be stable per
+    # index, and a second container would retire the first one's sessions.
     command: python -m baler.mqtt_listener
     # Pure daemons connect to Postgres/MQTT eagerly at startup and exit on
     # failure. On a fresh DB volume, postgres' first-boot init briefly passes

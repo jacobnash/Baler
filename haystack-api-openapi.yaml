@@ -57,7 +57,21 @@ paths:
         - name: limit
           in: query
           required: false
-          schema: {type: integer}
+          description: >-
+            `read`: at most this many records. Without it a filter read
+            answers at most `BALER_READ_LIMIT` (default 1000) records a
+            page; a page that stops short says so in its grid meta
+            (`incomplete`, `limit`, `after`).
+          schema: {type: integer, minimum: 1}
+        - name: after
+          in: query
+          required: false
+          description: >-
+            `read` (Baler extension): the Ref a previous page's meta `after`
+            named, e.g. `@urn:point:x`; the next page starts after it.
+            Pages are in id order and keyset, so a walk is stable under
+            concurrent writes.
+          schema: {type: string}
         - name: id
           in: query
           required: false

@@ -32,21 +32,37 @@ def site_scope(prefixes) -> Scope:
     return Scope(clean) if clean else Scope.everything()
 
 
-def _equip_point_pairs(store) -> list[tuple[str, str | None]]:
+def _subjects(store, query: str) -> list[str]:
+    """The ?equip IRIs of a one-column SELECT (TSV where the store
+    offers it: half the bytes of JSON rows, Baler#244)."""
+    if hasattr(store, "iter_tsv"):
+        return [t[1:-1] for t in (row[0] for row in store.iter_tsv(query)) if t[:1] == "<"]
+    return [str(row.equip) for row in store.query(query)]
+
+
+def _equip_point_pairs(store, equip_ok=lambda uri: True) -> list[tuple[str, str | None]]:
     """(equip, point) for every urn:equip: subject that is typed or has
-    points, (equip, None) for one with none. Two plain pattern scans,
-    joined here: as one query (a UNION of every typed subject and every
-    hasPoint subject, a STRSTARTS filter over all of them, then an
-    OPTIONAL hasPoint) it was 0.35-0.47 s at 10k points against 0.14 s
-    for these two, most of a Cx report's time (Baler#244)."""
-    linked = [(str(r.equip), str(r.point)) for r in store.query(
-        hisquery.PREFIXES + "SELECT ?equip ?point WHERE { ?equip brick:hasPoint ?point }")]
-    typed = {str(r.equip) for r in store.query(
-        'SELECT DISTINCT ?equip WHERE { ?equip a ?_t FILTER(STRSTARTS(STR(?equip), "urn:equip:")) }')}
-    pairs: set[tuple[str, str | None]] = {(e, p) for e, p in linked if e.startswith("urn:equip:")}
-    with_points = {e for e, _ in pairs}
-    pairs |= {(e, None) for e in typed - with_points}
-    return sorted(pairs, key=lambda ep: (ep[0], ep[1] or ""))
+    points and that `equip_ok` accepts, (equip, None) for one with none.
+    The equips first - DISTINCT inside Oxigraph, so 10k rows rather than
+    every hasPoint triple - then the points of only the accepted ones: a
+    project's report reads its own site's points, not the whole graph's
+    (all of them, 1.3 s of a 1.5 s inventory at 100k points, Baler#244).
+    No STR() filters: a per-candidate dictionary lookup in Oxigraph."""
+    with_points = _subjects(store, hisquery.PREFIXES + "SELECT DISTINCT ?equip WHERE { ?equip brick:hasPoint ?point }")
+    typed = _subjects(store, "SELECT DISTINCT ?equip WHERE { ?equip a ?_t }")
+    equips = sorted({e for e in (*with_points, *typed) if e.startswith("urn:equip:") and equip_ok(e)})
+    if not equips:
+        return []
+    linked: set[tuple[str, str | None]] = set()
+    values = " ".join(f"<{hisquery._uri(e)}>" for e in equips)
+    query = hisquery.PREFIXES + f"SELECT ?equip ?point WHERE {{ VALUES ?equip {{ {values} }} ?equip brick:hasPoint ?point }}"
+    if hasattr(store, "iter_tsv"):
+        linked = {(row[0][1:-1], row[1][1:-1]) for row in store.iter_tsv(query) if row[1][:1] == "<"}
+    else:
+        linked = {(str(r.equip), str(r.point)) for r in store.query(query)}
+    has = {e for e, _ in linked}
+    linked |= {(e, None) for e in equips if e not in has}
+    return sorted(linked, key=lambda ep: (ep[0], ep[1] or ""))
 
 
 def build(store, scopes: list[Scope]) -> list[dict]:
@@ -58,10 +74,10 @@ def build(store, scopes: list[Scope]) -> list[dict]:
     # Scope.sparql. As SPARQL FILTERs on every row the scope tests were
     # ~0.33 s of a 0.35 s query (#150). A point URI without a key (none are
     # minted today) still gets the graph-aware SPARQL test.
-    pairs = _equip_point_pairs(store)
-
     def allowed(uri: str) -> bool:
         return all(s.allows(uri) for s in scopes)
+
+    pairs = _equip_point_pairs(store, allowed)
 
     unkeyed = sorted({point for _, point in pairs if point is not None and entity_key(point) is None})
     visible_unkeyed = set(unkeyed)

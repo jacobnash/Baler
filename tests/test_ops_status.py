@@ -1,7 +1,9 @@
-"""Ops status assembly unit tests (no live stack required)."""
+"""Ops status assembly unit tests (no live stack required; the one integration-marked test needs postgres)."""
 
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
+
+import pytest
 
 from baler import ops_status
 
@@ -23,6 +25,18 @@ def test_infer_ingest_ok_when_recent():
     state, detail = ops_status._infer_ingest({"last_ingest_at": recent}, platform_ok=True)
     assert state == "ok"
     assert "last ingest" in detail
+
+
+def test_infer_ingest_degraded_after_broker_drops():
+    """#233: overload is never silent - drops the broker counted turn the
+    ingest card degraded for an hour."""
+    now = datetime.now(timezone.utc)
+    recent = (now - timedelta(seconds=30)).isoformat()
+    lst = {"workers": 2, "broker_dropped_since_start": 4741, "broker_last_drop_at": (now - timedelta(minutes=5)).isoformat()}
+    state, detail = ops_status._infer_ingest({"last_ingest_at": recent, "listener": lst}, platform_ok=True)
+    assert state == "degraded" and "4741" in detail and "BALER_LISTENER_WORKERS" in detail
+    lst["broker_last_drop_at"] = (now - timedelta(hours=2)).isoformat()
+    assert ops_status._infer_ingest({"last_ingest_at": recent, "listener": lst}, platform_ok=True)[0] == "ok"
 
 
 def test_infer_derivations_degraded_when_targets_disabled():
@@ -230,3 +244,39 @@ def test_a_primed_prober_has_a_round_before_start_returns():
     with patch("baler.ops_status._probe_one", side_effect=_fake_probe):
         cache.start(interval=3600, prime=True)
         assert cache.latest() is not None
+
+
+@pytest.mark.integration
+def test_points_seen_last_hour_from_the_registry_matches_the_history_scan():
+    """Baler#244: the count comes from point_registry, whose last_ts trails
+    a point's newest sample by up to REGISTRY_GRANULARITY_S; the points in
+    that band at the hour's edge are confirmed against point_history, so
+    the answer is the old scan's exactly. Needs docker compose's postgres."""
+    from baler import timeseries
+
+    now = datetime.now(timezone.utc)
+    hour = now - timedelta(hours=1)
+    cases = {  # point: (registry last_ts, newest sample)
+        "seen": (now - timedelta(minutes=10), now - timedelta(minutes=10)),
+        "edge-seen": (hour - timedelta(seconds=10), hour + timedelta(seconds=15)),
+        "edge-quiet": (hour - timedelta(seconds=20), hour - timedelta(seconds=15)),
+        "quiet": (now - timedelta(hours=2), now - timedelta(hours=2)),
+    }
+    with timeseries.connect() as conn:
+        conn.execute("DELETE FROM point_history WHERE point_uri LIKE 'urn:test-ops:%'")
+        conn.execute("DELETE FROM point_registry WHERE point_uri LIKE 'urn:test-ops:%'")
+        for name, (last_ts, newest) in cases.items():
+            conn.execute("INSERT INTO point_history (point_uri, ts, value) VALUES (%s, %s, 1)", (f"urn:test-ops:{name}", newest))
+            conn.execute("INSERT INTO point_registry (point_uri, last_ts) VALUES (%s, %s)", (f"urn:test-ops:{name}", last_ts))
+        conn.commit()
+        try:
+            mine = " WHERE point_uri LIKE 'urn:test-ops:%'"
+            new = {r[0] for r in conn.execute(f"SELECT point_uri FROM ({ops_status.SEEN_LAST_HOUR_SQL}) q{mine}")}
+            old = {r[0] for r in conn.execute(
+                "SELECT point_uri FROM point_history WHERE ts > now() - interval '1 hour'"
+                " AND point_uri LIKE 'urn:test-ops:%' GROUP BY point_uri")}
+            assert new == old == {"urn:test-ops:seen", "urn:test-ops:edge-seen"}
+        finally:
+            conn.execute("DELETE FROM point_history WHERE point_uri LIKE 'urn:test-ops:%'")
+            conn.execute("DELETE FROM point_registry WHERE point_uri LIKE 'urn:test-ops:%'")
+            conn.commit()
