@@ -143,6 +143,8 @@ def process_label(service: str, cmdline: str) -> str:
         if m and "(" in cmdline:  # host(port): a client connection
             return f"postgres client {m.group(1)}"
         return cmdline.split("  ")[0].strip()
+    if service == "postgres" and cmdline.startswith("postgres"):
+        return "postgres (postmaster)"
     return cmdline[:80] or service
 
 
@@ -333,6 +335,7 @@ SELECT (SELECT coalesce(json_agg(w), '[]') FROM (
           WHERE pid <> pg_backend_pid() AND coalesce(state, '') NOT IN ('idle')
             AND coalesce(wait_event_type, '') NOT IN ('Activity')
             AND NOT (backend_type = 'client backend' AND state IS NULL)
+            AND backend_type NOT LIKE '%Launcher%' 
           GROUP BY 1, 2, 3) w),
        (SELECT count(*) FROM pg_locks WHERE NOT granted),
        (SELECT detail FROM service_heartbeats WHERE service = 'mqtt_listener')
@@ -532,7 +535,7 @@ class Sampler:
                 p = prev.get("disk")
                 if p and dt > 0:
                     dw = ds["writes"] - p["writes"]
-                    tick["disk"] = {"util": round((ds["io_ms"] - p["io_ms"]) / (dt * 1000), 3),
+                    tick["disk"] = {"util": round(min(1.0, (ds["io_ms"] - p["io_ms"]) / (dt * 1000)), 3),
                                     "write_bps": round((ds["sectors_w"] - p["sectors_w"]) * 512 / dt),
                                     "w_await_ms": round((ds["write_ms"] - p["write_ms"]) / dw, 2) if dw else 0.0}
         free = None
@@ -572,9 +575,13 @@ class Sampler:
     # ---------------------------------------------------------- summary
 
     def summary(self) -> dict:
-        return summarize(self.ticks, pg_delta=counter_delta(self.pg_begin, self.pg_end) if self.pg_end else {},
-                         statements=self.statements, overhead=self.overhead(), device=self.device,
-                         errors=self.errors[:10])
+        out = summarize(self.ticks, pg_delta=counter_delta(self.pg_begin, self.pg_end) if self.pg_end else {},
+                        statements=self.statements, overhead=self.overhead(), device=self.device,
+                        errors=self.errors[:10])
+        # the raw samples, so a verdict can be re-derived (and the rules
+        # re-tested) after the stack is gone
+        out["ticks"] = self.ticks
+        return out
 
     def overhead(self) -> dict:
         dur = max((self.stopped or time.time()) - (self.started or time.time()), 1e-9)

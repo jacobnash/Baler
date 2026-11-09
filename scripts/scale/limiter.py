@@ -90,7 +90,7 @@ def cpu_saturation(svc: str, c: dict) -> tuple[float, str] | None:
         cands.append((c["throttled"] / THROTTLED, f"{svc} CPU-capped (throttled {_pct(c['throttled'])})"))
     if c.get("cap") and c.get("cpu_p90") is not None:
         cands.append((c["cpu_p90"] / c["cap"] / NEAR_CAP,
-                      f"{svc} CPU-capped (p90 {c['cpu_p90']:.2f} of {c['cap']:g} cores)"))
+                      f"{svc} CPU-capped (p90 {c['cpu_p90']:.2f} cores of its {c['cap']:g}-core cap)"))
     procs = c.get("procs") or []
     if procs and svc != "postgres":
         p = procs[0]
@@ -151,7 +151,7 @@ def attribute_ingest(soak: dict) -> tuple[str, list[str], list[str], str]:
     disk = soak.get("disk") or {}
     if disk.get("util_p90") is not None:
         cands.append((disk["util_p90"] / DISK_UTIL,
-                      f"disk (util p90 {_pct(disk['util_p90'])}, {disk.get('write_mb_s_mean')} MB/s written)", "disk"))
+                      f"disk (util p90 {_pct(disk['util_p90'])}, {disk.get('write_mb_s_mean', 0):.0f} MB/s written)", "disk"))
     pg = soak.get("pg") or {}
     w = pg_wait_saturation(pg)
     if w:
@@ -167,16 +167,17 @@ def attribute_ingest(soak: dict) -> tuple[str, list[str], list[str], str]:
     evidence = [f"{t} [{s:.2f}x threshold]" for s, t, _ in sorted(cands, key=lambda c: -c[0])[:5]]
     if not hot:
         return "ingest listener (unattributed: nothing at its limit)", evidence, [], "low"
-    best = hot[0]
-    # the listener writing all the time is a consequence when the listener
-    # itself is CPU-bound: don't let it outrank the CPU it's waiting on
-    if best[2] == "postgres" and "listener writing" in best[1]:
-        other = next((c for c in hot[1:] if "listener writing" not in c[1]), None)
-        if other:
-            best = other
-    also = [t for s, t, comp in hot if t != best[1] and comp != best[2]]
+    # Consequences don't outrank their cause: the listener writing all the
+    # time is explained by anything else at its limit (Postgres CPU or
+    # waits, the disk, the listener's own CPU), and Postgres write waits by
+    # a saturated disk.
+    causes = [c for c in hot if "listener writing" not in c[1]] or hot
+    if any(c[2] == "disk" for c in causes):
+        causes = [c for c in causes if "write waits" not in c[1]]
+    best = causes[0]
+    also = [t for s, t, comp in causes[1:] if comp != best[2]]
     conf = "high" if not also else "medium"
-    if best[2] == "postgres" and "listener writing" in best[1] and not w:
+    if "listener writing" in best[1]:
         conf = "medium"  # inferred from the listener's side only
     prefix = {"ingest listener": "ingest listener: ", "broker": "broker: ", "postgres": "", "disk": ""}[best[2]]
     return prefix + best[1], evidence, also, conf
