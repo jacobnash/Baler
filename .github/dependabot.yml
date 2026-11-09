@@ -1,0 +1,43 @@
+# Dependency update PRs (#279). Weekly, grouped so a week's bumps for one
+# ecosystem arrive as one PR, not twenty. Security updates (Dependabot
+# alerts) are separate and arrive as soon as an advisory is published,
+# whatever this schedule says, once "Dependabot security updates" is on in
+# the repository's settings.
+#
+# Python: pyproject.toml has ranges, not a lock, so Dependabot widens or
+# bumps the floors there. openhay is a git dependency pinned in two places
+# (pyproject.toml and the Dockerfile's OPENHAY_REF, see CLAUDE.md) and is
+# not something Dependabot can bump; bump it by hand.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+    groups:
+      python:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directories: ["/docs-site", "/tools/live-check", "/e2e-haxall"]
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+    groups:
+      npm:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Base images: the app image (rust + python stages), the notebook image,
+  # the nash-srv Windrow image and the function-project template.
+  - package-ecosystem: docker
+    directories: ["/", "/docker", "/deploy/nash-srv", "/templates/function-project"]
+    schedule: { interval: weekly, day: monday }
+    groups:
+      docker:
+        patterns: ["*"]
