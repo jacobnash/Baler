@@ -259,6 +259,10 @@ check("commissioning (/cx/): reads viewer, changes operator, archive admin, site
     assert.equal(policy.resolveRoute("POST", "/cx/issues/i1/risk").minRole, "admin");
     assert.equal(policy.resolveRoute("DELETE", "/cx/risks/k1").minRole, "admin");
     assert.equal(policy.resolveRoute("DELETE", "/cx/issues/i1"), null);
+    // Baler#217 construction schedules: their own paths, not #212's /schedules
+    assert.equal(policy.resolveRoute("POST", "/cx/projects/p1/construction-schedules").minRole, "operator");
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/construction-schedules").minRole, "viewer");
+    assert.equal(policy.resolveRoute("GET", "/cx/construction-schedules/s1/activities").minRole, "viewer");
     // Cx 6 procedures
     assert.equal(policy.resolveRoute("GET", "/cx/procedure-templates").minRole, "viewer");
     assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/procedures").minRole, "viewer");

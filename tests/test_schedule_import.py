@@ -56,17 +56,17 @@ def test_schedule_api(monkeypatch):
     base, server = hx.serve(monkeypatch, hx.repo())
     try:
         pid = hx.project(base)["id"]
-        s = hx.check(requests.post(f"{base}/projects/{pid}/schedules", headers=hx.A,
+        s = hx.check(requests.post(f"{base}/projects/{pid}/construction-schedules", headers=hx.A,
                                    json={"filename": "sample.xer", "data": base64.b64encode(_read("sample.xer")).decode()}),
-                     "/projects/{id}/schedules", "post", 201)
+                     "/projects/{id}/construction-schedules", "post", 201)
         assert s["format"] == "xer" and s["activities"] == 3
-        acts = hx.check(requests.get(f"{base}/schedules/{s['id']}/activities?status=in_progress", headers=hx.A),
-                        "/schedules/{id}/activities", "get", 200)
+        acts = hx.check(requests.get(f"{base}/construction-schedules/{s['id']}/activities?status=in_progress", headers=hx.A),
+                        "/construction-schedules/{id}/activities", "get", 200)
         assert [a["code"] for a in acts] == ["M-1010"]
-        assert len(requests.get(f"{base}/schedules/{s['id']}/activities?q=vav", headers=hx.A).json()) == 1
-        hx.check(requests.get(f"{base}/projects/{pid}/schedules", headers=hx.A), "/projects/{id}/schedules", "get", 200)
-        assert requests.get(f"{base}/schedules/{s['id']}/activities", headers=hx.B).status_code == 404
-        assert requests.post(f"{base}/projects/{pid}/schedules", json={"data": base64.b64encode(b"x").decode()},
+        assert len(requests.get(f"{base}/construction-schedules/{s['id']}/activities?q=vav", headers=hx.A).json()) == 1
+        hx.check(requests.get(f"{base}/projects/{pid}/construction-schedules", headers=hx.A), "/projects/{id}/construction-schedules", "get", 200)
+        assert requests.get(f"{base}/construction-schedules/{s['id']}/activities", headers=hx.B).status_code == 404
+        assert requests.post(f"{base}/projects/{pid}/construction-schedules", json={"data": base64.b64encode(b"x").decode()},
                              headers=hx.A).status_code == 400
     finally:
         server.shutdown()

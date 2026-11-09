@@ -12,15 +12,15 @@ shows.
 ## Importing
 
 ```bash
-curl -X POST $BALER/cx/projects/$P/schedules -H "Authorization: Bearer $T" \
+curl -X POST $BALER/cx/projects/$P/construction-schedules -H "Authorization: Bearer $T" \
   -d '{"filename": "update-07.xer", "data": "'$(base64 -w0 update-07.xer)'"}'
-curl "$BALER/cx/schedules/$S/activities?status=in_progress"
-curl "$BALER/cx/schedules/$S/activities?q=AHU-1"
-curl "$BALER/cx/schedules/$S/activities?milestones=true"
+curl "$BALER/cx/construction-schedules/$S/activities?status=in_progress"
+curl "$BALER/cx/construction-schedules/$S/activities?q=AHU-1"
+curl "$BALER/cx/construction-schedules/$S/activities?milestones=true"
 ```
 
 The format is detected from the file. Each import is a new **version**
-(`GET /cx/projects/{id}/schedules`, newest first). Old versions are kept, so
+(`GET /cx/projects/{id}/construction-schedules`, newest first). Old versions are kept, so
 you can see what the schedule said at any update.
 
 ## What is read
