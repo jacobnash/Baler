@@ -40,7 +40,11 @@ service.
   starting at once apply each migration once. Its row in
   `baler_schema_migrations` commits with it: a failed migration leaves nothing
   applied and nothing recorded, and the next run tries it again from the start.
-  The migration transaction has no statement timeout.
+  The migration transaction has no statement timeout. A whole upgrade run
+  also holds a session-level advisory lock of its own (`schema.RUN_LOCK_KEY`),
+  so when several processes start at once one applies every pending
+  migration and the rest wait, then find nothing left to do, instead of
+  splitting the run between them.
 
 The `migrate` service connects with the same `BALER_PG_DSN` as every daemon,
 built from `BALER_PG_USER`/`BALER_PG_DB`, so an install still on the old

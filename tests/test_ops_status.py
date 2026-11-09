@@ -106,6 +106,13 @@ def test_building_cards_judge_faults_and_disabled_targets():
     assert cards["last_ingest"]["state"] == "ok"
     assert cards["points_last_hour"]["state"] == "ok"
     assert all(c["layer"] == "building" for c in cards.values())
+    assert "mfa_unsealed" not in cards
+
+
+def test_building_cards_flag_unsealed_mfa_secrets():
+    cards = {c["id"]: c for c in ops_status.building_cards({"mfa_unsealed": 2})}
+    assert cards["mfa_unsealed"]["state"] == "degraded"
+    assert "2 authenticator secret(s)" in cards["mfa_unsealed"]["detail"]
 
 
 @patch("baler.ops_status._building_signals")
@@ -223,7 +230,8 @@ def test_collect_status_answers_from_the_background_round(mock_building):
     with patch("baler.ops_status._probes", cache), patch("baler.ops_status._probe_one", side_effect=_fake_probe) as probe:
         doc = ops_status.collect_status()
     # only the inferred (no I/O) components were judged per request
-    assert {c[0][0]["id"] for c in probe.call_args_list} == {"ingest_listener", "fault_detector", "derivation_engine"}
+    assert {c[0][0]["id"] for c in probe.call_args_list} == {"ingest_listener", "fault_detector", "derivation_engine",
+                                                             "backups", "restore_drill"}
     assert {c["id"] for c in doc["platform"]} >= {"historian", "data_api"}
 
 
@@ -280,3 +288,38 @@ def test_points_seen_last_hour_from_the_registry_matches_the_history_scan():
             conn.execute("DELETE FROM point_history WHERE point_uri LIKE 'urn:test-ops:%'")
             conn.execute("DELETE FROM point_registry WHERE point_uri LIKE 'urn:test-ops:%'")
             conn.commit()
+
+
+# --- the listener's backlog (#235)
+
+
+def _recent():
+    return (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+
+
+def test_infer_ingest_judges_the_listeners_backlog():
+    def state(**lst):
+        return ops_status._infer_ingest({"last_ingest_at": _recent(), "listener": lst}, platform_ok=True)
+
+    assert state(queue=10, queue_max=50_000, oldest_age_s=0.4)[0] == "ok"
+    assert "queue 10" in state(queue=10, queue_max=50_000, oldest_age_s=0.4)[1]
+    assert state(queue=10, queue_max=50_000, oldest_age_s=45)[0] == "degraded"
+    assert state(queue=10, queue_max=50_000, oldest_age_s=400)[0] == "down"
+    full = state(queue=45_000, queue_max=50_000, oldest_age_s=1, workers=2)
+    assert full[0] == "degraded" and "BALER_LISTENER_WORKERS" in full[1]
+
+
+def test_a_stale_listener_heartbeat_is_down_but_a_missing_one_is_not_judged():
+    old = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
+    b = {"last_ingest_at": _recent(), "heartbeats": {"mqtt_listener": old}}
+    assert ops_status._infer_ingest(b, platform_ok=True)[0] == "down"
+    assert ops_status._infer_ingest({"last_ingest_at": _recent(), "heartbeats": {}}, platform_ok=True)[0] == "ok"
+
+
+def test_ingest_summary_is_what_metrics_export():
+    now = datetime(2026, 11, 9, 12, 0, 30, tzinfo=timezone.utc)
+    b = {"last_ingest_at": "2026-11-09T12:00:00+00:00",
+         "listener": {"queue": 3, "queue_max": 100, "oldest_age_s": 0.5, "workers": 2, "broker_dropped_since_start": 0}}
+    s = ops_status.ingest_summary(b, now)
+    assert s["lag_s"] == 30.0 and s["queue"] == 3 and s["queue_oldest_age_s"] == 0.5 and s["workers"] == 2
+    assert ops_status.ingest_summary({}, now)["lag_s"] is None

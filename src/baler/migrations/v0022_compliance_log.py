@@ -1,5 +1,5 @@
 """
-0005 compliance log (#207, epic #221 §3.3): adopted packs run on a schedule
+0022 compliance log (#207, epic #221 §3.3): adopted packs run on a schedule
 after acceptance, read and written by baler.commissioning.compliance.
 
 - cx_compliance_runs: one per run (schedule or a person), its summary and
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 5
+VERSION = 22
 NAME = "compliance log"
 
 RUNS = """

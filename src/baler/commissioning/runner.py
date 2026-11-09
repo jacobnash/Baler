@@ -30,6 +30,7 @@ from baler.commissioning import (
     gates,
     inventory,
     issues,
+    manual,
     mirror,
     phases,
     procedures,
@@ -78,7 +79,7 @@ def execute(repo, job: RunJob, clock: Callable[[], datetime], run_fn=engine.run,
         repo.set_run_status(job.run_id, "running", {"stage": "starting"})
         with repo.history() as history:
             summary, results = run_fn(repo.store, history, job.scopes, job.now, job.window_hours,
-                                      progress=progress, **job.engine_kwargs)
+                                      progress=progress, **_with_source(repo, job.engine_kwargs))
         summary["phase"] = job.phase
         summary["window_hours"] = job.window_hours
         repo.complete_run(job.run_id, clock(), summary, results)
@@ -152,8 +153,10 @@ def phase_gate(repo, project: dict, key: str, now: datetime) -> dict | None:
     run = next((r for r in repo.list_runs(pid, 20) if r.get("status") == "completed"), None)
     results = repo.get_results(run["id"]) if run else []
     procs = repo.list_procedures(pid)
-    latest = {pr["id"]: next((t for t in repo.list_test_runs(pr["id"], 20) if t["status"] == "completed"), None)
-              for pr in procs}
+    latest: dict[str, dict | None] = {}
+    for pr in procs:
+        got = next((t for t in repo.list_test_runs(pr["id"], 20) if t["status"] == "completed"), None)
+        latest[pr["id"]] = refresh_test_run(repo, got, now) if got else None
     reconcile_issues(repo, pid, None, [], now)  # an overdue waiver lapses first
     active = repo.list_issues(pid, issues.ACTIVE)
     risks = {r["issue_id"]: r for r in repo.list_risks(pid)}
@@ -192,7 +195,15 @@ def engine_kwargs(settings: dict | None) -> dict:
         out["ladder_config"] = s["ladder"]
     if s.get("economizer"):
         out["economizer_settings"] = s["economizer"]
+    if (s.get("overrides") or {}).get("enabled"):
+        out["override_settings"] = s["overrides"]
     return out
+
+
+def _with_source(repo, kwargs: dict) -> dict:
+    """The override tests read schedules, priority arrays and Baler's own
+    writes from the repo (Baler#212); nothing else needs it."""
+    return {**kwargs, "override_source": repo} if kwargs.get("override_settings") else kwargs
 
 
 def queue_run(repo, worker, project: dict, claims: dict, now: datetime, window_hours: float,
@@ -232,9 +243,12 @@ class TestJob:
 
 
 def queue_test_run(repo, worker, project: dict, proc: dict, claims: dict, start: datetime, end: datetime,
-                   now: datetime, user_sub: str | None, user_email: str | None) -> dict:
+                   now: datetime, user_sub: str | None, user_email: str | None, methods: dict | None = None) -> dict:
+    """`methods` picks a method per step for this run (Baler#275);
+    procedures.choose_methods validates it and fills in the defaults."""
     scopes, prefixes = project_scopes(repo, project, claims)
     snapshot = {k: proc[k] for k in ("id", "name", "kind", "equip_class", "equip_uris", "steps", "window_hours")}
+    snapshot["methods"] = procedures.choose_methods(proc, methods)
     tr = {"id": db.new_id(), "project_id": project["id"], "procedure_id": proc["id"], "phase": phases.current(project["phases"]),
           "status": "queued", "started_at": start, "window_end": end, "requested_at": now, "finished_at": None,
           "triggered_by": user_sub, "scope": {"caller": scope_json(scopes[0]), "site_prefixes": prefixes},
@@ -265,11 +279,14 @@ def execute_test(repo, job: TestJob, clock: Callable[[], datetime], run_fn=engin
             equips = [e for e in site if procedures.applies(job.procedure, e)]
             hours = max((job.end - job.start).total_seconds() / 3600, 1 / 60)
             _, results = run_fn(repo.store, hist, job.scopes, job.end, hours, equips=equips, site_equips=site,
-                                **job.engine_kwargs)
+                                **_with_source(repo, job.engine_kwargs))
             ids = _range_points(job.procedure, site)
             truncated: set[str] = set()
             series = hist.window(ids, job.start, job.end + timedelta(seconds=1), truncated=truncated) if ids else {}
         per = procedures.evaluate(job.procedure, equips, results, series, truncated, (job.start, job.end))
+        per = manual.apply(per, job.procedure, job.procedure.get("methods") or procedures.choose_methods(job.procedure),
+                           repo.find_rows(manual.RESULTS, order="recorded_at", test_run_id=job.run_id),
+                           repo.find_rows("cx_active_runs", project_id=job.project_id), job.start)
         prev = next((r for r in repo.list_test_runs(job.procedure["id"], 20)
                      if r["id"] != job.run_id and r["status"] == "completed"), None)
         summary = procedures.summarize(per)
@@ -286,6 +303,10 @@ def execute_test(repo, job: TestJob, clock: Callable[[], datetime], run_fn=engin
                 reconcile_issues(repo, job.project_id, job.run_id, results, clock(), judged_from=job.start, kind="test_run")
             except Exception:  # the test run stands; the next run reconciles again
                 log.exception("cx test run %s: issue reconcile failed", job.run_id)
+        try:
+            method_issues(repo, repo.get_test_run(job.run_id) or {}, clock())
+        except Exception:
+            log.exception("cx test run %s: method issues failed", job.run_id)
     except Exception as exc:  # noqa: BLE001 - recorded on the row, never fatal to the worker
         log.error("cx test run %s failed:\n%s", job.run_id, traceback.format_exc())
         try:
@@ -294,6 +315,64 @@ def execute_test(repo, job: TestJob, clock: Callable[[], datetime], run_fn=engin
                            {"test_run_id": job.run_id, "error": error_text(exc)}, clock())
         except Exception:
             log.exception("cx test run %s: could not record the failure", job.run_id)
+
+
+def refresh_test_run(repo, tr: dict, now: datetime) -> dict:
+    """Re-apply a completed test run's methods with the manual results and
+    active runs recorded since (Baler#275): its statuses, summary and
+    issues follow a person's entry, or an active test finishing, without
+    re-reading history. Returns the run as stored."""
+    if not tr or tr.get("status") != "completed" or not tr.get("equipment"):
+        return tr
+    proc = tr.get("procedure") or {}
+    methods = proc.get("methods") or procedures.choose_methods(proc)
+    if set(methods.values()) == {"passive"} and not repo.find_rows(manual.RESULTS, order="recorded_at", test_run_id=tr["id"]):
+        return tr  # nothing but history behind it: unchanged since it ran
+    start = tr["started_at"] if isinstance(tr["started_at"], datetime) else datetime.fromisoformat(str(tr["started_at"]))
+    per = manual.apply(tr["equipment"], proc, methods, repo.find_rows(manual.RESULTS, order="recorded_at", test_run_id=tr["id"]),
+                       repo.find_rows("cx_active_runs", project_id=tr["project_id"]), start)
+    summary = {**(tr.get("summary") or {}), **procedures.summarize(per)}
+    if per != tr.get("equipment") or summary != tr.get("summary"):
+        repo.update_test_run(tr["id"], {"equipment": per, "summary": summary})
+        tr = {**tr, "equipment": per, "summary": summary}
+    method_issues(repo, tr, now)
+    return repo.get_test_run(tr["id"]) or tr
+
+
+def method_issues(repo, tr: dict, now: datetime) -> list[tuple]:
+    """Open an issue for each manual or active fail and each contradiction
+    the test run carries, and reconcile the rest (a later pass resolves,
+    a pass after the fix is the retest). Only results whose verdict
+    changed since the last time are applied, so re-reading a run is
+    idempotent."""
+    if not tr or not tr.get("equipment"):
+        return []
+    proc_id = tr["procedure_id"]
+    results = manual.issue_results(tr["equipment"], proc_id)
+    seen = dict((tr.get("summary") or {}).get("issue_signatures") or {})
+    fresh = []
+    for r in results:
+        sig = f"{r['status']}|{r['evidence'].get('manual_result_id') or r['evidence'].get('active_run_id')}"
+        key = f"{r['check_id']}|{r['subject']}"
+        if seen.get(key) != sig:
+            fresh.append(r)
+            seen[key] = sig
+    if not fresh:
+        return []
+    for r in fresh:
+        if r["status"] != "fail":
+            continue
+        try:
+            issue = issues.from_result(r, tr["id"], tr["project_id"], db.new_id, now, None)
+            issue["title"] = issues.title_for(r)
+            repo.create_issue(issue)
+            repo.add_issue_event(issue["id"], "open.method", None, None,
+                                 {"test_run_id": tr["id"], "check_id": r["check_id"], "evidence": r["evidence"]}, now)
+        except db.IssueExists:
+            pass
+    changes = reconcile_issues(repo, tr["project_id"], tr["id"], fresh, now, judged_from=None, kind="test_run")
+    repo.update_test_run(tr["id"], {"summary": {**(tr.get("summary") or {}), "issue_signatures": seen}})
+    return changes
 
 
 # ------------------------------------------------------- spec extraction (Cx 7)
@@ -448,15 +527,24 @@ class Scheduler:
 
     def _loop(self) -> None:
         while not self._stop.wait(self.every_s):
+            self.tick()
+
+    def tick(self) -> None:
+        """One pass: queue what's due, then every extra (the Cx 9 sweeper,
+        the fleet sweeper, operator-write expiry, ...). Each runs on its
+        own, so one failing never skips the others - least of all a
+        sweeper. (Before this, `extra` was stored and never called: the
+        periodic sweeps only ran at startup.)"""
+        now = self.clock()
+        try:
+            schedule_tick(self.repo, self.worker, now)
+        except Exception:
+            log.exception("cx schedule tick failed")
+        for fn in self.extra:
             try:
-                schedule_tick(self.repo, self.worker, self.clock())
+                fn(now)
             except Exception:
-                log.exception("cx schedule tick failed")
-            for fn in self.extra:  # each on its own: one failing never stops the others
-                try:
-                    fn(self.clock())
-                except Exception:
-                    log.exception("cx schedule: extra tick failed")
+                log.exception("cx scheduler extra %r failed", fn)
 
     def stop(self) -> None:
         self._stop.set()

@@ -3,7 +3,7 @@
 // users.js calls initSources() for admins. Secrets are write-only: the API
 // says only whether one is set, and a blank secret field keeps it.
 
-const OPS_SOURCES_URL = (new URLSearchParams(location.search).get("ops") || "/ops") + "/sources";
+const OPS_SOURCES_URL = apiBase("ops", "/ops") + "/sources";
 const srcState = { kinds: {}, list: [], editing: null };
 const $s = (id) => document.getElementById(id);
 

@@ -82,6 +82,44 @@ export function evaluate(cfg, payloads) {
   return { checks, raw };
 }
 
+// Overload (#235): Baler's own numbers from GET /ops/metrics, the endpoint
+// the scale ladder checks against its canaries - end-to-end ingest lag, the
+// listener's oldest uncommitted reading, broker drops since the listener
+// started. A metric the install doesn't export (an older Baler) is skipped.
+export function parseProm(text) {
+  const out = {};
+  for (const line of String(text || "").split("\n")) {
+    if (!line || line.startsWith("#")) continue;
+    const i = line.lastIndexOf(" ");
+    const v = Number(line.slice(i + 1));
+    if (i > 0 && !Number.isNaN(v)) out[line.slice(0, i)] = v;
+  }
+  return out;
+}
+
+const OVERLOAD = [
+  ["baler_ingest_newest_reading_age_seconds", "max_ingest_lag_s", "ingest lag", "now minus the newest stored reading"],
+  ["baler_listener_queue_oldest_age_seconds", "max_queue_age_s", "listener backlog", "the listener's oldest uncommitted reading"],
+  ["baler_broker_dropped_since_listener_start", "max_broker_drops", "broker drops", "messages the broker dropped since the listener started"],
+];
+
+export function evaluateMetrics(cfg, text) {
+  const m = parseProm(text);
+  const checks = [];
+  const raw = [];
+  for (const [name, key, label, what] of OVERLOAD) {
+    if (cfg[key] == null || m[name] === undefined) continue;
+    const ok = m[name] <= cfg[key];
+    checks.push({ module: "dataflow", name: `${label} (/ops/metrics)`, status: ok ? "pass" : "fail", value: m[name],
+                  budget: `≤ ${cfg[key]}`, detail: `${what}: ${m[name]}` });
+    if (!ok) {
+      raw.push({ kind: "overload", key: name, scope: "dataflow", title: `${label} over budget: ${m[name]} (≤ ${cfg[key]})`,
+                 detail: `${name} = ${m[name]} from GET /ops/metrics; the budget is ${cfg[key]} (budgets.json dataflow.${key})` });
+    }
+  }
+  return { checks, raw };
+}
+
 export async function run({ api, budgets }) {
   const cfg = budgets.dataflow || {};
   const payloads = {};
@@ -92,5 +130,16 @@ export async function run({ api, budgets }) {
     return { scope: "dataflow", complete: false, raw: [],
              checks: [{ module: "dataflow", name: "GET /ops/freshness", status: "error", detail: e.message }] };
   }
-  return { scope: "dataflow", complete: true, ...evaluate(cfg, payloads) };
+  const out = evaluate(cfg, payloads);
+  try {
+    const res = await api.get("/ops/metrics");
+    if (res.ok) {
+      const extra = evaluateMetrics(cfg, await res.text());
+      out.checks.push(...extra.checks);
+      out.raw.push(...extra.raw);
+    }
+  } catch {
+    // an install without /ops/metrics: freshness above still judges data flow
+  }
+  return { scope: "dataflow", complete: true, ...out };
 }

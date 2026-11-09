@@ -1,5 +1,5 @@
 """
-0004 requirement packs (#205, epic #221 §3.2): standards as versioned data,
+0020 requirement packs (#205, epic #221 §3.2): standards as versioned data,
 read and written by baler.commissioning.packs_api.
 
 - cx_packs: one row per (org, pack_id, version). `requirements` holds the
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 4
+VERSION = 20
 NAME = "requirement packs"
 
 PACKS = """

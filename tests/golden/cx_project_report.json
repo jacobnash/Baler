@@ -73,6 +73,33 @@
   "window_start": "2026-11-05T12:00:00+00:00"
  },
  "active_runs": [],
+ "coverage": [
+  {
+   "automatic": 1,
+   "by_method": {
+    "active": 0,
+    "manual": 0,
+    "passive": 1
+   },
+   "equip_class": "Air_Handling_Unit",
+   "failed": 0,
+   "in_class": 1,
+   "passed": 1,
+   "procedures": [
+    {
+     "kind": "startup",
+     "name": "AHU seq",
+     "procedure_id": "id-1",
+     "test_run_id": "id-2"
+    }
+   ],
+   "sampled": 1,
+   "summary": "1 of 1 tested: 1 automatically",
+   "tested": 1,
+   "untested": 0,
+   "witnessed": 0
+  }
+ ],
  "cxa": "Ann Example",
  "equipment": {
   "urn:equip:fbf/a/ahu-1": {
@@ -245,7 +272,7 @@
      "action": "risk.covered",
      "actor": "system",
      "detail": {
-      "risk_id": "id-1",
+      "risk_id": "id-3",
       "test_run_id": "id-2"
      },
      "id": 12,
@@ -263,7 +290,7 @@
       "reason": "read-only point",
       "retest_trigger": "writes enabled",
       "review_by": "2027-01-05",
-      "risk_id": "id-1"
+      "risk_id": "id-3"
      },
      "id": 8,
      "ts": "2026-11-06T12:00:00+00:00",
@@ -275,7 +302,7 @@
      "actor": "user",
      "detail": {
       "check_id": "exists",
-      "run_id": "id-3"
+      "run_id": "id-4"
      },
      "id": 1,
      "ts": "2026-11-06T12:00:00+00:00",
@@ -283,10 +310,10 @@
      "user_sub": "u-a"
     }
    ],
-   "id": "id-4",
-   "last_seen_run": "id-3",
-   "opened_run": "id-3",
-   "project_id": "id-5",
+   "id": "id-5",
+   "last_seen_run": "id-4",
+   "opened_run": "id-4",
+   "project_id": "id-6",
    "resolved_at": null,
    "resolved_by": null,
    "retest": null,
@@ -296,8 +323,8 @@
     "accepted_name": "Ann Example",
     "accepted_name_source": "account",
     "created_at": "2026-11-06T12:00:00+00:00",
-    "id": "id-1",
-    "issue_id": "id-4",
+    "id": "id-3",
+    "issue_id": "id-5",
     "owner": "Controls Co",
     "reason": "read-only point",
     "retest_trigger": "writes enabled",
@@ -317,6 +344,7 @@
    "assignee": null,
    "check_id": "template:AHU_FanCommand",
    "closed_at": null,
+   "closed_by": null,
    "closed_run": null,
    "created_at": "2026-11-06T12:00:00+00:00",
    "created_by": "u-a",
@@ -353,6 +381,7 @@
      "actor": "user",
      "detail": {
       "closed_at": null,
+      "closed_by": null,
       "closed_run": null,
       "from": "open",
       "note": "on it",
@@ -369,7 +398,7 @@
      "actor": "user",
      "detail": {
       "check_id": "template:AHU_FanCommand",
-      "run_id": "id-3"
+      "run_id": "id-4"
      },
      "id": 2,
      "ts": "2026-11-06T12:00:00+00:00",
@@ -377,10 +406,10 @@
      "user_sub": "u-a"
     }
    ],
-   "id": "id-6",
-   "last_seen_run": "id-3",
-   "opened_run": "id-3",
-   "project_id": "id-5",
+   "id": "id-7",
+   "last_seen_run": "id-4",
+   "opened_run": "id-4",
+   "project_id": "id-6",
    "resolved_at": null,
    "resolved_by": null,
    "retest": null,
@@ -433,7 +462,7 @@
      "actor": "user",
      "detail": {
       "check_id": "template:AHU_MAT",
-      "run_id": "id-3"
+      "run_id": "id-4"
      },
      "id": 3,
      "ts": "2026-11-06T12:00:00+00:00",
@@ -441,10 +470,10 @@
      "user_sub": "u-a"
     }
    ],
-   "id": "id-7",
-   "last_seen_run": "id-3",
-   "opened_run": "id-3",
-   "project_id": "id-5",
+   "id": "id-8",
+   "last_seen_run": "id-4",
+   "opened_run": "id-4",
+   "project_id": "id-6",
    "resolved_at": null,
    "resolved_by": null,
    "retest": null,
@@ -497,7 +526,7 @@
      "actor": "user",
      "detail": {
       "check_id": "template:AHU_OAT",
-      "run_id": "id-3"
+      "run_id": "id-4"
      },
      "id": 4,
      "ts": "2026-11-06T12:00:00+00:00",
@@ -505,10 +534,10 @@
      "user_sub": "u-a"
     }
    ],
-   "id": "id-8",
-   "last_seen_run": "id-3",
-   "opened_run": "id-3",
-   "project_id": "id-5",
+   "id": "id-9",
+   "last_seen_run": "id-4",
+   "opened_run": "id-4",
+   "project_id": "id-6",
    "resolved_at": null,
    "resolved_by": null,
    "retest": null,
@@ -561,7 +590,7 @@
      "actor": "user",
      "detail": {
       "check_id": "template:AHU_SATSP",
-      "run_id": "id-3"
+      "run_id": "id-4"
      },
      "id": 5,
      "ts": "2026-11-06T12:00:00+00:00",
@@ -569,10 +598,10 @@
      "user_sub": "u-a"
     }
    ],
-   "id": "id-9",
-   "last_seen_run": "id-3",
-   "opened_run": "id-3",
-   "project_id": "id-5",
+   "id": "id-10",
+   "last_seen_run": "id-4",
+   "opened_run": "id-4",
+   "project_id": "id-6",
    "resolved_at": null,
    "resolved_by": null,
    "retest": null,
@@ -625,7 +654,7 @@
      "actor": "user",
      "detail": {
       "check_id": "template:VAV_Flow",
-      "run_id": "id-3"
+      "run_id": "id-4"
      },
      "id": 6,
      "ts": "2026-11-06T12:00:00+00:00",
@@ -633,10 +662,10 @@
      "user_sub": "u-a"
     }
    ],
-   "id": "id-10",
-   "last_seen_run": "id-3",
-   "opened_run": "id-3",
-   "project_id": "id-5",
+   "id": "id-11",
+   "last_seen_run": "id-4",
+   "opened_run": "id-4",
+   "project_id": "id-6",
    "resolved_at": null,
    "resolved_by": null,
    "retest": null,
@@ -689,7 +718,7 @@
      "actor": "user",
      "detail": {
       "check_id": "template:VAV_ZATSP",
-      "run_id": "id-3"
+      "run_id": "id-4"
      },
      "id": 7,
      "ts": "2026-11-06T12:00:00+00:00",
@@ -697,10 +726,10 @@
      "user_sub": "u-a"
     }
    ],
-   "id": "id-11",
-   "last_seen_run": "id-3",
-   "opened_run": "id-3",
-   "project_id": "id-5",
+   "id": "id-12",
+   "last_seen_run": "id-4",
+   "opened_run": "id-4",
+   "project_id": "id-6",
    "resolved_at": null,
    "resolved_by": null,
    "retest": null,
@@ -717,6 +746,7 @@
    "assignee": null,
    "check_id": null,
    "closed_at": "2026-11-06T12:00:00+00:00",
+   "closed_by": "u-a",
    "closed_run": null,
    "created_at": "2026-11-06T12:00:00+00:00",
    "created_by": "u-a",
@@ -730,6 +760,7 @@
      "actor": "user",
      "detail": {
       "closed_at": "2026-11-06T12:00:00+00:00",
+      "closed_by": "u-a",
       "from": "open",
       "note": "labelled",
       "status": "closed"
@@ -752,10 +783,10 @@
      "user_sub": "u-a"
     }
    ],
-   "id": "id-12",
+   "id": "id-13",
    "last_seen_run": null,
    "opened_run": null,
-   "project_id": "id-5",
+   "project_id": "id-6",
    "risk": null,
    "severity": null,
    "source": "baler",
@@ -807,7 +838,7 @@
       "status": "fail",
       "subject": "urn:point:fbf/a/ahu-1/RAT",
       "symptom": "offline - last sample 2026-11-03 12:00:00 is older than the 24 h window",
-      "waived_by": "id-4"
+      "waived_by": "id-5"
      },
      {
       "candidates": [
@@ -1444,7 +1475,7 @@
       "action": "risk.covered",
       "actor": "system",
       "detail": {
-       "risk_id": "id-1",
+       "risk_id": "id-3",
        "test_run_id": "id-2"
       },
       "id": 12,
@@ -1462,7 +1493,7 @@
        "reason": "read-only point",
        "retest_trigger": "writes enabled",
        "review_by": "2027-01-05",
-       "risk_id": "id-1"
+       "risk_id": "id-3"
       },
       "id": 8,
       "ts": "2026-11-06T12:00:00+00:00",
@@ -1474,7 +1505,7 @@
       "actor": "user",
       "detail": {
        "check_id": "exists",
-       "run_id": "id-3"
+       "run_id": "id-4"
       },
       "id": 1,
       "ts": "2026-11-06T12:00:00+00:00",
@@ -1482,10 +1513,10 @@
       "user_sub": "u-a"
      }
     ],
-    "id": "id-4",
-    "last_seen_run": "id-3",
-    "opened_run": "id-3",
-    "project_id": "id-5",
+    "id": "id-5",
+    "last_seen_run": "id-4",
+    "opened_run": "id-4",
+    "project_id": "id-6",
     "resolved_at": null,
     "resolved_by": null,
     "retest": null,
@@ -1495,8 +1526,8 @@
      "accepted_name": "Ann Example",
      "accepted_name_source": "account",
      "created_at": "2026-11-06T12:00:00+00:00",
-     "id": "id-1",
-     "issue_id": "id-4",
+     "id": "id-3",
+     "issue_id": "id-5",
      "owner": "Controls Co",
      "reason": "read-only point",
      "retest_trigger": "writes enabled",
@@ -1516,6 +1547,7 @@
     "assignee": null,
     "check_id": "template:AHU_FanCommand",
     "closed_at": null,
+    "closed_by": null,
     "closed_run": null,
     "created_at": "2026-11-06T12:00:00+00:00",
     "created_by": "u-a",
@@ -1552,6 +1584,7 @@
       "actor": "user",
       "detail": {
        "closed_at": null,
+       "closed_by": null,
        "closed_run": null,
        "from": "open",
        "note": "on it",
@@ -1568,7 +1601,7 @@
       "actor": "user",
       "detail": {
        "check_id": "template:AHU_FanCommand",
-       "run_id": "id-3"
+       "run_id": "id-4"
       },
       "id": 2,
       "ts": "2026-11-06T12:00:00+00:00",
@@ -1576,10 +1609,10 @@
       "user_sub": "u-a"
      }
     ],
-    "id": "id-6",
-    "last_seen_run": "id-3",
-    "opened_run": "id-3",
-    "project_id": "id-5",
+    "id": "id-7",
+    "last_seen_run": "id-4",
+    "opened_run": "id-4",
+    "project_id": "id-6",
     "resolved_at": null,
     "resolved_by": null,
     "retest": null,
@@ -1632,7 +1665,7 @@
       "actor": "user",
       "detail": {
        "check_id": "template:AHU_MAT",
-       "run_id": "id-3"
+       "run_id": "id-4"
       },
       "id": 3,
       "ts": "2026-11-06T12:00:00+00:00",
@@ -1640,10 +1673,10 @@
       "user_sub": "u-a"
      }
     ],
-    "id": "id-7",
-    "last_seen_run": "id-3",
-    "opened_run": "id-3",
-    "project_id": "id-5",
+    "id": "id-8",
+    "last_seen_run": "id-4",
+    "opened_run": "id-4",
+    "project_id": "id-6",
     "resolved_at": null,
     "resolved_by": null,
     "retest": null,
@@ -1696,7 +1729,7 @@
       "actor": "user",
       "detail": {
        "check_id": "template:AHU_OAT",
-       "run_id": "id-3"
+       "run_id": "id-4"
       },
       "id": 4,
       "ts": "2026-11-06T12:00:00+00:00",
@@ -1704,10 +1737,10 @@
       "user_sub": "u-a"
      }
     ],
-    "id": "id-8",
-    "last_seen_run": "id-3",
-    "opened_run": "id-3",
-    "project_id": "id-5",
+    "id": "id-9",
+    "last_seen_run": "id-4",
+    "opened_run": "id-4",
+    "project_id": "id-6",
     "resolved_at": null,
     "resolved_by": null,
     "retest": null,
@@ -1760,7 +1793,7 @@
       "actor": "user",
       "detail": {
        "check_id": "template:AHU_SATSP",
-       "run_id": "id-3"
+       "run_id": "id-4"
       },
       "id": 5,
       "ts": "2026-11-06T12:00:00+00:00",
@@ -1768,10 +1801,10 @@
       "user_sub": "u-a"
      }
     ],
-    "id": "id-9",
-    "last_seen_run": "id-3",
-    "opened_run": "id-3",
-    "project_id": "id-5",
+    "id": "id-10",
+    "last_seen_run": "id-4",
+    "opened_run": "id-4",
+    "project_id": "id-6",
     "resolved_at": null,
     "resolved_by": null,
     "retest": null,
@@ -1824,7 +1857,7 @@
       "actor": "user",
       "detail": {
        "check_id": "template:VAV_Flow",
-       "run_id": "id-3"
+       "run_id": "id-4"
       },
       "id": 6,
       "ts": "2026-11-06T12:00:00+00:00",
@@ -1832,10 +1865,10 @@
       "user_sub": "u-a"
      }
     ],
-    "id": "id-10",
-    "last_seen_run": "id-3",
-    "opened_run": "id-3",
-    "project_id": "id-5",
+    "id": "id-11",
+    "last_seen_run": "id-4",
+    "opened_run": "id-4",
+    "project_id": "id-6",
     "resolved_at": null,
     "resolved_by": null,
     "retest": null,
@@ -1888,7 +1921,7 @@
       "actor": "user",
       "detail": {
        "check_id": "template:VAV_ZATSP",
-       "run_id": "id-3"
+       "run_id": "id-4"
       },
       "id": 7,
       "ts": "2026-11-06T12:00:00+00:00",
@@ -1896,10 +1929,10 @@
       "user_sub": "u-a"
      }
     ],
-    "id": "id-11",
-    "last_seen_run": "id-3",
-    "opened_run": "id-3",
-    "project_id": "id-5",
+    "id": "id-12",
+    "last_seen_run": "id-4",
+    "opened_run": "id-4",
+    "project_id": "id-6",
     "resolved_at": null,
     "resolved_by": null,
     "retest": null,
@@ -1916,6 +1949,7 @@
     "assignee": null,
     "check_id": null,
     "closed_at": "2026-11-06T12:00:00+00:00",
+    "closed_by": "u-a",
     "closed_run": null,
     "created_at": "2026-11-06T12:00:00+00:00",
     "created_by": "u-a",
@@ -1929,6 +1963,7 @@
       "actor": "user",
       "detail": {
        "closed_at": "2026-11-06T12:00:00+00:00",
+       "closed_by": "u-a",
        "from": "open",
        "note": "labelled",
        "status": "closed"
@@ -1951,10 +1986,10 @@
       "user_sub": "u-a"
      }
     ],
-    "id": "id-12",
+    "id": "id-13",
     "last_seen_run": null,
     "opened_run": null,
-    "project_id": "id-5",
+    "project_id": "id-6",
     "risk": null,
     "severity": null,
     "source": "baler",
@@ -1967,7 +2002,7 @@
   ],
   "origin": "",
   "project": {
-   "id": "id-5",
+   "id": "id-6",
    "name": "Building A",
    "phase": "startup",
    "site_id": "site-a"
@@ -1975,10 +2010,10 @@
   "run": {
    "error": null,
    "finished_at": "2026-11-06T12:00:00+00:00",
-   "id": "id-3",
+   "id": "id-4",
    "phase": "startup",
    "progress": null,
-   "project_id": "id-5",
+   "project_id": "id-6",
    "scope": {
     "caller": {
      "exclude": [],
@@ -2080,7 +2115,7 @@
   {
    "kind": "startup",
    "name": "AHU seq",
-   "procedure_id": "id-13",
+   "procedure_id": "id-1",
    "status": "active",
    "steps": [
     {
@@ -2122,6 +2157,8 @@
       "status": "pass",
       "steps": [
        {
+        "active": null,
+        "contradiction": false,
         "criteria": [
          {
           "counts": {
@@ -2156,6 +2193,9 @@
          }
         ],
         "id": "s1",
+        "machine_status": "pass",
+        "manual": null,
+        "method": "passive",
         "status": "pass",
         "title": "Supply air band"
        }
@@ -2170,8 +2210,11 @@
     "procedure": {
      "equip_class": "Air_Handling_Unit",
      "equip_uris": null,
-     "id": "id-13",
+     "id": "id-1",
      "kind": "startup",
+     "methods": {
+      "s1": "passive"
+     },
      "name": "AHU seq",
      "steps": [
       {
@@ -2193,8 +2236,8 @@
      ],
      "window_hours": 24.0
     },
-    "procedure_id": "id-13",
-    "project_id": "id-5",
+    "procedure_id": "id-1",
+    "project_id": "id-6",
     "requested_at": "2026-11-06T12:00:00+00:00",
     "scope": {
      "caller": {
@@ -2217,8 +2260,17 @@
       "not_applicable": 0,
       "pass": 1
      },
+     "contradictions": 0,
      "equipment": 1,
      "partial": false,
+     "steps_by_method": {
+      "passive": {
+       "fail": 0,
+       "inconclusive": 0,
+       "not_applicable": 0,
+       "pass": 1
+      }
+     },
      "steps_by_status": {
       "fail": 0,
       "inconclusive": 0,
@@ -2233,7 +2285,7 @@
   }
  ],
  "project": {
-  "id": "id-5",
+  "id": "id-6",
   "name": "Building A",
   "phase": "startup",
   "phases": [
@@ -2314,7 +2366,7 @@
    ],
    "procedure": "AHU seq",
    "procedure_edited": false,
-   "procedure_id": "id-13",
+   "procedure_id": "id-1",
    "reason": null,
    "rule": "S1: Discharge_Air_Temperature_Sensor within 40..80 F",
    "rule_recorded": true,
