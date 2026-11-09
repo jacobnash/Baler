@@ -20,6 +20,11 @@ advisory never blocks a deploy. To report a vulnerability, see [`SECURITY.md`](h
 | CodeQL | Python, JavaScript/TypeScript (UI, gateway njs, tools) and the workflows themselves, `security-extended` queries | every run | no: results go to the repository's code scanning page |
 | Dependabot | version-update PRs, weekly and grouped: pip, npm (three projects), GitHub Actions, Docker base images (four Dockerfiles) | weekly | n/a |
 
+**Dependency review needs the dependency graph.** GitHub's dependency review only works with the
+repository's dependency graph turned on (Settings, Advanced Security). Until it is, the job checks for
+that first, passes with a warning that the review was skipped, and blocks nothing. With the graph on,
+it runs and blocks as described.
+
 **Why only two checks block.** Dependency review and the PR secret scan judge only what a pull
 request changes, so they can fail on *new* problems without failing on anything already on `main`.
 The other scans look at the whole tree and history. They start as report-only so they can't turn CI

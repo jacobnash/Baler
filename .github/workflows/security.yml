@@ -46,7 +46,27 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
         with:
           persist-credentials: false
-      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294  # v5.0.0
+      # The action needs the repository's dependency graph (Settings ->
+      # Advanced Security). While that is off it refuses to run at all
+      # ("not supported on this repository"), which says nothing about the
+      # PR. So check first: with the graph on, the review runs and blocks
+      # as intended; with it off, the job passes with a warning saying the
+      # review was skipped and why. A real finding still fails the job.
+      - name: Is the dependency graph on?
+        id: graph
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          if gh api "repos/${REPO}/dependency-graph/sbom" --silent 2>/dev/null; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Dependency review skipped::the repository's dependency graph is off, so GitHub can't review dependency changes. Turn it on in Settings -> Advanced Security; this check then blocks new high/critical advisories."
+            echo "Dependency review **skipped**: the repository's dependency graph is off (Settings -> Advanced Security)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - if: steps.graph.outputs.enabled == 'true'
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294  # v5.0.0
         with:
           config-file: ./.github/dependency-review-config.yml
 
