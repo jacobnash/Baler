@@ -42,7 +42,11 @@ def test_passport_per_position(api):
     assert ahu["startup_vs_today"]["latest"]["status"] == "fail"  # start-up baseline vs today
     assert ahu["issues"]["open"] == 1 and len(ahu["open_faults"]) == 1
     missing = rep["not_in_this_record"]
-    assert missing["assets"].startswith("#197") and "efficiency" in missing and "compliance_by_space" in missing
+    assert missing["assets"].startswith("#197")
+    # #215 (baselines), #216 (savings cases), #209/#207 (spaces, compliance log) have landed: their
+    # tables are registered, so those sections are read, not listed as missing
+    assert not {"efficiency", "replace_vs_keep", "compliance_by_space"} & set(missing)
+    assert rep["compliance_by_space"] == [] and ahu["efficiency"] == [] and ahu["replace_vs_keep"] == []
     assert {d["key"]: d["in_baler"] for d in rep["std_202_deliverables"]}["systems_manual"] is False
     # never names equipment another org owns
     assert all(not p["equip_uri"].startswith("urn:equip:fbf/b/") for p in rep["positions"])
