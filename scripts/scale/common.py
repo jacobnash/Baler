@@ -111,7 +111,10 @@ def guard_problems(config: dict, env_file: Path = ENV_FILE, checkout_name: str |
 # value pattern). Labels and markers mirror what Windrow's bacnet_tagger
 # produces for an AHU-ish controller.
 TEMPLATES = [
-    ("sat", "discharge air temp sensor", "°F", "Number", "sine"),
+    # 55-65 °F: inside the stack's seeded discharge-air-temp-out-of-range
+    # rule (50-70), which a 65-75 sine tripped on every sat point half the
+    # time - 10% of points flapping, not --fault-share's (#273)
+    ("sat", "discharge air temp sensor", "°F", "Number", "sine-sat"),
     ("sat-sp", "discharge air temp sp writable", "°F", "Number", "const"),
     ("rat", "return air temp sensor", "°F", "Number", "sine"),
     ("mat", "mixed air temp sensor", "°F", "Number", "walk"),
@@ -222,7 +225,8 @@ def value_at(pattern: str, idx: int, tick: int):
         # cheap deterministic pseudo-walk: sum of two slow sines with
         # per-point phase, so no state is kept per point
         return round(70 + 3 * math.sin((tick + idx * 7) / 37.0) + math.sin((tick + idx) / 5.3), 3)
-    return round(70 + 5 * math.sin(2 * math.pi * (tick + idx % 120) / 120.0), 3)  # sine, 10 min @ 5 s
+    centre = 60 if pattern == "sine-sat" else 70
+    return round(centre + 5 * math.sin(2 * math.pi * (tick + idx % 120) / 120.0), 3)  # sine, 10 min @ 5 s
 
 
 # ---------------------------------------------------------------- the host

@@ -119,7 +119,7 @@ def test_rules_never_fire_on_generated_values():
     assert {r["type"] for r in rules if r["mode"] == "his"} == {"stuck", "stale"}
     for r in rules:
         label = r["applies_to"]["topic_glob"].rsplit("/", 1)[-1]
-        assert next(t for t in common.TEMPLATES if t[0] == label)[4] in ("sine", "walk")  # always moving
+        assert next(t for t in common.TEMPLATES if t[0] == label)[4] in ("sine", "sine-sat", "walk")  # always moving
 
 
 def _hb(cur_rows, tick_rows, passes, busy, evals, cur_busy_de=0.0, cur_busy_fd=0.0):
