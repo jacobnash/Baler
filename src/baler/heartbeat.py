@@ -56,7 +56,7 @@ class Status:
         with self._lock:
             self.detail[key] = value
 
-    def add(self, key: str, n: int) -> None:
+    def add(self, key: str, n: float) -> None:
         with self._lock:
             self.detail[key] = self.detail.get(key, 0) + n
 

@@ -1,5 +1,5 @@
 """
-0003 passive override tests (Baler#212): what Windrow reads off the
+0006 passive override tests (Baler#212): what Windrow reads off the
 controllers that the override detector needs.
 
 - bacnet_schedules: the latest snapshot of each BACnet Schedule and
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 3
+VERSION = 6
 NAME = "override tests: schedules and priority arrays"
 
 SCHEDULES = """

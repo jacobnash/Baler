@@ -30,6 +30,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from functools import lru_cache
+from typing import Any
 
 from opentelemetry import trace
 
@@ -60,6 +61,51 @@ tracer = tracing.get_tracer(__name__)
 # same fan status over Modbus (0/1) charted fine. Multi-state values are
 # unsigned integers in BACnet, so these two names mean binary only.
 BINARY_STATES = {"active": True, "inactive": False}
+
+# Windrow's optional batched envelope (Baler#234): one message per device
+# per poll tick on f"{prefix}/batch", {"ts": t, "points": {label: value}} or
+# {"points": [{"point", "value", "ts"[, "quality"]}, ...]}. Told apart from a
+# reading by its payload (a "points" key and no "value"), so a point that
+# happens to be labelled "batch" is still a reading.
+BATCH_TOPIC = "batch"
+
+
+def is_batch(topic: str, payload: dict) -> bool:
+    return topic.rsplit("/", 1)[-1] == BATCH_TOPIC and "points" in payload and "value" not in payload
+
+
+def _label_ok(label) -> bool:
+    return (isinstance(label, str) and label != "" and not label.startswith("/") and not label.endswith("/")
+            and "+" not in label and "#" not in label and "//" not in label)
+
+
+def expand_batch(topic: str, payload: dict) -> list[tuple[str, Any, Any, Any]]:
+    """A batch message -> [(topic, value, ts, quality envelope)], each topic
+    exactly the per-point one ({prefix}/{label}), so point identity is the
+    same either way. Raises ValueError or TypeError for a malformed batch (the message
+    is then skipped and acknowledged, like any bad message)."""
+    prefix = topic.rsplit("/", 1)[0]
+    points = payload["points"]
+    out: list[tuple[str, Any, Any, Any]] = []
+    items: list[tuple[Any, Any, Any, Any]]
+    if isinstance(points, dict):
+        ts = payload.get("ts")
+        items = [(label, value, ts, None) for label, value in points.items()]
+    elif isinstance(points, list):
+        items = []
+        for p in points:
+            if not isinstance(p, dict):
+                raise TypeError("a batch's points list holds objects")
+            items.append((p.get("point"), p.get("value"), p.get("ts", payload.get("ts")), p.get("quality")))
+    else:
+        raise TypeError("a batch's points is an object or a list")
+    for label, value, ts, q in items:
+        if not _label_ok(label):
+            raise ValueError(f"bad point label in batch: {label!r}")
+        if label.endswith("/tags") or label == "equip/tags":
+            raise ValueError(f"tags don't ride a batch: {label!r}")
+        out.append((f"{prefix}/{label}", value, ts, q))
+    return out
 
 # Mark a queued controller alarm (ReadingBatcher.put_alarm) and a queued
 # tags/equip message (put_tags) apart from a reading's quality flag.
@@ -199,6 +245,7 @@ class ReadingBatcher:
         # Counters. received is written by paho's thread only, done by this
         # thread only: received - done is what's queued or being written.
         self.received = 0
+        self.messages = 0  # MQTT messages (a batch message is many readings, Baler#234)
         self.done = 0
         self.rows = 0
         self.batches = 0
@@ -212,6 +259,15 @@ class ReadingBatcher:
         # last beat (take_queue_peak).
         self.flush_s = 0.0
         self.queue_peak = 0
+        # Overload signals for /ops/status and /ops/metrics (#235): the
+        # last batch's write time, messages the broker redelivered (DUP:
+        # sent before but never acknowledged, so after a reconnect or a
+        # crash), and when the oldest reading not yet committed arrived -
+        # the first item of the batch being gathered or written, else the
+        # queue's head (each item carries its arrival time, last).
+        self.last_flush_s = 0.0
+        self.redelivered = 0
+        self._batch_t0: float | None = None
         self.last_message_at = 0.0
         # Priority-array changes from readings' `priority` key (Windrow#25,
         # Baler#212): written after each batch commits. Best effort - Windrow
@@ -225,6 +281,7 @@ class ReadingBatcher:
     def _put(self, item) -> None:
         self.received += 1
         self.last_message_at = time.monotonic()
+        item = (*item, self.last_message_at)
         try:
             self.queue.put_nowait(item)
         except queue.Full:
@@ -233,8 +290,16 @@ class ReadingBatcher:
             self.blocked_s += time.monotonic() - t0
             self.blocked_events += 1
 
-    def put(self, msg, topic: str, value, ts, flag: str | None = None) -> None:
-        self._put((self.generation, msg.mid, msg.qos, topic, value, ts, flag))
+    def note_redelivery(self, msg) -> None:
+        if getattr(msg, "dup", False):
+            self.redelivered += 1
+
+    def put(self, msg, topic: str, value, ts, flag: str | None = None, ack: bool = True) -> None:
+        """ack=False: this reading's commit doesn't acknowledge its message
+        - every reading of a batch message but the last (Baler#234). The
+        queue is FIFO and batches commit in order, so once the last one is
+        committed all of them are, and the message is acknowledged once."""
+        self._put((self.generation, msg.mid, msg.qos if ack else 0, topic, value, ts, flag))
 
     def put_alarm(self, msg, topic: str, event, ts) -> None:
         """A controller alarm (Baler#168): not stored as a reading, but it
@@ -263,6 +328,7 @@ class ReadingBatcher:
                           f"blocked {self.blocked_s:.1f} s in all", flush=True)
                     last_report, last_rows, last_batches = now, self.rows, self.batches
                 batch = [self.queue.get()]
+                self._batch_t0 = batch[0][-1]
                 self.queue_peak = max(self.queue_peak, self.queue.qsize() + 1)
                 deadline = time.monotonic() + self.max_wait
                 while len(batch) < self.max_rows:
@@ -295,12 +361,24 @@ class ReadingBatcher:
         try:
             self._flush(batch)
         finally:
-            self.flush_s += time.monotonic() - t0
+            self.last_flush_s = time.monotonic() - t0
+            self.flush_s += self.last_flush_s
+            self._batch_t0 = None
+
+    def oldest_age(self) -> float:
+        """Seconds the oldest reading not yet committed has waited in this
+        worker (0 when nothing is waiting): the listener's own share of
+        ingest lag, before the readings' rows exist to measure."""
+        t = self._batch_t0
+        if t is None:
+            with self.queue.mutex:
+                t = self.queue.queue[0][-1] if self.queue.queue else None
+        return round(max(0.0, time.monotonic() - t), 3) if t is not None else 0.0
 
     def _flush(self, batch: list) -> None:
         with tracer.start_as_current_span("mqtt_listener.flush") as span:
             readings, alarms, tags = [], [], []
-            for _, _, _, topic, value, ts, flag in batch:
+            for _, _, _, topic, value, ts, flag, _ in batch:
                 if flag is ALARM:
                     alarms.append([topic, value, ts])
                 elif flag is TAGS:
@@ -352,9 +430,11 @@ class ReadingBatcher:
 
     def stats(self) -> dict:
         return {"received": self.received, "rows": self.rows, "batches": self.batches, "tags": self.tags,
-                "alarms": self.alarms, "queue": self.queue.qsize(), "blocked_s": round(self.blocked_s, 2),
+                "alarms": self.alarms, "messages": self.messages, "queue": self.queue.qsize(), "blocked_s": round(self.blocked_s, 2),
                 "blocked_events": self.blocked_events, "flush_s": round(self.flush_s, 3),
-                "queue_max": self.queue.maxsize, "connected": self.connected}
+                "queue_max": self.queue.maxsize, "connected": self.connected,
+                "oldest_age_s": self.oldest_age(), "last_flush_s": round(self.last_flush_s, 3),
+                "redelivered": self.redelivered}
 
 
 def make_on_message(store, ts_conn, batcher: ReadingBatcher | None = None, retained_only: bool = False):
@@ -371,6 +451,9 @@ def make_on_message(store, ts_conn, batcher: ReadingBatcher | None = None, retai
         redelivered after every restart and stop ingest for good (a bare
         `1` on an fbf/ topic did exactly that in CI). Infrastructure errors
         (Postgres/Oxigraph down) still raise, so the worker restarts."""
+        if batcher is not None:
+            batcher.messages += 1
+            batcher.note_redelivery(msg)
         try:
             queued = False if retained_only and not msg.retain else _handle(msg)
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
@@ -400,6 +483,20 @@ def make_on_message(store, ts_conn, batcher: ReadingBatcher | None = None, retai
         if not isinstance(payload, dict):
             span.set_attribute("error", "payload is not a JSON object")
             print(f"malformed payload on {msg.topic}: expected a JSON object, got {type(payload).__name__}")
+            return False
+
+        # One device's poll tick in one message (Baler#234): its readings
+        # go to the batcher keyed exactly as per-point messages would be,
+        # and the message is acknowledged once the last of them commits.
+        if is_batch(msg.topic, payload):
+            rows = [(t, binary_state(v), ts_, quality.from_envelope(q)) for t, v, ts_, q in expand_batch(msg.topic, payload)]
+            if not rows:
+                return False
+            if batcher is not None:
+                for i, (t, v, ts_, flag) in enumerate(rows):
+                    batcher.put(msg, t, v, ts_, flag, ack=i == len(rows) - 1)
+                return True
+            ingest_readings(store, ts_conn, rows)
             return False
 
         value = payload.get("value")
@@ -596,7 +693,9 @@ def _heartbeats(service: str, client_id: str, batcher: ReadingBatcher) -> None:
         dt = max(now - last_t, 1e-9)
         detail = {**st, "client_id": client_id, "pid": os.getpid(), "queue_peak": batcher.take_queue_peak(),
                   "readings_per_s": round((st["rows"] - last["rows"]) / dt, 1),
-                  "messages_per_s": round((st["received"] - last["received"]) / dt, 1),
+                  "messages_per_s": round((st["messages"] - last["messages"]) / dt, 1),
+                  "items_per_s": round((st["received"] - last["received"]) / dt, 1),
+                  "batches_per_s": round((st["batches"] - last["batches"]) / dt, 2),
                   "cpu_pct": round(100 * (cpu - last_cpu) / dt, 1),
                   "blocked_s_delta": round(st["blocked_s"] - last["blocked_s"], 2),
                   # share of the interval the batcher spent writing: near
@@ -643,7 +742,16 @@ def _worker_totals(conn) -> dict:
             "flush_s": round(sum(d.get("flush_s", 0) for d in rows), 3),
             "queue": max(d.get("queue", 0) for d in rows), "queue_peak": max(d.get("queue_peak", 0) for d in rows),
             "queue_max": max(d.get("queue_max", 0) for d in rows),
-            "blocked_s": round(sum(d.get("blocked_s", 0) for d in rows), 2)}
+            "blocked_s": round(sum(d.get("blocked_s", 0) for d in rows), 2),
+            # #235: the oldest uncommitted reading in any worker, the slowest
+            # last batch, redeliveries and the current rates, summed.
+            "oldest_age_s": max(d.get("oldest_age_s", 0) for d in rows),
+            "last_flush_s": max(d.get("last_flush_s", 0) for d in rows),
+            "redelivered": sum(d.get("redelivered", 0) for d in rows),
+            "received": sum(d.get("received", 0) for d in rows),
+            "readings_per_s": round(sum(d.get("readings_per_s", 0) for d in rows), 1),
+            "messages_per_s": round(sum(d.get("messages_per_s", 0) for d in rows), 1),
+            "batches_per_s": round(sum(d.get("batches_per_s", 0) for d in rows), 2)}
 
 
 def run_tags(args) -> None:

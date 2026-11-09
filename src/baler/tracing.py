@@ -20,6 +20,11 @@ def init_tracing(service_name: str = "baler") -> None:
     global _initialized
     if _initialized:
         return
+    # Every long-running process calls this once at start: count the start
+    # and its unhandled exceptions for Ops and the alerter (#277).
+    from baler import errors
+
+    errors.install(service_name)
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318/v1/traces")
     provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
     provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
