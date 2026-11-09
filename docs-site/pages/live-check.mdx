@@ -39,7 +39,7 @@ write access to the repo.
 ```bash
 cd tools/live-check
 npm install
-npm test                 # unit tests for fingerprints and the issue plan
+npm test                 # unit tests, plus axe on Connectors and Ops served from ui/ (a11y.test.mjs)
 npm run dry-run          # check and print, change no issues
 npm run check            # check and sync the issue log
 ```

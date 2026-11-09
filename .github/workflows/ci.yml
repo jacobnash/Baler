@@ -92,11 +92,18 @@ jobs:
       # same-origin paths; plain node runs it in a vm against a fake location.
       - run: node --test ui/apibase.test.mjs
       # tools/live-check (post-deploy verification, #178): budget, freshness,
-      # edge and issue-sync logic on fixtures, and a --dry-run against a stub
-      # install. Needs no npm install: Playwright loads only for the
-      # browser modules, which these tests don't run.
+      # edge and issue-sync logic on fixtures, a --dry-run against a stub
+      # install, and a11y.test.mjs: the browser pass's axe check on
+      # Connectors and Ops served from ui/. That one needs the npm install
+      # (playwright-core, axe-core; no browser download) and the runner's
+      # preinstalled Chrome; LIVE_CHECK_REQUIRE_BROWSER makes a missing one
+      # fail here instead of skipping.
+      - run: npm ci
+        working-directory: tools/live-check
       - run: node --test
         working-directory: tools/live-check
+        env:
+          LIVE_CHECK_REQUIRE_BROWSER: "1"
       # Live check of the non-Anthropic LLM path (Cx 7/10) against Gemini's free
       # tier: a real PDF extraction and agent turn. Skips without the
       # GEMINI_API_KEY repo secret; informational only - a free-tier rate
