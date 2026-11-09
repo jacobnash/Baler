@@ -145,7 +145,8 @@ def worker(proc: int, equips: range, args, out: mp.Queue, stop) -> None:
     for g in equips:
         pts = shape.equip_points(g)
         prefix = shape.equip_prefix(g)
-        items.extend((f"{prefix}/{label}", label, idx, t[4] if args.pattern == "mix" else args.pattern)
+        items.extend((f"{prefix}/{label}", label, idx, t[4] if args.pattern == "mix" else args.pattern,
+                      common.is_faulting(idx, t, args.fault_share))
                      for idx, label, t in pts)
     if args.phase in ("tags", "both"):
         tag_rate = max(1.0, args.tags_rate / args.procs)
@@ -180,7 +181,8 @@ def worker(proc: int, equips: range, args, out: mp.Queue, stop) -> None:
         groups = []
         for g in equips:
             prefix = shape.equip_prefix(g)
-            groups.append((f"{prefix}/batch", [(label, idx, t[4] if args.pattern == "mix" else args.pattern)
+            groups.append((f"{prefix}/batch", [(label, idx, t[4] if args.pattern == "mix" else args.pattern,
+                                                common.is_faulting(idx, t, args.fault_share))
                                                for idx, label, t in shape.equip_points(g)]))
         n = len(groups)
         rate = n / args.interval
@@ -197,7 +199,10 @@ def worker(proc: int, equips: range, args, out: mp.Queue, stop) -> None:
                 topic, pts = groups[ms % n]
                 tick = ms // n
                 ts = time.time()
-                payload = common.batch_envelope(ts, {label: common.value_at(pattern, idx, tick) for label, idx, pattern in pts})
+                # --fault-share (#273) applies to batched readings the same way
+                payload = common.batch_envelope(ts, {
+                    label: (faulting and common.fault_value(idx, tick)) or common.value_at(pattern, idx, tick)
+                    for label, idx, pattern, faulting in pts})
                 if not _publish(client, acks, topic, payload, int(ts), stop, readings=len(pts), retain=False):
                     break
                 ms += 1
@@ -221,10 +226,10 @@ def worker(proc: int, equips: range, args, out: mp.Queue, stop) -> None:
             behind_max = max(behind_max, behind)
             burst = 0
             while rs < due and burst < 2000:  # yield to report() every so often
-                topic, label, idx, pattern = items[rs % n]
+                topic, label, idx, pattern, faulting = items[rs % n]
                 ts = time.time()
-                if not _publish(client, acks, topic, common.envelope(label, common.value_at(pattern, idx, rs // n), ts),
-                                int(ts), stop):
+                value = (faulting and common.fault_value(idx, rs // n)) or common.value_at(pattern, idx, rs // n)
+                if not _publish(client, acks, topic, common.envelope(label, value, ts), int(ts), stop):
                     break
                 rs += 1
                 sent += 1
@@ -307,6 +312,8 @@ def parse_args(argv=None):
     ap.add_argument("--points-per-equip", type=int, default=10)
     ap.add_argument("--equips-per-site", type=int, default=50)
     ap.add_argument("--pattern", choices=common.PATTERNS, default="mix", help="value pattern (mix = per point kind)")
+    ap.add_argument("--fault-share", type=float, default=0.0,
+                    help="share of points that read out of range half the time (#273: faults, webhooks)")
     ap.add_argument("--phase", choices=["tags", "readings", "both"], default="both")
     ap.add_argument("--tags-from", type=int, default=0, help="publish tags only for points with index >= this (ladder steps)")
     ap.add_argument("--tags-rate", type=float, default=2000.0, help="tags/equip messages per second, all procs together")

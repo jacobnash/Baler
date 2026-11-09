@@ -1,0 +1,112 @@
+---
+title: Alerting
+---
+
+Ops (`/ops/status`) shows what is wrong when someone looks. The **alerter** (`python -m baler.alerts`,
+the `alerter` compose service) tells a person without anyone looking: it judges the same signals
+every 30 seconds and sends a notice by webhook and/or email when something breaks, and another when
+it clears. A **dead-man's switch** pings an outside service, so the whole host going dark is noticed
+too.
+
+Nothing is sent until you configure a channel, and nothing is pinged until you set a dead-man URL.
+Every setting is in `.env` (the full list, with defaults, is in `.env.example` under "operator
+alerts"); restart the alerter after changing one: `docker compose up -d alerter`.
+
+## What alerts
+
+| Alert key | Severity | When |
+|---|---|---|
+| `component:<id>` | critical if down, warning if degraded | any **Platform** or **Jobs** card on the Ops page that is down or degraded. That covers a service that stopped answering, a daemon whose heartbeat went stale (`OPS_HEARTBEAT_STALE_SECONDS`), a rule daemon that missed readings or fell behind the reading feed, broker drops on the ingest listener, and any job that reports as a card (backups and the restore drill, once they report to Ops). Tools (Charts, Traces) don't alert; a card that is `off` (a job this install doesn't run) doesn't either. |
+| `component:ingest_listener` | warning | the Ingest listener card goes **quiet** (no ingest for `OPS_QUIET_INGEST_SECONDS`) after data has flowed at least once. A fresh install with no data yet doesn't alert. |
+| `restarts:<process>` | critical | a process started `BALER_ALERT_RESTART_COUNT` times (default 3) within `BALER_ALERT_RESTART_WINDOW_SECONDS` (default 15 min): Docker is restarting a crashing container. One-shot jobs (`baler-migrate`, imports) are ignored; see `BALER_ALERT_RESTART_IGNORE`. |
+| `disk:<path>` | critical | free space on a watched path is below `BALER_ALERT_DISK_MIN_FREE_PCT` (default 10%). Compose mounts the Postgres volume read-only at `/pgdata` in the alerter and watches it by default. |
+| `cert:<host:port>` | warning, critical under 3 days | a TLS certificate in `BALER_ALERT_CERT_HOSTS` expires within `BALER_ALERT_CERT_DAYS` (default 14), or can't be verified at all. |
+| `gateway:5xx` | warning | the gateway answered `BALER_ALERT_GATEWAY_5XX` (default 20) or more requests with a 5xx in the last `BALER_ALERT_GATEWAY_WINDOW_SECONDS` (default 15 min). This reads the same log as post-deploy verification's gateway-errors check, so a bad deploy pages someone even between verifications. |
+
+When Postgres itself is down the alerter still alerts (the Historian card is down): it keeps its
+state in memory and writes it to the `alert_state` table whenever the database answers.
+
+## Once when it starts, once when it clears
+
+Each alert has a key (above). It must hold for `BALER_ALERT_FOR_SECONDS` (default 120) before it
+fires, so a container restarting during a deploy doesn't page anyone. Then:
+
+- one **firing** notice;
+- a **reminder** every `BALER_ALERT_REPEAT_SECONDS` (default 4 h; `0` turns reminders off) while it
+  lasts;
+- one **resolved** notice once it has been gone for `BALER_ALERT_CLEAR_SECONDS` (default 120). If it
+  comes back within that time, it is the same incident and nothing new is sent.
+
+A restarted alerter reads its open alerts back from `alert_state`, so it neither re-sends them nor
+forgets their clear. The Ops page lists what is currently open under **Alerts sent** (admins and
+anyone else who can see the whole install).
+
+## Channels
+
+**Webhook.** `BALER_ALERT_WEBHOOK_URL` gets a JSON `POST` per notice, signed like
+[fault webhooks](/webhooks) (`X-Baler-Signature: sha256=<HMAC of the body with
+BALER_ALERT_WEBHOOK_SECRET>`) and held to the same rules: `https` only, and the host must resolve to a
+public address, checked again on every attempt (`webhooks.validate_url`). For a receiver on your
+own network, `BALER_ALLOW_PRIVATE_WEBHOOKS=1` relaxes that for every webhook on the install.
+
+```json
+{
+  "source": "baler", "instance": "nash-srv", "event": "firing",
+  "key": "component:data_api", "severity": "critical",
+  "title": "Data API down", "detail": "HTTP 502",
+  "opened_at": "2026-11-09T12:01:00+00:00", "at": "2026-11-09T12:01:00+00:00",
+  "text": "[nash-srv] FIRING: Data API down - HTTP 502"
+}
+```
+
+`event` is `firing`, `reminder`, `resolved` or `test`. `text` is a one-line summary, which chat tools
+that accept a `text` field show as-is.
+
+**Email.** Set `BALER_ALERT_EMAIL_TO` (comma-separated) and the install's outbound mail settings,
+`BALER_SMTP_HOST`, `BALER_SMTP_FROM` and, as your provider needs, `BALER_SMTP_PORT`,
+`BALER_SMTP_TLS` (`starttls`, `ssl` or `none`), `BALER_SMTP_USER` and `BALER_SMTP_PASSWORD`.
+
+To check delivery end to end:
+
+```bash
+docker compose run --rm alerter python -m baler.alerts --test
+```
+
+It sends one `test` notice to every configured channel and exits non-zero if any failed.
+
+**Failures.** Each channel has its own outbox. A delivery that fails is logged (`docker compose logs
+alerter`) and retried on later cycles with backoff (30 s, doubling, at most 30 min), for up to 24
+hours. A failing channel never delays the other channel, the next evaluation, the dead-man ping or
+`/ops/status`, which is served by a different process.
+
+## Dead-man's switch
+
+The alerter can only alert while it, Docker and the host are running. For everything else, point
+`BALER_DEADMAN_URL` at an outside heartbeat monitor (any service that expects a periodic request and
+alerts when it stops). After every cycle that completed, meaning status collected and the database
+reachable, the alerter sends a `GET` to that URL, at most every `BALER_DEADMAN_INTERVAL_SECONDS`
+(default 60). Set the monitor's grace period to a few minutes.
+
+The pings stop when the host, Docker, the alerter or Postgres stops, and the outside monitor alerts.
+The URL goes through the same `https` and public-address check as webhooks. It is off unless set.
+
+## Unhandled exceptions
+
+Every Baler process counts its own starts and unhandled exceptions (any thread, and any API request
+that fails with one) in the `service_runtime` table. Ops shows the counts under **Process errors**,
+and `/ops/status` returns them as `processes`. Set `BALER_ERROR_TRACKING_URL` to also post each
+exception as signed JSON to an error-tracking endpoint: service, exception type, message (cut to 500
+characters) and the last frames' file and line. Local variables and request bodies are never sent.
+
+## Hooks for other modules
+
+A module that has its own failure signal can add conditions without touching the evaluator:
+
+```python
+from baler import alerts
+
+alerts.register_source("myjob", lambda now: [alerts.Condition("myjob:late", alerts.WARNING, "My job is late")])
+```
+
+If a source raises, the error is logged and that cycle skips it. Its open alerts neither fire again
+nor clear. A job that already reports as an Ops card needs nothing: the `component:` rule covers it.

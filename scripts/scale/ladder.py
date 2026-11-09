@@ -47,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common
 import evidence
 import limiter
+import synthetic
 
 DEFAULT_STEPS = [10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000]
 SMALL_HOST_STEPS = [1_000, 2_500, 5_000]  # prepended when the host has few CPUs
@@ -95,6 +96,8 @@ def cpu_caps(nproc: int, env: dict[str, str]) -> dict[str, str]:
 def stack_env() -> dict[str, str]:
     env = dict(os.environ)
     env.update(cpu_caps(os.cpu_count() or 1, common.read_env()))
+    # the synthetic load's webhook receiver is on the host (#273); scale stack only
+    env.setdefault("BALER_ALLOW_PRIVATE_WEBHOOKS", "1")
     return env
 
 
@@ -615,10 +618,18 @@ class LiveSafety:
     """Watches the live install sharing this host: its gateway's latency on
     a cheap read-only, unauthenticated GET, and the host load. Trips when
     either degrades well past its pre-run baseline - the run then stops for
-    live-safety, which is never reported as a Baler ceiling."""
+    live-safety, which is never reported as a Baler ceiling.
 
-    def __init__(self, url: str | None, load_factor: float, latency_factor: float, enabled: bool = True):
+    "Degrades" means for three checks in a row, or, with `sustain_s`, for
+    that many seconds without a good check in between (the soak's 5 min:
+    its checks are a sample apart, and a 6 h soak shouldn't stop for one
+    slow minute). The ladder and the soak share this one implementation."""
+
+    def __init__(self, url: str | None, load_factor: float, latency_factor: float, enabled: bool = True,
+                 sustain_s: float | None = None, clock=time.monotonic):
         self.enabled = enabled
+        self.sustain_s, self.clock = sustain_s, clock
+        self.bad_since: float | None = None
         self.url = url if enabled else None
         self.nproc = os.cpu_count() or 1
         self.load_factor, self.latency_factor = load_factor, latency_factor
@@ -656,13 +667,44 @@ class LiveSafety:
             lat = self._probe() or 0.0
             sample["live_latency_s"] = round(lat, 3)
             bad = bad or lat > max(self.baseline_latency * self.latency_factor, self.baseline_latency + 0.5)
-        self.strikes = self.strikes + 1 if bad else 0
-        return self.strikes >= 3, sample
+        return self.judge(bad), sample
+
+    def judge(self, bad: bool) -> bool:
+        """One check's verdict into the trip decision (pure but for the clock)."""
+        now = self.clock()
+        if not bad:
+            self.strikes, self.bad_since = 0, None
+            return False
+        self.strikes += 1
+        if self.bad_since is None:
+            self.bad_since = now
+        if self.sustain_s is not None:
+            return now - self.bad_since >= self.sustain_s
+        return self.strikes >= 3
+
+    def bad_for_s(self) -> float:
+        return round(self.clock() - self.bad_since, 1) if self.bad_since is not None else 0.0
 
     def describe(self) -> dict:
         return {"enabled": self.enabled, "live_url": self.url, "baseline_latency_s": self.baseline_latency,
                 "baseline_load_per_cpu": round(self.baseline_load, 2), "load_factor": self.load_factor,
-                "latency_factor": self.latency_factor, "note": self.note}
+                "latency_factor": self.latency_factor, "sustain_s": self.sustain_s, "note": self.note}
+
+
+def add_live_args(p, sustain_default: float | None) -> None:
+    """The live-safety options, for `run` and `soak` alike."""
+    p.add_argument("--live-url", default="http://127.0.0.1:8080/ui/", help="the live gateway, probed read-only for live-safety")
+    p.add_argument("--no-live-check", action="store_true", help="no live install on this host: no live latency or host-load watch")
+    p.add_argument("--live-load-factor", type=float, default=1.5)
+    p.add_argument("--live-latency-factor", type=float, default=3.0)
+    p.add_argument("--live-sustain", type=float, default=sustain_default,
+                   help="stop once live has been degraded this many seconds without a good check"
+                        + (" (default: three checks in a row)" if sustain_default is None else ""))
+
+
+def live_safety(args) -> LiveSafety:
+    return LiveSafety(args.live_url, args.live_load_factor, args.live_latency_factor, enabled=not args.no_live_check,
+                      sustain_s=args.live_sustain)
 
 
 # ----------------------------------------------------------------- generator
@@ -674,7 +716,8 @@ def start_loadgen(ep: Endpoints, args, points: int, phase: str, stats_file: Path
            "--password", ep.gen_password, "--tags-from", str(tags_from), "--tags-rate", str(args.tags_rate),
            "--points-per-equip", str(args.points_per_equip), "--equips-per-site", str(args.equips_per_site),
            "--pattern", args.pattern, "--stats-file", str(stats_file), "--duration", str(duration),
-           "--envelope", getattr(args, "envelope", "point") if phase == "readings" else "point"]
+           "--envelope", getattr(args, "envelope", "point") if phase == "readings" else "point",
+           "--fault-share", str(getattr(args, "fault_share", 0) or 0)]
     return subprocess.Popen(cmd, cwd=common.REPO)
 
 
@@ -804,6 +847,7 @@ def evaluate(step: dict) -> tuple[str, list[str]]:
                            "retention behind)")
         elif (feed.get("lag_s_last") or 0) > MAX_P95_LAG_S:
             reasons.append(f"{svc} is {feed['lag_s_last']} s behind on the reading feed at the end of the soak")
+    reasons.extend(synthetic.reasons(step))
     lag = step.get("lag", {})
     if lag:
         if lag.get("lost"):
@@ -840,11 +884,19 @@ def evaluate(step: dict) -> tuple[str, list[str]]:
 
 # ----------------------------------------------------------------- one step
 
-def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety: LiveSafety, outdir: Path) -> dict:
+def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety: LiveSafety, outdir: Path,
+             syn: dict | None = None) -> dict:
+    # A step's size is total points, synthetics included (#273); from here
+    # on `points` is the real ones, which the generator publishes.
+    plan = synthetic.plan_for(args)
+    total, points, prev = points, plan.real_points(points), plan.real_points(prev) if prev else 0
     shape = common.Shape(points, args.points_per_equip, args.equips_per_site)
-    step: dict = {"points": points, "offered_target_rps": points / args.interval, "sites": shape.sites,
+    step: dict = {"points": total, "real_points": points, "synthetic_points": plan.points(total)["synthetic"],
+                  "profile": args.profile, "interval_s": args.interval,
+                  "offered_target_rps": points / args.interval, "sites": shape.sites,
                   "equips": shape.equips, "started": datetime.now(timezone.utc).isoformat()}
-    print(f"\n=== step {points:,} points ({shape.sites} sites, {shape.equips} equips) ===", flush=True)
+    print(f"\n=== step {total:,} points ({points:,} real, {step['synthetic_points']:,} synthetic; "
+          f"{shape.sites} sites, {shape.equips} equips; {args.profile}) ===", flush=True)
     conn = pg_connect(ep)
     states0 = container_states()
 
@@ -878,12 +930,18 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
     samples: list[dict] = []
     ev = None
     try:
+        eng_start = synthetic.engines(conn)
         time.sleep(args.warmup)
+        if plan.derivations:
+            # the first passes over a step's new equips write their outputs'
+            # lineage to the graph: a one-off burst, recorded, not soaked (#273)
+            step["synthetic_settle"] = synthetic.settle(lambda: synthetic.engines(conn), eng_start, args.interval)
         ev = start_evidence(ep, sysmon, args)
         soak_start = time.time()
         w0 = chunk_writes(conn)
         sys0 = sysmon.snapshot()
         feed0 = feed_status(conn)
+        eng0, hooks0 = synthetic.engines(conn), syn["sink"].snapshot() if syn and syn.get("sink") else None
         lst0 = listener_status(conn)
         storm = start_tags_storm(ep, args, points, outdir) if args.tags_storm else None
         while time.time() - soak_start < args.soak:
@@ -900,6 +958,7 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
                 sample["docker"] = docker_stats()
                 sample["docker_stats_s"] = round(time.perf_counter() - t1, 3)  # its cost, for the overhead record
             sample.update(lag=canary.stats(soak_start), feed=feed_status(conn), listener=listener_status(conn))
+            sample["synthetic"] = synthetic.engines(conn)  # tick and Cur-mode timings (#273)
             t1 = time.perf_counter()
             conn.execute("SELECT 1")
             sample["pg_roundtrip_s"] = round(time.perf_counter() - t1, 4)
@@ -926,6 +985,7 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
         w1 = chunk_writes(conn)
         sys1 = sysmon.snapshot()
         feed1 = feed_status(conn)
+        eng1, hooks1 = synthetic.engines(conn), syn["sink"].snapshot() if syn and syn.get("sink") else None
         lst1 = listener_status(conn)
         if storm is not None:
             step["tags_storm"] = finish_tags_storm(storm, ep, points, args.tags_storm, canary)
@@ -1004,6 +1064,12 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
                          "messages_per_s": round(offered_rps * st["messages"] / st["sent"], 1)
                          if st.get("messages") and st.get("sent") else None}
     step["lag"] = canary.stats(soak_start)
+    if syn is not None:
+        hooks = hooks1 and {k: v - (hooks0 or {}).get(k, 0) for k, v in hooks1.items()}
+        step["synthetic"] = synthetic.summarize(
+            plan, total, samples, eng0, eng1, soak_end - soak_start, synthetic.fault_counts(conn, soak_start, soak_end),
+            hooks, synthetic.chain_lag(conn, syn["derivations"], synthetic.sample_equips(shape), soak_start, soak_end),
+            step["lag"])
     step["broker"] = sys1
     step["db"] = db_metrics(conn)
     if step["db"].get("bytes_per_row"):
@@ -1025,6 +1091,21 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
     step["limiter"] = limiter.verdict(step)
     conn.close()
     return step
+
+
+def start_synthetic(ep: Endpoints, args) -> dict:
+    """The profile's derivations and rules (#273; none for stress-5s, and a
+    run with another N removes the extra), and with a fault share a webhook
+    receiver for its faults' transitions."""
+    plan = synthetic.plan_for(args)
+    s = session(ep)
+    syn: dict = synthetic.ensure(ep.gateway, s, plan)
+    if plan.fault_share:
+        syn["sink"] = synthetic.WebhookSink(f"{common.PROJECT}_default")
+        syn["sink"].register(ep.gateway, s)
+        print(f"webhook receiver {syn['sink'].url}", flush=True)
+    print(f"profile {plan.profile}: {plan.describe()}", flush=True)
+    return syn
 
 
 def summarize_docker(samples: list[dict]) -> dict:
@@ -1068,16 +1149,17 @@ def cmd_run(args) -> None:
     config = guard()
     ep = cmd_up(args) if not args.no_up else Endpoints(config)
     ensure_rules(ep)
+    syn = start_synthetic(ep, args)
     budgets = json.loads(Path(args.budgets).read_text())
     nproc = os.cpu_count() or 1
     steps = [parse_count(s) for s in args.steps.split(",")] if args.steps else default_steps(nproc)
     existing = graph_counts(ep)["scale_points"]
-    if existing > steps[0] and not args.reuse:
+    if existing > synthetic.plan_for(args).real_points(steps[0]) and not args.reuse:
         # Reads scale with the points in the graph, not with the step's load:
         # a 1k step on a graph left with 10k points times 10k-point reads.
         raise SystemExit(f"the stack already has {existing:,} scale points, more than the first step ({steps[0]:,}): "
                          "`ladder.py down` then `up` for a clean ladder, or --reuse to measure on top of them")
-    safety = LiveSafety(args.live_url, args.live_load_factor, args.live_latency_factor, enabled=not args.no_live_check)
+    safety = live_safety(args)
     result = run_header(ep, args)
     result.update(steps=[], live_safety=safety.describe())
     outdir = common.RESULTS / result["run_id"]
@@ -1086,7 +1168,7 @@ def cmd_run(args) -> None:
         print(f"note: durability not end-to-end on ({result['durability']}); results labelled not comparable", flush=True)
     prev = 0
     for points in steps:
-        step = run_step(ep, args, points, prev, budgets, safety, outdir)
+        step = run_step(ep, args, points, prev, budgets, safety, outdir, syn)
         result["steps"].append(step)
         path = write_result(result)
         print(f"step {points:,}: {step['status']} {step.get('reasons')}\n"
@@ -1220,6 +1302,10 @@ def cmd_table(args) -> None:
                   f"{s.get('lag', {}).get('p95_s', '-')} s | {med('read?filter=point')} | "
                   f"{med('readAll(equip) hisRead(today)')} | {med('Cx report, 500-point project')} | "
                   f"{(s.get('reasons') or ['-'])[0]} | {limiter.short(s.get('limiter')).replace('|', '/')} |")
+    syn = synthetic.table([json.loads(Path(path).read_text()) for path in args.files])
+    if syn:
+        print("\nSynthetic load (#273):\n")
+        print("\n".join(syn))
 
 
 def main(argv=None) -> None:
@@ -1239,7 +1325,7 @@ def main(argv=None) -> None:
     p.add_argument("files", nargs="+")
     p.set_defaults(func=cmd_table)
     def generator_args(p):
-        p.add_argument("--interval", type=float, default=5.0)
+        p.add_argument("--interval", type=float, default=None, help="seconds between readings (default: the profile's)")
         p.add_argument("--procs", type=int, default=max(1, (os.cpu_count() or 2) // 2), help="generator processes")
         p.add_argument("--tags-rate", type=float, default=2000.0)
         p.add_argument("--points-per-equip", type=int, default=10)
@@ -1248,7 +1334,8 @@ def main(argv=None) -> None:
         p.add_argument("--envelope", choices=["point", "batch"], default="point",
                        help="readings per point, or Windrow's batched envelope: one message per equip per "
                             "interval (Baler#234)")
-        p.add_argument("--warmup", type=float, default=60.0)
+        p.add_argument("--warmup", type=float, default=None, help="seconds before measuring (default: the profile's)")
+        synthetic.add_args(p)  # --profile, --synthetic-per-equip, --synthetic-mix, --fault-share (#273)
 
     for name, func in (("run", cmd_run), ("crash", cmd_crash)):
         p = sub.add_parser(name)
@@ -1259,7 +1346,7 @@ def main(argv=None) -> None:
     soak.add_parser(sub, generator_args)
     p = sub.choices["run"]
     p.add_argument("--steps", help="comma list, e.g. 10k,25k,50k (default: 10k..1M, from 1k on hosts with < 4 CPUs)")
-    p.add_argument("--soak", type=float, default=900.0, help="seconds per step (R2: at least 900)")
+    p.add_argument("--soak", type=float, default=None, help="seconds per step (R2: at least 900; default: the profile's)")
     p.add_argument("--sample-every", type=float, default=15.0)
     p.add_argument("--graph-timeout", type=float, default=3600.0, help="seconds to wait for a step's tags to reach the graph")
     p.add_argument("--abort-lag", type=float, default=300.0, help="stop a soak early once lag passes this")
@@ -1275,10 +1362,7 @@ def main(argv=None) -> None:
     p.add_argument("--no-up", action="store_true", help="the stack is already up")
     p.add_argument("--no-build", action="store_true", help="up without rebuilding the images")
     p.add_argument("--reuse", action="store_true", help="allow a stack that already has more scale points than the first step")
-    p.add_argument("--live-url", default="http://127.0.0.1:8080/ui/", help="the live gateway, probed read-only for live-safety")
-    p.add_argument("--no-live-check", action="store_true", help="no live install on this host: no live latency or host-load watch")
-    p.add_argument("--live-load-factor", type=float, default=1.5)
-    p.add_argument("--live-latency-factor", type=float, default=3.0)
+    add_live_args(p, sustain_default=None)
     p = sub.choices["crash"]
     p.add_argument("--points", type=int, default=10_000)
     p.add_argument("--kill", default="mqtt_listener,listener_worker,postgres",
@@ -1287,6 +1371,7 @@ def main(argv=None) -> None:
     p.add_argument("--kill-worker", default="worker-0", help="which worker listener_worker kills")
     p.add_argument("--down-for", type=float, default=10.0, help="seconds a killed service stays down")
     args = ap.parse_args(argv)
+    synthetic.apply_profile(args)
     args.func(args)
 
 

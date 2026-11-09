@@ -106,6 +106,13 @@ def test_building_cards_judge_faults_and_disabled_targets():
     assert cards["last_ingest"]["state"] == "ok"
     assert cards["points_last_hour"]["state"] == "ok"
     assert all(c["layer"] == "building" for c in cards.values())
+    assert "mfa_unsealed" not in cards
+
+
+def test_building_cards_flag_unsealed_mfa_secrets():
+    cards = {c["id"]: c for c in ops_status.building_cards({"mfa_unsealed": 2})}
+    assert cards["mfa_unsealed"]["state"] == "degraded"
+    assert "2 authenticator secret(s)" in cards["mfa_unsealed"]["detail"]
 
 
 @patch("baler.ops_status._building_signals")
@@ -223,7 +230,8 @@ def test_collect_status_answers_from_the_background_round(mock_building):
     with patch("baler.ops_status._probes", cache), patch("baler.ops_status._probe_one", side_effect=_fake_probe) as probe:
         doc = ops_status.collect_status()
     # only the inferred (no I/O) components were judged per request
-    assert {c[0][0]["id"] for c in probe.call_args_list} == {"ingest_listener", "fault_detector", "derivation_engine"}
+    assert {c[0][0]["id"] for c in probe.call_args_list} == {"ingest_listener", "fault_detector", "derivation_engine",
+                                                             "backups", "restore_drill"}
     assert {c["id"] for c in doc["platform"]} >= {"historian", "data_api"}
 
 
