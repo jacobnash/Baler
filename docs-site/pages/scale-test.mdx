@@ -434,9 +434,22 @@ generator at `--points` for `--duration` seconds (default 6 h) and records:
 | | the oldest uncompressed chunk's age past its end, and the **backlog** (chunks old enough to compress that aren't yet) | `timescaledb_information.chunks` |
 | | each compression run: duration, chunks, rows (the chunks' inserts while hot), **rows/s** | `job_stats`, `pg_stat_user_tables` |
 | | whether a compression run is in progress (polled every 2 s) | `pg_stat_activity` |
-| | the 5m/1h aggregates' watermark age; canary lag; restarts | catalog, canary, `docker inspect` |
+| | the 5m/1h aggregates' watermark age; canary lag, cumulative (`lag`) and **for this sample's window** (`lag_window`: p50/p95/max of the canaries stored in it, plus how many are still pending and the oldest one's age); restarts | catalog, canary, `docker inspect` |
+| | **broker drops** (`broker`: total, since the first sample, since the previous one) | mqtt_listener's supervisor heartbeat, `broker_dropped_total` ([#272](https://github.com/jacobnash/Baler/pull/272)) |
+| | `detector`: fault_detector's last His sweep time and stale candidates, last quality sweep time and rows; `pg`: the newest chunk's heap and index bytes, cumulative `blks_read`/`blks_hit`, autovacuums running on chunks, the longest active statement | fault_detector heartbeat, `chunks_detailed_size`, `pg_stat_database`, `pg_stat_progress_vacuum`, `pg_stat_activity` |
 | `--probe-every` (600 s) | every read probe in `budgets.json` plus its `soak_probes`: history over the last hour and across the hot/compressed boundary, `hisRead(pastWeek)` for 100 and 1,000 points. Rounds that overlapped a compression run are marked | gateway |
-| `--late-every` (1800 s) | late data into the newest compressed chunk, over MQTT at the soak's own rate: every point's reading there **replayed** (same ts, new value: a spool or retained replay) and a new reading **backfilled** 1.23 s after it (Windrow's trend backfill). Then each must be stored exactly once, with the new value | generator account |
+| `--late-every` (1800 s) | late data into the newest compressed chunk, over MQTT: every point's reading there **replayed** (same ts, new value: a spool or retained replay) and a new reading **backfilled** 1.23 s after it (Windrow's trend backfill). Then each must be stored exactly once, with the new value. Paced: `--late-rate` messages/s (default a tenth of the soak's rate, at least 200/s) and never more than `--late-window` (500) awaiting a PUBACK; the oldest gets `--late-ack-timeout` (60 s). Each entry records the lag just before and while it ran | generator account |
+
+**A failed round doesn't end the soak.** A probe or late-write round that raises (no PUBACK in
+time, a dropped connection, a login failure) is recorded as `{"t", "error", "harness_error":
+true}` in `probe_rounds`/`late`, the late writer gets a fresh MQTT client, and the soak goes on.
+nash-srv's first 100k soak ended at 3.5 h on exactly that: its late round published 200,000
+messages at the full 20,000/s into one paho client and waited only at the end. paho keeps every
+unacknowledged QoS 1 message under a 16-bit id, so once more than 65,535 were waiting, ids wrapped
+onto messages still outstanding and paho refused them with `ERR_QUEUE_SIZE` (it does that even
+with an unbounded queue), and `wait_for_publish` raised it. Reproduced locally against mosquitto
+with the broker paused for 3 s: 134,465 of 200,000 refused. Paced, the same 200,000 go through
+with at most 500 outstanding.
 
 **Live-safety.** A soak watches the live install sharing the host the way the ladder does, with
 the same code (`ladder.LiveSafety`) and options: `--live-url`, `--live-load-factor`,
@@ -463,13 +476,17 @@ steady phase starts after `compress_after` + 2 chunks + one schedule:
   compressed bytes per row.
 - **Compression keeps up:** no failed run. `compression_margin` reports median compression rows/s
   over ingest rows/s (one background worker).
-- **Ingest:** ≥ 99% stored, no lost canaries, p95 lag under 30 s overall and in the samples taken
-  during compression, no growing backlog, no restarts.
+- **Ingest:** ≥ 99% stored, no lost canaries, no broker drops during the soak, p95 lag under 30 s
+  overall and in each sample window taken during compression (the window's own p95, not the
+  cumulative one, which a single early burst holds up for hours), no growing backlog, no
+  restarts. `summary.lag_window_p95_max` and `lag_windows_over_budget` say when lag was worst.
 - **Reads:** every probe round in budget, and at least one round during a compression run
   (otherwise `inconclusive`).
 - **Aggregates:** the 5-minute aggregate equals the raw fold over a compressed hour; watermarks no
   further behind than their offset plus two schedules (20 min for 5m, 2 h 10 min for 1h).
-- **Late data:** at least one late round, every replay and backfill stored once.
+- **Late data:** at least one late round, every replay and backfill stored once. Rounds that
+  failed in the harness are listed in `summary.late_round_errors` and don't fail the run; if no
+  round completed at all, the verdict is `inconclusive` (late data untested), not `pass`.
 - At least 2 chunk intervals and 2 compression cycles in the steady phase, or the verdict is
   `inconclusive: soak too short`.
 
@@ -1047,6 +1064,44 @@ Earlier local finding, from the same work: a 2,000-point overwrite batch into co
 failed TimescaleDB's 100,000-row decompression cap and would have put mqtt_listener into a
 restart loop; writers now lift that cap per transaction
 ([History compression](/history-compression)).
+
+### Long soak, nash-srv first attempt (#245)
+
+Run `20261109T023841Z` on `b18f19d`: 100k points, 20,000 msg/s, 1-hour chunks, compress after 3
+hours, postgres capped at 6 GB. It stopped at about 3.5 h on the harness's late-write crash above,
+not a Baler fault: 254 M readings acknowledged and stored, 0 canaries lost, 0 restarts. Full
+figures are in [#245](https://github.com/jacobnash/Baler/issues/245). Two open questions, as far
+as the posted figures (no result JSON) settle them:
+
+- **The p95 lag burst at t ≈ 3,700–5,000 s.** No compression run and no late round were in that
+  window: the first chunk old enough to compress (02:00, ending 03:00) became eligible at 06:00,
+  t ≈ 12,000 s (the probe round at 12,093 s was the first during compression), and late rounds
+  only start once a chunk is compressed. What the window does contain is the end of the first
+  *full* chunk: the soak started at about 02:39:45, so 04:00 is t ≈ 4,815 s. The burst covers the
+  last ~19 minutes of the 03:00 chunk and clears a few minutes into the 04:00 one. That chunk
+  ended at 72 M rows and 16 GB with its indexes, against postgres's 6 GB (`history_chunks
+  recommend` already warns a 1-hour chunk is over 25% of it). Every insert goes into the newest
+  chunk's `(point_uri, ts)` index at a point-dependent, effectively random leaf; once that index
+  outgrows what postgres and the page cache inside its cgroup can hold, inserts start to read,
+  and lag climbs until a new, empty chunk starts. The 02:00 chunk the soak began part-way into (21
+  M rows) never got that large, which fits. The cumulative p95 can't show whether the 04:00 and
+  05:00 chunks repeated it (expected at t ≈ 7,300–8,400 s and 10,900–12,000 s, if so); the
+  rerun's `lag_window` per sample and `pg.newest_chunk_index_bytes`/`blks_read` will. If it does
+  repeat, it's the sizing rule biting (more postgres memory, or the narrow row), not the
+  harness, and #233's under-2 s p95 isn't reachable on this box with 1-hour chunks at 6 GB.
+- **His sweeps of 41.8 and 84.6 s against 30 s.** fault_detector's "His sweep took" figure is
+  timed from *after* the inline quality sweep (`t0` is set once `quality.sweep` returns), so it
+  doesn't include quality time, and [#287](https://github.com/jacobnash/Baler/pull/287) moving
+  the quality sweep to its own thread doesn't explain these two lines. What #287 fixes is the
+  separate, larger delay that line never reports: no His cycle starting at all while a quality
+  sweep runs (170 s at 100k in #268, more with a full hour at 20,000 rows/s). The soak's only
+  His rule is `scale-stale`, whose sweep is a `point_registry` scan plus one newest-row probe per
+  stale candidate, per chunk. That is small unless there are candidates, so two isolated slow
+  sweeps point at contention in Postgres at those moments (the cache pressure above, or a
+  compression run past t ≈ 12,000 s) rather than at the sweep's own work; candidates left in
+  `point_registry` by points the soak doesn't publish would make every sweep slow, not two.
+  The rerun samples `detector.his_sweep_s`, `his_stale_candidates` and `quality_sweep_s` with
+  every sample, so each slow sweep can be lined up with lag, chunk boundaries and compression.
 
 ### Disk growth
 
