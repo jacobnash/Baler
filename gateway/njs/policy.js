@@ -143,6 +143,15 @@ const ROUTES = [
   ["POST",   /^\/ops\/documents\/[^/]+\/links$/,          "documents", "operator"],
   ["DELETE", /^\/ops\/documents\/[^/]+\/links\/[^/]+$/,   "documents", "operator"],
 
+  // PM schedules (#199): due work is computed, then exported (CSV, COBie Job).
+  ["GET",    /^\/ops\/pm\/tasks$/,                       "assets", "viewer"],
+  ["POST",   /^\/ops\/pm\/tasks$/,                       "assets", "operator"],
+  ["PATCH",  /^\/ops\/pm\/tasks\/[^/]+$/,                 "assets", "operator"],
+  ["POST",   /^\/ops\/pm\/tasks\/[^/]+\/complete$/,       "assets", "operator"],
+  ["GET",    /^\/ops\/pm\/tasks\/[^/]+\/completions$/,    "assets", "viewer"],
+  ["GET",    /^\/ops\/pm\/due$/,                         "assets", "viewer"],
+  ["GET",    /^\/ops\/pm\/due\/export$/,                  "assets", "viewer"],
+
   // commissioning_api (Baler#37): reads viewer, changes operator,
   // archiving a project admin. The backend also checks the caller's org
   // and sites against the project itself.

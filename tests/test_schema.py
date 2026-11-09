@@ -31,6 +31,7 @@ RELEASED = {
     "v0011_assets.py": "31fb56cbe5e367e6abec1ee21b314acb39a112f3a6b7323238fe1400a53fad7b",
     "v0012_documents.py": "3d9a3d0eaf77e40c41395a6559e6e248b65b1cdbe30a3d28710fea12c6f985dc",
     "v0013_warranties.py": "1a11fb5773b542e255fd2dbb5cef52a3d7350b19c5ada0eedc297c5ad18d9645",
+    "v0014_pm.py": "859b16ea49b65c4b47aea0a499065fe8578dfecc671ef164218d0c0588e35c33",
 }
 
 

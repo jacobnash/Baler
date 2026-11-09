@@ -112,6 +112,31 @@
     </section>
 
     <section>
+      <h2>Preventive maintenance</h2>
+      <p class="hint">What's due, by calendar, by run hours counted from the status point's raw history, or by a
+        condition on a point. Points can be names under the asset's position (e.g. <code>sf-status</code>).
+        Baler isn't a CMMS: export the due work to yours.
+        <a href="/docs/pm-schedules" target="_blank" rel="noopener">Docs</a>.</p>
+      <p><a id="pm-csv" href="#">Download due work (CSV)</a> · <a id="pm-cobie" href="#">COBie Job sheet (CSV)</a></p>
+      <table id="pm-due-table">
+        <thead><tr><th>Status</th><th>Task</th><th>Asset</th><th>Basis</th><th>Since</th><th>Due / measure</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <form id="pm-form" class="inline-form">
+        <input name="title" placeholder="task title" required />
+        <input name="asset_type" placeholder="asset type (fan…)" />
+        <select name="trigger"><option>calendar</option><option value="run_hours">run hours</option><option>condition</option></select>
+        <input name="interval_days" placeholder="days" size="5" inputmode="numeric" />
+        <input name="interval_hours" placeholder="run hours" size="7" inputmode="decimal" />
+        <input name="run_point" placeholder="status point" />
+        <input name="condition_point" placeholder="condition point" />
+        <select name="condition_op"><option>&gt;=</option><option>&gt;</option><option>&lt;=</option><option>&lt;</option></select>
+        <input name="condition_value" placeholder="limit" size="5" inputmode="decimal" />
+        <button type="submit">Add PM task</button>
+      </form>
+    </section>
+
+    <section>
       <h2>Position history</h2>
       <form id="position-form" class="inline-form">
         <input name="uri" placeholder="position URI (urn:equip:…)" size="40" required />
