@@ -762,6 +762,52 @@ $PY scripts/scale/ladder.py run --no-up --steps 100k --tags-storm 100000 --conti
 $PY scripts/scale/ladder.py crash --points 10000
 ```
 
+### Quality sweep (#268): limiter removed, next limiter exposed
+
+**Before:** `quality.sweep` ran inline in fault_detector's His loop and re-judged the last hour of
+every classified point on each pass, so His rules waited for the whole pass and a pass grew with
+the history behind it (nash-srv: 25 s at 25k, 68 s at 50k, 170 s at 100k; a full hour at 20,000
+readings/s projected to about 680 s, past the 300 s interval). **After:** a pass runs on its own
+thread and connection and judges only what is new since a persisted watermark, plus an overlap,
+plus late rows the reading feed shows ([Sample quality](/quality#how-the-sweep-stays-incremental)).
+
+Local runs (dev VM, 4 CPUs shared with other agents' stacks and test runs, so per-row costs are
+noisy; `--soak 900`, mix pattern, 60% of points classified):
+
+| Run | Pass | Rows judged | `sweep_s` | His cycle gap |
+|---|---|---|---|---|
+| 25k, main (load/CPU 2.3–3.6) | 1st / 2nd / 3rd | 0.79M / 1.72M / 2.70M | 10.6 / 26.2 / 50.2 s | inline: 30 s + the pass, up to ~80 s |
+| 25k, #268 (load/CPU 3.4–8, ingest 145–260 s behind) | steady passes | 1.04M / 0.84M / 0.76M / 0.58M … 1.44M | 39.3 / 23.9 / 25.2 / 28.8 … 23.8 s | `gap_s_max` 30.07–30.20 s, 0 cycles over |
+| 50k, #268 (10k/s offered, 4.7k/s stored: generator- and host-bound) | steady passes | 0.83M / 1.31M / 1.06M / 0.90M (+ 300k context) | 19.6 / 26.8 / 17.3 / 6.3 s | `gap_s_max` 30.28–30.32 s, 0 cycles over |
+
+- **Rows per pass follow the ingest rate**, not the hour: about stored rate × classified share ×
+  (interval + overlap). In these runs the listener ran 2–4 minutes behind (the host's other load),
+  so the overlap widened to the measured delay (170–300 s) instead of sending every row down the
+  late path; at a 30 s overlap the same 25k run, without the adaptive overlap, recorded 413k
+  "late" rows in 3 minutes.
+- **A/B on one database at one moment** (end of the 50k soak): main's `sweep` over the last hour
+  read 2.82M rows in 51.2 s (18.2 µs/row); the incremental pass over the last 330 s read 0.68M rows
+  plus 0.30M context rows in 14.9 s (21.8 µs/row, the context probes included). The spike check
+  itself went from 4.0 to 1.3 µs/sample.
+- **Late rows:** three readings published mid-soak at 25k, 10 minutes late, 50 minutes late and on
+  time, out of range: all three flagged `out_of_range` (the first two found by the feed watcher,
+  the third by the window); `quality_late` drained; 0 readings missed by the watcher.
+- fault_detector used 0.03 cores on average at 50k (p90 0.04); its feed lag peaked at 3.1 s.
+
+At 100k points and 20,000 readings/s with 60% classified, a pass is about 12k rows/s × 330 s =
+4M rows, roughly 90 s at the measured 22 µs/row (160 s if ingest runs 5 minutes behind and the
+overlap reaches its cap): inside the 300 s interval, where the hour re-scan was not.
+
+**Next limiter exposed.** No longer the His loop: cycles kept 30.0–30.3 s at 25k and 50k. In
+fault_detector the next wall is the pass's own per-row cost: a pass is
+rate × (interval + overlap) × ~22 µs, so it overruns a 300 s interval at about 40k classified
+rows/s (Python decode and judging on one thread, sharing the GIL with the Cur-mode feed thread),
+and the per-pass `point_meta` SPARQL (1–3.6 s at 50k) grows with the classified points. Both are
+in the heartbeat (`quality.window_s`, `quality.meta_s`) and the limiter's rule 5b names a pass that
+overruns. On this host the step limiter was ingest (generator and listener under shared CPU), not
+fault_detector: its headroom ratios at 50k were His cycle 0.67, quality watermark 0.27, quality
+sweep 0.06.
+
 ### nash-srv
 
 | Run | Host (nproc, model, RAM) | Durable | Points | Status | Offered/s | Stored/s | Stored/s per CPU | p95 lag | read?filter=point | readAll(equip) | Cx report | First failure |
