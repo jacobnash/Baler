@@ -121,7 +121,7 @@
 
       <section id="procedures-section">
         <h2>Test procedures</h2>
-        <p class="hint">Power-on, start-up and functional procedures, judged passively on history from when the equipment was started. Nothing is commanded.</p>
+        <p class="hint">Power-on, start-up and functional procedures. Each step is judged on history from when the equipment was started (passive), by a person (manual), or by an active test (see Active tests), as the run chooses.</p>
         <div class="toolbar">
           <button type="button" id="seed-procedures-btn" data-min-role="operator">Add the standard procedures</button>
           <span id="procedures-status" class="hint"></span>
@@ -134,7 +134,32 @@
           <h3 class="cx-sub" id="test-run-title"></h3>
           <p class="hint" id="test-run-meta"></p>
           <div class="cx-grid-wrap"><table id="test-run-grid" class="cx-grid"></table></div>
+          <div id="manual-entry" class="manual-entry" hidden>
+            <h3 class="cx-sub">Record a manual result</h3>
+            <p class="hint">Saved on this device first and sent when there is a connection: nothing typed is lost if the signal drops. Recorded as you.</p>
+            <form id="manual-form">
+              <label>Equipment <select id="manual-equip"></select></label>
+              <label>Step <select id="manual-step"></select></label>
+              <p class="hint" id="manual-instruction"></p>
+              <fieldset><legend>Result</legend>
+                <label><input type="radio" name="manual-status" value="pass" /> Pass</label>
+                <label><input type="radio" name="manual-status" value="fail" /> Fail</label>
+                <label><input type="radio" name="manual-status" value="not_applicable" /> N/A</label>
+              </fieldset>
+              <label>Note <textarea id="manual-note" rows="3" maxlength="4000"></textarea></label>
+              <label>Witness <input type="text" id="manual-witness" placeholder="name (optional)" /></label>
+              <label>Witness organization <input type="text" id="manual-witness-org" /></label>
+              <label>Photos / files <input type="file" id="manual-files" accept="image/*,application/pdf" capture="environment" multiple /></label>
+              <button type="submit">Save result</button>
+            </form>
+            <p class="hint" id="manual-drafts" role="status"></p>
+          </div>
         </div>
+        <h3 class="cx-sub">Test coverage</h3>
+        <table>
+          <thead><tr><th>Equipment class</th><th>Tested</th><th>By method</th></tr></thead>
+          <tbody id="coverage-body"></tbody>
+        </table>
       </section>
 
       <section id="active-section">
@@ -151,6 +176,75 @@
           <tbody id="active-body"></tbody>
         </table>
         <div id="active-detail" class="hint"></div>
+
+        <h3 class="cx-sub">Fleet runs</h3>
+        <p class="hint">One active test across many equipment in one window - every terminal unit overnight. Each unit is its own active run with every safeguard above; the fleet adds a per-system concurrency limit (a system is the equipment that feeds it), a stagger, and an automatic stop once enough units fail. Confirm by typing the plan's code.</p>
+        <div class="toolbar" data-min-role="admin">
+          <label>Class <input type="text" id="fleet-class" value="Variable_Air_Volume_Box" size="22" /></label>
+          <label>Test <select id="fleet-test"><option value="">command/status</option></select></label>
+          <label>Window <input type="number" id="fleet-hours" min="0.25" max="8" step="0.25" value="8" /> h</label>
+          <label>Per system <input type="number" id="fleet-per-system" min="1" max="50" value="1" /></label>
+          <label>At once <input type="number" id="fleet-max" min="1" max="50" value="10" /></label>
+          <label>Stagger <input type="number" id="fleet-stagger" min="0" max="3600" value="30" /> s</label>
+          <label>Stop after <input type="number" id="fleet-failures" min="1" value="3" /> failures</label>
+          <button type="button" id="fleet-plan-btn">Plan fleet (dry run)</button>
+        </div>
+        <table>
+          <thead><tr><th>Planned</th><th>Test</th><th>Status</th><th>Members</th><th>Failures</th><th></th></tr></thead>
+          <tbody id="fleet-body"></tbody>
+        </table>
+        <div id="fleet-detail" class="hint"></div>
+
+        <h3 class="cx-sub">Scheduled retests</h3>
+        <p class="hint">Repeat a fleet run, e.g. every season. A schedule names its equipment, test, limits and windows; nothing runs until an admin approves exactly that by typing its approval code, and each window still runs only if active tests are switched on for this deployment at the time. Once approved a schedule can only narrow. Revoking it stops it, and any run it has going.</p>
+        <div class="toolbar" data-min-role="admin">
+          <label>From fleet <select id="sched-fleet"></select></label>
+          <label>First window <input type="datetime-local" id="sched-first" /></label>
+          <label>Length <input type="number" id="sched-hours" min="0.25" max="8" step="0.25" value="8" /> h</label>
+          <label>Every <input type="number" id="sched-days" min="1" max="366" value="91" /> days</label>
+          <label>Approval until <input type="date" id="sched-until" /></label>
+          <label>Retest <select id="sched-mode"><option value="all">everything</option><option value="failures">failures only</option></select></label>
+          <button type="button" id="sched-propose-btn">Propose</button>
+        </div>
+        <table>
+          <thead><tr><th>Name</th><th>Status</th><th>Equipment</th><th>Windows</th><th>Next</th><th></th></tr></thead>
+          <tbody id="sched-body"></tbody>
+        </table>
+        <div id="sched-detail" class="hint"></div>
+      </section>
+
+      <section id="writes-section">
+        <h2>Operator writes</h2>
+        <p class="hint" id="writes-status">Command a point or change a schedule from here. Every write records who, why, the priority and when it ends, and is relinquished (or reverted) by itself on time. Priorities 1-7 are reserved for life safety and the controller.</p>
+        <div class="toolbar" data-min-role="operator">
+          <label>Point <select id="write-point"></select></label>
+          <label>Value <input type="number" id="write-value" step="any" required /></label>
+          <label>Priority <select id="write-level"></select></label>
+          <label>For <input type="number" id="write-hold" min="1" max="1440" value="60" /> min</label>
+          <label>Reason <input type="text" id="write-reason" maxlength="500" required placeholder="why (recorded)" /></label>
+          <button type="button" id="write-send-btn">Write</button>
+        </div>
+        <details data-min-role="admin">
+          <summary>Schedule or calendar write (admin)</summary>
+          <div class="toolbar">
+            <label>Site <input type="text" id="sched-site" /></label>
+            <label>Edge node <input type="text" id="sched-instance" /></label>
+            <button type="button" id="sched-load-btn">Load objects</button>
+            <label>Object <select id="sched-object"></select></label>
+          </div>
+          <label>Change (JSON: exceptions, weekly, default or effective_period; dates for a calendar)
+            <textarea id="sched-fields" rows="8" cols="80" spellcheck="false"></textarea></label>
+          <div class="toolbar">
+            <label>Revert after <input type="number" id="sched-revert" min="1" max="744" value="24" /> h</label>
+            <label><input type="checkbox" id="sched-permanent" /> permanent</label>
+            <label>Reason <input type="text" id="sched-reason" maxlength="500" required /></label>
+            <button type="button" id="sched-send-btn">Write schedule</button>
+          </div>
+        </details>
+        <table>
+          <thead><tr><th>When</th><th>Who</th><th>Target</th><th>Value</th><th>Priority</th><th>Until</th><th>Status</th><th>Reason</th><th></th></tr></thead>
+          <tbody id="writes-body"></tbody>
+        </table>
       </section>
 
       <section id="spec-section">
@@ -342,6 +436,7 @@
     </form>
   </dialog>
 
+  <script src="apibase.js"></script>
   <script src="auth.js"></script>
   <script src="chart.js"></script>
   <script src="cx.js"></script>
@@ -349,6 +444,7 @@
   <script src="cx_procedures.js"></script>
   <script src="cx_spec.js"></script>
   <script src="cx_active.js"></script>
+  <script src="cx_writes.js"></script>
   <script src="cx_agent.js"></script>
 </body>
 </html>

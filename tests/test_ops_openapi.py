@@ -103,3 +103,34 @@ def test_get_status_matches_documented_schema(live_server, spec):
     )
     assert body["summary"] == "ok"
     assert body["building"]["needs_first_org"] is True
+
+
+def test_get_metrics_needs_the_gateway_and_serves_prometheus_text(live_server, spec):
+    assert requests.get(f"{live_server}/metrics").status_code == 401
+    assert "/metrics" in spec["paths"]
+
+
+
+def test_get_metrics_through_the_gateway(monkeypatch):
+    from contextlib import contextmanager
+
+    class Pool:
+        @contextmanager
+        def connection(self):
+            yield object()
+
+    monkeypatch.setenv("BALER_GATEWAY_SECRET", GATEWAY_SECRET)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(ts_pool=Pool()))
+    server.daemon_threads = True
+    Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with patch("baler.ops_api.scope_for", return_value=None), \
+             patch("baler.ops_metrics.collect", return_value={"now": __import__("datetime").datetime.now(), "details": {
+                 "mqtt_listener": {"queue": 4}}}):
+            resp = requests.get(f"http://127.0.0.1:{server.server_address[1]}/metrics",
+                                headers={"X-Gateway-Secret": GATEWAY_SECRET})
+    finally:
+        server.shutdown()
+    assert resp.status_code == 200
+    assert resp.headers["Content-Type"].startswith("text/plain; version=0.0.4")
+    assert "baler_listener_queue_depth 4" in resp.text

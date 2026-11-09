@@ -20,6 +20,14 @@ MIGRATIONS_DIR = os.path.dirname(migrations.__file__)
 RELEASED = {
     "v0001_baseline.py": "1d2d0e4ae1765256e289d1faa354932cc3f1b0f6b194935121534a92dc772ae5",
     "v0002_reading_feed.py": "69e91be0315b236e7e6dde2b7b89aeabb041f6b798cacd8617594d47d80b2a79",
+    "v0003_quality_watermark.py": "023829bf0df44304f1c1e376af7a20e73cfd69c4350ccfee665922dcfdb1ce8a",
+    "v0004_alerts.py": "79c2a620550d18df9f2317e0659efb56149a3e47e16428f5a33b077d262dd198",
+    "v0005_password_reset_mfa.py": "7d7381e49a7a79ce7638ea6bc670e41a91cf85637f27a39d446bece891f01312",
+    "v0006_override_tests.py": "e5127763ffc742a03ae61b643b5b6acd347120d5a880b7cd0aedd7e2d5383d28",
+    "v0007_operator_writes.py": "3554c157eb694f14695cd149fa8932fd115e5e13376ca5ab2890ce122f6e611c",
+    "v0008_manual_results.py": "470a4c4b0316239b9af8b795460966213a6937e6c19bc90a72af4dcd9146b587",
+    "v0009_fleet_runs.py": "06f0bd2e6cb0e5bf0d70a51003d91f16ddd76fea6dbbc3251d19b0c7a06fc010",
+    "v0010_active_schedules.py": "3c5e052df21ea923cd47f295317b42a1e923a35d9ef23156dec1956e704cd4d0",
 }
 
 

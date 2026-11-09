@@ -14,6 +14,9 @@ Each run writes a timestamped, gzip'd pair under `backups/` (gitignored).
 `grafana-data` is regenerable dashboard config, out of scope.
 `scripts/restore.py` restores a pair into a fresh stack, and
 `scripts/restore_drill.py` proves that it does (see [Restore drill](#restore-drill)).
+Both report to **Ops** (`/ops/status`, see [In Ops](#in-ops)). An encrypted
+copy in S3-compatible storage off the host is optional and off by default
+(see [Off-site copies](#off-site-copies-optional)).
 
 ```bash
 docker compose up -d postgres oxigraph   # only these two are needed
@@ -78,6 +81,26 @@ tables, and Oxigraph's bulk load adds to whatever graph is there.
 
 4. Start everything: `docker compose up -d`.
 
+### From the off-site copy
+
+If the host is gone, so are its local backups. With [off-site copies](#off-site-copies-optional)
+configured, step 3 fetches the set from the bucket instead: the newest
+complete one, or one by its timestamp. It checks each object against the
+set's manifest, decrypts it into a private temporary directory, restores it
+and removes the directory:
+
+```bash
+pip install -e '.[offsite]'
+# BALER_BACKUP_S3_* as on the old host, and the private key from your recovery copy:
+export BALER_BACKUP_AGE_IDENTITY_FILE=/root/backup-key.txt
+python scripts/restore.py --from-offsite                      # the newest set
+python scripts/restore.py --from-offsite 20261108T033000Z     # or a given one
+```
+
+`--download-dir` puts the temporary directory somewhere with room for the set
+twice over (it holds the ciphertext and the plaintext while decrypting).
+`--only postgres` or `--only oxigraph` restores one half.
+
 ### TimescaleDB
 
 A dump of a TimescaleDB database restores only between
@@ -127,7 +150,16 @@ restores a backup into a **scratch stack** and checks it:
 pip install -e .                        # the drill imports baler for its checks
 python scripts/restore_drill.py         # the newest pair in backups/
 python scripts/restore_drill.py --postgres-file backups/postgres-<ts>.sql.gz --oxigraph-file backups/oxigraph-<ts>.ttl.gz
+python scripts/restore_drill.py --source offsite   # the newest off-site set (needs the private key)
 ```
+
+Which backup: `--source local` restores the newest pair in `--backup-dir`.
+`--source offsite` fetches and decrypts the newest complete off-site set
+(`--offsite-stamp` for another), as `restore.py --from-offsite` does.
+`--source auto`, the default, takes the newer of the two when an off-site target
+*and* `BALER_BACKUP_AGE_IDENTITY_FILE` are configured, and local otherwise. So
+with no off-site target, which is the default, the drill restores the newest
+local backup and needs no other configuration.
 
 The scratch stack is postgres and oxigraph from `docker-compose.yml` with
 `scripts/restore-drill.compose.yml` on top, under their own compose project
@@ -150,13 +182,33 @@ the checks. The drill restores with the real `restore.py`, then checks:
 | write into a compressed chunk | an idempotent re-insert into the newest compressed chunk, through the ingest path's upsert, leaves the same rows |
 | Cx report renders | the newest finished commissioning run's report renders from the restored database and graph |
 | graph triples | the restored graph has as many triples as the backup file |
+| schema migrations | `baler_schema_migrations` came back as versions 1..N with no gaps (Baler#264). The check reports which migrations this code's `migrate` would still apply, read-only |
+| point_history chunk interval | the hypertable's chunk interval equals the dump's (`BALER_HISTORY_CHUNK_INTERVAL`, Baler#270), so chunks made after the restore keep the old size |
 
 It prints each check, `restore drill PASSED` or `FAILED`, and exits non-zero on
-any failure. `--report file.json` also writes the report as JSON. The scratch
-stack is removed afterwards, along with its volumes. Only volumes Docker labels
-as the scratch project's are removed, and the drill refuses to use the live
-project's name. `--keep` leaves the stack up to look around (it prints the DSN),
+any failure. `--report file.json` also writes the report as JSON. The result
+also goes to the **Restore drill** card in Ops, and to
+`BALER_BACKUP_ALERT_COMMAND` when it fails (see [In Ops](#in-ops)).
+`--no-status` skips both. The scratch stack is removed afterwards, along with
+its volumes. `--keep` leaves the stack up to look around (it prints the DSN),
 and `--down --project <name>` removes it later.
+
+**The drill only ever stops or removes its own scratch stack.** An earlier
+version once removed a volume that wasn't scratch, so the drill now refuses
+before it starts or stops anything:
+
+- the live project's name (`COMPOSE_PROJECT_NAME`, or the checkout's directory
+  name), `baler`, `timberdoodle` and the live `BALER_VOLUME_PREFIX`;
+- any project that already has a container or volume, under its compose label
+  or named with its volume prefix, that lacks the `baler.scratch=restore-drill`
+  label. `scripts/restore-drill.compose.yml` puts that label on everything it
+  creates. So `--project` pointed at a real stack, whatever it's called, is
+  refused, with a list of what the drill found.
+
+Teardown removes only volumes that carry both the project's compose label and
+the scratch label. Scratch volumes left by a drill from before this change
+have no label, so the drill refuses them too. Remove those by hand once you've
+checked what they are.
 
 `docker-compose.yml` requires `MQTT_PASSWORD` and the gateway secrets for
 services the drill never starts. When they aren't set, the drill sets
@@ -181,11 +233,20 @@ the restored stack with the source:
 - the policies, the extension version, the graph and the Cx report HTML.
 
 It needs Docker but not the main stack. Its two scratch projects are `restore`
-and `restore-drill`:
+and `restore-drill`. It runs with no off-site target. The drill restores
+the local backup and reports to the source stack's `service_heartbeats`,
+which the test reads back through `ops_status`:
 
 ```bash
 pytest tests/test_restore_drill.py -m integration
 ```
+
+`tests/test_restore_drill_offsite.py` does the off-site half against a local
+S3-compatible server (see [Testing locally](#testing-locally)). It backs up
+with the upload on, checks the bucket holds only ciphertext, deletes every
+local backup, and drills from the bucket alone into an empty scratch stack. It
+also checks that the wrong key fails the drill, and that a failed upload keeps
+the local backup and shows in Ops.
 
 ### On a schedule, on your host
 
@@ -201,8 +262,14 @@ sudo systemctl enable --now baler-restore-drill.timer
 systemctl status baler-restore-drill     # last result; journalctl -u baler-restore-drill for the report
 ```
 
-It restores the newest backup in `backups/`, writes
-`backups/restore-drill-latest.json` and fails the unit when a check fails.
+It restores the newest backup (`--source auto`: local unless an off-site
+target and key are configured), writes `backups/restore-drill-latest.json`,
+reports to the Restore drill card in Ops, and fails the unit when a check
+fails. The timer runs on Sundays at 05:00, a couple of hours after the nightly
+backup. Edit `OnCalendar=` to change that. The Ops card turns degraded when the
+newest passing drill is older than `OPS_DRILL_STALE_DAYS` (8), so a timer that
+stopped firing shows up too. Point `--backup-dir` at backup.py's `--out-dir` if
+you moved the backups (see [nash-srv](#a-checkout-managed-by-a-ci-runner-nash-srv)).
 
 ## Automating backups
 
@@ -221,6 +288,10 @@ sudo cp scripts/systemd/baler-backup.{service,timer} /etc/systemd/system/
 sudo $EDITOR /etc/systemd/system/baler-backup.service   # set WorkingDirectory=
 sudo systemctl enable --now baler-backup.timer
 ```
+
+Optional settings (retention, the alert command, the off-site copy) go in
+`/etc/baler/backup.env`, which both units read if it exists. See
+[Off-site copies](#off-site-copies-optional).
 
 `baler-backup.timer` runs daily by default (`OnCalendar=daily`,
 edit that line directly to change the schedule, see `man systemd.time`)
@@ -268,10 +339,264 @@ names match. Then run `restore.py` with the same `COMPOSE_PROJECT_NAME`,
 
 What nash-srv runs today: a pinned, root-owned copy of `backup.py` makes the
 nightly backup at 03:30 UTC into `/var/backups/baler`. The weekly restore drill
-stays off until the host has finished its post-reboot soak.
+stays off until the host has finished its post-reboot soak. There's no off-site
+copy.
 
-### Either way
+A copy of `backup.py` outside a checkout still backs up exactly as before, but
+it can't import `baler`. So it doesn't report to Ops (the Backups card stays
+"off") and it can't make an off-site copy. To change any of this on nash-srv,
+in this order:
 
-Backups accumulate indefinitely: there's no retention or pruning yet. Watch
-disk usage, or clean the directory out yourself if it becomes a problem. A
-drill on the newest backup is what tells you that the ones you keep restore.
+1. **Report to Ops.** Run the backup from a checkout that isn't the runner's
+   workspace, e.g. a root-owned `/opt/baler` at the deployed commit, with a venv
+   (`python3 -m venv /opt/baler/.venv && /opt/baler/.venv/bin/pip install -e /opt/baler`).
+   Keep the live project's environment and `/var/backups/baler`:
+
+   ```ini
+   # /etc/systemd/system/baler-backup.service (excerpt)
+   WorkingDirectory=/opt/baler
+   Environment=COMPOSE_PROJECT_NAME=baler COMPOSE_ENV_FILES=<the deploy's env file>
+   Environment=COMPOSE_FILE=<the deploy's compose file(s), ':'-separated>
+   Environment=PYTHONPYCACHEPREFIX=/var/cache/baler/pycache
+   EnvironmentFile=-/etc/baler/backup.env
+   ExecStart=/opt/baler/.venv/bin/python scripts/backup.py --out-dir /var/backups/baler --prune
+   ```
+
+   Keep the 03:30 UTC schedule (`OnCalendar=*-*-* 03:30:00 UTC`). `--prune`
+   starts local retention (7 daily, 4 weekly). Drop it to keep everything as
+   today.
+
+2. **The weekly drill, once the soak is over.** No off-site target is needed.
+   It restores the newest backup in `/var/backups/baler` into the
+   `baler-restore-drill` scratch project beside the live stack:
+
+   ```ini
+   # /etc/systemd/system/baler-restore-drill.service (excerpt)
+   WorkingDirectory=/opt/baler
+   Environment=COMPOSE_PROJECT_NAME=baler COMPOSE_ENV_FILES=<the deploy's env file>
+   Environment=PYTHONPYCACHEPREFIX=/var/cache/baler/pycache
+   ExecStart=/opt/baler/.venv/bin/python scripts/restore_drill.py --backup-dir /var/backups/baler \
+       --report /var/backups/baler/restore-drill-latest.json
+   ```
+
+   Then `sudo systemctl enable --now baler-restore-drill.timer`. Its default,
+   Sunday 05:00, runs after that night's 03:30 backup. `COMPOSE_PROJECT_NAME=baler`
+   tells the drill which project is live, so it refuses that project and reports
+   to it. A run takes well under a minute at nash-srv's size (see the
+   measurements above), with two extra containers.
+
+3. **Off-site, when wanted.** Follow [Setup](#setup):
+   `pip install -e '/opt/baler[offsite]'`, then the bucket settings in
+   `/etc/baler/backup.env`. The next nightly run uploads. Nothing else changes.
+
+### Retention
+
+Local backups are kept until you prune them. `backup.py --prune` applies the
+retention policy to `--out-dir` after a successful backup: the newest backup of
+each of the last `BALER_BACKUP_KEEP_DAILY` (7) days that have one, and the
+newest of each of the last `BALER_BACKUP_KEEP_WEEKLY` (4) ISO weeks. The
+newest backup is always kept, even with both set to 0. Off-site copies use the
+same policy, and are pruned on every successful upload. A drill on the newest
+backup is what tells you that the ones you keep restore.
+
+## In Ops
+
+`backup.py` and `restore_drill.py` run on the host, so they report through
+`docker compose exec postgres psql`, like the dump itself. Each run writes a row
+to the live database's `service_heartbeats` (`backup`, `restore_drill`).
+`backup.py` also writes the same JSON to `backup-status.json` in `--out-dir`.
+`/ops/status` shows two cards in the Jobs row:
+
+| Card | State |
+|---|---|
+| Backups | **off** until a backup has reported, so an install without one stays green. **ok**: the last backup, its size, and the off-site copy if there is one. **degraded**: the off-site copy failed, or pruning it failed, while the local backup is fine (the card says both), or the newest good backup is older than `OPS_BACKUP_STALE_HOURS` (36). **down**: the last local backup failed |
+| Restore drill | **off** until a drill has reported. **ok**: passed, from which backup and source. **degraded**: failed (the failed checks are listed), or the last pass is older than `OPS_DRILL_STALE_DAYS` (8) |
+
+Reporting is best effort. If the database can't be reached, the backup still
+runs and the warning goes to the job's log.
+
+**Alerts.** When a backup, an off-site copy or a drill fails, the script runs
+`BALER_BACKUP_ALERT_COMMAND`, if set. It runs without a shell, with the report
+as JSON on stdin and `BALER_ALERT_EVENT` set to `backup_failed`,
+`offsite_upload_failed` or `restore_drill_failed`. The bucket credentials are
+removed from its environment. Use it for a script that mails or pages you.
+It's the hook the alerting work (Baler#277) will use.
+
+## Off-site copies (optional)
+
+On a standard install every backup lives on the same machine as the data, and
+losing the machine loses both. `backup.py` can also send each successful
+backup, encrypted, to any S3-compatible bucket: AWS S3, Backblaze B2, Wasabi,
+Cloudflare R2, a MinIO or Garage server elsewhere, and others.
+
+**It's off by default and entirely optional.** With `BALER_BACKUP_S3_BUCKET`
+unset, nothing is uploaded and no provider or account is involved. Backups,
+restores and the scheduled drill all work from local files alone. You can turn
+it on later, at any time, with the steps below. Nothing about existing backups
+changes.
+
+### How it works
+
+After the local backup succeeds, `backup.py`:
+
+1. encrypts each file with [age](https://age-encryption.org) to your recipient
+   (public) key, streamed, into a temporary file next to the backups;
+2. uploads it to `s3://<bucket>/<prefix><stamp>/<file>.age` and checks the size
+   that was stored;
+3. writes `<prefix><stamp>/manifest.json` last. A set with a manifest is
+   complete. The manifest holds no data: the file names, each object's size and
+   SHA-256, and the recipient public keys, so you can tell which key a set needs;
+4. prunes old sets with the [retention](#retention) policy. Only complete sets
+   are counted, and the newest complete set is never removed. A set that never
+   got its manifest (an upload that died) is removed once a newer complete set
+   exists. Other prefixes in the bucket are never touched.
+
+If any step fails, the local backup stays where it is. The error goes to the
+log (credentials redacted), to `backup-status.json` and to the Backups card,
+and to the alert command. `backup.py` exits 2, so the systemd unit shows
+failed. Nothing is pruned after a failed upload.
+
+**Why age.** age is a small, well-reviewed, standard file-encryption format
+(`age-encryption.org/v1`) with independent implementations: the Go `age`, the
+Rust `rage`, and `pyrage`, which Baler uses.
+
+- **The host never needs the private key.** Encryption uses only the recipient
+  (public) key, and the private key isn't needed to back up. Neither is stored
+  in the bucket. Someone who reads the bucket, or steals the backup host's
+  configuration, can't decrypt the backups.
+- **It's streamed and authenticated.** The payload is ChaCha20-Poly1305 in
+  64 KiB chunks, so a dump of many GB encrypts in constant memory (14 MB of
+  RSS for a 300 MB file, measured). A changed, truncated or reordered object
+  fails to decrypt instead of giving you a wrong dump. Restores also check
+  each object's SHA-256 against the manifest first.
+- **Recovery doesn't need Baler.** `age -d -i key.txt postgres-<ts>.sql.gz.age | gunzip`
+  works with the `age` package from Debian, Ubuntu or Homebrew.
+
+The alternative, AES-GCM through `cryptography` (already a Baler dependency),
+would mean a symmetric key on the host that both encrypts and decrypts, plus a
+chunked file format of our own to stream large dumps. That's more code to get
+right, and no standard tool could read the files without Baler.
+
+### Setup
+
+1. **Make a key pair**, on a trusted machine, not necessarily the backup host:
+
+   ```bash
+   age-keygen -o backup-key.txt      # prints "Public key: age1..."
+   ```
+
+   The public key (`age1...`) goes to the host. The private key file goes into
+   your recovery storage (see [Key recovery](#key-recovery)). It's only needed
+   on the host if the drill should restore from the off-site copy.
+
+2. **Make a bucket and a key for it alone.** Turn on the provider's object
+   versioning or object lock if you want protection against a compromised host
+   deleting copies. Give the key exactly these permissions on that bucket (AWS
+   IAM shown here; B2, R2 and MinIO have equivalent bucket-scoped keys):
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::my-baler-backups",
+        "Condition": {"StringLike": {"s3:prefix": "baler/*"}}},
+       {"Effect": "Allow", "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
+        "Resource": "arn:aws:s3:::my-baler-backups/baler/*"}
+     ]
+   }
+   ```
+
+   That's everything Baler calls: `PutObject` (and multipart upload, which
+   `PutObject` covers), `HeadObject`/`GetObject`, `ListObjectsV2` and
+   `DeleteObjects`. A test checks the client calls nothing else. Leave out
+   `s3:DeleteObject` and handle expiry with a bucket lifecycle rule if the host
+   shouldn't be able to delete. Pruning then fails, the card says so, and
+   uploads carry on.
+
+3. **Install the extra** in the venv the units run (`pip install -e '.[offsite]'`:
+   `boto3` and `pyrage`), and point `baler-backup.service`'s `ExecStart` at that
+   venv's `python`.
+
+4. **Configure it** in `/etc/baler/backup.env` (`chmod 600`, owned by root).
+   Every variable is in `.env.example`. These are read by the scripts on the
+   host, not by compose, so the credentials never reach an app container:
+
+   ```bash
+   BALER_BACKUP_S3_BUCKET=my-baler-backups
+   BALER_BACKUP_S3_PREFIX=baler/
+   BALER_BACKUP_S3_ENDPOINT=https://s3.eu-central-003.backblazeb2.com   # blank for AWS
+   BALER_BACKUP_S3_REGION=eu-central-003
+   BALER_BACKUP_S3_ACCESS_KEY_ID=...
+   BALER_BACKUP_S3_SECRET_ACCESS_KEY=...
+   BALER_BACKUP_AGE_RECIPIENTS=age1...            # your public key; add a second, offline recovery key if you like
+   # BALER_BACKUP_AGE_IDENTITY_FILE=/etc/baler/backup-key.txt   # only for off-site drills
+   ```
+
+   Without a recipient, `backup.py` refuses to upload anything.
+
+5. **Run it once by hand** and look at the result:
+
+   ```bash
+   sudo systemctl start baler-backup && journalctl -u baler-backup -n 20
+   ```
+
+   It should print `off-site -> s3://.../<stamp>/ (... bytes, encrypted)`, and
+   the Backups card should say "encrypted off-site copy OK".
+
+The credentials are only ever read from the environment. They aren't printed,
+and they aren't stored in the reports or in the bucket. Every error message
+that leaves the off-site code has them blanked.
+
+### Key recovery
+
+The private key is the only way to read the off-site copies. **Lose it and
+they're noise. Store it where it survives the host:**
+
+- a password manager or secrets vault the team can reach, and/or a printed
+  copy (the file is three short lines) in a safe;
+- optionally, a second key pair kept entirely offline, added as another
+  recipient (`BALER_BACKUP_AGE_RECIPIENTS="age1host... age1offline..."`).
+  Either private key then decrypts every new copy.
+
+Never put the private key in the bucket, in `.env` or in the repository.
+Each set's `manifest.json` lists the public keys it was encrypted to. Match
+them against `age-keygen -y backup-key.txt`, which prints a private key's
+public key.
+
+To recover with nothing but the bucket and the key:
+
+```bash
+# with Baler (a fresh checkout): see "From the off-site copy" above
+python scripts/restore.py --from-offsite
+# or by hand with the age CLI, then restore.py --postgres-file/--oxigraph-file as usual
+aws s3 cp --recursive s3://my-baler-backups/baler/<stamp>/ ./restore/ --endpoint-url "$ENDPOINT"
+age -d -i backup-key.txt -o restore/postgres-<stamp>.sql.gz restore/postgres-<stamp>.sql.gz.age
+age -d -i backup-key.txt -o restore/oxigraph-<stamp>.ttl.gz restore/oxigraph-<stamp>.ttl.gz.age
+```
+
+**Rotating the key:** make a new pair and set the new public key as the
+recipient. New copies use it, and the old private key still reads the older
+copies until retention removes them. Keep it until then.
+
+**Prove it works**: run the drill from the off-site copy now and then
+(`restore_drill.py --source offsite`, with the private key available on the
+host just for that run). It fetches, verifies, decrypts and restores the
+newest set into a scratch stack, so you find out that a key is missing or a
+bucket is unreadable before you need the backup.
+
+### Testing locally
+
+No provider or account is needed to try this, or to run its tests. Any local
+S3-compatible server works:
+
+```bash
+# moto's server (pip), or MinIO in Docker
+pip install 'moto[server]' && moto_server -H 127.0.0.1 -p 5000 &
+#   docker run -d --rm -p 9000:9000 minio/minio server /data   # then create a bucket
+export BALER_TEST_S3_ENDPOINT=http://127.0.0.1:5000
+pytest tests/test_backup_offsite.py                            # unit: encryption, retention, the bucket
+pytest tests/test_restore_drill_offsite.py -m integration      # backup -> bucket -> drill, scratch stacks
+```
+
+Without `BALER_TEST_S3_ENDPOINT` the tests start moto's in-process server
+(`moto[server]` is in the `dev` extra), and they skip if it isn't installed.
