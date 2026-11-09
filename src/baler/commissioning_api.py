@@ -42,6 +42,7 @@ from baler.commissioning import (
     active,
     agent,
     db,
+    earned_api,
     economizer,
     engine,
     gates,
@@ -96,7 +97,7 @@ _RUN = re.compile(r"/runs/([^/]+)")
 _RUN_REPORT = re.compile(r"/runs/([^/]+)/report")
 
 # Building-record features (epic #221), each a route table (commissioning.routes).
-EXTENSIONS = (schedules_api,)
+EXTENSIONS = (schedules_api, earned_api)
 
 
 def _check_prefixes(value) -> list[str]:

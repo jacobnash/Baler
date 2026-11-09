@@ -188,6 +188,13 @@ const ROUTES = [
   ["POST",   /^\/cx\/projects\/[^/]+\/schedules$/,            "commissioning", "operator"],
   ["GET",    /^\/cx\/projects\/[^/]+\/schedules$/,            "commissioning", "viewer"],
   ["GET",    /^\/cx\/schedules\/[^/]+\/activities$/,           "commissioning", "viewer"],
+  // Earned evidence (#218)
+  ["POST",   /^\/cx\/projects\/[^/]+\/schedule-links$/,       "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/schedule-links$/,       "commissioning", "viewer"],
+  ["DELETE", /^\/cx\/schedule-links\/[^/]+$/,                 "commissioning", "operator"],
+  ["POST",   /^\/cx\/schedule-links\/[^/]+\/signoff$/,         "commissioning", "operator"],
+  ["GET",    /^\/cx\/schedules\/[^/]+\/earned-evidence$/,      "commissioning", "viewer"],
+  ["GET",    /^\/cx\/schedules\/[^/]+\/link-suggestions$/,     "commissioning", "viewer"],
 
   // auth_api - POST /auth/login has its own exact-match nginx location
   // with no js_access at all (can't require a token to get a token), so

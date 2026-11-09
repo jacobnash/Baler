@@ -1,0 +1,74 @@
+---
+title: Earned evidence
+---
+
+> On schedule by the data, not by the meeting.
+
+Once the GC's schedule is [imported](/schedule-import), each activity can be
+linked to the evidence that shows it done. The earned-evidence report then
+says which activities the data shows done, which are due but not evidenced,
+and which the schedule marks done with no evidence behind them (Baler#218,
+epic #221 §9).
+
+## Linking activities to evidence
+
+A person makes every link. Links are by **activity code**, so they survive
+re-importing the schedule.
+
+| `kind` | `params` | Met when |
+|---|---|---|
+| `points_online` | `equip_uris`, `min_pct` (95), `within_hours` (24) | that share of the equipment's points reported a real value in the last `within_hours` before the as-of date (BACnet/Modbus data) |
+| `procedure_passed` | `procedure_id`, optional `equip_uris` | the procedure's latest completed test run (Cx 6: start-up, power-on or FPT) passed for that equipment |
+| `form_signed` | `title` | a person signed it off in Baler: a checklist, or the TAB report linked |
+
+```bash
+curl -X POST $BALER/cx/projects/$P/schedule-links -d '{
+  "activity_code": "M-1000", "kind": "procedure_passed",
+  "params": {"procedure_id": "'$AHU_STARTUP'", "equip_uris": ["urn:equip:fbf/a/ahu-1"]}}'
+
+curl -X POST $BALER/cx/projects/$P/schedule-links -d '{
+  "activity_code": "M-1020", "kind": "form_signed", "params": {"title": "TAB report linked, Level 3"}}'
+curl -X POST $BALER/cx/schedule-links/$L/signoff -d '{"document": {"title": "TAB-L3 rev 2"}}'
+```
+
+An activity with several links is evidenced when all of them are met. A
+sign-off records who, when and the document reference. Until the document
+store (#201) can be pointed at, the reference is a title you type.
+
+**Suggested links** (`GET /cx/schedules/{id}/link-suggestions`) are
+proposals and are never applied. An activity whose name names an
+equipment tag (`AHU-1`) and says start-up or functional is matched to an
+active procedure of that kind that applies to that equipment. An activity
+that only names equipment gets a `points_online` suggestion.
+
+## The report
+
+```bash
+curl "$BALER/cx/schedules/$S/earned-evidence?as_of=2027-02-15T12:00:00Z"
+```
+
+| Section | Activities |
+|---|---|
+| `done_by_data` | evidence met, with when it was met |
+| `due_not_evidenced` | planned to finish by the as-of date, evidence not met |
+| `marked_done_no_evidence` | the schedule says complete; the evidence doesn't |
+| `ahead_of_schedule_status` | evidence met; the schedule doesn't say complete yet |
+| `not_linked` | nobody has linked them yet |
+
+Every activity in a section lists each piece of evidence with its detail
+("1 of 2 points reported in the last 24 h (50 %, need 95 %)", "AHU start-up:
+passed on 1 equipment", "signed off by ..."). It reads the same whether the
+evidence came from BACnet or from a form.
+
+## Storage
+
+Migration `0004_schedule_evidence` adds `cx_schedule_links` and
+`cx_evidence_signoffs`.
+
+## Not yet
+
+- Active tests (Cx 9) and issues closed as evidence kinds.
+- TAB report evidence from the document store (#201) instead of a sign-off.
+- A printable page and a UI.
+- Points-online evidence dated by when the threshold was first crossed
+  (today it's the newest sample at the as-of date).
