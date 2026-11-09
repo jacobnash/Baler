@@ -144,6 +144,8 @@ const ROUTES = [
   ["DELETE", /^\/ops\/documents\/[^/]+\/links\/[^/]+$/,   "documents", "operator"],
   // Extraction from documents (#202): proposals only; a person confirms each.
   ["POST",   /^\/ops\/documents\/[^/]+\/extract$/,        "documents", "operator"],
+  // Drawing schedules (#203): rows become proposals like #202's.
+  ["POST",   /^\/ops\/documents\/[^/]+\/schedules$/,      "documents", "operator"],
   ["GET",    /^\/ops\/documents\/[^/]+\/proposals$/,      "documents", "viewer"],
   ["GET",    /^\/ops\/document-proposals$/,              "documents", "viewer"],
   ["POST",   /^\/ops\/document-proposals\/[^/]+\/decide$/, "documents", "operator"],
