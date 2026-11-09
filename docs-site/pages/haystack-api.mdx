@@ -125,7 +125,7 @@ Baler's own clients follow `after` to the end: the Equipment page's tree (`ui/ap
 given no `limit`. openhay's `Client.read` and other third-party clients get the first page. To fetch
 everything in one grid instead, pass a `limit` as large as the graph, or set `BALER_READ_LIMIT=0` for
 the whole install (one unbounded grid, as before). That's what reads at scale can't afford: at 100k
-points one grid was 33 MB and took 16 s to build and encode ([Scale test](/scale-test#reads-at-scale)).
+points one grid was 33 MB and took 16 s to build and encode ([Scale test](/scale-test#reads-at-scale-paging-244)).
 
 Reads by `id`, `nav`, `watchSub`/`watchPoll` and `hisRead` aren't paged.
 
