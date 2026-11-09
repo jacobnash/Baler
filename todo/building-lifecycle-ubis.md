@@ -226,7 +226,7 @@ position AHU-1/SF-motor ──installed── asset #A102 (Baldor, 2026-03-01 �
 | **Bench test** | Before install | Record a controller or device's test results against the *asset*, as its first baseline | New |
 | **Start-up / power-on** | Start-up | Procedures as data (12 seeds), passive criteria | *Built: Cx 6* |
 | **Functional / active** | FPT | Override, observe, auto-release, inside the safety envelope (window, admin, `expires_at`, guaranteed relinquish) | *Built: Cx 9* |
-| **Passive override test** | Any time after start-up | When a person overrides a setpoint or command, check the equipment reaches it within X minutes, *given the schedule in force* | New |
+| **Passive override test** | Any time after start-up | When a person overrides a setpoint or command, check the equipment reaches it within X minutes, *given the schedule in force* | *Built: #212* (`commissioning/overrides.py`; priority arrays wait on Windrow#25) |
 | **Sequence (GL36)** | FPT, seasonal | ConStrain items over trends | *Built: Cx 3* |
 | **Continuous compliance** | Operations | Packs on a schedule (§3.3) | New (uses the Cx 6 scheduler) |
 
@@ -248,8 +248,10 @@ command; Windrow's `connection_manager.write_point` performs a BACnet
 WriteProperty at a priority, refusing commands past `expires_at`. It is used by
 Haystack `pointWrite` and Cx 9. What's next:
 
-- **audited operator writes** from the UI (who, why, auto-relinquish time);
+- **audited operator writes** from the UI (who, why, auto-relinquish time); *built: #213*;
 - **schedule and calendar writes**, which Windrow reads today but doesn't write.
+  *Baler's side built (#213) against the Windrow#26 contract*, see
+  docs-site `operator-writes.mdx`.
 
 ## 8. Operations analytics
 

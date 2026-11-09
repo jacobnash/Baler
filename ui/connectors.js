@@ -4,7 +4,7 @@
 // Baler over HTTP and remote ones over the MQTT command channel; the page
 // doesn't care which. No build step, same as the rest of ui/.
 // How-to: docs-site/pages/connectors.mdx (linked from the page).
-const OPS_URL = new URLSearchParams(location.search).get("ops") || "/ops";
+const OPS_URL = apiBase("ops", "/ops");
 const REFRESH_MS = 15000;
 // Bigger than this asks first; bigger than MIN_PREFIX_BITS is refused.
 const SCAN_CONFIRM_BITS = 22;

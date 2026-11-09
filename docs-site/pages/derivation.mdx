@@ -145,7 +145,7 @@ to `#` over QoS 0, which the broker silently dropped from once the engine fell b
 - the triggered points (those matching the glob) are looked up in an index of the `select`'s rows
   by input point. The `select` runs again every `--select-refresh` seconds (default 60) or when
   the derivation changes, not once per reading;
-- each triggered row runs **once per batch**, however many of its inputs reported in it, on inputs
+- each triggered row runs **once per poll** of the feed (up to 20 batches; once per batch before #273), however many of its inputs reported in it, on inputs
   that are already committed;
 - open masking faults and auto-disabled targets are read once per pass, not once per input and
   per target;
@@ -156,6 +156,36 @@ and missed readings show in its heartbeat, on its `/ops/status` card and in
 `building.reading_feed.derivation_engine`, the same as for fault detection. Rollups have no Cur
 mode, as before. Readings that didn't arrive over MQTT (`POST /ingest`, hisWrite) are picked up
 by the next sweep.
+
+**How often a Cur-mode formula is swept.** A Cur-mode formula re-runs on every reading of its
+inputs, so its sweep over every row is only a backstop. Without `interval_seconds` it is swept
+every `--cur-sweep-seconds` (default 300), not every `--tick-seconds` (5) as other derivations
+are. Before [#273](https://github.com/jacobnash/Baler/issues/273) it was swept every tick as well,
+and the scale ladder's 1-minute profile measured that as 6.5 times the configured derivation work,
+all of it recomputing values the reading feed had just computed. Set `interval_seconds` to sweep
+a Cur-mode formula more often, for example when most of its inputs arrive by `POST /ingest`.
+
+**Writes are batched per derivation.** Each derivation's output rows from one sweep or one feed
+batch are written in one transaction (`timeseries.write_point_values`), not as an INSERT and a
+`point_registry` upsert per row, each with its own commit. A target's health row is written on
+its first success and after each failure, not again on every success. A derivation that depends
+on another still reads the other's rows from the same sweep, because each derivation's batch is
+committed before the next derivation runs.
+
+**Memory is bounded by configuration, not by point count.** A sweep or a feed poll reads its
+rows' input windows with one bulk query per chunk of rows, not one query for every row at once.
+Each chunk holds about `BALER_DERIVATION_READ_BUDGET` readings (default 200,000), sized from the
+readings per row the previous chunk held, and is freed before the next chunk is read. Output
+rows are written every `BALER_DERIVATION_WRITE_BATCH` rows (default 5,000). Before
+[#336](https://github.com/jacobnash/Baler/issues/336) a sweep read every row's windows in one
+go. With a 1 h window at 5 s readings that is 1,440 readings per two-input row, about 0.4 MB
+each in Python. At 100k points the engine was OOM-killed at its 1 GiB limit 192 times in a
+6 h soak. A single row whose own windows hold more than the budget still reads them all,
+because its function needs them. A restart loop like that, where each process beats its
+heartbeat until it is killed, turns the Analysis engine card on `/ops/status` degraded once
+the engine has started `BALER_ALERT_RESTART_COUNT` times within
+`BALER_ALERT_RESTART_WINDOW_SECONDS`. That is the same threshold as the alerter's `restarts:`
+alert.
 
 ## Failure isolation is per-(derivation, target), not per-derivation
 

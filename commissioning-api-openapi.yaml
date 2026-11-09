@@ -38,6 +38,10 @@ tags:
   - name: Spec
   - name: Faults
   - name: Active tests
+  - name: Operator writes
+  - name: Override tests
+  - name: Spaces
+  - name: Packs
   - name: Agent
 paths:
   /projects:
@@ -971,6 +975,13 @@ paths:
               properties:
                 started_at: { type: string, format: date-time }
                 hours: { type: number, exclusiveMinimum: 0, maximum: 744 }
+                methods:
+                  type: object
+                  description: >-
+                    Baler#275: the method this run uses per step id (one the
+                    step offers); a step not named uses its first. Stored on
+                    the run's procedure snapshot as `methods`.
+                  additionalProperties: { type: string, enum: [manual, passive, active] }
       responses:
         "202":
           description: The queued test run
@@ -1317,6 +1328,87 @@ paths:
       responses:
         "204": { description: Undone }
         "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/schedules:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Override tests]
+      operationId: listCxSchedules
+      summary: BACnet schedules and calendars last read from the project's connections
+      description: >-
+        Baler#212. What `POST .../schedules/refresh` (or the periodic
+        refresh, settings.overrides.refresh_minutes) last read from Windrow:
+        each Schedule and Calendar object as Windrow's
+        `connection_schedules` answers it (`body`), the urn:point: URIs a
+        schedule controls, and what it commands now in the project's time
+        zone (settings.overrides.tz, default UTC).
+      responses:
+        "200":
+          description: Schedules
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tz, schedules]
+                properties:
+                  tz: { type: string }
+                  schedules:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, kind, object, topic_prefix, points, read_at, body]
+                      properties:
+                        id: { type: string }
+                        kind: { type: string, enum: [schedule, calendar] }
+                        object: { type: string }
+                        name: { type: [string, "null"] }
+                        topic_prefix: { type: string }
+                        points: { type: array, items: { type: string } }
+                        read_at: { type: string, format: date-time }
+                        body: { type: object }
+                        now:
+                          type: object
+                          properties:
+                            value: {}
+                            source: { type: string, enum: [exception, weekly, default, not_in_effect] }
+                            priority: { type: integer }
+                            unoccupied: { type: boolean }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/schedules/refresh:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Override tests]
+      operationId: refreshCxSchedules
+      summary: Read schedules and calendars from Windrow now (operator)
+      description: >-
+        Reads only: for every Windrow instance on the command channel, its
+        in-scope connections' Schedule and Calendar objects
+        (`connection_schedules`). Nothing is written to a controller.
+        Priority arrays don't come through here: they arrive on each
+        commandable point's reading (`priority`, Windrow#25).
+      responses:
+        "200":
+          description: What was read
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [instances, schedules, calendars, errors]
+                properties:
+                  instances:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        site: { type: string }
+                        instance: { type: string }
+                        connections: { type: integer }
+                  schedules: { type: integer }
+                  calendars: { type: integer }
+                  errors: { type: array, items: { type: string } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { description: No Windrow command channel configured }
   /projects/{id}/faults:
     parameters:
       - { $ref: "#/components/parameters/ProjectId" }
@@ -1434,6 +1526,7 @@ paths:
                 type: object
                 properties:
                   aborted: { type: array, items: { type: string } }
+                  fleets: { type: array, items: { type: string }, description: Fleet runs stopped (Baler#275) }
                   relinquished: { type: array, items: { type: string } }
         "403": { description: Not an admin }
   /projects/{id}/active-runs:
@@ -1476,7 +1569,8 @@ paths:
                 equip_uri: { type: string }
                 window_start: { type: string, format: date-time }
                 window_end: { type: string, format: date-time }
-                kind: { type: string, enum: [command_response, custom], default: command_response }
+                kind: { type: string, enum: [command_response, custom, library], default: command_response }
+                test: { type: string, description: "kind library: a standard test id from GET /active/library (Baler#275)" }
                 response_minutes: { type: number }
                 steps: { type: array, items: { type: object } }
       responses:
@@ -1555,6 +1649,296 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ActiveRun" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/fleet-runs:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Active tests]
+      operationId: listCxFleetRuns
+      summary: The project's fleet runs, newest first (Baler#275)
+      responses:
+        "200":
+          description: Fleet runs
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/FleetRun" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Active tests]
+      operationId: planCxFleetRun
+      summary: Plan one active test across many equipment - the fleet dry run (admin)
+      description: >-
+        Members are `equip_uris`, every equipment of `equip_class`, or the
+        members that failed in the finished fleet `retest_of` (its test
+        again, retest-failures-only). Each member's steps are compiled and
+        validated exactly as for one active run; each gets a system (the
+        equipment that feeds it) and a slot that keeps at most
+        concurrency_per_system of a system and max_concurrent in all
+        running, `stagger_seconds` apart. Lists every write across the
+        fleet and commands nothing. Refused if the fleet doesn't fit the
+        window (at most 8 h).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [window_start, window_end]
+              properties:
+                window_start: { type: string, format: date-time }
+                window_end: { type: string, format: date-time }
+                equip_uris: { type: array, items: { type: string } }
+                equip_class: { type: string, description: A Brick class; subclasses match }
+                retest_of: { type: string, description: A finished fleet run; only its failed members are planned }
+                kind: { type: string, enum: [command_response, library], default: command_response }
+                test: { type: string, description: "kind library: a test id from GET /active/library" }
+                response_minutes: { type: number, default: 2 }
+                concurrency_per_system: { type: integer, minimum: 1, maximum: 50, default: 1 }
+                max_concurrent: { type: integer, minimum: 1, maximum: 50, default: 10 }
+                stagger_seconds: { type: integer, minimum: 0, maximum: 3600, default: 30 }
+                max_failures: { type: integer, minimum: 1, default: 3, description: Stop the fleet when this many members failed }
+      responses:
+        "201":
+          description: The planned fleet (status planned)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/FleetRun" }
+                  - type: object
+                    properties:
+                      writes_allowed: { type: boolean }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: Not an admin }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /fleet-runs/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Active tests]
+      operationId: getCxFleetRun
+      summary: A fleet run, its members and their outcomes
+      responses:
+        "200":
+          description: The fleet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FleetRun" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /fleet-runs/{id}/confirm:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Active tests]
+      operationId: confirmCxFleetRun
+      summary: Start a planned fleet (admin, inside its window, with the switch on)
+      description: >-
+        The body repeats the fleet's plan_hash. 403 when
+        BALER_CX_ALLOW_WRITES isn't 1; 400 for any other confirmation; 409
+        outside the window, if the fleet isn't planned, or if the plan
+        changed since it was listed (the stored plan no longer hashes to
+        plan_hash, or a member no longer validates against the inventory).
+        Members then start in plan order, never before their slot, within
+        the limits; each is an ordinary active run (its before-state
+        captured before its first write). The fleet stops by itself when
+        max_failures members have failed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: string, description: This fleet's plan_hash }
+      responses:
+        "202":
+          description: Confirmed and starting
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FleetRun" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: "Not an admin, or active tests are switched off" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { description: No point_write route configured }
+  /fleet-runs/{id}/abort:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Active tests]
+      operationId: abortCxFleetRun
+      summary: Stop a fleet (operator) - no member starts again, every level its members hold is relinquished now; a planned fleet is cancelled
+      responses:
+        "202":
+          description: The fleet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FleetRun" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/active-schedules:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Active tests]
+      operationId: listCxActiveSchedules
+      summary: The project's scheduled retests, newest first (Baler#275)
+      responses:
+        "200":
+          description: Schedules
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ActiveSchedule" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Active tests]
+      operationId: proposeCxActiveSchedule
+      summary: Propose a scheduled (e.g. seasonal) fleet retest (admin) - nothing runs until approved
+      description: >-
+        The scope is a frozen equipment list (equip_uris, or every
+        equipment of equip_class now), a test and fleet limits; the timing
+        is first_window_start + k * every_days, window_minutes long (at
+        most 8 h), until valid_until (at most 400 days out). mode `all`
+        retests every member each window, `failures` only those that failed
+        in the schedule's last run. The answer carries the approval_hash
+        and a dry run of the next window. Approval never turns writes on.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [first_window_start, window_minutes, every_days, valid_until]
+              properties:
+                name: { type: string }
+                equip_uris: { type: array, items: { type: string } }
+                equip_class: { type: string }
+                kind: { type: string, enum: [command_response, library], default: command_response }
+                test: { type: string }
+                response_minutes: { type: number, default: 2 }
+                concurrency_per_system: { type: integer, default: 1 }
+                max_concurrent: { type: integer, default: 10 }
+                stagger_seconds: { type: integer, default: 30 }
+                max_failures: { type: integer, default: 3 }
+                mode: { type: string, enum: [all, failures], default: all }
+                first_window_start: { type: string, format: date-time }
+                window_minutes: { type: integer, minimum: 1, maximum: 480 }
+                every_days: { type: integer, minimum: 1, maximum: 366 }
+                valid_until: { type: string, format: date-time }
+      responses:
+        "201":
+          description: The proposed schedule
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/ActiveSchedule" }
+                  - type: object
+                    required: [preview]
+                    properties:
+                      writes_allowed: { type: boolean }
+                      preview:
+                        type: object
+                        description: The fleet dry run for the next window
+                        properties:
+                          window_start: { type: string, format: date-time }
+                          window_end: { type: string, format: date-time }
+                          members: { type: integer }
+                          skipped: { type: array, items: { type: object } }
+                          plan: { type: array, items: { type: object } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: Not an admin }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /active-schedules/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Active tests]
+      operationId: getCxActiveSchedule
+      summary: A scheduled retest
+      responses:
+        "200":
+          description: The schedule
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActiveSchedule" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Active tests]
+      operationId: patchCxActiveSchedule
+      summary: Narrow a schedule (admin) - never wider than what was approved
+      description: >-
+        Only name, equip_uris (a subset), window_minutes (shorter),
+        valid_until (sooner), concurrency_per_system / max_concurrent /
+        max_failures (lower), stagger_seconds (longer) and mode (all to
+        failures) may change, and only inside the approved envelope; 409
+        otherwise (propose a new schedule for approval).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: The schedule
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActiveSchedule" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: Not an admin }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /active-schedules/{id}/approve:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Active tests]
+      operationId: approveCxActiveSchedule
+      summary: Approve exactly the proposed scope and timing (admin, a signed-in person)
+      description: >-
+        The body repeats the approval_hash. API keys are refused (403). From
+        then on each window runs as a fleet run confirmed in the approver's
+        name - only if BALER_CX_ALLOW_WRITES=1 at that moment; otherwise the
+        window is skipped and audited. Expired approvals stop scheduling.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: string, description: This schedule's approval_hash }
+      responses:
+        "200":
+          description: The approved schedule
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActiveSchedule" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: "Not an admin, or not a signed-in person" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /active-schedules/{id}/revoke:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Active tests]
+      operationId: revokeCxActiveSchedule
+      summary: Revoke a schedule (operator) - it stops scheduling, and a fleet it has running is stopped and relinquished
+      responses:
+        "200":
+          description: The schedule
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActiveSchedule" }
         "404": { $ref: "#/components/responses/NotFound" }
   /projects/{id}/agent/sessions:
     parameters:
@@ -1775,6 +2159,1070 @@ paths:
               schema: { type: string }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/baselines:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Runs]
+      operationId: listCxBaselines
+      summary: Performance baselines fitted for the project's equipment
+      responses:
+        "200":
+          description: Baselines
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/PerformanceBaseline" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Runs]
+      operationId: fitCxBaseline
+      summary: Fit a baseline (chiller kW/ton vs load and ECWT) over a known-good period (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [equip_uri, points, fit_start, fit_end]
+              properties:
+                equip_uri: { type: string }
+                asset_id: { type: [string, "null"], description: "The installed asset, once the asset registry (#197) knows it" }
+                kind: { type: string, enum: [chiller_kw_per_ton] }
+                points:
+                  type: object
+                  description: "kw and ecwt, and tons or chw_flow_gpm + chw_supply_f + chw_return_f"
+                  properties:
+                    kw: { type: string }
+                    ecwt: { type: string }
+                    tons: { type: string }
+                    chw_flow_gpm: { type: string }
+                    chw_supply_f: { type: string }
+                    chw_return_f: { type: string }
+                fit_start: { type: string, format: date-time }
+                fit_end: { type: string, format: date-time }
+                note: { type: string }
+      responses:
+        "201":
+          description: The baseline, with its model and Guideline 14 statistics
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PerformanceBaseline" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /baselines/{id}/degradation:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Runs]
+      operationId: getCxDegradation
+      summary: Actual vs predicted at matched conditions since the baseline
+      parameters:
+        - { name: start, in: query, schema: { type: string, format: date-time } }
+        - { name: end, in: query, schema: { type: string, format: date-time } }
+        - { name: bucket, in: query, schema: { type: string, enum: [month, week] } }
+        - { name: alert_pct, in: query, description: "Your own threshold (a setting, not a standard)", schema: { type: number } }
+      responses:
+        "200":
+          description: The degradation report
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [baseline, hours_total, hours_matched, buckets, overall]
+                properties:
+                  baseline: { $ref: "#/components/schemas/PerformanceBaseline" }
+                  start: { type: string }
+                  end: { type: string }
+                  hours_total: { type: integer }
+                  hours_matched: { type: integer }
+                  hours_outside_fit_range: { type: integer }
+                  buckets: { type: array, items: { type: object } }
+                  overall: { type: [object, "null"] }
+                  alert_pct: { type: [number, "null"] }
+                  alert: { type: [boolean, "null"] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/savings-cases:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Runs]
+      operationId: listCxSavingsCases
+      summary: Replace-vs-keep cases
+      responses:
+        "200":
+          description: Cases
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/SavingsCase" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Runs]
+      operationId: createCxSavingsCase
+      summary: A replace-vs-keep case from a baseline; measured inputs filled in, the rest yours (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [baseline_id]
+              properties:
+                baseline_id: { type: string }
+                title: { type: string }
+                assumptions: { type: object, description: "key: number or {value, note}" }
+      responses:
+        "201":
+          description: The case
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SavingsCase" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /savings-cases/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Runs]
+      operationId: getCxSavingsCase
+      summary: A savings case
+      responses:
+        "200":
+          description: The case
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SavingsCase" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Runs]
+      operationId: editCxSavingsCase
+      summary: Change any assumption and recompute (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { assumptions: { type: object } } }
+      responses:
+        "200":
+          description: The case
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SavingsCase" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/hunting:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Runs]
+      operationId: getCxHunting
+      summary: Hunting per control loop, against each equipment's start-up baseline
+      description: |
+        Error zero crossings and command reversals per hour, period,
+        amplitude and travel, from raw samples (a series sampled slower
+        than once a minute is not judged). `hunting` when the rate is over
+        `ratio` x the start-up baseline, or over `min_reversals_per_hour`
+        with no baseline; then the onset day and setpoint edits / asset
+        events around it.
+      parameters:
+        - { name: hours, in: query, schema: { type: number, minimum: 1, maximum: 168 } }
+        - { name: days, in: query, description: How far back to look for the onset, schema: { type: integer, minimum: 1, maximum: 60 } }
+        - { name: ratio, in: query, schema: { type: number } }
+        - { name: min_reversals_per_hour, in: query, schema: { type: number } }
+        - { name: command_deadband, in: query, description: "Command moves within this many % are noise (default 2)", schema: { type: number } }
+        - { name: error_deadband, in: query, description: "Error within this band around zero is noise, in the variable's units (default 0.5)", schema: { type: number } }
+        - { name: equip, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: One row per loop
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [generated_at, hours, hunting, loops]
+                properties:
+                  generated_at: { type: string, format: date-time }
+                  hours: { type: number }
+                  settings: { type: object }
+                  hunting: { type: integer }
+                  loops:
+                    type: array
+                    items:
+                      type: object
+                      required: [equip_uri, loop, verdict, now, commands]
+                      properties:
+                        equip_uri: { type: string }
+                        loop: { type: string }
+                        label: { type: string }
+                        sensor: { type: [string, "null"] }
+                        setpoint: { type: [string, "null"] }
+                        commands: { type: array, items: { type: string } }
+                        now: { type: object }
+                        baseline: { type: [object, "null"] }
+                        rate_per_hour: { type: [number, "null"] }
+                        baseline_rate_per_hour: { type: [number, "null"] }
+                        ratio: { type: [number, "null"] }
+                        threshold_per_hour: { type: number }
+                        verdict: { type: string, enum: [hunting, steady, inconclusive] }
+                        onset: { type: [string, "null"] }
+                        changes: { type: array, items: { type: object } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /pack-schema:
+    get:
+      tags: [Packs]
+      operationId: getCxPackSchema
+      summary: Engines, phases, operators and quantities a pack row may use
+      responses:
+        "200":
+          description: The vocabulary
+          content:
+            application/json:
+              schema: { type: object, required: [engines, quantities], properties: { engines: { type: array, items: { type: string } }, quantities: { type: object } } }
+  /packs:
+    get:
+      tags: [Packs]
+      operationId: listCxPacks
+      summary: Your org's requirement pack versions (rows omitted)
+      parameters:
+        - { name: pack_id, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Pack versions
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Pack" } }
+    post:
+      tags: [Packs]
+      operationId: importCxPack
+      summary: Import a pack document as a draft version (operator)
+      description: Rows carry citations (ref, page), never quoted standard text. Values may be blank.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PackDocument" }
+      responses:
+        "201":
+          description: The draft
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pack" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+  /packs/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Packs]
+      operationId: getCxPack
+      summary: A pack version with its rows and history
+      responses:
+        "200":
+          description: The pack
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pack" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /packs/{id}/requirements/{rid}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+      - { name: rid, in: path, required: true, schema: { type: string } }
+    patch:
+      tags: [Packs]
+      operationId: setCxPackValues
+      summary: Enter or change a draft row's values; clears its confirmation (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                value: { type: [number, string, "null"] }
+                min: { type: [number, "null"] }
+                max: { type: [number, "null"] }
+                op: { type: string }
+                unit: { type: string }
+      responses:
+        "200":
+          description: The pack
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pack" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /packs/{id}/requirements/{rid}/confirm:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+      - { name: rid, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Packs]
+      operationId: confirmCxPackRow
+      summary: A person confirms a row's numbers for the pack's edition (operator)
+      responses:
+        "200":
+          description: The pack
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pack" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /packs/{id}/publish:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Packs]
+      operationId: publishCxPack
+      summary: Freeze a draft version (admin)
+      responses:
+        "200":
+          description: The pack
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pack" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/packs:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Packs]
+      operationId: listCxProjectPacks
+      summary: The pack versions this project is judged by
+      responses:
+        "200":
+          description: Adoptions
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/PackAdoption" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Packs]
+      operationId: adoptCxPack
+      summary: Adopt a published pack version; replaces an older version of the same pack (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [pack], properties: { pack: { type: string } } }
+      responses:
+        "201":
+          description: The adoption
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PackAdoption" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/compliance/runs:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Packs]
+      operationId: listCxComplianceRuns
+      summary: The project's compliance runs, newest first
+      responses:
+        "200":
+          description: Runs
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ComplianceRun" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Packs]
+      operationId: startCxComplianceRun
+      summary: Run the adopted packs' active rows against the spaces now (operator)
+      responses:
+        "202":
+          description: The queued run
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ComplianceRun" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /compliance-runs/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Packs]
+      operationId: getCxComplianceRun
+      summary: A compliance run and its results
+      responses:
+        "200":
+          description: The run
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/ComplianceRun" }
+                  - type: object
+                    required: [results]
+                    properties:
+                      results: { type: array, items: { $ref: "#/components/schemas/ComplianceLogRow" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /spaces/{id}/compliance:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Spaces]
+      operationId: getCxSpaceCompliance
+      summary: A space's compliance log (for surveys)
+      parameters:
+        - { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 3660 } }
+        - { name: format, in: query, schema: { type: string, enum: [json, html] } }
+      responses:
+        "200":
+          description: The log (text/html for format=html)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [space, days, log]
+                properties:
+                  space: { type: object }
+                  days: { type: integer }
+                  every_hours: { type: [number, "null"] }
+                  log: { type: array, items: { $ref: "#/components/schemas/ComplianceLogRow" } }
+            text/html:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /packs/{id}/extract:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Packs]
+      operationId: extractCxPackRows
+      summary: Propose rows for a draft pack from a PDF you hold (operator)
+      description: |
+        Runs in the background (poll GET /pack-extractions/{id}). Each
+        proposal cites the page and quotes the text it was read from; the
+        quote must be on that page or the proposal is dropped. The PDF is
+        not kept (only its sha256). Needs BALER_LLM_PROVIDER set to a model.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                filename: { type: string }
+                data: { type: string, description: The PDF, base64 }
+      responses:
+        "202":
+          description: The queued extraction
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PackExtraction" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501":
+          description: No model is configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /pack-extractions/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Packs]
+      operationId: getCxPackExtraction
+      summary: An extraction's status
+      responses:
+        "200":
+          description: The extraction
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PackExtraction" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /packs/{id}/proposals:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Packs]
+      operationId: listCxPackProposals
+      summary: Proposed rows for a pack, with their sources
+      responses:
+        "200":
+          description: Proposals
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/PackProposal" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /pack-proposals/{id}/accept:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Packs]
+      operationId: acceptCxPackProposal
+      summary: Add the row (with your corrections) to the draft pack, unconfirmed (operator)
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { row: { type: object } } }
+      responses:
+        "200":
+          description: The proposal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PackProposal" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /pack-proposals/{id}/reject:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Packs]
+      operationId: rejectCxPackProposal
+      summary: Reject a proposal (operator)
+      responses:
+        "200":
+          description: The proposal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PackProposal" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /space-types:
+    get:
+      tags: [Spaces]
+      operationId: listCxSpaceTypes
+      summary: The built-in space types (a starting list; any slug is allowed)
+      responses:
+        "200":
+          description: Space types
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, label]
+                  properties:
+                    id: { type: string }
+                    label: { type: string }
+                    brick_class: { type: [string, "null"] }
+  /projects/{id}/spaces:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Spaces]
+      operationId: listCxSpaces
+      summary: The project's spaces
+      parameters:
+        - { name: space_type, in: query, schema: { type: string } }
+        - { name: include_archived, in: query, schema: { type: boolean } }
+      responses:
+        "200":
+          description: Spaces, by name
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Space" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Spaces]
+      operationId: createCxSpace
+      summary: Add a space (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SpaceSpec" }
+      responses:
+        "201":
+          description: The space
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Space" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /spaces/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Spaces]
+      operationId: getCxSpace
+      summary: A space, its neighbours, children and serving chain
+      responses:
+        "200":
+          description: The space
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpaceDetail" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Spaces]
+      operationId: updateCxSpace
+      summary: Change fields of a space (operator)
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SpaceSpec" }
+      responses:
+        "200":
+          description: The space
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpaceDetail" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Spaces]
+      operationId: archiveCxSpace
+      summary: Archive a space (admin)
+      responses:
+        "204": { description: Archived }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /spaces/{id}/adjacent:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    put:
+      tags: [Spaces]
+      operationId: putCxSpaceAdjacent
+      summary: Replace the spaces next to this one (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [adjacent]
+              properties:
+                adjacent:
+                  type: array
+                  maxItems: 50
+                  items:
+                    type: object
+                    required: [space_id]
+                    properties:
+                      space_id: { type: string }
+                      relation: { type: string, enum: [adjacent, door] }
+      responses:
+        "200":
+          description: The space
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpaceDetail" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /spaces/{id}/serving:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    put:
+      tags: [Spaces]
+      operationId: putCxSpaceServing
+      summary: Replace the equipment that serves this space directly (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [equip_uris]
+              properties:
+                equip_uris: { type: array, maxItems: 20, items: { type: string } }
+      responses:
+        "200":
+          description: The space
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpaceDetail" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /spaces/{id}/readiness:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Spaces]
+      operationId: getCxSpaceReadiness
+      summary: Readiness of a room, or of every room under a suite/zone/floor
+      description: |
+        Ready means every applicable requirement passes over its window, the
+        required start-up/functional tests of the serving equipment passed,
+        the TAB report is linked, and every open issue is resolved or
+        accepted as a risk. No evidence is never a pass: a criterion with
+        none is `inconclusive` and the verdict `incomplete`.
+      parameters:
+        - { name: format, in: query, schema: { type: string, enum: [json, html] } }
+      responses:
+        "200":
+          description: The report (text/html for format=html)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+            text/html:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /test-runs/{id}/manual-results:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Procedures]
+      operationId: listCxManualResults
+      summary: Every manual result recorded against a test run, oldest first
+      responses:
+        "200":
+          description: Results
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ManualResult" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Procedures]
+      operationId: recordCxManualResult
+      summary: Record a person's pass / fail / N-A for one step on one equipment (operator, a person)
+      description: >-
+        Baler#275. Always recorded as the signed-in person (sub, email,
+        display name, role from the token): there is no field for anyone
+        else, and API keys are refused. The step must offer the manual
+        method. `client_id` makes an offline resend idempotent (200 with
+        the stored row); `observed_at` is when the person checked (at most
+        14 days back). The run's statuses, summary and issues update: a
+        manual fail opens an issue, a contradiction with the data opens
+        one, and a later pass resolves or retests it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [equip_uri, step_id, status]
+              additionalProperties: false
+              properties:
+                equip_uri: { type: string }
+                step_id: { type: string }
+                status: { type: string, enum: [pass, fail, not_applicable] }
+                note: { type: string, maxLength: 4000 }
+                witness:
+                  type: object
+                  required: [name]
+                  properties: { name: { type: string }, org: { type: string }, role: { type: string } }
+                attachments:
+                  type: array
+                  maxItems: 5
+                  items:
+                    type: object
+                    required: [media_type, data]
+                    properties:
+                      filename: { type: string }
+                      media_type: { type: string, enum: [image/jpeg, image/png, image/webp, image/heic, application/pdf, text/plain] }
+                      data: { type: string, description: base64, at most 5 MB decoded }
+                client_id: { type: string, minLength: 8, maxLength: 80 }
+                observed_at: { type: string, format: date-time }
+      responses:
+        "200":
+          description: Already recorded (same client_id)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManualResult" }
+        "201":
+          description: Recorded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManualResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: "Not a person's session, or not operator" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /manual-results/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    patch:
+      tags: [Procedures]
+      operationId: editCxManualResult
+      summary: Edit your own manual result; the previous version is kept in history (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                status: { type: string, enum: [pass, fail, not_applicable] }
+                note: { type: string }
+                witness: { type: [object, "null"] }
+                attachments: { type: array, items: { type: object }, description: Added to the existing ones }
+                reason: { type: string, description: Why it changed (kept in history) }
+      responses:
+        "200":
+          description: Edited
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManualResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: Only the person who recorded it can edit it }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /manual-attachments/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Procedures]
+      operationId: getCxManualAttachment
+      summary: A manual result's attachment (the file itself)
+      responses:
+        "200":
+          description: The file, with its media type; ETag is its sha256
+          content:
+            application/octet-stream: { schema: { type: string, format: binary } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/coverage:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Procedures]
+      operationId: getCxCoverage
+      summary: Test coverage per equipment class and method
+      description: >-
+        Baler#275. From each active procedure's latest completed test run:
+        equipment of the class in scope, sampled by the procedure, tested
+        (a step judged pass or fail), passed, and tested per method
+        (manual / passive / active), automatically (passive or active) and
+        witnessed.
+      responses:
+        "200":
+          description: One row per equipment class
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [equip_class, in_class, sampled, tested, passed, by_method, automatic, witnessed, summary]
+                  properties:
+                    equip_class: { type: string }
+                    in_class: { type: integer }
+                    sampled: { type: integer }
+                    tested: { type: integer }
+                    passed: { type: integer }
+                    failed: { type: integer }
+                    untested: { type: integer }
+                    automatic: { type: integer }
+                    witnessed: { type: integer }
+                    by_method:
+                      type: object
+                      properties: { manual: { type: integer }, passive: { type: integer }, active: { type: integer } }
+                    procedures: { type: array, items: { type: object } }
+                    summary: { type: string, description: "e.g. 220 of 220 tested: 220 automatically, 12 witnessed" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /active/library:
+    get:
+      tags: [Active tests]
+      operationId: listCxActiveLibrary
+      summary: The standard active tests, as data (Baler#275)
+      description: >-
+        VAV reheat, AHU, chilled-water loop. Each states its equipment
+        class, the safety limits on every value it may command, its steps
+        (writes and expectations by Brick class; relative values resolve
+        against the latest samples when a run is planned) and its expected
+        result. Plan one with POST /projects/{id}/active-runs
+        {"kind": "library", "test": id}: every Cx 9 safeguard applies.
+      responses:
+        "200":
+          description: The library
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, name, equip_class, limits, steps, expected]
+                  properties:
+                    id: { type: string }
+                    name: { type: string }
+                    equip_class: { type: string }
+                    description: { type: string }
+                    limits: { type: object }
+                    steps: { type: array, items: { type: object } }
+                    expected: { type: string }
+  /projects/{id}/writes:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Operator writes]
+      operationId: listCxOperatorWrites
+      summary: Every audited operator write on the project, newest first
+      parameters:
+        - { name: point, in: query, required: false, schema: { type: string }, description: "Also return Baler's priority array for this point" }
+      responses:
+        "200":
+          description: Writes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [writes, levels, max_hold_minutes]
+                properties:
+                  writes: { type: array, items: { $ref: "#/components/schemas/OperatorWrite" } }
+                  levels: { type: array, items: { type: integer }, description: "Levels a UI write may use (8-16)" }
+                  max_hold_minutes: { type: number }
+                  priority_array: { type: object, additionalProperties: { type: object } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Operator writes]
+      operationId: createCxOperatorPointWrite
+      summary: Command a point, with a reason and an auto-relinquish time (operator, a person)
+      description: >-
+        Baler#213. Goes through point_write to the Windrow instance that
+        owns the point (a BACnet WriteProperty at the level). Levels 8-16
+        only; `reason` and `hold_minutes` (or `expires_at`, at most 24 h
+        ahead) are required, and the level is relinquished by itself when
+        it runs out. Refused for an API key (a person makes operator
+        writes) and with 409 if a Cx active test holds the level, or
+        another person does without `replace: true`. Baler's priority array
+        records the level as `op:<write id>`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [point, value, reason]
+              properties:
+                point: { type: string }
+                value: { type: [number, boolean] }
+                level: { type: integer, minimum: 8, maximum: 16, default: 8 }
+                reason: { type: string, minLength: 3, maxLength: 500 }
+                hold_minutes: { type: number, exclusiveMinimum: 0, maximum: 1440 }
+                expires_at: { type: string, format: date-time }
+                replace: { type: boolean, description: "Take a level another person holds (their value is kept in `before`)" }
+      responses:
+        "201":
+          description: Written
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorWrite" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: "Not a person's session, or not operator" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { description: The site refused the write or didn't answer (recorded as failed) }
+        "503": { description: No Windrow command channel configured }
+  /writes/{id}/relinquish:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Operator writes]
+      operationId: relinquishCxOperatorWrite
+      summary: Release an operator point write before it expires (operator, a person)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 3 }
+      responses:
+        "200":
+          description: Relinquished
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorWrite" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { description: The relinquish wasn't applied; the sweeper retries at expiry }
+  /projects/{id}/schedule-targets:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Operator writes]
+      operationId: listCxScheduleTargets
+      summary: Schedule and calendar objects on a Windrow instance's in-scope connections, read live (operator)
+      parameters:
+        - { name: site, in: query, required: true, schema: { type: string } }
+        - { name: instance, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Objects per connection
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    connection_id: { type: string }
+                    topic_prefix: { type: string }
+                    schedules: { type: array, items: { type: object } }
+                    calendars: { type: array, items: { type: object } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/schedule-writes:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Operator writes]
+      operationId: createCxScheduleWrite
+      summary: Change a BACnet Schedule or Calendar, with a reason and a revert time (admin, a person)
+      description: >-
+        Sent over the command channel as Windrow's `write_schedule` /
+        `write_calendar` (the Windrow#26 contract; see docs-site
+        operator-writes). The object is read first and kept as `before`;
+        at `revert_at` the sweeper writes the changed fields back, unless
+        someone has changed the object since (`conflict`, left alone).
+        Without `revert_at`, `permanent: true` must be said.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [site, instance, connection_id, object, reason]
+              properties:
+                site: { type: string }
+                instance: { type: string }
+                connection_id: { type: string }
+                kind: { type: string, enum: [schedule, calendar], default: schedule }
+                object: { type: string, description: "schedule,N or calendar,N" }
+                weekly: { type: object }
+                exceptions: { type: array, items: { type: object } }
+                default: {}
+                effective_period: { type: array, items: { type: string } }
+                dates: { type: array, items: { type: object } }
+                reason: { type: string, minLength: 3, maxLength: 500 }
+                revert_at: { type: string, format: date-time }
+                permanent: { type: boolean }
+      responses:
+        "201":
+          description: Written
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorWrite" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: Not a person's admin session }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { description: The site refused the write or didn't answer (recorded as failed) }
+        "503": { description: No Windrow command channel configured }
+  /writes/{id}/revert:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Operator writes]
+      operationId: revertCxScheduleWrite
+      summary: Write a schedule/calendar write's before-state back now (admin, a person)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 3 }
+      responses:
+        "200":
+          description: Reverted (or conflict, when the object changed since)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperatorWrite" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { description: The revert wasn't applied }
 components:
   parameters:
     ProjectId:
@@ -1810,6 +3258,33 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    OperatorWrite:
+      type: object
+      required: [id, project_id, kind, target, reason, status, created_at, log]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        kind: { type: string, enum: [point, schedule, calendar] }
+        target: { type: string, description: "The point URI, or site/instance/connection/object" }
+        equip_uri: { type: [string, "null"] }
+        site: { type: [string, "null"] }
+        instance: { type: [string, "null"] }
+        connection_id: { type: [string, "null"] }
+        level: { type: [integer, "null"] }
+        value: {}
+        before: { type: [object, "null"] }
+        reason: { type: string }
+        who: { type: [string, "null"] }
+        user_sub: { type: [string, "null"] }
+        role: { type: [string, "null"] }
+        status: { type: string, enum: [pending, active, permanent, relinquished, expired, superseded, reverted, conflict, failed] }
+        expires_at: { type: [string, "null"], format: date-time, description: "Auto-relinquish (points) or revert (schedules)" }
+        created_at: { type: string, format: date-time }
+        ended_at: { type: [string, "null"], format: date-time }
+        ended_by: { type: [string, "null"] }
+        end_reason: { type: [string, "null"] }
+        error: { type: [string, "null"] }
+        log: { type: array, items: { type: object } }
     Error:
       type: object
       required: [error]
@@ -1899,6 +3374,30 @@ components:
             status_agreement_min: { type: number, minimum: 0, maximum: 1 }
             tail_fraction: { type: number, minimum: 0.01, maximum: 1 }
             tolerances: { type: object, additionalProperties: { type: number, minimum: 0 } }
+          additionalProperties: false
+        overrides:
+          type: object
+          description: >-
+            Passive override tests (Baler#212): every override of a setpoint
+            or command found in history (minus Baler's own writes, the
+            schedule's own changes and releases; annotated with the
+            priority-array level when Windrow reports it) is judged as
+            `override:<pair>` - did the controlled variable reach it within
+            `within_minutes` - and a setpoint override while the equipment
+            was scheduled unoccupied is not_applicable, never a fail. Off
+            unless `enabled`.
+          properties:
+            enabled: { type: boolean }
+            within_minutes: { type: number, minimum: 1, maximum: 1440, description: "Time to reach the override (default 30)" }
+            min_hold_minutes: { type: number, minimum: 0, maximum: 1440, description: "A step must hold this long to count (default 10)" }
+            schedule_slack_minutes: { type: number, minimum: 0, maximum: 120 }
+            baler_slack_minutes: { type: number, minimum: 0, maximum: 120 }
+            refresh_minutes: { type: number, minimum: 0, maximum: 1440, description: "Re-read schedules and priority arrays this often; 0 = on request only (default 15)" }
+            basis: { type: string, enum: [any, priority_array], description: "priority_array: only overrides a priority-array observation confirms" }
+            tz: { type: [string, "null"], description: "IANA time zone the controllers' schedules run in" }
+            tolerances: { type: object, additionalProperties: { type: number, minimum: 0 } }
+            min_step: { type: object, additionalProperties: { type: number, minimum: 0 } }
+            unoccupied_values: { type: array, items: { type: [number, string, boolean] } }
           additionalProperties: false
         economizer:
           type: object
@@ -2024,7 +3523,7 @@ components:
           type: [object, "null"]
           description: While running, roughly every 2 s; null otherwise
           properties:
-            stage: { type: string, enum: [starting, inventory, history, checks, gl36, economizer] }
+            stage: { type: string, enum: [starting, inventory, history, checks, gl36, economizer, overrides] }
             equipment_done: { type: integer }
             equipment_total: { type: [integer, "null"] }
             points: { type: [integer, "null"] }
@@ -2162,12 +3661,25 @@ components:
           type: array
           items:
             type: object
-            required: [criteria]
             properties:
               id: { type: string }
               title: { type: string }
               instruction: { type: string }
-              criteria: { type: array, items: { $ref: "#/components/schemas/Criterion" } }
+              criteria:
+                type: array
+                items: { $ref: "#/components/schemas/Criterion" }
+                description: Required (1-20) when the step offers passive; a manual-only step may have none
+              methods:
+                type: array
+                items: { type: string, enum: [manual, passive, active] }
+                description: "Baler#275: how the step can be judged (default [passive]); a test run picks one"
+              active:
+                type: object
+                properties:
+                  kind: { type: string, enum: [command_response, library] }
+                  test: { type: string, description: "kind library: the standard test's id" }
+                description: The Cx 9 active test whose outcome judges the step (methods include active)
+              witness_required: { type: boolean, description: A manual result for this step needs a witness }
     Procedure:
       allOf:
         - { $ref: "#/components/schemas/ProcedureSpec" }
@@ -2212,6 +3724,12 @@ components:
                     title: { type: string }
                     status: { $ref: "#/components/schemas/Status" }
                     criteria: { type: array, items: { type: object } }
+                    method: { type: string, enum: [manual, passive, active], description: The method that produced `status` }
+                    machine_status: { type: [string, "null"], description: "The criteria's own verdict, always kept (never overwritten by a typed value)" }
+                    manual: { type: [object, "null"], description: "The current manual result: who, role, when, status, note, witness, attachments, edits" }
+                    active: { type: [object, "null"], description: The active run that judged it }
+                    contradiction: { type: boolean, description: "A person's pass/fail disagrees with the data's" }
+                    reason: { type: string }
         summary: { type: [object, "null"] }
         previous_id: { type: [string, "null"] }
         diff:
@@ -2283,7 +3801,7 @@ components:
         id: { type: string }
         project_id: { type: string }
         equip_uri: { type: string }
-        kind: { type: string, enum: [command_response, custom] }
+        kind: { type: string, description: "command_response, custom, or library:<test id>" }
         steps: { type: array, items: { type: object } }
         plan:
           type: array
@@ -2311,6 +3829,130 @@ components:
         results: { type: array, items: { type: object } }
         error: { type: [string, "null"] }
         abort_requested: { type: boolean }
+        fleet_id: { type: [string, "null"], description: The fleet run this run is a member of (Baler#275) }
+    FleetRun:
+      type: object
+      required: [id, project_id, kind, params, members, plan, plan_hash, status, window_start, window_end, failures, tally]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        kind: { type: string, description: "command_response or library:<test id>" }
+        params:
+          type: object
+          properties:
+            kind: { type: string, enum: [command_response, library] }
+            test: { type: [string, "null"] }
+            response_minutes: { type: number }
+            concurrency_per_system: { type: integer }
+            max_concurrent: { type: integer }
+            stagger_seconds: { type: integer }
+            max_failures: { type: integer }
+        members:
+          type: array
+          items:
+            type: object
+            required: [equip_uri, system, steps, slot_start, slot_end, state]
+            properties:
+              equip_uri: { type: string }
+              dis: { type: [string, "null"] }
+              system: { type: string, description: "The equipment that feeds it (brick:feeds / isFedBy), or (no system)" }
+              steps: { type: array, items: { type: object } }
+              minutes: { type: number }
+              slot_start: { type: string, format: date-time, description: Never started before this }
+              slot_end: { type: string, format: date-time }
+              state: { type: string, enum: [pending, started, done, skipped, not_run] }
+              run_id: { type: [string, "null"], description: Its own active run, once started }
+              outcome: { type: [string, "null"], enum: [pass, fail, inconclusive, aborted, null] }
+              started_at: { type: [string, "null"] }
+              note: { type: [string, "null"] }
+        skipped:
+          type: array
+          description: Equipment named that can't take the test, and why
+          items: { type: object, properties: { equip_uri: { type: string }, reason: { type: string } } }
+        plan:
+          type: array
+          description: The dry run - every write across the fleet
+          items:
+            type: object
+            properties:
+              equip_uri: { type: string }
+              step: { type: string }
+              point: { type: string }
+              value: { type: number }
+              level: { type: integer }
+              hold_minutes: { type: number }
+              not_before: { type: string, format: date-time }
+              expires_at: { type: string, format: date-time }
+        plan_hash: { type: string, description: "sha256 of the plan; the typed confirmation repeats it" }
+        status: { type: string, enum: [planned, confirmed, running, completed, stopped, aborted, expired, failed, cancelled] }
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
+        retest_of: { type: [string, "null"] }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        confirmed_by: { type: [string, "null"] }
+        confirmed_at: { type: [string, "null"], format: date-time }
+        started_at: { type: [string, "null"], format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+        heartbeat_at: { type: [string, "null"], format: date-time }
+        failures: { type: integer }
+        stop_reason: { type: [string, "null"] }
+        error: { type: [string, "null"] }
+        abort_requested: { type: boolean }
+        tally: { type: object, additionalProperties: { type: integer }, description: Members by outcome (or state while not finished) }
+        schedule_id: { type: [string, "null"], description: The scheduled retest that started it (Baler#275) }
+    ActiveScheduleScope:
+      type: object
+      required: [equip_uris, kind, mode]
+      properties:
+        equip_uris: { type: array, items: { type: string } }
+        kind: { type: string, enum: [command_response, library] }
+        test: { type: [string, "null"] }
+        response_minutes: { type: number }
+        concurrency_per_system: { type: integer }
+        max_concurrent: { type: integer }
+        stagger_seconds: { type: integer }
+        max_failures: { type: integer }
+        mode: { type: string, enum: [all, failures] }
+    ActiveScheduleTiming:
+      type: object
+      required: [first_window_start, window_minutes, every_days, valid_until]
+      properties:
+        first_window_start: { type: string, format: date-time }
+        window_minutes: { type: integer, maximum: 480 }
+        every_days: { type: integer }
+        valid_until: { type: string, format: date-time }
+    ActiveSchedule:
+      type: object
+      required: [id, project_id, name, status, scope, timing, approval_hash, valid_until]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        name: { type: string }
+        status: { type: string, enum: [proposed, approved, expired, revoked] }
+        scope: { $ref: "#/components/schemas/ActiveScheduleScope" }
+        timing: { $ref: "#/components/schemas/ActiveScheduleTiming" }
+        approval:
+          type: [object, "null"]
+          description: The approved envelope - the schedule may only narrow inside it
+          properties:
+            scope: { $ref: "#/components/schemas/ActiveScheduleScope" }
+            timing: { $ref: "#/components/schemas/ActiveScheduleTiming" }
+            hash: { type: string }
+        approval_hash: { type: string, description: sha256 of scope + timing; the approver types it }
+        approved_by: { type: [string, "null"] }
+        approved_at: { type: [string, "null"], format: date-time }
+        approver_claims: { type: [object, "null"] }
+        valid_until: { type: string, format: date-time }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        last_occurrence: { type: [integer, "null"] }
+        last_fleet_id: { type: [string, "null"] }
+        revoked_by: { type: [string, "null"] }
+        revoked_at: { type: [string, "null"], format: date-time }
+        history: { type: array, items: { type: object } }
+        next_window: { type: [string, "null"], format: date-time }
     AgentSession:
       type: object
       required: [id, project_id, status, transcript]
@@ -2371,6 +4013,7 @@ components:
         opened_run: { type: [string, "null"] }
         last_seen_run: { type: [string, "null"] }
         closed_run: { type: [string, "null"], description: The retest (run or test run id) the person's close cited }
+        closed_by: { type: [string, "null"], description: The person (sub) who closed it }
         resolved_at:
           type: [string, "null"]
           format: date-time
@@ -2483,3 +4126,358 @@ components:
               message: { type: string }
               haystack_markers: { type: array, items: { type: string } }
               xeto_spec: { type: [string, "null"] }
+    ManualResult:
+      type: object
+      required: [id, project_id, procedure_id, test_run_id, equip_uri, step_id, status, recorded_by, recorded_at, observed_at, history]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        procedure_id: { type: string }
+        test_run_id: { type: string }
+        equip_uri: { type: string }
+        step_id: { type: string }
+        status: { type: string, enum: [pass, fail, not_applicable] }
+        note: { type: [string, "null"] }
+        witness: { type: [object, "null"] }
+        attachments:
+          type: array
+          items:
+            type: object
+            properties: { id: { type: string }, filename: { type: string }, media_type: { type: string }, size: { type: integer }, sha256: { type: string } }
+        recorded_by: { type: string }
+        recorded_email: { type: [string, "null"] }
+        recorded_name: { type: [string, "null"] }
+        recorded_role: { type: [string, "null"] }
+        recorded_at: { type: string, format: date-time }
+        observed_at: { type: string, format: date-time }
+        client_id: { type: [string, "null"] }
+        history: { type: array, items: { type: object }, description: "Earlier versions: status, note, witness, attachments, replaced_at, replaced_by, reason" }
+        updated_at: { type: string, format: date-time }
+    SpaceSpec:
+      type: object
+      properties:
+        name: { type: string, maxLength: 200 }
+        kind: { type: string, enum: [building, floor, suite, zone, room] }
+        space_type: { type: [string, "null"], description: "Slug, e.g. operating_room; what a pack's applies_to.space_type matches" }
+        parent_id: { type: [string, "null"] }
+        rec_class: { type: [string, "null"] }
+        brick_class: { type: [string, "null"] }
+        point_uris: { type: array, maxItems: 50, items: { type: string } }
+        attributes: { type: object, description: "e.g. area_ft2, volume_ft3" }
+    Space:
+      type: object
+      required: [id, project_id, name, kind, status, point_uris, attributes, created_at, updated_at]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        name: { type: string }
+        kind: { type: string }
+        space_type: { type: [string, "null"] }
+        parent_id: { type: [string, "null"] }
+        rec_class: { type: [string, "null"] }
+        brick_class: { type: [string, "null"] }
+        point_uris: { type: array, items: { type: string } }
+        attributes: { type: object }
+        status: { type: string, enum: [active, archived] }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SpaceDetail:
+      allOf:
+        - { $ref: "#/components/schemas/Space" }
+        - type: object
+          required: [adjacent, serving, serving_chain, children]
+          properties:
+            adjacent:
+              type: array
+              items:
+                type: object
+                properties:
+                  space_id: { type: string }
+                  relation: { type: string }
+            serving: { type: array, items: { type: string } }
+            serving_chain:
+              type: array
+              description: The terminals (level 1) and what feeds them, from the graph's brick:feeds
+              items:
+                type: object
+                properties:
+                  equip_uri: { type: string }
+                  feeds: { type: [string, "null"] }
+                  level: { type: integer }
+            children: { type: array, items: { $ref: "#/components/schemas/Space" } }
+    ReadinessCriterion:
+      type: object
+      required: [status, items]
+      properties:
+        status: { type: string, enum: [pass, fail, inconclusive] }
+        items: { type: array, items: { type: object } }
+        note: { type: [string, "null"] }
+    Readiness:
+      type: object
+      required: [project, space, generated_at, status, verdict, counts, rooms, limitations]
+      properties:
+        project: { type: object }
+        space: { type: object }
+        generated_at: { type: string, format: date-time }
+        status: { type: string, enum: [pass, fail, inconclusive] }
+        verdict: { type: string, enum: [ready, incomplete, not_ready] }
+        counts:
+          type: object
+          properties:
+            ready: { type: integer }
+            incomplete: { type: integer }
+            not_ready: { type: integer }
+        limitations: { type: array, items: { type: string } }
+        rooms:
+          type: array
+          items:
+            type: object
+            required: [space_id, name, status, verdict, criteria, serving_chain]
+            properties:
+              space_id: { type: string }
+              name: { type: string }
+              space_type: { type: [string, "null"] }
+              status: { type: string, enum: [pass, fail, inconclusive] }
+              verdict: { type: string, enum: [ready, incomplete, not_ready] }
+              serving_chain: { type: array, items: { type: object } }
+              criteria:
+                type: object
+                required: [requirements, tests, tab_report, issues]
+                properties:
+                  requirements: { $ref: "#/components/schemas/ReadinessCriterion" }
+                  tests: { $ref: "#/components/schemas/ReadinessCriterion" }
+                  tab_report: { $ref: "#/components/schemas/ReadinessCriterion" }
+                  issues: { $ref: "#/components/schemas/ReadinessCriterion" }
+    PackRow:
+      type: object
+      required: [id, title, citation, applies_to, criterion, evidence, check]
+      properties:
+        id: { type: string }
+        title: { type: string, maxLength: 160 }
+        citation:
+          type: object
+          required: [ref]
+          additionalProperties: false
+          properties:
+            ref: { type: string, description: "Table, section or clause" }
+            page: { type: [integer, string, "null"] }
+        applies_to:
+          type: object
+          properties:
+            space_type: { type: array, items: { type: string } }
+            equip_class: { type: array, items: { type: string } }
+            phase: { type: array, items: { type: string } }
+        criterion:
+          type: object
+          properties:
+            quantity: { type: [string, "null"] }
+            op: { type: [string, "null"], enum: [">=", "<=", ">", "<", between, "==", null] }
+            value: { type: [number, string, "null"] }
+            min: { type: [number, "null"] }
+            max: { type: [number, "null"] }
+            unit: { type: [string, "null"] }
+        evidence:
+          type: object
+          properties:
+            point_class: { type: [string, "null"] }
+            window_hours: { type: number }
+            coverage: { type: number }
+        check:
+          type: object
+          required: [engine]
+          properties:
+            engine: { type: string, enum: [cx, procedure, shacl, gl36] }
+            check_id: { type: string }
+            criterion: { type: string }
+            template: { type: string }
+            item: { type: string }
+        verified_by: { type: [object, "null"] }
+        note: { type: [string, "null"] }
+    PackDocument:
+      type: object
+      required: [pack_id, version, title, source]
+      properties:
+        pack_id: { type: string }
+        version: { type: string }
+        title: { type: string }
+        source:
+          type: object
+          required: [standard, edition]
+          properties:
+            standard: { type: string }
+            edition: { type: string }
+            publisher: { type: [string, "null"] }
+            kind: { type: [string, "null"] }
+        jurisdiction: { type: array, items: { type: string } }
+        notice: { type: [string, "null"] }
+        requirements: { type: array, items: { $ref: "#/components/schemas/PackRow" } }
+    Pack:
+      allOf:
+        - { $ref: "#/components/schemas/PackDocument" }
+        - type: object
+          required: [id, org_id, status, summary, created_at]
+          properties:
+            id: { type: string }
+            org_id: { type: string }
+            status: { type: string, enum: [draft, published, retired] }
+            history: { type: array, items: { type: object } }
+            summary:
+              type: object
+              properties:
+                rows: { type: integer }
+                confirmed: { type: integer }
+                blank: { type: integer }
+                active: { type: integer }
+            created_by: { type: [string, "null"] }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+            published_by: { type: [string, "null"] }
+            published_at: { type: [string, "null"], format: date-time }
+    PackAdoption:
+      type: object
+      required: [adoption, pack]
+      properties:
+        adoption:
+          type: object
+          properties:
+            id: { type: string }
+            project_id: { type: string }
+            pack_ref: { type: string }
+            pack_id: { type: string }
+            version: { type: string }
+            adopted_by: { type: [string, "null"] }
+            adopted_at: { type: string, format: date-time }
+            retired_at: { type: [string, "null"] }
+        pack: { $ref: "#/components/schemas/Pack" }
+    PackExtraction:
+      type: object
+      required: [id, pack_ref, filename, sha256, size, status, proposals]
+      properties:
+        id: { type: string }
+        org_id: { type: string }
+        pack_ref: { type: string }
+        filename: { type: string }
+        sha256: { type: string }
+        size: { type: integer }
+        status: { type: string, enum: [queued, running, completed, failed] }
+        proposals: { type: integer }
+        info: { type: [object, "null"] }
+        error: { type: [string, "null"] }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        finished_at: { type: [string, "null"] }
+    PackProposal:
+      type: object
+      required: [id, pack_ref, row, source, status]
+      properties:
+        id: { type: string }
+        org_id: { type: string }
+        pack_ref: { type: string }
+        extraction_id: { type: string }
+        row: { $ref: "#/components/schemas/PackRow" }
+        source:
+          type: object
+          properties:
+            document: { type: string }
+            sha256: { type: string }
+            page: { type: integer }
+            quote: { type: string, description: "Verbatim, from the user's own document; never copied into the pack" }
+            quote_verified: { type: boolean }
+        confidence: { type: [number, "null"] }
+        status: { type: string, enum: [proposed, accepted, rejected] }
+        decided_by: { type: [string, "null"] }
+        decided_at: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+    ComplianceRun:
+      type: object
+      required: [id, project_id, status, window_end, started_at]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        status: { type: string, enum: [queued, running, completed, failed] }
+        triggered_by: { type: [string, "null"] }
+        window_end: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: [string, "null"] }
+        summary: { type: [object, "null"] }
+        error: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+    ComplianceLogRow:
+      type: object
+      required: [space_id, pack_id, version, row_id, title, citation, status, window_start, window_end, evidence]
+      properties:
+        id: { type: string }
+        run_id: { type: string }
+        space_id: { type: string }
+        pack_ref: { type: string }
+        pack_id: { type: string }
+        version: { type: string }
+        row_id: { type: string }
+        title: { type: string }
+        citation: { type: object }
+        status: { type: string, enum: [pass, fail, inconclusive] }
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
+        evidence: { type: object }
+        note: { type: [string, "null"] }
+    PerformanceBaseline:
+      type: object
+      required: [id, project_id, equip_uri, kind, points, fit_start, fit_end, model, status]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        equip_uri: { type: string }
+        asset_id: { type: [string, "null"] }
+        kind: { type: string }
+        points: { type: object }
+        fit_start: { type: string, format: date-time }
+        fit_end: { type: string, format: date-time }
+        model:
+          type: object
+          properties:
+            coefficients: { type: array, items: { type: number } }
+            features: { type: array, items: { type: string } }
+            n_hours: { type: integer }
+            cvrmse_pct: { type: number }
+            nmbe_pct: { type: number }
+            ranges: { type: object }
+            quality: { type: object }
+        status: { type: string, enum: [active, superseded] }
+        note: { type: [string, "null"] }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+    SavingsCase:
+      type: object
+      required: [id, project_id, equip_uri, title, assumptions, result, history]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        equip_uri: { type: string }
+        asset_id: { type: [string, "null"] }
+        baseline_id: { type: [string, "null"] }
+        title: { type: string }
+        assumptions:
+          type: object
+          additionalProperties:
+            type: object
+            required: [value, unit, label, source]
+            properties:
+              value: { type: [number, "null"] }
+              unit: { type: string }
+              label: { type: string }
+              source: { type: string, enum: [measured, user, default] }
+              note: { type: [string, "null"] }
+        result:
+          type: object
+          properties:
+            annual_kwh_saved: { type: number }
+            annual_savings: { type: number }
+            simple_payback_years: { type: [number, "null"] }
+            savings_over_remaining_life: { type: [number, "null"] }
+            sensitivity: { type: array, items: { type: object } }
+            formula: { type: string }
+        history: { type: array, items: { type: object } }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
