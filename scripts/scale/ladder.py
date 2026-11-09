@@ -929,7 +929,12 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
     samples: list[dict] = []
     ev = None
     try:
+        eng_start = synthetic.engines(conn)
         time.sleep(args.warmup)
+        if plan.derivations:
+            # the first passes over a step's new equips write their outputs'
+            # lineage to the graph: a one-off burst, recorded, not soaked (#273)
+            step["synthetic_settle"] = synthetic.settle(lambda: synthetic.engines(conn), eng_start, args.interval)
         ev = start_evidence(ep, sysmon, args)
         soak_start = time.time()
         w0 = chunk_writes(conn)

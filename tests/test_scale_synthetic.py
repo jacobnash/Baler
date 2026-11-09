@@ -158,3 +158,19 @@ def test_summary_and_reasons():
     assert any(w.startswith("derivation chain top lags") for w in why)
     assert any(w.startswith("Cur-mode rule evaluations") for w in why)
     assert synthetic.reasons({}) == []
+
+
+def test_settle_waits_for_two_passes_under_the_interval():
+    beats = iter([{"derivation_engine": {"tick": {"passes": 3, "last_s": 117.0}}},
+                  {"derivation_engine": {"tick": {"passes": 4, "last_s": 73.0}}},
+                  {"derivation_engine": {"tick": {"passes": 5, "last_s": 8.0}}}])
+    clock = [0.0]
+
+    def sleep(s):
+        clock[0] += s
+
+    out = synthetic.settle(lambda: next(beats), {"derivation_engine": {"tick": {"passes": 3}}}, 60.0,
+                           sleep=sleep, clock=lambda: clock[0])
+    assert out == {"waited_s": 10.0, "settled": True, "longest_pass_s": 117.0}
+    out = synthetic.settle(dict, {}, 60.0, limit=12, sleep=sleep, clock=lambda: clock[0])
+    assert out["settled"] is False  # gives up at the limit: the soak then shows it

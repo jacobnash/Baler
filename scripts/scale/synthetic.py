@@ -56,6 +56,7 @@ import secrets
 import statistics
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -415,6 +416,26 @@ def engines(conn) -> dict:
     except Exception:  # noqa: BLE001
         conn.rollback()
         return {}
+
+
+def settle(read_engines, start: dict, interval: float, limit: float = 900.0, every: float = 5.0,
+           sleep=time.sleep, clock=time.monotonic) -> dict:
+    """Waits (up to `limit` s) until derivation_engine has finished two tick
+    passes since `start` (its heartbeat then) and its last pass took less
+    than the interval: a step's first passes over its new equips write each
+    new output's lineage to the graph once, a burst that isn't the steady
+    load the soak measures. Returns how long it waited and the longest pass
+    seen meanwhile (that burst)."""
+    t0 = clock()
+    passes0 = ((start.get("derivation_engine") or {}).get("tick") or {}).get("passes") or 0
+    longest = 0.0
+    while True:
+        tick = (read_engines().get("derivation_engine") or {}).get("tick") or {}
+        longest = max(longest, tick.get("last_s") or 0.0)
+        done = (tick.get("passes") or 0) >= passes0 + 2 and (tick.get("last_s") or 0) < interval
+        if done or clock() - t0 >= limit:
+            return {"waited_s": round(clock() - t0, 1), "settled": done, "longest_pass_s": round(longest, 2)}
+        sleep(every)
 
 
 def fault_counts(conn, a: float, b: float) -> dict:
