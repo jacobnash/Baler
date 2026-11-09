@@ -1,0 +1,117 @@
+---
+title: Document store
+---
+
+Part of the building lifecycle record (epic Baler#221, design
+`todo/building-lifecycle-ubis.md` §5). Baler#201.
+
+A building's documents are part of its record: O&M manuals, prints,
+submittals, start-up guides, TAB reports, warranties, photos. The document
+store keeps them for the building's life.
+
+## Content-addressed
+
+Each file is stored once, keyed by the sha256 of its bytes. That is the
+pattern Cx 7's `cx_spec_documents` uses, except that this store keeps the file.
+
+- **Duplicates are free.** Uploading a file the org already has returns the
+  existing document (`200`, `"duplicate": true`). Another org uploading the
+  same file gets its own document over the same stored bytes. It can't see
+  yours.
+- **Integrity is checkable.** `GET /ops/documents/{id}/verify` re-hashes the
+  stored bytes and compares them with the sha256 the document is named by.
+- **The file never changes.** Title, kind, notes and site can be edited
+  (audited). A new revision of a manual is a new upload.
+
+The bytes live in Postgres (`lc_blob_data`, `bytea`), so every
+[backup](/backups) already has them. No service writes files under the app
+directory. Uploads are limited to 100 MB per file.
+
+## Linked
+
+A document, or one page of it, links to any of:
+
+| `target_kind` | `target` |
+|---|---|
+| `position` | the equipment URI (checked against the caller's sites) |
+| `asset` | an asset id (assets are Baler#197) |
+| `space` | a space URI |
+| `system` | a system URI |
+| `phase` | a Cx phase key, e.g. `construction`, `startup` |
+
+## Searchable, with citations
+
+On upload, each page's text is extracted once per file. PDFs are read with
+pdfplumber (the `cx-spec` extra). Plain text is used as is, with form feeds
+as page breaks. The text is indexed with Postgres full-text search
+(`tsvector`, GIN index).
+
+`GET /ops/documents/search?q=` takes websearch syntax (words, `"a phrase"`,
+`-excluded`). It returns the best pages first, and each hit names the
+document and the page:
+
+```json
+[{"document_id": "…", "filename": "sf-om.pdf", "title": "SF motor O&M", "kind": "om_manual",
+  "page": 47, "snippet": "… «bearing» «lubrication» every 2000 hours …", "citation": "SF motor O&M, p. 47"}]
+```
+
+Anything that answers from documents (the assistant, extraction in #202)
+cites document and page from these hits.
+
+A file with no text layer (a scan), a damaged PDF, or a type we can't read
+is still stored. It just isn't searchable, and `text_status` says why.
+
+## API
+
+All under the gateway's `/ops/` prefix. Reads need `viewer`, changes
+`operator`, delete `admin`.
+
+| Route | What |
+|---|---|
+| `POST /ops/documents?filename=&kind=&title=&site_id=` | Upload. The body is the file itself, with its own Content-Type (anything but JSON) |
+| `GET /ops/documents` | List. Filters: `kind`, `target_kind`, `target` |
+| `GET /ops/documents/kinds` | The document kinds and link target kinds |
+| `GET /ops/documents/search?q=` | Pages matching `q`, with citations. Filters: `kind`, `target_kind`, `target`, `limit` |
+| `GET /ops/documents/{id}` | Metadata, page count, text status, links |
+| `PATCH /ops/documents/{id}` | `title`, `kind`, `notes`, `site_id`, `filename` (audited) |
+| `DELETE /ops/documents/{id}` | Soft delete (admin). The stored bytes stay |
+| `GET /ops/documents/{id}/content` | The file (as an attachment) |
+| `GET /ops/documents/{id}/pages/{n}` | One page's text, with its citation |
+| `GET /ops/documents/{id}/verify` | Re-hash the stored bytes |
+| `POST /ops/documents/{id}/links` | `target_kind`, `target`, optional `page`, `note` |
+| `DELETE /ops/documents/{id}/links/{link_id}` | Remove a link |
+| `GET /ops/documents/{id}/audit` | Every change, newest first |
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/pdf" \
+  --data-binary @ahu1-om.pdf "$BALER/ops/documents?filename=ahu1-om.pdf&kind=om_manual"
+```
+
+Kinds: `om_manual`, `submittal`, `drawing`, `specification`,
+`startup_guide`, `tab_report`, `warranty`, `cx_report`, `photo`,
+`certificate`, `other`.
+
+## UI
+
+**Documents** in the top navigation: search with citations, upload, the
+list, and each document's links, download and integrity check.
+
+## Storage
+
+Migration 0003: `lc_blobs` and `lc_blob_data` (one row per distinct file),
+`lc_document_pages` (page text, `tsvector`), `lc_documents` (an org's
+documents) and `lc_document_links`. The code is `baler.lifecycle.documents`,
+served by `ops_api`.
+
+## Not built yet
+
+- **The building export** (`python -m baler.export`): document files by
+  sha256 with the manifest. Until then the manifest's `not_included`
+  `document_content` line still applies.
+- OCR for scanned documents. They're stored, but not searchable.
+- The assistant's document tools (search, cite), which are #220.
+- Purging a deleted document's bytes. A delete is soft, and the blob
+  stays, because other documents or orgs may share it.
+- Moving large blobs out of Postgres. We haven't measured how a store of
+  many large manuals affects backup and restore time. Measure that on a
+  real document set before deciding.

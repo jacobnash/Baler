@@ -103,6 +103,22 @@ const ROUTES = [
   ["POST",   /^\/ops\/edges\/[^/]+\/[^/]+\/actions\/(list_devices|list_connections|modbus_list_connections|list_announced)$/, "devices", "viewer"],
   ["POST",   /^\/ops\/edges\/[^/]+\/[^/]+\/actions\/[a-z_]+$/, "devices", "admin"],
 
+  // Building lifecycle record (epic #221), served by ops_api from
+  // baler.lifecycle. Reads viewer, changes operator; ops_api also keeps
+  // each org's rows to itself and positions to the caller's sites.
+  // Document store (#201): deleting (a soft delete) is admin.
+  ["GET",    /^\/ops\/documents$/,                       "documents", "viewer"],
+  ["POST",   /^\/ops\/documents$/,                       "documents", "operator"],
+  ["GET",    /^\/ops\/documents\/search$/,               "documents", "viewer"],
+  ["GET",    /^\/ops\/documents\/kinds$/,                "documents", "viewer"],
+  ["GET",    /^\/ops\/documents\/[^/]+$/,                "documents", "viewer"],
+  ["PATCH",  /^\/ops\/documents\/[^/]+$/,                "documents", "operator"],
+  ["DELETE", /^\/ops\/documents\/[^/]+$/,                "documents", "admin"],
+  ["GET",    /^\/ops\/documents\/[^/]+\/(content|verify|audit)$/, "documents", "viewer"],
+  ["GET",    /^\/ops\/documents\/[^/]+\/pages\/[^/]+$/,     "documents", "viewer"],
+  ["POST",   /^\/ops\/documents\/[^/]+\/links$/,          "documents", "operator"],
+  ["DELETE", /^\/ops\/documents\/[^/]+\/links\/[^/]+$/,   "documents", "operator"],
+
   // commissioning_api (Baler#37): reads viewer, changes operator,
   // archiving a project admin. The backend also checks the caller's org
   // and sites against the project itself.

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Baler — Documents</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="console.css" />
+</head>
+<body>
+  <header>
+    <h1>Documents</h1>
+    <span id="status">connecting…</span>
+    <nav class="top-nav">
+      <a href="index.html">Equipment tree</a>
+      <a href="his.html">Query</a>
+      <a href="alarms.html">Alarms</a>
+      <a href="derivations.html">Derivations</a>
+      <a href="cx.html">Commissioning</a>
+      <a href="documents.html">Documents</a>
+      <a href="connectors.html">Connectors</a>
+      <a href="ops.html">Ops</a>
+      <a href="/docs" target="_blank" rel="noopener">Docs</a>
+    </nav>
+  </header>
+  <div id="login-gate" class="login-gate">
+    <form id="login-form">
+      <h2>Sign in</h2>
+      <label>Email <input type="email" id="login-email" autocomplete="username" required /></label>
+      <label>Password <input type="password" id="login-password" autocomplete="current-password" required /></label>
+      <button type="submit">Sign in</button>
+      <p id="login-error" class="hint" hidden></p>
+    </form>
+  </div>
+  <main id="main" class="console-main" style="display: none">
+    <section>
+      <h2>Search</h2>
+      <p class="hint">Searches every page's text. Each hit cites the document and page.
+        See <a href="/docs/documents" target="_blank" rel="noopener">the docs</a>.</p>
+      <form id="search-form" class="inline-form">
+        <input name="q" placeholder='e.g. filter MERV, "bearing lubrication"' size="40" required />
+        <button type="submit">Search</button>
+      </form>
+      <table id="hits-table">
+        <thead><tr><th>Citation</th><th>Kind</th><th>Snippet</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Upload</h2>
+      <p class="hint">Stored once by sha256: uploading the same file again returns the existing document.</p>
+      <form id="upload-form" class="inline-form">
+        <input type="file" name="file" required />
+        <select name="kind" id="kind-select"></select>
+        <input name="title" placeholder="title (optional)" />
+        <button type="submit">Upload</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Documents</h2>
+      <table id="docs-table">
+        <thead><tr><th>Title / file</th><th>Kind</th><th>Pages</th><th>Text</th><th>Added</th><th>sha256</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section id="detail" hidden>
+      <h2 id="detail-title"></h2>
+      <p><button type="button" id="download">Download</button> <button type="button" id="verify">Verify integrity</button> <span id="verify-result"></span></p>
+      <h3>Links</h3>
+      <table id="links-table"><thead><tr><th>Kind</th><th>Target</th><th>Page</th><th>Note</th></tr></thead><tbody></tbody></table>
+      <form id="link-form" class="inline-form">
+        <select name="target_kind"><option>position</option><option>asset</option><option>space</option><option>system</option><option>phase</option></select>
+        <input name="target" placeholder="URI, asset id or phase key" size="36" required />
+        <input name="page" placeholder="page" size="4" inputmode="numeric" />
+        <input name="note" placeholder="note" />
+        <button type="submit">Link</button>
+      </form>
+    </section>
+  </main>
+  <script src="auth.js"></script>
+  <script src="documents.js"></script>
+</body>
+</html>
