@@ -288,6 +288,59 @@ class CountingStore:
         self.writes += 1
 
 
+def test_output_rows_are_written_in_one_transaction_per_derivation(monkeypatch):
+    """#273: _batched_writes collects a derivation's rows for one
+    write_point_values call, instead of a commit per row."""
+    monkeypatch.setattr(derivation_engine, "link_point_to_equip", lambda store, p, e: None)
+    single, batches = [], []
+    monkeypatch.setattr(derivation_engine.timeseries, "write_point_value", lambda *a, **k: single.append(a))
+    monkeypatch.setattr(derivation_engine.timeseries, "write_point_values", lambda conn, rows: batches.append(list(rows)))
+    store = CountingStore()
+    with derivation_engine._batched_writes("conn"):
+        with derivation_engine._batched_writes("conn"):  # nested: the outer batch
+            derivation_engine._write_and_attach(store, None, "urn:point:computed/d/t1", "urn:t1", 1.0, T0,
+                                                {"unit": "°F"}, ["urn:point:a"])
+        derivation_engine._write_and_attach(store, None, "urn:point:computed/d/t2", "urn:t2", 2.0, T0, {}, ["urn:point:a"])
+        assert batches == []  # nothing written until the derivation is done
+    assert not single
+    assert batches == [[("urn:point:computed/d/t1", 1.0, T0, "°F", None), ("urn:point:computed/d/t2", 2.0, T0, None, None)]]
+
+
+class HealthConn:
+    def __init__(self):
+        self.statements = []
+
+    def execute(self, sql, params=None):
+        self.statements.append(sql.split()[0])
+        return SimpleNamespace(fetchone=lambda: (1,))
+
+
+def test_a_success_is_recorded_once_until_the_target_fails():
+    conn = HealthConn()
+    for _ in range(3):
+        derivation_engine._record_success_once(conn, "d", "urn:t")
+    assert len(conn.statements) == 1  # the row exists (list_targets), then nothing to change
+    derivation_engine._record_target_failure(conn, "d", "urn:t", False, ValueError("x"), SimpleNamespace(
+        set_attribute=lambda *a: None))
+    derivation_engine._record_success_once(conn, "d", "urn:t")
+    assert len(conn.statements) == 3  # the failure, then the success that resets it
+
+
+def test_cur_mode_derivations_are_swept_on_the_backstop_interval_not_every_tick():
+    sweep = derivation_engine.sweep_interval
+    assert sweep(DERIVATION, 5.0, 300.0) == 300.0
+    assert sweep({**DERIVATION, "applies_to_topic_glob": None}, 5.0, 300.0) == 5.0
+    assert sweep({**DERIVATION, "interval_seconds": 60}, 5.0, 300.0) == 60.0
+
+
+def test_tick_stats_running_totals():
+    t = derivation_engine.TickStats()
+    t.record(1.0, 10, 60.0, 0.0)
+    out = t.record(2.0, 20, 60.0, 1.5)
+    assert out == {"last_s": 2.0, "last_rows": 20, "interval_s": 60.0, "late_s": 1.5, "passes": 2, "rows": 30,
+                   "busy_s": 3.0}
+
+
 def test_lineage_is_written_once_per_process(monkeypatch):
     monkeypatch.setattr(derivation_engine, "link_point_to_equip", lambda store, p, e: None)
     monkeypatch.setattr(derivation_engine.timeseries, "write_point_value", lambda *a, **k: None)

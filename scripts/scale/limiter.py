@@ -265,8 +265,9 @@ def rule_daemon_hits(step: dict, soak: dict) -> list[tuple[str, str, str, list[s
         if lagging:
             ev.append(f"chain top p95 {top['p95_s']} s behind its inputs (> {budget:g} s)")
         why, conf, more = _daemon_cause(step, soak, "derivation_engine", tick.get("busy"))
-        hits.append((f"{TICKS}: a pass of {tick.get('rows_per_pass')} rows takes {tick.get('mean_s')} s against its "
-                     f"{iv:g} s interval; {why}", TICKS, conf, ev + more))
+        name = (f"{TICKS}: a pass of {tick.get('rows_per_pass')} rows takes {tick.get('mean_s')} s against its "
+                f"{iv:g} s interval; {why}")
+        hits.append((name, TICKS, conf, ev + more))
     return hits
 
 

@@ -61,6 +61,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import common
+import limiter
 
 # ------------------------------------------------------------------ profiles
 
@@ -155,7 +156,7 @@ class Plan:
         and the derivations' outputs, one per derivation per equip."""
         if not self.derivations:
             return {"real": total, "synthetic": 0, "total": total, "equips": math.ceil(total / self.points_per_equip)}
-        equips = max(1, round(total / (self.points_per_equip + self.derivations)))
+        equips = round(total / (self.points_per_equip + self.derivations))
         real = equips * self.points_per_equip
         return {"real": real, "synthetic": equips * self.derivations, "total": real + equips * self.derivations,
                 "equips": equips}
@@ -559,3 +560,27 @@ def reasons(step: dict) -> list[str]:
 
 def median(xs: list[float]) -> float | None:
     return statistics.median(xs) if xs else None
+
+
+def table(results: list[dict]) -> list[str]:
+    """Markdown rows of the synthetic load per step, for `ladder.py table`
+    (after its main table): what was configured, what it measured as."""
+    head = ("| Run | Profile | N | Points (real + synthetic) | Status | Derivation rows/s (expected) | Tick pass / interval | "
+            "Rule evals/s (expected) | Faults opened / resolved / webhooks | Chain top lag p50 / p95 (ingest p50) | Limiter |")
+    lines = [head, "|" + "---|" * (head.count("|") - 1)]
+    for r in results:
+        for st in r.get("steps", []):
+            syn = st.get("synthetic")
+            if not syn:
+                continue
+            p, d, ru, f = syn["points"], syn["derivations"], syn["rules"], syn["faults"]
+            tick, top, cl = d.get("tick") or {}, (syn.get("chain_lag") or {}).get("top") or {}, syn.get("chain_lag") or {}
+            hooks = (f.get("webhooks") or {}).get("received", "-")
+            lines.append(
+                f"| {r['run_id']} | {syn['plan']['profile']} | {syn['plan']['per_equip']} | {p['total']:,} ({p['real']:,} + "
+                f"{p['synthetic']:,}) | {st['status']} | {d.get('rows_per_s')} ({syn['expected']['derivation_rows_per_s']}) | "
+                f"{tick.get('mean_s')} s / {tick.get('interval_s')} s | {ru.get('cur_evaluations_per_s')} "
+                f"({syn['expected']['cur_rule_evaluations_per_s']}) | {f.get('opened')} / {f.get('resolved')} / {hooks} | "
+                f"{top.get('p50_s', '-')} / {top.get('p95_s', '-')} s ({cl.get('inputs_ingest_p50_s', '-')} s) | "
+                f"{limiter.short(st.get('limiter')).replace('|', '/')} |")
+    return lines if len(lines) > 2 else []

@@ -1133,6 +1133,10 @@ def cmd_table(args) -> None:
                   f"{s.get('lag', {}).get('p95_s', '-')} s | {med('read?filter=point')} | "
                   f"{med('readAll(equip) hisRead(today)')} | {med('Cx report, 500-point project')} | "
                   f"{(s.get('reasons') or ['-'])[0]} | {limiter.short(s.get('limiter')).replace('|', '/')} |")
+    syn = synthetic.table([json.loads(Path(path).read_text()) for path in args.files])
+    if syn:
+        print("\nSynthetic load (#273):\n")
+        print("\n".join(syn))
 
 
 def main(argv=None) -> None:
