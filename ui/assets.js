@@ -176,6 +176,20 @@ initAuth(() => {
     await loadDeferred();
   });
   loadPM().catch((err) => say(`error: ${err.message}`));
+  document.getElementById("cobie-export").addEventListener("click", (ev) => { ev.preventDefault(); downloadCSV("/cobie/export", "cobie.xlsx"); });
+  onSubmit("cobie-form", async (f) => {
+    const file = f.elements.file.files[0];
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let bin = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    const body = { workbook: btoa(bin), filename: file.name, commit: f.elements.commit.checked,
+      positions: f.elements.positions.value ? JSON.parse(f.elements.positions.value) : {} };
+    const out = await api("/cobie/import", { method: "POST", body: JSON.stringify(body) });
+    document.getElementById("cobie-result").textContent = JSON.stringify(
+      { dry_run: out.dry_run, summary: out.summary, created: out.created, errors: out.errors,
+        skipped: (out.plan || out).skipped }, null, 2);
+    if (!out.dry_run) { await loadAssets(); await loadPM(); }
+  });
   document.getElementById("pm-csv").addEventListener("click", (ev) => { ev.preventDefault(); downloadCSV("/pm/due/export?format=csv", "pm-due.csv"); });
   document.getElementById("pm-cobie").addEventListener("click", (ev) => { ev.preventDefault(); downloadCSV("/pm/due/export?format=cobie-job", "cobie-job.csv"); });
   onSubmit("pm-form", async (f) => {
