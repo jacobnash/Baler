@@ -120,6 +120,56 @@ def test_judge_marks_unit_suspect_samples():
     assert set(flags.values()) == {"unit_suspect"} and len(flags) == 15
 
 
+def test_spike_indexes_below_start_are_neighbours_only():
+    values = [72.0, 72.1, 71.9, 72.0, 72.2, 72.1, 140.0, 72.0, 71.8, 72.1, 72.0, 72.1, 71.9]
+    assert quality.spike_indexes(values, start=6) == [6]
+    assert quality.spike_indexes(values, start=7) == []
+
+
+def test_spike_indexes_match_the_statistics_median_reference():
+    import random
+    import statistics
+
+    def reference(values, half=5, k=6.0):
+        out = []
+        for i in range(half, len(values) - half):
+            nb = values[i - half:i] + values[i + 1:i + 1 + half]
+            med = statistics.median(nb)
+            mad = statistics.median(abs(v - med) for v in nb)
+            if abs(values[i] - med) > k * 1.4826 * max(mad, max(abs(med) * 0.001, 1e-6)):
+                out.append(i)
+        return out
+
+    rng = random.Random(268)
+    for _ in range(50):
+        values = [72.0 + rng.gauss(0, rng.choice([0.0, 0.01, 0.5])) for _ in range(200)]
+        for i in rng.sample(range(200), 5):
+            values[i] += rng.choice([-1, 1]) * rng.uniform(0, 30)
+        assert quality.spike_indexes(values) == reference(values)
+
+
+def test_context_lets_the_previous_pass_s_unjudged_tail_be_judged_now():
+    # The previous pass ended at a spike with too few right-hand neighbours;
+    # this pass gets it back as context and judges it, without re-judging
+    # the older context.
+    values = [72.0, 72.1, 71.9, 72.0, 72.2, 72.1, 72.0, 72.1, 71.9, 140.0]
+    older = [(T0 + timedelta(minutes=i), v) for i, v in enumerate(values)]
+    new = [(T0 + timedelta(minutes=10 + i), v, None) for i, v in enumerate([72.0, 71.8, 72.1, 72.0, 72.1, 71.9])]
+    flags, _ = quality.judge("Zone_Air_Temperature_Sensor", "°F", new, older)
+    assert flags == {T0 + timedelta(minutes=9): "spike"}
+    # an old spike deeper in the context (already judged last pass) isn't flagged again here
+    older[2] = (older[2][0], 140.0)
+    flags, _ = quality.judge("Zone_Air_Temperature_Sensor", "°F", new, older)
+    assert T0 + timedelta(minutes=2) not in flags
+
+
+def test_judge_only_flags_just_the_late_rows():
+    values = [72.0, 72.1, 71.9, 72.0, 72.2, 72.1, 95.0, 72.0, 71.8, 72.1, 72.0, 72.1, 180.0, 72.0]
+    samples = _samples(values)
+    flags, _ = quality.judge("Zone_Air_Temperature_Sensor", "°F", samples, only={T0 + timedelta(minutes=6)})
+    assert flags == {T0 + timedelta(minutes=6): "spike"}  # the 180 isn't a late row: someone else's job
+
+
 def test_cur_mode_ignores_a_reading_the_device_flags(monkeypatch):
     seen = []
     monkeypatch.setattr(fault_detector, "handle_cur_reading", lambda *a: seen.append(a[3]))

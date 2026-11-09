@@ -17,6 +17,6 @@ docs-site/pages/schema-migrations.mdx for the rules on hypertables and
 compressed chunks (migrations.hypertable has the helper).
 """
 
-from baler.migrations import v0001_baseline, v0002_reading_feed
+from baler.migrations import v0001_baseline, v0002_reading_feed, v0003_quality_watermark
 
-ALL = (v0001_baseline, v0002_reading_feed)
+ALL = (v0001_baseline, v0002_reading_feed, v0003_quality_watermark)
