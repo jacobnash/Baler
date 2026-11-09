@@ -25,6 +25,7 @@ RELEASED = {
     "v0005_password_reset_mfa.py": "7d7381e49a7a79ce7638ea6bc670e41a91cf85637f27a39d446bece891f01312",
     "v0006_override_tests.py": "e5127763ffc742a03ae61b643b5b6acd347120d5a880b7cd0aedd7e2d5383d28",
     "v0007_operator_writes.py": "3554c157eb694f14695cd149fa8932fd115e5e13376ca5ab2890ce122f6e611c",
+    "v0008_manual_results.py": "470a4c4b0316239b9af8b795460966213a6937e6c19bc90a72af4dcd9146b587",
 }
 
 

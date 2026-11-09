@@ -973,6 +973,13 @@ paths:
               properties:
                 started_at: { type: string, format: date-time }
                 hours: { type: number, exclusiveMinimum: 0, maximum: 744 }
+                methods:
+                  type: object
+                  description: >-
+                    Baler#275: the method this run uses per step id (one the
+                    step offers); a step not named uses its first. Stored on
+                    the run's procedure snapshot as `methods`.
+                  additionalProperties: { type: string, enum: [manual, passive, active] }
       responses:
         "202":
           description: The queued test run
@@ -1820,6 +1827,158 @@ paths:
       summary: Interactive docs for this API
       responses:
         "200": { description: HTML }
+  /test-runs/{id}/manual-results:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Procedures]
+      operationId: listCxManualResults
+      summary: Every manual result recorded against a test run, oldest first
+      responses:
+        "200":
+          description: Results
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ManualResult" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Procedures]
+      operationId: recordCxManualResult
+      summary: Record a person's pass / fail / N-A for one step on one equipment (operator, a person)
+      description: >-
+        Baler#275. Always recorded as the signed-in person (sub, email,
+        display name, role from the token): there is no field for anyone
+        else, and API keys are refused. The step must offer the manual
+        method. `client_id` makes an offline resend idempotent (200 with
+        the stored row); `observed_at` is when the person checked (at most
+        14 days back). The run's statuses, summary and issues update: a
+        manual fail opens an issue, a contradiction with the data opens
+        one, and a later pass resolves or retests it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [equip_uri, step_id, status]
+              additionalProperties: false
+              properties:
+                equip_uri: { type: string }
+                step_id: { type: string }
+                status: { type: string, enum: [pass, fail, not_applicable] }
+                note: { type: string, maxLength: 4000 }
+                witness:
+                  type: object
+                  required: [name]
+                  properties: { name: { type: string }, org: { type: string }, role: { type: string } }
+                attachments:
+                  type: array
+                  maxItems: 5
+                  items:
+                    type: object
+                    required: [media_type, data]
+                    properties:
+                      filename: { type: string }
+                      media_type: { type: string, enum: [image/jpeg, image/png, image/webp, image/heic, application/pdf, text/plain] }
+                      data: { type: string, description: base64, at most 5 MB decoded }
+                client_id: { type: string, minLength: 8, maxLength: 80 }
+                observed_at: { type: string, format: date-time }
+      responses:
+        "200":
+          description: Already recorded (same client_id)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManualResult" }
+        "201":
+          description: Recorded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManualResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: "Not a person's session, or not operator" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /manual-results/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    patch:
+      tags: [Procedures]
+      operationId: editCxManualResult
+      summary: Edit your own manual result; the previous version is kept in history (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                status: { type: string, enum: [pass, fail, not_applicable] }
+                note: { type: string }
+                witness: { type: [object, "null"] }
+                attachments: { type: array, items: { type: object }, description: Added to the existing ones }
+                reason: { type: string, description: Why it changed (kept in history) }
+      responses:
+        "200":
+          description: Edited
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManualResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: Only the person who recorded it can edit it }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /manual-attachments/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Procedures]
+      operationId: getCxManualAttachment
+      summary: A manual result's attachment (the file itself)
+      responses:
+        "200":
+          description: The file, with its media type; ETag is its sha256
+          content:
+            application/octet-stream: { schema: { type: string, format: binary } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/coverage:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Procedures]
+      operationId: getCxCoverage
+      summary: Test coverage per equipment class and method
+      description: >-
+        Baler#275. From each active procedure's latest completed test run:
+        equipment of the class in scope, sampled by the procedure, tested
+        (a step judged pass or fail), passed, and tested per method
+        (manual / passive / active), automatically (passive or active) and
+        witnessed.
+      responses:
+        "200":
+          description: One row per equipment class
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [equip_class, in_class, sampled, tested, passed, by_method, automatic, witnessed, summary]
+                  properties:
+                    equip_class: { type: string }
+                    in_class: { type: integer }
+                    sampled: { type: integer }
+                    tested: { type: integer }
+                    passed: { type: integer }
+                    failed: { type: integer }
+                    untested: { type: integer }
+                    automatic: { type: integer }
+                    witnessed: { type: integer }
+                    by_method:
+                      type: object
+                      properties: { manual: { type: integer }, passive: { type: integer }, active: { type: integer } }
+                    procedures: { type: array, items: { type: object } }
+                    summary: { type: string, description: "e.g. 220 of 220 tested: 220 automatically, 12 witnessed" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /projects/{id}/writes:
     parameters:
       - { $ref: "#/components/parameters/ProjectId" }
@@ -2445,12 +2604,23 @@ components:
           type: array
           items:
             type: object
-            required: [criteria]
             properties:
               id: { type: string }
               title: { type: string }
               instruction: { type: string }
-              criteria: { type: array, items: { $ref: "#/components/schemas/Criterion" } }
+              criteria:
+                type: array
+                items: { $ref: "#/components/schemas/Criterion" }
+                description: Required (1-20) when the step offers passive; a manual-only step may have none
+              methods:
+                type: array
+                items: { type: string, enum: [manual, passive, active] }
+                description: "Baler#275: how the step can be judged (default [passive]); a test run picks one"
+              active:
+                type: object
+                properties: { kind: { type: string, enum: [command_response] } }
+                description: The Cx 9 active test whose outcome judges the step (methods include active)
+              witness_required: { type: boolean, description: A manual result for this step needs a witness }
     Procedure:
       allOf:
         - { $ref: "#/components/schemas/ProcedureSpec" }
@@ -2495,6 +2665,12 @@ components:
                     title: { type: string }
                     status: { $ref: "#/components/schemas/Status" }
                     criteria: { type: array, items: { type: object } }
+                    method: { type: string, enum: [manual, passive, active], description: The method that produced `status` }
+                    machine_status: { type: [string, "null"], description: "The criteria's own verdict, always kept (never overwritten by a typed value)" }
+                    manual: { type: [object, "null"], description: "The current manual result: who, role, when, status, note, witness, attachments, edits" }
+                    active: { type: [object, "null"], description: The active run that judged it }
+                    contradiction: { type: boolean, description: "A person's pass/fail disagrees with the data's" }
+                    reason: { type: string }
         summary: { type: [object, "null"] }
         previous_id: { type: [string, "null"] }
         diff:
@@ -2654,6 +2830,7 @@ components:
         opened_run: { type: [string, "null"] }
         last_seen_run: { type: [string, "null"] }
         closed_run: { type: [string, "null"], description: The retest (run or test run id) the person's close cited }
+        closed_by: { type: [string, "null"], description: The person (sub) who closed it }
         resolved_at:
           type: [string, "null"]
           format: date-time
@@ -2766,3 +2943,30 @@ components:
               message: { type: string }
               haystack_markers: { type: array, items: { type: string } }
               xeto_spec: { type: [string, "null"] }
+    ManualResult:
+      type: object
+      required: [id, project_id, procedure_id, test_run_id, equip_uri, step_id, status, recorded_by, recorded_at, observed_at, history]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        procedure_id: { type: string }
+        test_run_id: { type: string }
+        equip_uri: { type: string }
+        step_id: { type: string }
+        status: { type: string, enum: [pass, fail, not_applicable] }
+        note: { type: [string, "null"] }
+        witness: { type: [object, "null"] }
+        attachments:
+          type: array
+          items:
+            type: object
+            properties: { id: { type: string }, filename: { type: string }, media_type: { type: string }, size: { type: integer }, sha256: { type: string } }
+        recorded_by: { type: string }
+        recorded_email: { type: [string, "null"] }
+        recorded_name: { type: [string, "null"] }
+        recorded_role: { type: [string, "null"] }
+        recorded_at: { type: string, format: date-time }
+        observed_at: { type: string, format: date-time }
+        client_id: { type: [string, "null"] }
+        history: { type: array, items: { type: object }, description: "Earlier versions: status, note, witness, attachments, replaced_at, replaced_by, reason" }
+        updated_at: { type: string, format: date-time }

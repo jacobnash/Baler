@@ -1,0 +1,118 @@
+---
+title: Manual, passive and active steps
+---
+
+# Manual, passive and active steps
+
+One procedure can mix traditional and automated commissioning (Baler#275).
+Each step says how it can be judged, and each test run picks one method per
+step. A CxA can do one step by hand and the next one automatically, or
+start a step manually and automate it later, all in the same procedure.
+
+| Method | The step's verdict comes from |
+|---|---|
+| `passive` | its criteria, judged over history (the default; every procedure written before this is passive) |
+| `manual` | a person: pass, fail or N/A, with a note, attachments and an optional witness |
+| `active` | a Cx 9 active test on the equipment (`"active": {"kind": "command_response"}`) |
+
+```json
+{"name": "AHU functional", "kind": "functional", "equip_class": "Air_Handling_Unit", "steps": [
+  {"id": "visual", "title": "Belts, filters, access doors", "methods": ["manual"], "witness_required": true},
+  {"id": "sat", "title": "Supply air plausible", "methods": ["passive", "manual"],
+   "criteria": [{"range": {"min": 40, "max": 110, "unit": "F"}, "point_class": "Supply_Air_Temperature_Sensor"}]},
+  {"id": "fan", "title": "Fan status follows command", "methods": ["active"], "active": {"kind": "command_response"}}
+]}
+```
+
+- A step whose only method is manual needs no machine criteria.
+- `POST /cx/procedures/{id}/runs {"methods": {"sat": "manual"}}` chooses
+  a method per step for that run. A step you don't name uses its first
+  method. The choice is stored on the run.
+
+## Manual results
+
+`POST /cx/test-runs/{id}/manual-results` (operator) records one result:
+
+```json
+{"equip_uri": "urn:equip:...", "step_id": "visual", "status": "pass",
+ "note": "belts tight, filters new", "witness": {"name": "Pat Owner", "org": "Owner"},
+ "attachments": [{"filename": "belts.jpg", "media_type": "image/jpeg", "data": "<base64>"}],
+ "client_id": "web:3f2c…", "observed_at": "2026-11-09T14:05:00Z"}
+```
+
+- **Who:** the result is always recorded as the signed-in person: their
+  sub, email, display name and role, taken from their token. There is no
+  field for anyone else, and API keys are refused. Only the person who
+  recorded a result can edit it (`PATCH /cx/manual-results/{id}` with a
+  `reason`). Every edit keeps the previous version in `history`.
+- **When:** `recorded_at` is the server's clock. `observed_at` is when the
+  person checked, and can be up to 14 days back for an entry made offline.
+- **Attachments:** up to 5 files of 5 MB each (images, PDF, text), stored
+  with their sha256. `GET /cx/manual-attachments/{id}` returns the file.
+- **Witness:** a name, organization and role. Witnesses often have no Baler
+  login. `witness_required` on the step keeps it inconclusive until a
+  result names one.
+- **Offline:** the Commissioning page saves each entry on the device first
+  and sends it when there is a connection. Because the entry carries a
+  `client_id`, a resend is stored once (the second send answers 200 with
+  the stored row). An entry the server refuses stays on the device with
+  the reason, and is not resent.
+
+## One verdict, three sources
+
+A step's `status` is the verdict of the method the run chose, so manual,
+passive and active results feed the same phase gates, issues and reports.
+Each step also records:
+
+- `method`: which method decided the status;
+- `machine_status` and the `criteria`: the data's verdict. It is always kept
+  and never overwritten by a typed value;
+- `manual`: the current manual result (the latest by observed time). Older
+  results stay on the record;
+- `active`: the newest active run on the equipment that started after the
+  test run did. The run itself goes through every Cx 9 safeguard, which is
+  unchanged;
+- `contradiction`: set when a person's pass or fail disagrees with the
+  data's pass or fail. The report shows both values.
+
+The run's status updates when a result is recorded, or when the run, the
+gate, the coverage or the report is read after an active test finishes.
+
+## Issues
+
+Manual and active verdicts, and disagreements, are Cx results on the
+equipment. They open and close issues like any check:
+
+| Result | When |
+|---|---|
+| `manual:<procedure>/<step>` | a manual step's result; a fail opens an issue |
+| `active:<procedure>/<step>` | an active step's result; a fail opens an issue |
+| `contradiction:<procedure>/<step>` | fail while a person and the data disagree, pass once they agree |
+
+Closing works as for any check-linked issue:
+
+1. The issue becomes `ready_for_retest`, either because a pass resolves it
+   or because someone claims the fix.
+2. A pass whose check happened after that (its `observed_at`) is the
+   retest.
+3. A person closes the issue. The close cites the test run in
+   `closed_run`, and the person in `closed_by`.
+
+`closed_by` is now recorded for every issue close.
+
+## Coverage
+
+`GET /cx/projects/{id}/coverage` returns one row per equipment class. It is
+also in the project report and on the Commissioning page, and it is based
+on each active procedure's latest test run:
+
+- **in scope:** equipment of that class in the project;
+- **sampled:** the equipment the procedures cover;
+- **tested:** at least one step judged pass or fail;
+- **passed:** every judged step passed, and none is inconclusive;
+- **per method:** tested manually, passively or actively. Automatically
+  means passively or actively;
+- **witnessed:** at least one manual result names a witness.
+
+For example: "220 of 220 tested: 220 automatically, 12 manually, 12
+witnessed".

@@ -284,6 +284,13 @@ check("commissioning (/cx/): reads viewer, changes operator, archive admin, site
     assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/schedules").minRole, "viewer");
     assert.equal(policy.resolveRoute("POST", "/cx/projects/p1/schedules/refresh").minRole, "operator");
     assert.equal(policy.resolveRoute("PUT", "/cx/projects/p1/schedules"), null);
+    // Baler#275 manual results and coverage
+    assert.equal(policy.resolveRoute("POST", "/cx/test-runs/t1/manual-results").minRole, "operator");
+    assert.equal(policy.resolveRoute("GET", "/cx/test-runs/t1/manual-results").minRole, "viewer");
+    assert.equal(policy.resolveRoute("PATCH", "/cx/manual-results/m1").minRole, "operator");
+    assert.equal(policy.resolveRoute("DELETE", "/cx/manual-results/m1"), null);
+    assert.equal(policy.resolveRoute("GET", "/cx/manual-attachments/a1").minRole, "viewer");
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/coverage").minRole, "viewer");
     // Cx 6 procedures
     assert.equal(policy.resolveRoute("GET", "/cx/procedure-templates").minRole, "viewer");
     assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/procedures").minRole, "viewer");

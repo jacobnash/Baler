@@ -42,6 +42,7 @@ from baler import docs_ui, gateway_auth, hisquery, timeseries, tracing, warmup
 from baler.commissioning import (
     active,
     agent,
+    coverage,
     db,
     economizer,
     engine,
@@ -52,6 +53,7 @@ from baler.commissioning import (
     issues,
     ladder,
     llm,
+    manual,
     mirror,
     operator_writes,
     overrides,
@@ -75,7 +77,7 @@ PORT = 8009
 RUN_STATEMENT_TIMEOUT = "10min"
 
 _PROJECT = re.compile(r"/projects/([^/]+)")
-_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|gate|report|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|agent/sessions|agent/proposals|writes|schedule-writes|schedule-targets|schedules|schedules/refresh)")
+_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|gate|report|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|agent/sessions|agent/proposals|writes|schedule-writes|schedule-targets|schedules|schedules/refresh|coverage)")
 _PROJECT_ISSUES = re.compile(r"/projects/([^/]+)/issues/(import|export)")
 _RUN_ISSUES = re.compile(r"/runs/([^/]+)/issues")
 _ISSUE = re.compile(r"/issues/([^/]+)")
@@ -84,6 +86,9 @@ _RISK = re.compile(r"/risks/([^/]+)")
 _PROCEDURE = re.compile(r"/procedures/([^/]+)")
 _PROCEDURE_RUNS = re.compile(r"/procedures/([^/]+)/runs")
 _TEST_RUN = re.compile(r"/test-runs/([^/]+)")
+_TEST_RUN_MANUAL = re.compile(r"/test-runs/([^/]+)/manual-results")
+_MANUAL_RESULT = re.compile(r"/manual-results/([^/]+)")
+_MANUAL_ATTACHMENT = re.compile(r"/manual-attachments/([^/]+)")
 _RUN_DIFF = re.compile(r"/runs/([^/]+)/diff")
 _PROJECT_SPEC = re.compile(r"/projects/([^/]+)/(spec|spec/import|spec/extract|spec/documents|spec/review|alignment|alignment/decisions)")
 _SPEC_DOC = re.compile(r"/spec-documents/([^/]+)")
@@ -253,6 +258,7 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                     ("GET", "schedule-targets"): ("schedule_targets", self._schedule_targets),
                     ("GET", "schedules"): ("list_schedules", self._list_schedules),
                     ("POST", "schedules/refresh"): ("refresh_schedules", self._refresh_schedules),
+                    ("GET", "coverage"): ("coverage", self._coverage),
                 }
                 hit = table.get((method, sub))
                 return None if hit is None else (hit[0], lambda span, claims: hit[1](span, claims, pid))
@@ -300,6 +306,10 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 (_PROCEDURE_RUNS, {"POST": ("create_test_run", self._create_test_run), "GET": ("list_test_runs", self._list_test_runs)}),
                 (_PROCEDURE, {"GET": ("get_procedure", self._get_procedure), "PATCH": ("patch_procedure", self._patch_procedure),
                               "DELETE": ("archive_procedure", self._archive_procedure)}),
+                (_TEST_RUN_MANUAL, {"POST": ("record_manual_result", self._record_manual_result),
+                                    "GET": ("list_manual_results", self._list_manual_results)}),
+                (_MANUAL_RESULT, {"PATCH": ("edit_manual_result", self._edit_manual_result)}),
+                (_MANUAL_ATTACHMENT, {"GET": ("get_manual_attachment", self._get_manual_attachment)}),
                 (_TEST_RUN, {"GET": ("get_test_run", self._get_test_run)}),
                 (_RUN_DIFF, {"GET": ("run_diff", self._run_diff)}),
                 (_SPEC_DOC, {"GET": ("get_spec_document", self._get_spec_document)}),
@@ -700,7 +710,12 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             with section("procedures") as sp:
                 procs = [x for x in repo.list_procedures(pid) if x["status"] != "archived"]
                 latest = repo.latest_completed_test_runs([pr["id"] for pr in procs])  # one query (#150)
+                # manual results / active tests recorded since a run (Baler#275)
+                latest = {k: (runner.refresh_test_run(repo, v, now_fn()) if v else None) for k, v in latest.items()}
                 sp.set_attribute("procedures", len(procs))
+            with section("coverage"):
+                cov = [{**r, "summary": coverage.sentence(r)} for r in
+                       coverage.compute(procs, latest, self._caller_inventory(equips, self._scopes(p, claims)[0]))] if equips else []
             with section("issues") as sp:
                 iss = [i for i in self._report_issues(pid) if not i.get("equip_uri") or scope.allows(i["equip_uri"])]
                 sp.set_attribute("issues", len(iss))
@@ -734,7 +749,7 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                                            iss, events, alignment, docs, active_runs, active.writes_allowed(),
                                            site=repo.get_site(p["site_id"]) if p.get("site_id") else None,
                                            equipment=equipment,
-                                           acceptance=acceptance, origin=origin)
+                                           acceptance=acceptance, origin=origin, coverage=cov)
             with section("render") as sp:
                 if fmt == "json":
                     respond_json(self, 200, rep)
@@ -933,6 +948,7 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 target = body["status"]
                 changes["status"] = target
                 changes["closed_at"] = now if target == "closed" else None
+                changes["closed_by"] = claims.get("sub") if target == "closed" else None
                 if target == "closed" and issue.get("retest"):
                     rt = issue["retest"]
                     changes["closed_run"] = rt.get("test_run_id") or rt.get("run_id")
@@ -1231,8 +1247,10 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 raise ValueError("started_at must be in the past: a passive test judges history that already exists")
             end = min(start + timedelta(hours=hours), now)
             sub = claims.get("sub")
+            methods = procedures.choose_methods(proc, body.get("methods"))  # 400 before anything is queued
             try:
-                tr = runner.queue_test_run(repo, worker, project, proc, claims, start, end, now, sub, repo.user_email(sub))
+                tr = runner.queue_test_run(repo, worker, project, proc, claims, start, end, now, sub, repo.user_email(sub),
+                                           methods=methods)
             except db.RunActive as exc:
                 respond_json(self, 409, {"error": "this procedure already has a test run in progress", "test_run_id": exc.run_id})
                 return
@@ -1250,6 +1268,7 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             if tr is None or not self._visible(repo.get_project(tr["project_id"]), claims):
                 respond_error(self, 404, "no such test run")
                 return
+            tr = runner.refresh_test_run(repo, tr, now_fn())  # manual results / active tests since it ran
             scope = repo.scope_for(claims)
             out = db.public_row(tr)
             if out.get("equipment"):
@@ -1257,6 +1276,122 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             if out.get("diff"):
                 out["diff"] = {**out["diff"], "changes": [c for c in out["diff"]["changes"] if scope.allows(c["equip_uri"])]}
             respond_json(self, 200, out)
+
+        # ---------------------------------------- manual results (Baler#275)
+
+        def _visible_test_run(self, tr_id: str, claims: dict) -> tuple[dict, dict] | None:
+            tr = repo.get_test_run(tr_id)
+            project = repo.get_project(tr["project_id"]) if tr else None
+            if tr is None or not self._visible(project, claims):
+                respond_error(self, 404, "no such test run")
+                return None
+            assert project is not None
+            return tr, project
+
+        def _public_manual(self, row: dict) -> dict:
+            return db.public_row({**row, "history": [db.public_row(h) for h in row.get("history") or []]})
+
+        def _record_manual_result(self, span, claims, tr_id) -> None:
+            """A person's pass / fail / N-A for one step on one equipment,
+            recorded as the caller (never on someone else's behalf)."""
+            if claims.get("kind") != "session" or not claims.get("sub"):
+                respond_error(self, 403, "a manual result is recorded by a signed-in person, not an API key")
+                return
+            if claims.get("role") not in ("operator", "admin"):  # the gateway's row too; checked here as well
+                respond_error(self, 403, "recording a result needs the operator role")
+                return
+            hit = self._visible_test_run(tr_id, claims)
+            if hit is None:
+                return
+            tr, project = hit
+            if project.get("archived_at"):
+                respond_error(self, 409, "project is archived")
+                return
+            if tr["status"] != "completed":
+                respond_error(self, 409, f"test run is {tr['status']}: record manual results once it has completed")
+                return
+            body = self.read_json_body()
+            cid = body.get("client_id")
+            if isinstance(cid, str) and cid:
+                dup = repo.find_rows(manual.RESULTS, order="recorded_at", project_id=project["id"], client_id=cid)
+                if dup:  # an offline draft sent again: stored once
+                    respond_json(self, 200, self._public_manual(dup[0]))
+                    return
+            scope = repo.scope_for(claims)
+            judged = {e["equip_uri"] for e in tr.get("equipment") or [] if scope.allows(e["equip_uri"])}
+            sub = claims.get("sub")
+            now = now_fn()
+            row, files = manual.new_result(body, tr, tr["procedure"], judged, claims, repo.user_email(sub), repo.user_name(sub), now)
+            repo.put_rows(manual.RESULTS, [row])
+            if files:
+                repo.put_rows(manual.ATTACHMENTS, files)
+            self._event(project["id"], "manual_result.record", claims,
+                        {"manual_result_id": row["id"], "test_run_id": tr_id, "equip_uri": row["equip_uri"],
+                         "step_id": row["step_id"], "status": row["status"], "witness": (row["witness"] or {}).get("name")})
+            runner.refresh_test_run(repo, tr, now)
+            respond_json(self, 201, self._public_manual(row))
+
+        def _list_manual_results(self, span, claims, tr_id) -> None:
+            if self._visible_test_run(tr_id, claims) is None:
+                return
+            scope = repo.scope_for(claims)
+            respond_json(self, 200, [self._public_manual(r) for r in repo.find_rows(manual.RESULTS, order="recorded_at", test_run_id=tr_id)
+                                     if scope.allows(r["equip_uri"])])
+
+        def _edit_manual_result(self, span, claims, rid) -> None:
+            row = repo.get_row(manual.RESULTS, rid)
+            tr = repo.get_test_run(row["test_run_id"]) if row else None
+            project = repo.get_project(row["project_id"]) if row else None
+            if row is None or tr is None or not self._visible(project, claims) or not repo.scope_for(claims).allows(row["equip_uri"]):
+                respond_error(self, 404, "no such manual result")
+                return
+            assert project is not None
+            now = now_fn()
+            try:
+                changes, files = manual.edit(row, self.read_json_body(), claims, now)
+            except manual.NotYours as exc:
+                respond_error(self, 403, str(exc))
+                return
+            repo.update_row(manual.RESULTS, rid, changes)
+            if files:
+                repo.put_rows(manual.ATTACHMENTS, files)
+            self._event(project["id"], "manual_result.edit", claims,
+                        {"manual_result_id": rid, "from": row["status"], "to": changes.get("status", row["status"]),
+                         "reason": changes["history"][-1]["reason"]})
+            runner.refresh_test_run(repo, tr, now)
+            respond_json(self, 200, self._public_manual(repo.get_row(manual.RESULTS, rid) or row))
+
+        def _get_manual_attachment(self, span, claims, aid) -> None:
+            att = repo.get_row(manual.ATTACHMENTS, aid)
+            res = repo.get_row(manual.RESULTS, att["result_id"]) if att else None
+            project = repo.get_project(res["project_id"]) if res else None
+            if att is None or res is None or not self._visible(project, claims) or not repo.scope_for(claims).allows(res["equip_uri"]):
+                respond_error(self, 404, "no such attachment")
+                return
+            data = bytes(att["data"])
+            self.send_response(200)
+            self.send_header("Content-Type", att["media_type"])
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition", f'attachment; filename="{att["filename"].replace(chr(34), "")}"')
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("ETag", f'"{att["sha256"]}"')
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _coverage(self, span, claims, pid) -> None:
+            """Tested vs sampled per equipment class and method (Baler#275)."""
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            scopes, _ = self._scopes(p, claims)
+            procs = [x for x in repo.list_procedures(pid) if x["status"] == "active"]
+            now = now_fn()
+            latest = {}
+            for pr in procs:
+                got = next((t for t in repo.list_test_runs(pr["id"], 20) if t["status"] == "completed"), None)
+                latest[pr["id"]] = runner.refresh_test_run(repo, got, now) if got else None
+            rows = coverage.compute(procs, latest, inventory.build(repo.store, scopes))
+            respond_json(self, 200, [{**r, "summary": coverage.sentence(r)} for r in rows])
 
         def _run_diff(self, span, claims, rid) -> None:
             """Reconcile a run against an earlier one (default: the

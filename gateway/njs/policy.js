@@ -193,6 +193,14 @@ const ROUTES = [
   // re-read (reads schedules and priority arrays, never writes).
   ["GET",    /^\/cx\/projects\/[^/]+\/schedules$/,              "commissioning", "viewer"],
   ["POST",   /^\/cx\/projects\/[^/]+\/schedules\/refresh$/,     "commissioning", "operator"],
+  // Traditional commissioning (Baler#275): a person records a manual step
+  // result (the backend refuses API keys and records the caller, never
+  // someone else) and edits only their own; coverage is a read.
+  ["POST",   /^\/cx\/test-runs\/[^/]+\/manual-results$/,         "commissioning", "operator"],
+  ["GET",    /^\/cx\/test-runs\/[^/]+\/manual-results$/,         "commissioning", "viewer"],
+  ["PATCH",  /^\/cx\/manual-results\/[^/]+$/,                    "commissioning", "operator"],
+  ["GET",    /^\/cx\/manual-attachments\/[^/]+$/,                "commissioning", "viewer"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/coverage$/,                "commissioning", "viewer"],
   // Cx 10 (Baler#46): the agent. Talking to it is a change (it can start
   // passive runs and propose); accepting a proposal is the change itself,
   // and the backend requires admin for an active-test proposal.

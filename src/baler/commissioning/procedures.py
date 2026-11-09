@@ -49,6 +49,25 @@ it says "required": true.
 Every test run is diffed against the procedure's previous run, per
 (equipment, step), in #5's reconcile vocabulary: new, resolved,
 regressed, still_failing, still_passing, changed, gone.
+
+Methods (Baler#275). Each step offers one or more ways to judge it:
+
+  "passive"  its criteria, over history (the default, and all a step
+             without `methods` can be);
+  "manual"   a person checks it and records pass / fail / N-A with a note,
+             attachments and an optional witness (cx_manual_results); a
+             step that is manual only needs no machine criteria;
+  "active"   a Cx 9 active test on the equipment (`active: {kind}`), run
+             under every #45 safeguard as before: this only reads its
+             outcome.
+
+A test run picks one method per step (`methods` when it is queued, else
+each step's first). The step's status is that method's verdict, so manual,
+passive and active results feed the same gates, issues and reports. The
+machine's own verdict is always kept beside it (`machine_status`, with its
+criteria): a typed value never overwrites computed evidence, and when a
+person's pass/fail disagrees with the machine's the step carries
+`contradiction` and an issue opens (runner.apply_methods).
 """
 
 from __future__ import annotations
@@ -68,6 +87,9 @@ STATUSES = ("draft", "active", "archived")
 ORDER = {"fail": 0, "inconclusive": 1, "pass": 2, "not_applicable": 3}
 MAX_STEPS = 50
 MAX_CRITERIA = 20
+METHODS = ("manual", "passive", "active")
+MANUAL_STATUSES = ("pass", "fail", "not_applicable")
+ACTIVE_KINDS = ("command_response",)
 _ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,59}")
 DEFAULT_HOURS = {"power_on": 2.0, "startup": 24.0, "functional": 24.0, "seasonal": 24.0 * 7}
 
@@ -355,12 +377,34 @@ def normalize(body: dict, existing: dict | None = None) -> dict:
         if not isinstance(sid, str) or not _ID.fullmatch(sid) or sid in seen:
             raise ValueError(f"step id {sid!r} must be unique and match [a-z0-9][a-z0-9_-]*")
         seen.add(sid)
-        crit = st.get("criteria")
-        if not isinstance(crit, list) or not crit or len(crit) > MAX_CRITERIA:
-            raise ValueError(f"step {sid}: criteria must be a list of 1-{MAX_CRITERIA}")
-        out_steps.append({"id": sid, "title": str(st.get("title") or sid)[:200],
-                          "instruction": str(st.get("instruction") or "")[:2000],
-                          "criteria": [_criterion(c, f"step {sid}") for c in crit]})
+        methods = st.get("methods", ["passive"])
+        if not isinstance(methods, list) or not methods or any(m not in METHODS for m in methods) \
+                or len(set(methods)) != len(methods):
+            raise ValueError(f"step {sid}: methods is a non-empty list of {', '.join(METHODS)}")
+        crit = st.get("criteria") if st.get("criteria") is not None else []
+        if not isinstance(crit, list) or len(crit) > MAX_CRITERIA:
+            raise ValueError(f"step {sid}: criteria must be a list of up to {MAX_CRITERIA}")
+        if not crit and "passive" in methods:
+            raise ValueError(f"step {sid}: a passive step needs 1-{MAX_CRITERIA} criteria (a manual-only step may have none)")
+        step: dict = {"id": sid, "title": str(st.get("title") or sid)[:200], "instruction": str(st.get("instruction") or "")[:2000],
+                "criteria": [_criterion(c, f"step {sid}") for c in crit]}
+        if methods != ["passive"]:
+            step["methods"] = list(methods)
+        if "active" in methods:
+            act = st.get("active") or {"kind": "command_response"}
+            if not isinstance(act, dict) or act.get("kind") not in ACTIVE_KINDS or set(act) - {"kind"}:
+                raise ValueError(f"step {sid}: active is {{kind: {' | '.join(ACTIVE_KINDS)}}}")
+            step["active"] = {"kind": act["kind"]}
+        elif st.get("active") is not None:
+            raise ValueError(f"step {sid}: active is only for a step whose methods include active")
+        if "witness_required" in st:
+            if not isinstance(st["witness_required"], bool):
+                raise ValueError(f"step {sid}: witness_required is true or false")
+            if st["witness_required"]:
+                if "manual" not in methods:
+                    raise ValueError(f"step {sid}: witness_required is only for a step whose methods include manual")
+                step["witness_required"] = True
+        out_steps.append(step)
     wh = _num(base.get("window_hours", DEFAULT_HOURS[base["kind"]]), "window_hours")
     if not 0 < wh <= 24 * 31:
         raise ValueError("window_hours must be in (0, 744]")
@@ -385,6 +429,30 @@ def from_seed(template: str) -> dict:
         raise ValueError(f"unknown procedure template {template!r} (known: {', '.join(SEED_BY_ID)})")
     out = normalize({k: v for k, v in seed.items() if k != "template"})
     out["template"] = template
+    return out
+
+
+def step_methods(step: dict) -> list[str]:
+    return list(step.get("methods") or ["passive"])
+
+
+def choose_methods(proc: dict, chosen: dict | None = None) -> dict[str, str]:
+    """{step id: method} for one test run: the caller's choice where given
+    (it must be one the step offers), else the step's first method."""
+    chosen = chosen or {}
+    if not isinstance(chosen, dict):
+        raise TypeError("methods is an object of {step id: manual | passive | active}")
+    ids = {st["id"] for st in proc["steps"]}
+    unknown = set(chosen) - ids
+    if unknown:
+        raise ValueError(f"methods: no step {min(unknown)!r} in this procedure")
+    out = {}
+    for st in proc["steps"]:
+        offered = step_methods(st)
+        m = chosen.get(st["id"], offered[0])
+        if m not in offered:
+            raise ValueError(f"methods: step {st['id']} offers {', '.join(offered)}, not {m!r}")
+        out[st["id"]] = m
     return out
 
 
@@ -676,10 +744,15 @@ def summarize(per_equip: list[dict]) -> dict:
     for e in per_equip:
         by[e["status"]] += 1
     steps = {s: 0 for s in ORDER}
+    by_method: dict[str, dict[str, int]] = {}
+    contradictions = 0
     for e in per_equip:
         for st in e["steps"]:
             steps[st["status"]] += 1
-    return {"equipment": len(per_equip), "by_status": by, "steps_by_status": steps}
+            by_method.setdefault(st.get("method") or "passive", {s: 0 for s in ORDER})[st["status"]] += 1
+            contradictions += bool(st.get("contradiction"))
+    return {"equipment": len(per_equip), "by_status": by, "steps_by_status": steps, "steps_by_method": by_method,
+            "contradictions": contradictions}
 
 
 def diff(previous: list[dict] | None, current: list[dict]) -> dict:

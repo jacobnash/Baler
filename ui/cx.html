@@ -121,7 +121,7 @@
 
       <section id="procedures-section">
         <h2>Test procedures</h2>
-        <p class="hint">Power-on, start-up and functional procedures, judged passively on history from when the equipment was started. Nothing is commanded.</p>
+        <p class="hint">Power-on, start-up and functional procedures. Each step is judged on history from when the equipment was started (passive), by a person (manual), or by an active test (see Active tests), as the run chooses.</p>
         <div class="toolbar">
           <button type="button" id="seed-procedures-btn" data-min-role="operator">Add the standard procedures</button>
           <span id="procedures-status" class="hint"></span>
@@ -134,7 +134,32 @@
           <h3 class="cx-sub" id="test-run-title"></h3>
           <p class="hint" id="test-run-meta"></p>
           <div class="cx-grid-wrap"><table id="test-run-grid" class="cx-grid"></table></div>
+          <div id="manual-entry" class="manual-entry" hidden>
+            <h3 class="cx-sub">Record a manual result</h3>
+            <p class="hint">Saved on this device first and sent when there is a connection: nothing typed is lost if the signal drops. Recorded as you.</p>
+            <form id="manual-form">
+              <label>Equipment <select id="manual-equip"></select></label>
+              <label>Step <select id="manual-step"></select></label>
+              <p class="hint" id="manual-instruction"></p>
+              <fieldset><legend>Result</legend>
+                <label><input type="radio" name="manual-status" value="pass" /> Pass</label>
+                <label><input type="radio" name="manual-status" value="fail" /> Fail</label>
+                <label><input type="radio" name="manual-status" value="not_applicable" /> N/A</label>
+              </fieldset>
+              <label>Note <textarea id="manual-note" rows="3" maxlength="4000"></textarea></label>
+              <label>Witness <input type="text" id="manual-witness" placeholder="name (optional)" /></label>
+              <label>Witness organization <input type="text" id="manual-witness-org" /></label>
+              <label>Photos / files <input type="file" id="manual-files" accept="image/*,application/pdf" capture="environment" multiple /></label>
+              <button type="submit">Save result</button>
+            </form>
+            <p class="hint" id="manual-drafts" role="status"></p>
+          </div>
         </div>
+        <h3 class="cx-sub">Test coverage</h3>
+        <table>
+          <thead><tr><th>Equipment class</th><th>Tested</th><th>By method</th></tr></thead>
+          <tbody id="coverage-body"></tbody>
+        </table>
       </section>
 
       <section id="active-section">
