@@ -1,7 +1,7 @@
 // Assets page (#197): the lifecycle record's assets and install/remove
 // history, over ops_api's /ops/assets and /ops/positions routes. Plain
 // globals, no build step, like every other page here.
-const OPS_URL = new URLSearchParams(location.search).get("ops") || "/ops";
+const OPS_URL = apiBase("ops", "/ops");  // same-origin paths only (apibase.js)
 const statusEl = document.getElementById("status");
 let currentAsset = null;
 

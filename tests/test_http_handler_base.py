@@ -167,7 +167,9 @@ def test_end_headers_adds_cors_header_before_delegating(monkeypatch):
 
     BaseAPIHandler.end_headers(handler)
 
-    assert calls == [("Access-Control-Allow-Origin", "*"), ("super_called", None)]
+    assert calls == [("Access-Control-Allow-Origin", "*"),
+                     ("Access-Control-Expose-Headers", http_handler_base.PAGING_HEADERS),  # #280
+                     ("super_called", None)]
 
 
 def test_log_message_is_silent(capsys):

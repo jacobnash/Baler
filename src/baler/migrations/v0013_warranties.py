@@ -1,5 +1,5 @@
 """
-0004 warranties on assets (#198, epic #221).
+0013 warranties on assets (#198, epic #221).
 
 lc_warranties: one row per warranty on an asset (parts, labour, an
 extended term), with its start and end dates, its terms, and where it
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 4
+VERSION = 13
 NAME = "lifecycle warranties"
 
 WARRANTIES = """

@@ -55,12 +55,14 @@ A session against `<url>/api/<project>`. It authenticates every request with
 | method | returns |
 |---|---|
 | `about()` | the server's `about` record as a dict (`productName`, `serverTime`, ...) |
-| `read(filter, limit=None)` | records matching a [Haystack filter](https://project-haystack.org/doc/docHaystack/Filters), as a list of dicts |
-| `read_df(filter, limit=None)` | `read()` as a pandas DataFrame, one row per record |
+| `read(filter, limit=None)` | every record matching a [Haystack filter](https://project-haystack.org/doc/docHaystack/Filters), as a list of dicts, however many pages the server answers in. With `limit`, one page of at most that many |
+| `read_page(filter, limit=None, after=None)` | one page of a read, starting after a previous page's `.after` |
+| `read_df(filter, limit=None)` | `read()` as a pandas DataFrame, one row per record. The paging meta is in `df.attrs` |
 | `his_read(id, range="today")` | history rows `[{"ts": <epoch seconds>, "val": ...}, ...]` |
 | `his_read_df(id, range="today")` | history as a DataFrame with one column, `val`, indexed by UTC timestamp (`ts`) |
 | `his_write(id, items)` | sends samples to a point's history and returns how many were sent. Needs an `operator` key. |
 | `phable()` | a `phable.HaystackClient` on the same URL and key |
+| `phable_read_all(filter, limit=None)` | phable's `read_all`, following Baler's pages: one phable Grid of every match |
 | `haystack` | the underlying `baler.haystack_client.HaystackClient` |
 | `base_url` | `<url>/api/<project>` |
 
@@ -83,7 +85,18 @@ A leading `@` is optional.
 | Str, Bool | `str`, `bool` |
 | anything else | the raw Haystack JSON dict, e.g. `{"_kind": "coord", ...}` |
 
-If you need units, typed values or ops that aren't listed above, use `client.phable()`.
+**Pages.** Baler answers a read 1,000 records at a time by default
+([Reading large graphs](/haystack-api#reading-large-graphs-pages)). `read()` without a `limit`
+follows the pages to the end. Its result is a list with the paging meta on it: `.after` is `None`
+when the read is complete, and otherwise the cursor to pass to `read_page(..., after=...)`.
+`.incomplete` is the server's reason when it cut a read short. The notebook image bakes this client in,
+so after upgrading Baler rebuild it: `docker compose --profile notebook up -d --build jupyter`.
+
+If you need units, typed values or ops that aren't listed above, use `client.phable()`. **phable's
+`read_all` returns the first page only** (one request, 1,000 records by default), and
+`Grid.to_pandas()` drops the grid meta that says so. For a phable Grid of every record, use
+`client.phable_read_all("point")`, or `baler_fn.phable_read_all(phable_client, "point")` with a phable
+client of your own. Both follow `after` and return one Grid.
 
 **Writing.** `his_write(id, items)` accepts any of these:
 

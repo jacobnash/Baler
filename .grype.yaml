@@ -1,0 +1,11 @@
+# Grype image scan (security.yml, #279). Only fixable high/critical findings
+# are reported (only-fixed, severity-cutoff in the workflow).
+#
+# Accepting a risk: add an entry under ignore with a comment saying why it
+# doesn't apply or what mitigates it, who decided, and a date to look again,
+# e.g.
+#   - vulnerability: CVE-2026-00000
+#     package: { name: libexample }
+# Keep the reasoning general; exploit details go in a private advisory
+# (SECURITY.md), never here.
+ignore: []
