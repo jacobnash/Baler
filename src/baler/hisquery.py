@@ -1777,6 +1777,9 @@ def run_query(store, ts_conn, query: Query, now: datetime, tz: str = "UTC", limi
         "pointCount": point_count,
         "seriesLimit": series_limit,
         "after": next_after,
+        # Like a Haystack read page's grid meta (#280): a cut-short page
+        # says so in words, not only by a non-null `after`.
+        "incomplete": f"seriesLimit of {series_limit} reached; pass after to read on" if next_after else None,
         "hints": hints_for_empty_result(query.filter, graph) if not matched else [],
         "series": series,
     }

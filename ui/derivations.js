@@ -3,8 +3,7 @@
 // (POST /derivations/test, /dry-run, and plain CRUD) - no new expression
 // language, no client-side validation beyond "is this valid JSON", the
 // sandbox and the API's own 400s are the real validation.
-const params = new URLSearchParams(location.search);
-const DERIVATION_API_URL = params.get("derivation") || "/derivation";
+const DERIVATION_API_URL = apiBase("derivation", "/derivation");
 
 const statusEl = document.getElementById("status");
 const tbodyEl = document.querySelector("#derivations-table tbody");

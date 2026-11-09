@@ -1,0 +1,120 @@
+---
+title: Drawing schedules
+---
+
+Part of the building lifecycle record (epic Baler#221, design §5).
+Baler#203. Builds on the [document store](/documents) and
+[facts from documents](/document-extraction).
+
+Equipment and VAV schedules on mechanical prints list every unit's tag,
+capacity, airflow, motor and make. Baler reads them **one schedule at a
+time**, not a whole sheet in one shot. The evidence favours staged,
+task-specific pipelines over one-shot general vision models for engineering
+documents (arXiv 2602.13345). Each row becomes a **proposal** that a person
+confirms.
+
+## The pipeline
+
+1. **Find the schedule regions.** On each page, a schedule is a title line
+   containing the word SCHEDULE. Its region runs down from the title to the
+   next title below it, or to the first large vertical gap (where general notes
+   and title blocks usually start), and across to the next title beside it.
+   "MECHANICAL SCHEDULES" in a title block is not a schedule.
+2. **Read each region's table, on its own:**
+   - **`local`**: pdfplumber on the cropped region. It reads the ruled table if
+     there are lines, and columns by text alignment if not. Offline and free.
+     **Needs a text layer.**
+   - **`vision`**: the cropped region is rendered to an image and read by the
+     configured model (`BALER_LLM_PROVIDER=anthropic`: Claude, same model
+     setting as Cx 7; an OpenAI-compatible endpoint if it accepts images).
+     Works on scans. If the model fails on a region, that region falls back
+     to the local read, and the run lists the fallbacks.
+   - **`auto`** (the default): vision when a model is configured, else local.
+3. **Two-row headers** ("MOTOR" over "HP / V / PH") are joined per column
+   ("MOTOR HP").
+4. **Every row becomes a `schedule_row` proposal** (`lc_doc_proposals`,
+   #202's table): the schedule, the tag, the column values, the page, and the
+   row's cells as the quote. A local read's quote is checked against the
+   page's text. A vision read's quote is checked when the page has text, and
+   marked unverified when it doesn't.
+
+Nothing is applied on its own. Turning confirmed rows into positions and
+assets comes later (see *Not built yet*).
+
+## The eval set, and what it measures
+
+No public MEP benchmark exists, so we built a labelled set first:
+`baler.lifecycle.schedule_eval`. It has **8 cases and 9 schedules, 337
+cells**. Each case is ground truth written as data and rendered to a vector
+PDF with reportlab:
+
+| Case | What makes it hard |
+|---|---|
+| `ahu-ruled` | nothing: a clean ruled grid |
+| `vav-long` | 22 rows |
+| `pump-unruled` | no ruling lines: columns by whitespace |
+| `fan-two-row-header` | MOTOR spans HP / V / PH |
+| `two-schedules-sheet` | two schedules side by side, general notes, a title block |
+| `dense-small` | 5.5 pt type, 15 rows |
+| `blanks-landscape` | landscape, blank and "-" cells, notes |
+| `unruled-two-row` | no ruling lines **and** a two-row header |
+
+Scoring is per cell. Schedules are matched by title, rows by tag, headers
+by name. Cells in a schedule that doesn't exist count as wrong.
+
+```bash
+python -m baler.lifecycle.schedule_eval            # local reader, per-case table
+python -m baler.lifecycle.schedule_eval --check    # fail below the baseline
+python -m baler.lifecycle.schedule_eval --reader vision   # the configured model (costs tokens)
+```
+
+**Measured, local reader** (2026-11-09, this commit):
+
+| | |
+|---|---|
+| Schedules found | 9 / 9 |
+| Cell precision | 0.985 |
+| Cell recall | 0.985 |
+| Cell F1 | 0.985 |
+
+All 5 wrong cells are column **names** under a two-row header, not values.
+A group label is carried to the right over empty cells, because the text
+layer doesn't say where a merged cell ends. In `fan-two-row-header`,
+"DRIVE" becomes "MOTOR DRIVE". In `unruled-two-row`, "WHEEL EFF %" becomes
+"EXHAUST WHEEL EFF %". `tests/test_lifecycle_schedules.py` holds the
+local reader to this baseline.
+
+**What this number is not.** Synthetic PDFs have a perfect text layer.
+Real prints often don't: they may be scans, have text drawn as vectors, or use
+SHX fonts. So treat 0.985 as an upper bound for the local reader, not as
+real-world accuracy. **The vision reader has not been measured**: no model
+key was used in building this. Run `--reader vision` with one before
+quoting any number for it. The next step for the eval set is adding real,
+labelled sheets that we have permission to keep.
+
+## API and UI
+
+`POST /ops/documents/{id}/schedules` with optional `{"reader": "auto" | "local" | "vision"}`
+(operator; PDF documents only). It returns the run, each schedule found
+(page, title, headers, row count, reader), and the proposals. Review the
+proposals with `GET /ops/documents/{id}/proposals` and
+`POST /ops/document-proposals/{id}/decide`, as in #202.
+
+**Documents**, then open a drawing, then *Read schedules (drawings)*. The
+rows appear under *Proposed facts*.
+
+## Code
+
+`baler.lifecycle.schedules` (regions, readers, proposals, the route) and
+`baler.lifecycle.schedule_eval` (cases, renderer, scorer, CLI). No new
+tables: rows go in #202's `lc_doc_proposals`.
+
+## Not built yet
+
+- Real drawings in the eval set, and a measured number for the vision
+  reader.
+- Region finding on scans: today stage 1 needs the title's text. A scan
+  needs a layout or vision detector for stage 1 too.
+- Turning confirmed rows into positions and assets (#197), and into Cx spec
+  items (Cx 7).
+- Multi-page schedules, and schedules whose title is below the table.

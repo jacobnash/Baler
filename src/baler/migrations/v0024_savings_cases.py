@@ -1,5 +1,5 @@
 """
-0004 savings cases (#216, epic #221 §8.3): replace-vs-keep cases with every
+0024 savings cases (#216, epic #221 §8.3): replace-vs-keep cases with every
 assumption stated (value, unit, source: measured | user | default, note),
 the computed result, and the history of edits. Read and written by
 baler.commissioning.savings_api.
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 4
+VERSION = 24
 NAME = "savings cases"
 
 CASES = """

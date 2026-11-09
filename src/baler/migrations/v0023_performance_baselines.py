@@ -1,5 +1,5 @@
 """
-0003 performance baselines (#215, epic #221 §8.2): a regression fitted on a
+0023 performance baselines (#215, epic #221 §8.2): a regression fitted on a
 known-good period (chiller kW/ton vs load and entering condenser water
 first), read and written by baler.commissioning.baselines_api.
 
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 3
+VERSION = 23
 NAME = "performance baselines"
 
 BASELINES = """

@@ -60,6 +60,14 @@ async function authorize(r) {
         return;
     }
 
+    // The org requires MFA and this user hasn't set it up yet: their
+    // session reaches only enrolment (#278).
+    if (!policy.mfaAllows(claims, r.method, r.uri)) {
+        r.headersOut["Content-Type"] = "text/plain; charset=utf-8";
+        r.return(403, "your org requires multi-factor login: set up an authenticator first (Account page)\n");
+        return;
+    }
+
     if (!policy.scopeSatisfies(route.resource, claims)) {
         r.return(403, "this resource spans the whole org; a site-restricted login can't use it\n");
         return;
