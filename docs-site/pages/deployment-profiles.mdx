@@ -1,0 +1,356 @@
+---
+title: Deployment profiles and sizing
+---
+
+Each organization picks its own topology, and its IT team (often the GC's) installs it. This page
+describes the three shapes Baler is deployed in, what runs where in each, how to size the hardware,
+and when to split onto a second server (Baler#195, design in `todo/building-lifecycle-ubis.md`
+§10.3).
+
+**Every number here comes from a measured run, and the run is named.** A number that scales a
+measurement past the point where it was taken is labelled *extrapolated*. A planning target is
+labelled *target*. Results still to come are marked *pending*:
+
+- **Pending: realistic profiles** (#273). These are 60 s and 300 s reporting with 5–10 synthetic
+  items per equip, at 100k–1M total points. They set the measured safe points per server.
+- **Pending: the 6 h, 100k-point soak on nash-srv** (#245 acceptance). It gives compressed bytes
+  per row at real chunk size, and compression throughput on 12 threads.
+
+The calculator (`python -m baler.sizing`) carries the same labels on every line it prints. When
+those results land, fill in `PENDING` in `src/baler/sizing.py` and the placeholders
+[below](#pending-results).
+
+## The load to plan for
+
+These are Jacob's planning figures (#190's top note, 2026-11-09). They are targets, not
+measurements:
+
+- Most points report every **1–5 minutes**. Readings every 5 s are the **stress test**, not the
+  expected load.
+- Equipment carries **5–10 synthetic items** each: derivations, Cur-mode rules and His-mode rules.
+- **One server per roughly 1M points**, synthetics included. Past that, split by **portfolio or
+  campus**, so that reports stay inside one instance.
+
+A synthetic item costs more than its count suggests:
+
+- Every synthetic item adds to the graph.
+- A derivation also writes history at about its inputs' rate.
+- A rule writes only faults.
+
+So `--synthetic-per-equip` adds to *total points*, which drives graph, memory and the split.
+`--synthetic-history-share` (default 1, the upper bound) says how many of the synthetic items
+write history rows.
+
+## The three profiles
+
+| | Building box | Portfolio server | Edge + central |
+|---|---|---|---|
+| **Shape** | One server or mini-PC per building, the whole stack | One install, many sites ([multi-site scoping](/multi-site)) | Windrow on a Pi per building, one central Baler |
+| **Who** | One owner, one building | Owner, Cx firm or GC with several buildings | Large owners, sites without a server room |
+| **Field data reaches Baler by** | Windrow on the box or on a Pi on the LAN | A Pi gateway per site over MQTT/TLS 8883 | A Pi gateway per building over MQTT/TLS 8883 |
+| **Survives an uplink outage** | No uplink to lose: everything is on the LAN | Windrow's spool on each Pi | Windrow's spool on each Pi |
+| **Sale of one building** | Hand over the box, or `python -m baler.export export` | `python -m baler.export export --site <id>` | `export --site <id>` on the central server |
+| **Typical size** | 1k–20k points | up to the split threshold | up to the split threshold, at the centre |
+
+The portfolio server and edge + central run the same central stack. The difference is where the
+field polling runs. In practice most portfolio servers *are* edge + central, because a remote site
+needs a Pi gateway.
+
+### What runs where
+
+**The Baler stack** is `docker-compose.yml`, the same in every profile. It runs on the building box
+or the central server:
+
+- stores: `postgres` (TimescaleDB), `oxigraph`, `mosquitto`;
+- daemons: `mqtt_listener`, `fault_detector`, `derivation_engine`, `source_runner`;
+- APIs: `ingest_api`, `fault_api`, `derivation_api`, `validate_api`, `auth_api`, `ops_api`,
+  `commissioning_api` and `haystack_api`, all behind `gateway`;
+- observability: `jaeger`, `grafana`;
+- one-shot: `migrate`.
+
+The profile-gated services are opt-in, the same as anywhere: the `*_puller` services, and
+`jupyter` (profile `notebook`). [Architecture](/architecture) describes each service.
+
+**Windrow**, the BACnet/Modbus poller, runs in one of these places. Each exists in the repos today:
+
+| Where | How it's installed | Used in |
+|---|---|---|
+| On a Raspberry Pi at the site, role `gateway` | `sudo bash install-edge.sh gateway` (Windrow's `deploy/pi/install-edge.sh`), account in `/etc/windrow/edge.env` | Edge + central, portfolio, or a building box whose devices are on another LAN |
+| Beside Baler, polling devices by IP | `windrow_api` in `deploy/nash-srv/docker-compose.windrow.yml` | nash-srv. That file also starts the demo's mock BACnet device, so copy the `windrow_api` service, not the file |
+| Beside Baler on the host network, for broadcast discovery | `windrow_lan` in `deploy/nash-srv/docker-compose.lan.yml` | A building box on the same LAN as the devices |
+
+The installer's other roles (`bacnet`, `modbus`, `weather`) are simulators. `announce` lets
+devices that move between addresses be found again. [Edge nodes](/edge-nodes) is the runbook for
+all of these, and covers which to use.
+
+**Not built:** a Baler box per building feeding a central Baler. The design names it as an option,
+but no Baler-to-Baler replication exists. Use Windrow as the edge.
+
+### Compose files per profile
+
+The base file publishes every port on `0.0.0.0`. A real install puts an override on top that binds
+everything except the gateway (behind your TLS proxy) and MQTT/TLS to loopback.
+`deploy/nash-srv/docker-compose.override.yml` is that override for nash-srv, and you can copy it.
+Its `volumes: external` block is specific to nash-srv's pre-rename volumes, so drop it on a fresh
+install.
+
+```bash
+# building box, or the central server of a portfolio or edge + central install
+docker compose -f docker-compose.yml -f deploy/<your-site>/docker-compose.override.yml \
+  --env-file /etc/baler/baler.env up -d
+# + Windrow beside it, discovering on the host's LAN (building box only)
+#   ... -f deploy/nash-srv/docker-compose.lan.yml   (set the WINDROW_LAN_* vars; on nash-srv the
+#   deploy wrapper adds this file when nash-srv.env has BALER_WINDROW_LAN=1)
+```
+
+[nash-srv deploy](/nash-srv-deploy) is the worked example of a central server: Caddy in front,
+loopback ports, a CI runner deploying it.
+
+### Env per profile
+
+Everything lives in `.env` (`.env.example` lists every variable). The calculator prints the lines
+that depend on size.
+
+| Variable | Building box | Portfolio / central | Source |
+|---|---|---|---|
+| `BALER_HISTORY_CHUNK_INTERVAL`, `BALER_HISTORY_COMPRESS_AFTER` | usually blank (7 days) | what `python -m baler.history_chunks recommend` or `baler.sizing` says, often `1 hour` / `3 hours` | [History compression](/history-compression), #245, #270 |
+| `BALER_HISTORY_COMPRESS_SCHEDULE` | blank | blank (half a chunk) | #270 |
+| `BALER_LISTENER_WORKERS` | blank (1) | readings/s ÷ 6,000, rounded up | #272 |
+| `BALER_READ_LIMIT`, `BALER_HIS_SERIES_LIMIT` | blank (1000) | blank (1000). Set `0` only for a third-party Haystack client that can't follow `after` | #274 |
+| `BALER_FEED_RETENTION_S` | blank (600) | raise it if a rule daemon may be down longer than 10 min | `.env.example` |
+| `MQTT_PASSWORD`, `BALER_JWT_SECRET`, `BALER_GATEWAY_SECRET` | required | required | README quick start |
+| `BALER_SOURCES_KEY` | optional | set it, so the gateway secret can be rotated without losing stored source secrets | `.env.example` |
+
+On each Pi, `/etc/windrow/edge.env` holds:
+
+- `MQTT_HOST` and `MQTT_PORT=8883`;
+- the edge account (`MQTT_USERNAME`, `MQTT_PASSWORD`, `WINDROW_SITE_ID`), created in Ops → Edge
+  nodes;
+- the spool settings: `WINDROW_SPOOL_OUTAGE_HOURS` (default 24) and `WINDROW_SPOOL_MAX_ROWS`
+  (default 5,000,000).
+
+The spool is sized from the Pi's own reading rate: that rate × the outage hours + 10%, capped at
+`WINDROW_SPOOL_MAX_ROWS`. It lives at `/var/lib/windrow/windrow-spool.jsonl`. Raise the cap when
+the calculator's spool line says so. Windrow's code puts a spooled reading at about 100 B on disk,
+which is a design figure, not a measurement.
+
+**`log_statement=all`.** `docker-compose.yml` still starts Postgres with `log_statement=all`. At
+10k points every 5 s, #245 measured 8.4 MB of statement log every 10 s, about 73 GB/day. Before a
+large install, either cap Docker's log driver for `postgres` (`logging: options: max-size`), or
+override its `command:` in your override file without that flag.
+
+## Sizing
+
+```bash
+python -m baler.sizing --points 100000 --interval 300 --synthetic-per-equip 10
+python -m baler.sizing --points 5000 --interval 60 --synthetic-per-equip 5 --years 15 --buildings 1
+python -m baler.sizing --points 1000000 --interval 5 --json        # the stress case
+```
+
+Options:
+
+| Option | Meaning |
+|---|---|
+| `--points` | Field points |
+| `--interval` | Seconds between a point's readings (default 300) |
+| `--synthetic-per-equip` | Synthetic items per equip |
+| `--points-per-equip` | Field points per equip (default 10, the ladder's shape) |
+| `--years` | History kept on disk |
+| `--pg-memory` | Memory Postgres gets. Default: sized from the rate |
+| `--buildings` | Buildings the points are spread over, for the spool, export and replay lines |
+| `--outage-hours` | Uplink outage to spool for (default 24) |
+
+It prints:
+
+- the load: readings/s and history rows/s;
+- disk per day, raw and compressed, the hot window, and the total for `--years`;
+- the chunk settings, from `history_chunks.recommend` (#245's rule);
+- listener workers;
+- CPU, RAM and disk;
+- servers;
+- the Windrow spool per building, and how long its replay takes;
+- the size and time of one building's export, and of a full `pg_dump`.
+
+Each line gives its basis and one of these labels:
+
+- **measured**: from a cited run;
+- **extrapolated**: a measured rate scaled past where it was measured;
+- **rule**: #245's chunk sizing rule applied;
+- **target**: a planning target;
+- **pending**: a result still to come;
+- **assumption**: an input.
+
+### What each figure is based on
+
+| Figure | Basis | Label |
+|---|---|---|
+| Raw disk: **250 B/row** | point_history table + indexes: 228–265 B on the ladder, 250 B on nash-srv ([Scale test](/scale-test#disk-growth), #245) | measured |
+| Compressed disk, full batches (≥ 1,000 rows of a point per chunk): **8.2 B/row** | 8.0–8.2 B on `seed_perf` noisy data ([History compression](/history-compression#what-it-saves)); 5 B on nash-srv's 7-day chunks, mostly simulated (#245). The worse figure is used | measured |
+| Compressed disk at 60 rows of a point per chunk: **15.7 B/row** | local soak `20261108T235904Z`, 5-minute chunks (#270) | measured |
+| Compressed, between 60 and 1,000 rows | interpolated between the two | extrapolated |
+| Compressed, under 60 rows | 15.7 B as a **lower bound**. Smaller batches weren't measured, and compress worse | extrapolated |
+| Chunk interval, `compress_after`, schedule | one chunk + indexes in 25% of Postgres memory, `compress_after` = 3 chunks, policy every half chunk, never under 1 h (#245, #270) | rule |
+| Listener workers: **readings/s ÷ 6,000** | per worker: 14,921/s on nash-srv (1 process, ~1 core, 100k step, #190); 11,295/s with 1 worker and 6,077–7,083/s each with 2–3 workers on a starved 4-vCPU VM (#272). Most stored by any worker count: **18,232/s** (3 workers, local) | measured up to 18,232/s, extrapolated past it |
+| Listener CPU: **~1 core per 15k readings/s** | nash-srv 100k step (#190) | extrapolated |
+| Compression keeping up: **33,000 rows/s per job** | nash-srv's 1-CPU live box under load, a 13.2 M-row chunk in 6 min 39 s (#245). The local soak's tiny chunks did 198k rows/s (#270) | measured; 12-thread rate pending |
+| Postgres write I/O: **~990 B written per row** | at 5k points: WAL 585 + pages 220 + TEMP staging 130 + checkpoints 55 (#271). Estimated to approach a page per row at 100k, not measured yet | extrapolated |
+| Broker memory: **~550 B per queued reading**, 500,000 per worker at most | #272 | measured |
+| Graph: **~12.7 triples per point** | 1.27 M triples for the harness's 100k points / 10k equips (#274) | extrapolated |
+| `read?filter=point`: **1.08 s at 100k** (budget 1.5 s) | after paging; the whole-filter match (0.42 s, ~4 µs a point) grows with points (#274) | measured at 100k, extrapolated past it |
+| CPU baseline: **6 hardware threads** | 10k points every 5 s (2,000/s) passed on nash-srv with the stack on 6 threads (c36aec3, #190). 25k every 5 s (5,000/s) passed on a shared 4-vCPU VM after paging (run `20261109T015355Z`, #274) | measured inside those steps |
+| RAM | the scale stack's caps (`scripts/scale/compose.scale.yml`), under which the 10k–100k steps had no OOM kill: Postgres 6 GB, Oxigraph 4 GB, the other long-running services 11.5 GB together (#190). Postgres grows with the chunk rule. Oxigraph is scaled linearly past 100k, which is a guess | measured to 100k, extrapolated past it |
+| Servers: **one per ~1M total points** | Jacob's planning figure (#190 top note) | target |
+| Export: **~5.8 B/sample**, ~640k samples/s out, ~167k/s in | 22.4 M samples: 130 MB, 34.8 s, import 134 s ([Building export](/building-export#measured)) | extrapolated |
+| `pg_dump`: **~5.5 B/sample**, ~167k samples/s | 2.0 M samples: 11 MB gzip'd in 12 s ([Backups](/backups)) | extrapolated |
+
+### Worked examples
+
+Defaults apply: 10 field points per equip, every synthetic item writing history (the upper bound),
+1 year kept, and Postgres memory sized from the rate.
+
+| Field points, interval, synthetic/equip | Total points | Readings/s | Rows/s | Raw/day | Compressed/day | Chunk / compress after | 1 year on disk | Workers | Servers (target) | Inside a measured step? |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 5,000, 60 s, 5 (a hospital wing) | 7,500 | 83 | 125 | 2.7 GB | 98 MB | 12 h / 36 h | 42 GB | 1 | 1 | yes (10k step) |
+| 5,000, 300 s, 5 | 7,500 | 17 | 25 | 540 MB | 25 MB | 1 day / 3 days | 12 GB | 1 | 1 | yes |
+| 100,000, 300 s, 10 | 200,000 | 333 | 667 | 14.4 GB | ≥ 0.9 GB | 2 h / 6 h | 336 GB | 1 | 1 | pending (#273) |
+| 100,000, 60 s, 5 | 150,000 | 1,667 | 2,500 | 54 GB | ≥ 3.4 GB | 1 h / 3 h | 1.2 TB | 1 | 1 | pending |
+| 500,000, 300 s, 10 | 1,000,000 | 1,667 | 3,333 | 72 GB | ≥ 4.5 GB | 1 h / 3 h | 1.7 TB | 1 | 1 | pending |
+| 1,000,000, 300 s, 10 | 2,000,000 | 3,333 | 6,667 | 144 GB | ≥ 9.0 GB | 1 h / 3 h | 3.3 TB | 1 | **2** | pending |
+| 1,000,000, 60 s, 10 | 2,000,000 | 16,667 | 33,333 | 720 GB | ≥ 45 GB | 1 h / 3 h | 16.6 TB | 3 | **2** | pending |
+| 1,000,000, 5 s, 0 (stress) | 1,000,000 | 200,000 | 200,000 | 4.3 TB | 157 GB | 1 h / 3 h | 58 TB | 34, beyond measured | 1 | no: 100k at 5 s failed on ingest (#190) |
+
+What the table shows, from measured numbers:
+
+- **At realistic rates, readings/s is not the wall.** 1M field points at 5 minutes is 3,333
+  readings/s. That's below the 5,000/s of a step that passed (25k at 5 s, #274), and a single
+  listener worker covers it. What grows with the point count is the **graph and the reads**.
+  Extrapolating #274's match cost, `read?filter=point` passes its 1.5 s budget at about 200k total
+  points, with ~9 s at 2M. The next read limiters named in [Scale test](/scale-test) (the whole
+  filter match, the equip→point expansion) are what #273 will measure at 250k–1M.
+- **Slow reporting compresses worse with short chunks.** A 1-hour chunk at 5-minute reporting holds
+  12 rows per point, against up to 1,000 in a compressed batch. The 15.7 B/row figure is then only a
+  lower bound. Full batches would need chunks of about 84 h at 5 min, which needs more Postgres
+  memory under the 25% rule. Pass `--pg-memory` to see the trade. The soak (pending) will measure
+  it at real size.
+- **Logical backups stop being nightly jobs.** Extrapolating `pg_dump`'s measured rate, a year of
+  1M points at 5 min (≈ 210 billion rows with synthetics) takes about two weeks to dump. Below.
+
+### Pending results
+
+Fill these in when they land. Each has a slot in `sizing.PENDING`.
+
+| Result | Source | Value |
+|---|---|---|
+| Measured safe total points per server, `typical-1min`, N=5 | #273 | _pending_ |
+| Measured safe total points per server, `typical-1min`, N=10 | #273 | _pending_ |
+| Measured safe total points per server, `typical-5min`, N=5 | #273 | _pending_ |
+| Measured safe total points per server, `typical-5min`, N=10 | #273 | _pending_ |
+| Limiter at each of 100k / 250k / 500k / 1M total points | #273 (named by #269's limiter) | _pending_ |
+| Compressed B/row at a real chunk size, ladder data | 6 h soak, #245 | _pending_ |
+| Compression rows/s per job on 12 threads; hot window plateau at 100k | 6 h soak, #245 | _pending_ |
+| 100k at 5 s with `BALER_LISTENER_WORKERS=3`: stored %, drops | nash-srv, #233 acceptance | _pending_ |
+
+## When to split
+
+Split onto a second server, **by portfolio or campus** so reports stay inside one instance (#190),
+when one of these happens:
+
+1. **Total points approach the measured safe points per server** for your profile (pending #273).
+   Until that lands, plan to the target of ~1M total points, and treat anything past 100k total as
+   unmeasured.
+2. **Reads go over budget.** `read?filter=point`, `readAll(equip)` and the Cx report are the first
+   thing that failed at every ladder step from 25k up (before #274's paging). Watch the gateway's
+   request times, or run the ladder's probes against a copy.
+3. **Ingest shows overload:**
+   - `BROKER DROPPED` in the `mqtt_listener` log;
+   - `blocked_s` growing in its heartbeat;
+   - `/ops/status` showing ingest degraded.
+
+   First raise `BALER_LISTENER_WORKERS`. If stored readings/s stops rising with more workers (past
+   ~18k/s locally the `point_history` upsert was the limit, #272), the server is full.
+4. **Compression stops keeping up.** `python -m baler.history_chunks status` shows the oldest
+   uncompressed chunk getting older run after run.
+
+A split is a new install, plus a [building export](/building-export) and import of the sites that
+move.
+
+## Network ports
+
+The base `docker-compose.yml`, plus the nash-srv-style override:
+
+| Port | Service | Exposure |
+|---|---|---|
+| TCP 8080 | `gateway`: UI and every API, JWT-verified in nginx | loopback, behind your TLS reverse proxy (443) |
+| TCP 8883 | `mosquitto`, MQTT over TLS | **public** if edge nodes are remote. The only inbound port a site needs open |
+| TCP 1883 | `mosquitto`, plain MQTT | loopback only |
+| TCP 5433 | `postgres` | loopback (backups, `history_chunks status`) |
+| TCP 7878 | `oxigraph` | loopback |
+| TCP 16686, 4318 | `jaeger` UI, OTLP | loopback |
+| TCP 3033 | `grafana` | loopback |
+| TCP 8888 | `jupyter` (profile `notebook`) | loopback |
+| UDP 47900 | `windrow_api` device announce, sources limited by `WINDROW_ANNOUNCE_ALLOW` | LAN, if used |
+
+At a site (Windrow on a Pi):
+
+| Port | What | Direction |
+|---|---|---|
+| UDP 47808 | BACnet/IP, on the Pi's LAN address | LAN (`bacnet` and `gateway` can't share a Pi) |
+| TCP 502 | Modbus TCP to the devices | out to the LAN |
+| TCP 8883 | MQTT/TLS to the central broker | **out** only. Nothing at the site accepts an inbound connection |
+| TCP 8001 | Windrow's API | Pi loopback; managed over MQTT, not HTTP |
+
+Bandwidth from a site is roughly its readings/s × the MQTT message size. Message size wasn't
+measured on the wire; the broker's ~550 B per queued reading (#272) is an upper bound.
+
+## Backups and the restore drill
+
+[Backups](/backups) covers `scripts/backup.py` (a `pg_dump` plus an Oxigraph Turtle dump),
+`scripts/restore.py`, and `scripts/restore_drill.py`, which restores into a scratch stack and
+checks every table, compressed chunk, policy and aggregate. Run the drill on a schedule, not just
+once: the systemd timer in [Automating backups](/backups#automating-backups).
+
+| | Building box | Portfolio / central | Edge |
+|---|---|---|---|
+| What to back up | Postgres + Oxigraph (`backup.py`) | Same | Nothing: the Pi holds only its config and spool |
+| Drill | `restore_drill.py` monthly | `restore_drill.py` on a schedule, and after any TimescaleDB image change | Reinstall from `install-edge.sh` + `edge.env` |
+| Store copies | Off the box | Off the server | Keep `edge.env` (the account password is shown once) |
+
+**Scale limits of today's backup (extrapolated):**
+
+- **Measured:** 2.0 M samples took 12 s to dump, to 11 MB gzip'd.
+- **Extrapolated:** a building box at 5k points every minute (≈ 4 billion rows a year with
+  synthetics) dumps in about 7 hours, which still works nightly.
+- **Extrapolated:** a central server at hundreds of millions of rows a day does not. A full logical
+  dump of a year runs for days.
+
+A physical or incremental backup method (`pg_basebackup`, volume snapshots) isn't in the repo yet.
+Until it is, a large install needs its storage layer's snapshots, and the drill only proves
+logical dumps.
+
+## Upgrades
+
+- **Baler:**
+  1. Pull the new code.
+  2. Run `docker compose ... up -d --build`. The `migrate` service applies schema migrations and
+     the history settings before any daemon starts ([Schema migrations](/schema-migrations)).
+  3. Run [Post-deploy verification](/post-deploy-verify).
+- **History settings take effect without a rewrite.** Changing the chunk interval applies to new
+  chunks only, in milliseconds ([History compression](/history-compression#moving-a-live-install-to-short-chunks)).
+- **Windrow on a Pi:** re-run `sudo WINDROW_REF=<tag or sha> bash install-edge.sh <role>`. It's
+  idempotent, and restarts services running older code.
+- **TimescaleDB image:** a dump restores only into the same extension version, which
+  `restore.py` handles ([Backups](/backups#timescaledb)). Take a backup, and run the drill, before
+  changing the image.
+
+## How one building's data leaves on sale
+
+- **Building box:** hand over the box, or `python -m baler.export export <dir>`.
+- **Portfolio or central:** `python -m baler.export export <dir> --site <site id>`, then
+  `verify --against-source`. It writes Parquet, Turtle, JSON and CSV that any tool can read
+  without Baler. Add `--since`/`--until` to cut it a year at a time ([Building export](/building-export)).
+- **The edge Pi** holds no history, so it can be re-pointed at the buyer's broker. Change its
+  `edge.env`.
+
+Measured: 22.4 M samples exported in 34.8 s, to 130 MB, and imported in 134 s. Extrapolated with
+`baler.sizing --buildings N`: one building of a 100k-point, 1-minute portfolio split over 20
+buildings exports a year in about 1.7 hours, and imports in about 6.6 hours.

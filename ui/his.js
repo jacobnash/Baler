@@ -7,7 +7,7 @@
 const params = new URLSearchParams(location.search);
 // Relative by default so this works as served by the gateway at /ui/ -
 // override with ?ingest=... when serving ui/ standalone (ui_server.py).
-const INGEST_API_URL = params.get("ingest") || "/ingest";
+const INGEST_API_URL = apiBase("ingest", "/ingest");
 // Spans ("today", "thisMonth") resolve server-side in this zone, so what
 // the chart calls today is the user's calendar day, not the container's.
 const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";

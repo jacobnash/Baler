@@ -24,9 +24,10 @@ TimescaleDB stores `point_history` in time chunks (7 days each unless
 - **everything else is a compressed column**, including the per-sample
   `quality` flag ([Sample quality](/quality)). It varies from sample to sample,
   so it doesn't belong in the segment columns. NULL (ok) costs almost nothing.
-  The quality sweep only flags the last hour, which is still uncompressed. A
-  flag written into an older, compressed range takes the slower write path
-  described below.
+  The quality sweep judges only what is new since its last pass (#268),
+  which is still uncompressed. A late row in an older, compressed range is
+  judged where it is and written only if it is flagged, which takes the
+  slower write path described below.
 
 The continuous aggregates (`point_history_5m`, `point_history_1h`) aren't
 compressed. They're small.

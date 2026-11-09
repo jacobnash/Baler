@@ -1,0 +1,90 @@
+---
+title: Bench tests
+---
+
+Part of the building lifecycle record (epic Baler#221, design §7). Baler#211.
+Builds on [Positions and assets](/assets).
+
+Before a controller, actuator, sensor or drive goes in, someone tests it on
+the bench. Baler records that result against the **asset**, not the
+position, as the asset's **first baseline**. Years later, the same piece of
+hardware's start-up and operating behaviour can be compared with how it
+behaved new. A replacement brings its own bench test, so a comparison is
+never made against different hardware.
+
+## Procedures as data
+
+The same pattern as Cx 6's start-up procedures: a procedure is a list of
+steps, and each step says what to measure and what passes.
+
+| Criterion | Passes when |
+|---|---|
+| `{"range": {"min": a, "max": b}}` | the measured number is within (either bound may be left out). Same shape as Cx 6 |
+| `{"equals": v}` | the measured value equals `v` (e.g. a firmware version) |
+| `{"manual": true}` | the technician records `true` (passed) or `false` (failed) |
+
+```json
+{"name": "Actuator bench test", "asset_type": "actuator", "steps": [
+  {"id": "stroke-open", "title": "Strokes fully open on command", "criterion": {"manual": true}},
+  {"id": "stroke-time", "title": "Full-stroke time", "unit": "s", "criterion": {"range": {"max": 95}}}
+]}
+```
+
+**Templates carry structure only.** `GET /ops/bench/templates` offers an
+actuator stroke test, a temperature sensor check and a controller I/O check.
+Their range steps have **no limits**: tolerances come from the device's own
+submittal or the project's specification, and a person enters them. A
+measured step with no limits is `inconclusive`, never a pass.
+
+## Recording a test
+
+`POST /ops/assets/{id}/bench-tests` takes a `procedure_id` (or an inline
+one-off `procedure`), `measurements` (`{step_id: value}`), `tested_at`,
+`technician`, `instruments` (what it was measured with), `notes`, and
+optionally a `document_id` (the signed bench sheet in the document store).
+
+- Each step gets a verdict (`pass`, `fail`, `inconclusive` with the reason).
+  The test fails if any step fails, and is inconclusive if any step is
+  unmeasured or has no limits.
+- The procedure is stored **as it was run**. Editing the procedure later
+  doesn't change past results.
+- `before_install` records whether the test predates the asset's first
+  install.
+- Tests are append-only.
+
+## The baseline
+
+`GET /ops/assets/{id}/baseline` returns the asset's earliest **passing**
+bench test before its first install. If it only passed later (a spare
+re-tested before going back in), it returns the earliest passing test.
+`GET .../bench-tests` marks which test that is.
+
+## API
+
+| Route | What |
+|---|---|
+| `GET /ops/bench/templates` | Structure-only templates |
+| `GET /ops/bench/procedures` / `POST` | The org's procedures / add one (`template` to start from one) |
+| `PATCH /ops/bench/procedures/{id}` | Edit steps, or `status: archived` |
+| `GET /ops/assets/{id}/bench-tests` / `POST` | The asset's tests / record one |
+| `GET /ops/assets/{id}/baseline` | The baseline bench test |
+
+Reads need `viewer`, changes `operator`.
+
+## UI
+
+The **Assets** page shows each asset's bench tests, and has a form to record
+one against an active procedure.
+
+## Storage
+
+Migration 0016: `lc_bench_procedures` and `lc_bench_tests`. Code:
+`baler.lifecycle.bench`.
+
+## Not built yet
+
+- Comparing start-up (Cx 6) and operating trends against the bench
+  baseline. This is the analytics work, #214 and #215.
+- A form-style UI per procedure step. For now, measurements are entered as
+  JSON.
+- Importing results from bench test rigs or controller vendor tools.
