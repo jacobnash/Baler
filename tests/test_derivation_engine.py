@@ -34,7 +34,7 @@ from baler.ingest import (
 )
 from baler.mapping import classify_point
 from baler.mqtt_listener import make_on_message
-from baler.mqtt_util import make_client
+from baler.mqtt_util import make_client, publish_confirmed
 from baler.remote_store import RemoteStore
 from baler.store import BRICK, PROV, Store
 from baler.timeseries import connect, read_latest, write_point_value
@@ -457,14 +457,18 @@ def test_e2e_derivation_averages_bacnet_and_modbus_sourced_sensors_over_real_bro
     # rules/haystack_to_brick.yaml maps directly to Zone_Air_Temperature_Sensor.
     zone_temp_tags = {"zone": True, "air": True, "temp": True, "sensor": True}
 
-    publisher = make_client()
-    publisher.connect("localhost", 1883)
+    # Acknowledged by the broker before this returns. The old connect /
+    # publish / disconnect with no network loop reset the connection with
+    # the CONNACK unread, and the broker dropped publishes it hadn't read
+    # yet - the "not ingested within 20 s" failures (see publish_confirmed).
     now_ts = time.time()
-    publisher.publish(bacnet_topic, json.dumps({"value": 70.0, "ts": now_ts}), retain=True)
-    publisher.publish(modbus_topic, json.dumps({"value": 74.0, "ts": now_ts}), retain=True)
-    publisher.publish(f"{bacnet_topic}/tags", json.dumps({"value": json.dumps(zone_temp_tags), "ts": now_ts}), retain=True)
-    publisher.publish(f"{modbus_topic}/tags", json.dumps({"value": json.dumps(zone_temp_tags), "ts": now_ts}), retain=True)
-    publisher.disconnect()
+    tags_payload = json.dumps({"value": json.dumps(zone_temp_tags), "ts": now_ts})
+    publish_confirmed("localhost", 1883, [
+        (bacnet_topic, json.dumps({"value": 70.0, "ts": now_ts})),
+        (modbus_topic, json.dumps({"value": 74.0, "ts": now_ts})),
+        (f"{bacnet_topic}/tags", tags_payload),
+        (f"{modbus_topic}/tags", tags_payload),
+    ], retain=True)
 
     def _is_tagged(point_uri) -> bool:
         # RemoteStore.query() only exposes SELECT-shaped row iteration (no
