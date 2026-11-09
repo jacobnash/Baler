@@ -111,7 +111,10 @@ def guard_problems(config: dict, env_file: Path = ENV_FILE, checkout_name: str |
 # value pattern). Labels and markers mirror what Windrow's bacnet_tagger
 # produces for an AHU-ish controller.
 TEMPLATES = [
-    ("sat", "discharge air temp sensor", "°F", "Number", "sine"),
+    # 55-65 °F: inside the stack's seeded discharge-air-temp-out-of-range
+    # rule (50-70), which a 65-75 sine tripped on every sat point half the
+    # time - 10% of points flapping, not --fault-share's (#273)
+    ("sat", "discharge air temp sensor", "°F", "Number", "sine-sat"),
     ("sat-sp", "discharge air temp sp writable", "°F", "Number", "const"),
     ("rat", "return air temp sensor", "°F", "Number", "sine"),
     ("mat", "mixed air temp sensor", "°F", "Number", "walk"),
@@ -122,6 +125,7 @@ TEMPLATES = [
     ("chw-valve", "chilled water valve cmd writable", "%", "Number", "step"),
     ("dsp", "discharge air pressure sensor", "inH₂O", "Number", "sine"),
 ]
+NUMERIC_TEMPLATES = sum(1 for t in TEMPLATES if t[3] == "Number")
 PATTERNS = ("mix", "sine", "walk", "const", "step", "bool")
 # hisRead probes read readAll(<marker>): the first N points carry it.
 HIS_GROUPS = (1, 100, 1000)
@@ -142,7 +146,11 @@ class Shape:
         return math.ceil(self.equips / self.equips_per_site)
 
     def equip_prefix(self, g: int) -> str:
-        return f"{TOPIC_ROOT}/s{g // self.equips_per_site:05d}/e{g % self.equips_per_site:05d}"
+        # e<global index>, not the index within the site: an equip's last
+        # path segment is unique, as derivation outputs need (#273: the
+        # engine names an output after its target's last segment, so two
+        # sites' e00000 wrote one computed point).
+        return f"{TOPIC_ROOT}/s{g // self.equips_per_site:05d}/e{g:05d}"
 
     def site_prefix(self, site: int) -> str:
         return f"{TOPIC_ROOT}/s{site:05d}"
@@ -185,6 +193,26 @@ def envelope(point: str, value, ts: float) -> bytes:
     return json.dumps({"point": point, "value": value, "ts": ts}).encode()
 
 
+# Faulting points (#273, --fault-share): numeric points chosen by index read
+# FAULT_VALUE - outside the ladder's scale-range rule (+-1000) - for
+# FAULT_HALF_PERIOD readings, then normally for as many, so their faults
+# open and resolve all soak long.
+FAULT_HALF_PERIOD = 5
+FAULT_VALUE = 5000.0
+
+
+def is_faulting(idx: int, template: tuple, share: float) -> bool:
+    if not share or template[3] != "Number":
+        return False
+    # a fixed multiplicative hash spreads the chosen points over equips
+    return (idx * 2654435761) % 1_000_003 < share * 1_000_003 * len(TEMPLATES) / NUMERIC_TEMPLATES
+
+
+def fault_value(idx: int, tick: int):
+    """FAULT_VALUE in a faulting point's fault half-period, else None."""
+    return FAULT_VALUE if ((tick + idx) // FAULT_HALF_PERIOD) % 2 == 0 else None
+
+
 def value_at(pattern: str, idx: int, tick: int):
     """Deterministic synthetic value for point idx at reading number tick."""
     if pattern == "const":
@@ -197,7 +225,8 @@ def value_at(pattern: str, idx: int, tick: int):
         # cheap deterministic pseudo-walk: sum of two slow sines with
         # per-point phase, so no state is kept per point
         return round(70 + 3 * math.sin((tick + idx * 7) / 37.0) + math.sin((tick + idx) / 5.3), 3)
-    return round(70 + 5 * math.sin(2 * math.pi * (tick + idx % 120) / 120.0), 3)  # sine, 10 min @ 5 s
+    centre = 60 if pattern == "sine-sat" else 70
+    return round(centre + 5 * math.sin(2 * math.pi * (tick + idx % 120) / 120.0), 3)  # sine, 10 min @ 5 s
 
 
 # ---------------------------------------------------------------- the host
