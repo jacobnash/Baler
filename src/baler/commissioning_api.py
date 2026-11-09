@@ -1297,7 +1297,7 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             body = self.read_json_body()
             cid = body.get("client_id")
             if isinstance(cid, str) and cid:
-                dup = repo.find_rows(manual.RESULTS, project_id=project["id"], client_id=cid)
+                dup = repo.find_rows(manual.RESULTS, order="recorded_at", project_id=project["id"], client_id=cid)
                 if dup:  # an offline draft sent again: stored once
                     respond_json(self, 200, self._public_manual(dup[0]))
                     return

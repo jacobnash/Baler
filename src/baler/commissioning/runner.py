@@ -277,7 +277,7 @@ def execute_test(repo, job: TestJob, clock: Callable[[], datetime], run_fn=engin
             series = hist.window(ids, job.start, job.end + timedelta(seconds=1), truncated=truncated) if ids else {}
         per = procedures.evaluate(job.procedure, equips, results, series, truncated, (job.start, job.end))
         per = manual.apply(per, job.procedure, job.procedure.get("methods") or procedures.choose_methods(job.procedure),
-                           repo.find_rows(manual.RESULTS, test_run_id=job.run_id),
+                           repo.find_rows(manual.RESULTS, order="recorded_at", test_run_id=job.run_id),
                            repo.find_rows("cx_active_runs", project_id=job.project_id), job.start)
         prev = next((r for r in repo.list_test_runs(job.procedure["id"], 20)
                      if r["id"] != job.run_id and r["status"] == "completed"), None)
@@ -318,10 +318,10 @@ def refresh_test_run(repo, tr: dict, now: datetime) -> dict:
         return tr
     proc = tr.get("procedure") or {}
     methods = proc.get("methods") or procedures.choose_methods(proc)
-    if set(methods.values()) == {"passive"} and not repo.find_rows(manual.RESULTS, test_run_id=tr["id"]):
+    if set(methods.values()) == {"passive"} and not repo.find_rows(manual.RESULTS, order="recorded_at", test_run_id=tr["id"]):
         return tr  # nothing but history behind it: unchanged since it ran
     start = tr["started_at"] if isinstance(tr["started_at"], datetime) else datetime.fromisoformat(str(tr["started_at"]))
-    per = manual.apply(tr["equipment"], proc, methods, repo.find_rows(manual.RESULTS, test_run_id=tr["id"]),
+    per = manual.apply(tr["equipment"], proc, methods, repo.find_rows(manual.RESULTS, order="recorded_at", test_run_id=tr["id"]),
                        repo.find_rows("cx_active_runs", project_id=tr["project_id"]), start)
     summary = {**(tr.get("summary") or {}), **procedures.summarize(per)}
     if per != tr.get("equipment") or summary != tr.get("summary"):

@@ -418,7 +418,7 @@ def test_manual_results_attachments_and_closed_by_round_trip(repo):
     repo.put_rows(manual.RESULTS, [row])
     with pytest.raises(psycopg.errors.UniqueViolation):  # one row per offline entry
         repo.put_rows(manual.RESULTS, [{**row, "id": db.new_id()}])
-    got = repo.find_rows(manual.RESULTS, project_id=pid, client_id=f"web:{rid}")
+    got = repo.find_rows(manual.RESULTS, order="recorded_at", project_id=pid, client_id=f"web:{rid}")
     assert [(r["id"], r["witness"]["name"], r["observed_at"]) for r in got] == [(rid, "Pat", now)]
     repo.put_rows(manual.ATTACHMENTS, [{"id": f"a-{rid}", "result_id": rid, "project_id": pid, "filename": "x.png",
                                         "media_type": "image/png", "size": 3, "sha256": "abc", "data": b"\x89PN",
@@ -428,3 +428,10 @@ def test_manual_results_attachments_and_closed_by_round_trip(repo):
     repo.create_issue({"id": iid, "project_id": pid, "status": "open", "title": "t", "created_at": now, "updated_at": now})
     repo.update_issue(iid, {"status": "closed", "closed_by": "u-closer", "closed_at": now})
     assert repo.get_issue(iid)["closed_by"] == "u-closer"
+
+
+def test_manual_result_get_row_has_no_created_at(repo):
+    """cx_manual_results orders by recorded_at: get_row mustn't assume created_at."""
+    from baler.commissioning import manual
+
+    assert repo.get_row(manual.RESULTS, "no-such-result") is None
