@@ -111,6 +111,7 @@
           <button type="button" id="report-btn">Printable report</button>
           <button type="button" id="project-report-btn" title="The whole project for the CxA: limitations, sequences, acceptance, issues and waivers, sign-off">Project Cx report</button>
           <button type="button" id="issues-from-run-btn" data-min-role="operator">Open issues for failures</button>
+          <label data-min-role="operator" title="Inconclusive checks can't pass; an issue on each lets it be waived or deferred, which the acceptance gate needs"><input type="checkbox" id="issues-include-inconclusive" /> and inconclusive results (to waive or defer)</label>
         </div>
         <div class="cx-grid-wrap"><table id="results-grid" class="cx-grid"></table></div>
         <div class="toolbar" id="results-pager" hidden>
@@ -282,7 +283,7 @@
 
       <section id="issues-section">
         <h2>Issues</h2>
-        <p class="hint">An issue opened from a failing check closes only when a later run passes that check; manual and imported ones close by hand.</p>
+        <p class="hint">An issue opened from a check is resolved (ready for retest) when a later run passes that check, and a named person closes it after the retest; an inconclusive one is waived (risk accepted) or deferred. Manual and imported ones close by hand.</p>
         <div class="toolbar">
           <label>Show <select id="issues-filter">
             <option value="open,in_progress,ready_for_retest,risk_accepted">active</option>

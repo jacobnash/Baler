@@ -26,9 +26,15 @@ async function loadMirrorStatus() {
 
 const cxResultActions = [
   (card, r) => {
-    if (r.status !== "fail" || !can("operator")) return;
+    // An inconclusive check can't pass (e.g. a read-only controller), so the
+    // acceptance gate needs it waived: the issue is what a waiver hangs on.
+    if (!["fail", "inconclusive"].includes(r.status) || !can("operator")) return;
     const tracked = issueState.list.find((i) => i.check_id === r.check_id && i.subject === r.subject && i.status !== "closed");
-    const btn = el("button", { type: "button", textContent: tracked ? `Issue: ${ISSUE_STATUS_LABEL[tracked.status]}` : "Open issue" });
+    const inconclusive = r.status === "inconclusive";
+    const btn = el("button", { type: "button", textContent: tracked ? `Issue: ${ISSUE_STATUS_LABEL[tracked.status]}` : inconclusive ? "Open issue to waive or defer" : "Open issue" });
+    if (inconclusive && !tracked) {
+      btn.title = "This check couldn't decide. An issue on it can be waived (an admin accepts the risk) or deferred to a retest; the acceptance gate needs each inconclusive result waived.";
+    }
     btn.addEventListener("click", async () => {
       if (tracked) return openIssue(tracked.id);
       try {
@@ -249,9 +255,11 @@ async function newIssue() {
 
 async function issuesFromRun() {
   if (!cx.run) return;
-  if (!confirm("Open an issue for every failing result in this run that isn't tracked yet?")) return;
+  const withInconclusive = $("issues-include-inconclusive").checked;
+  const which = withInconclusive ? "failing or inconclusive result (inconclusive ones so they can be waived or deferred)" : "failing result";
+  if (!confirm(`Open an issue for every ${which} in this run that isn't tracked yet?`)) return;
   try {
-    const got = await cxApi("POST", `/runs/${cx.run.id}/issues`, {});
+    const got = await cxApi("POST", `/runs/${cx.run.id}/issues`, withInconclusive ? { include_inconclusive: true } : {});
     flash($("issues-status"), `${got.opened.length} opened, ${got.already_tracked} already tracked`);
     await Promise.all([loadIssues(), loadEvents()]);
   } catch (err) {
