@@ -81,3 +81,50 @@ def test_malformed_tag_messages_are_counted_and_skipped():
                                       ("fbf/s/a/r/tags", None, None), _msg("fbf/s/a/ok/tags", {"point": True})],
                               log=logged.append)
     assert counts["bad"] == 3 and len(logged) == 3 and counts["points"] == 1
+
+
+# --- the controller behind a connection's equip (Windrow#24) ---
+
+INVENTORY = {"bacnetVendorName": "Acme Controls", "bacnetModelName": "AC-500", "bacnetSerialNumber": "SN-0001",
+             "bacnetFirmwareRevision": "4.2.1"}
+
+
+def _values(store, subject, tag):
+    return {str(o) for o in store.graph.objects(URIRef(subject), HAYSTACK[tag])}
+
+
+def test_a_new_device_inventory_replaces_the_old_one():
+    """A swapped controller: the equip says what's there now, not both."""
+    store = Store()
+    equip = "fbf/s/ahu/equip/tags"
+    tag_ingest.apply(store, [_msg(equip, {"tags": {"ahu": True, **INVENTORY}, "points": ["sat"]})])
+    (subject,) = {s for s in store.graph.subjects(HAYSTACK.bacnetSerialNumber, None)}
+    uri = str(subject)
+    assert _values(store, uri, "bacnetSerialNumber") == {"SN-0001"}
+
+    tag_ingest.apply(store, [_msg(equip, {"tags": {"ahu": True, **INVENTORY, "bacnetSerialNumber": "SN-0999",
+                                                   "bacnetModelName": "AC-600"}, "points": ["sat"]})])
+    assert _values(store, uri, "bacnetSerialNumber") == {"SN-0999"}
+    assert _values(store, uri, "bacnetModelName") == {"AC-600"}
+    assert _values(store, uri, "bacnetVendorName") == {"Acme Controls"}
+    # other tags stay additive, as before
+    assert (URIRef(uri), HAYSTACK.hasTag, None) in store.graph
+
+
+def test_the_last_inventory_in_a_batch_wins():
+    store = Store()
+    equip = "fbf/s/ahu/equip/tags"
+    tag_ingest.apply(store, [_msg(equip, {"tags": {"bacnetSerialNumber": "SN-1"}, "points": []}),
+                             _msg(equip, {"tags": {"bacnetSerialNumber": "SN-2"}, "points": []})])
+    (subject,) = set(store.graph.subjects(HAYSTACK.bacnetSerialNumber, None))
+    assert _values(store, str(subject), "bacnetSerialNumber") == {"SN-2"}
+
+
+def test_an_equip_message_without_inventory_leaves_the_inventory_alone():
+    """Older Windrow (or a read that failed) sends equip/tags without it."""
+    store = Store()
+    equip = "fbf/s/ahu/equip/tags"
+    tag_ingest.apply(store, [_msg(equip, {"tags": dict(INVENTORY), "points": ["sat"]})])
+    tag_ingest.apply(store, [_msg(equip, {"tags": {}, "points": ["sat", "rat"]})])
+    (subject,) = set(store.graph.subjects(HAYSTACK.bacnetSerialNumber, None))
+    assert _values(store, str(subject), "bacnetSerialNumber") == {"SN-0001"}

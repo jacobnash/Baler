@@ -1,0 +1,94 @@
+---
+title: COBie import and export
+---
+
+Part of the building lifecycle record (epic Baler#221, design §5). Baler#204.
+Builds on [Positions and assets](/assets), [Warranties](/warranties) and
+[PM schedules](/pm-schedules).
+
+COBie is the US owner-handover interchange: a spreadsheet whose worksheets
+and columns are defined in NIBS *National BIM Standard-United States,
+Version 3*, section 4.2, **COBie, Annex A**. Baler reads and writes the
+sheets an operator needs: **Type**, **Component**, **Spare** and **Job**, plus
+the warranty columns. Only the column names (schema field names) appear in
+Baler. No text of the standard is reproduced.
+
+**Where warranties sit.** Sources disagree on whether warranty data belongs
+on Type or Component. Baler follows Annex A: the terms are on **Type**
+(`WarrantyGuarantorParts`, `WarrantyDurationParts`, `WarrantyGuarantorLabor`,
+`WarrantyDurationLabor`, `WarrantyDurationUnit`), and each **Component**
+carries its `WarrantyStartDate`.
+
+## Import: seeding the record at handover
+
+`POST /ops/cobie/import` takes the `.xlsx` base64-encoded in JSON:
+`{"workbook": "<base64>", "filename": "...", "positions": {...}, "commit": false}`.
+The limit is 30 MB.
+
+| COBie | Becomes |
+|---|---|
+| Component | An **asset**: tag (`TagNumber`, else `Name`), type (`TypeName`), its Type's `Manufacturer` and `ModelNumber`, `SerialNumber`, `ReplacementCost` as cost. `Space`, `BarCode`, `AssetIdentifier`, `Category` and `ExpectedLife` are kept in the asset's attributes |
+| Component + `positions` | **Installed** into a position at its `InstallationDate`. COBie knows spaces, not the Brick equipment the points hang on, so you map component names to position URIs: `{"AHU-1": "urn:equip:fbf/site/ahu-1"}` |
+| Type warranty columns | A **parts** and/or **labor warranty** on each of its components, starting at `WarrantyStartDate` (else `InstallationDate`), for the duration in `WarrantyDurationUnit` (years, months, weeks, days) |
+| Job | A **PM task** on the Type (`asset_type` = `TypeName`), calendar interval = `Frequency` × `FrequencyUnit`. Only day/week/month/quarter/year units are imported. Any other unit (an "hour" job could be calendar or run hours) is **reported, not guessed** |
+| Spare | A row in the **spares** list (`/ops/spares`) |
+
+**It's a dry run unless `"commit": true`.** The dry run returns the
+plan: every asset, install, warranty, PM task and spare it would write, and
+**every row it would skip, and why**. Examples are a component whose type
+isn't on the Type sheet, a warranty with no start date, a job with no usable
+frequency, or a spare with no type.
+
+Committing writes through the same code (and the same checks and audit trail)
+as the API uses for each kind of row. A component already imported (same COBie
+`Name`) is skipped, so importing the same workbook twice adds nothing. Install
+or warranty rows that fail their checks (an occupied position, say) are
+listed in `errors`, and the rest is written.
+
+## Export: handover and sale
+
+`GET /ops/cobie/export` downloads a workbook with:
+
+- an Instruction sheet;
+- **Type**: assets grouped by their COBie type, or by type, manufacturer and
+  model. It includes the manufacturer, model, replacement cost, and the warranty
+  durations (in months) and guarantors from their warranties;
+- **Component**: every asset in your sites, with type, space, serial, tag,
+  bar code, first `InstallationDate` and earliest `WarrantyStartDate`;
+- **Spare**: the spares list;
+- **Job**: active PM tasks, the same rows as
+  `GET /ops/pm/due/export?format=cobie-job`.
+
+An exported workbook imports back. The tests round-trip one into another org
+and get the same assets, warranties, PM tasks and spares.
+
+## Spares
+
+`GET /ops/spares?type=` lists spares, and `POST /ops/spares` adds one
+(`type_name`, `name`, `category`, `suppliers`, `set_number`, `part_number`,
+`description`).
+
+## Roles
+
+Import is `operator`. Export and listing spares are `viewer`.
+
+## UI
+
+**Assets** has a *COBie* section. Pick the file, optionally paste a positions
+map, and import as a dry run first. The result shows what would be written
+and skipped. Tick *commit* to write it. There's also a download link for the
+export.
+
+## Storage
+
+Migration 0018: `lc_spares`. Everything else lands in the asset, warranty and
+PM tables. Code: `baler.lifecycle.cobie`.
+
+## Not built yet
+
+- The other COBie sheets: Facility, Floor, Space and Zone (they wait for the
+  space model, #209), System, Document (linking to the document store, #201),
+  Attribute, Resource, Impact and Issue.
+- Using a Type's `ExpectedLife` as the service-life reference (#200). It's kept
+  on the asset, but not applied, because a reference needs a person and a source.
+- Validation against the full Annex A rules (required columns, pick lists).

@@ -40,6 +40,8 @@ except ImportError:
     if REQUIRED:
         raise
     pytest.skip("openhay not installed (pip install -e '.[haystack]')", allow_module_level=True)
+from baler import openhay_paging
+
 HAXALL_API = os.environ.get("HAXALL_API", "")
 HAXALL_USER = os.environ.get("HAXALL_SU_USERNAME", "su")
 HAXALL_PASS = os.environ.get("HAXALL_SU_PASSWORD", "")
@@ -104,7 +106,9 @@ class OpenhayClient:
         return self.c.about()["productName"]
 
     def read(self, flt):
-        return self.c.read(flt)
+        # openhay's own read stops at the first page (#280); Baler's
+        # wrapper follows `after`.
+        return openhay_paging.read(self.c, flt)
 
     def read_by_id(self, ref):
         return self.c.read_ids([ref])[0]

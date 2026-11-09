@@ -38,9 +38,11 @@ Baler doesn't recognise. An unknown field never makes good data look bad.
 Windrow will send this once Windrow#20 lands. Until then, only Baler's own
 checks set flags.
 
-**Baler's sweep.** `fault_detector` runs `quality.sweep` every 5 minutes
-(`--quality-interval`, 0 turns it off). It covers the last hour of every
-point that has both a Brick class and a `unit` tag:
+**Baler's sweep.** `fault_detector` runs a quality pass every 5 minutes
+(`--quality-interval`, 0 turns it off) on its own thread and database
+connection, so His-mode rules never wait for it. A pass judges what is new
+since the last one, for every point that has both a Brick class and a
+`unit` tag (see [How the sweep stays incremental](#how-the-sweep-stays-incremental)):
 
 - **Range.** A wide plausible range per class and unit, meant to catch a
   failed sensor, not a comfort complaint. Examples: zone air temperature
@@ -51,7 +53,7 @@ point that has both a Brick class and a `unit` tag:
 - **Spikes.** Each sample is compared with the median of the 5 samples
   before it and the 5 after. The window is centred, so a real step change
   (a setpoint change) isn't flagged. The newest 5 samples wait for the next
-  sweep.
+  pass, which fetches them back with their left-hand neighbours.
 - **Unit suspicion.** The median and 90% of the values fit the claimed
   unit's range, or they fit the other unit's and not their own. In the
   second case Baler writes an open suggestion to `quality_suggestions`, for
@@ -60,6 +62,48 @@ point that has both a Brick class and a `unit` tag:
 
 The sweep only fills a sample that has no flag yet, so a device's own flag
 always wins. It's idempotent.
+
+### How the sweep stays incremental
+
+Before [#268](https://github.com/jacobnash/Baler/issues/268) every pass
+re-judged the last hour of every point, inline in the His-mode loop: 25 s at
+25k points, 170 s at 100k (18M rows), and a projected 680 s for a full hour at
+20,000 readings/s, longer than the 5-minute interval. Now:
+
+- **A watermark.** `quality_watermark.judged_to` (migration 0003) is how far
+  the sweep has judged. A pass judges `(judged_to - overlap, now]` and moves
+  it to `now`, so a pass reads about *ingest rate × (interval + overlap)*
+  rows, whatever the history depth. Each point also brings back its last 10
+  good samples from before the window: neighbours for the spike check, and
+  the 5 the previous pass couldn't judge yet.
+- **An overlap window** for rows that were still on their way when the
+  previous pass read their point. It is at least `BALER_QUALITY_OVERLAP_S`
+  (default 30 s) and widens to the ingest delay the sweep measures on the
+  reading feed (commit time minus `ts`, 90th percentile, ×1.25, at most one
+  interval), so a listener running minutes behind doesn't turn every row into
+  a late one. It never shrinks between two passes. Rows inside it are judged
+  twice; flags only fill NULLs, so that's harmless. The heartbeat shows
+  `overlap_s` and `ingest_delay_s`.
+- **Late rows from the reading feed.** A row committed after the pass that
+  covered its ts (a spool replay, a trend backfill, a gateway catching up)
+  is late. Every committed batch is a [reading feed](/fault-detection) row,
+  written in the same transaction as its history, so the sweep's thread
+  watches the feed (consumer `quality`) and records each late reading in
+  `quality_late` in the same statement that moves its offset. The next pass
+  judges those rows with their own neighbours and deletes them. A late row
+  in a compressed chunk is read where it is and written only if it is
+  flagged: one segment batch decompressed, nothing for a clean row.
+- **Bounded passes.** A new install, or one that was stopped, starts an hour
+  back (where the old sweep looked) and catches up in passes of at most two
+  intervals of history, back to back, rather than one huge pass. A gap
+  longer than an hour is skipped and logged, as before.
+- **Visible.** The `fault_detector` heartbeat's `quality` holds the last
+  pass (`sweep_s`, `rows`, `context_rows`, `span_s`, `late_rows`,
+  `flagged`, `meta_s`), `watermark`, `watermark_lag_s` and the watcher's
+  feed position. `/ops/status` marks the fault detector degraded when the
+  watermark falls more than three intervals behind, and the scale ladder's
+  limiter names a pass that overruns its interval
+  ([Reading the limiter](/scale-test)).
 
 ## Who skips, who shows
 
