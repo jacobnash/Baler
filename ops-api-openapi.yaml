@@ -4,7 +4,8 @@ info:
   version: 0.1.0
   description: >
     Building-engineer control-plane status. Aggregates platform and job
-    health into plain-language states (ok / quiet / degraded / down).
+    health into plain-language states (ok / quiet / degraded / down, and
+    off for a job this install doesn't run, such as backups that never reported).
 paths:
   /status:
     get:
@@ -709,7 +710,7 @@ components:
         label: { type: string }
         layer: { type: string, enum: [platform, jobs, tools, building] }
         service: { type: string }
-        state: { type: string, enum: [ok, quiet, degraded, down] }
+        state: { type: string, enum: [ok, quiet, degraded, down, off] }
         detail: { type: ["string", "null"] }
         href:
           type: string

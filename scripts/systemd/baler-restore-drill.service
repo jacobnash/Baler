@@ -8,10 +8,20 @@ Type=oneshot
 # EDIT ME: path to this checkout.
 WorkingDirectory=/opt/baler
 Environment=PATH=/usr/bin:/usr/local/bin
+# Bytecode outside the checkout (#29): the drill imports baler from it.
+Environment=PYTHONPYCACHEPREFIX=/var/cache/baler/pycache
+# The same optional file as baler-backup.service. Off-site drills also need
+# BALER_BACKUP_AGE_IDENTITY_FILE there; without an off-site target the drill
+# restores the newest local backup, and needs nothing in it at all.
+EnvironmentFile=-/etc/baler/backup.env
 # EDIT ME: a Python with this checkout installed (the drill imports baler
 # for its checks), e.g. `python3 -m venv .venv && .venv/bin/pip install -e .`
-# Restores the newest backup in backups/ into a scratch compose project
-# (baler-restore-drill), checks it, removes it, and exits non-zero on any
-# failed check, so `systemctl status`/`journalctl -u baler-restore-drill`
-# show the result. The JSON report is overwritten on every run.
+# (add the offsite extra to drill from the off-site copy).
+# Restores the newest backup (--source auto: the newer of local and, when
+# configured with an identity, off-site) into a scratch compose project
+# (baler-restore-drill), checks it, removes it, reports the result to
+# /ops/status (Restore drill card) and BALER_BACKUP_ALERT_COMMAND, and exits
+# non-zero on any failed check, so `systemctl status`/`journalctl -u
+# baler-restore-drill` show it too. The JSON report is overwritten each run.
+# Point --backup-dir at backup.py's --out-dir if you changed it.
 ExecStart=/opt/baler/.venv/bin/python scripts/restore_drill.py --report backups/restore-drill-latest.json
