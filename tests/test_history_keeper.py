@@ -371,6 +371,12 @@ def test_late_rows_are_recompressed_once_settled_and_the_disk_comes_back(conn):
     assert inflated.partial
     assert inflated.disk_bytes > 2 * compressed.stats_bytes  # each late row decompressed its point's batch
 
+    # the chunk's indexes before the keeper touches it: however many the
+    # schema gives point_history, a reindex must leave exactly these, all valid
+    # (a failed REINDEX CONCURRENTLY would leave an extra invalid *_ccnew one)
+    indexes_before = conn.execute("SELECT count(*) FROM pg_index WHERE indrelid = %s::regclass", (name,)).fetchone()[0]
+    assert indexes_before >= 1
+
     kc = _keeper_conn("5s")
     keeper = hk.Keeper(kc, settle_s=600, max_defer_s=3600)
     now = datetime.now(timezone.utc)
@@ -386,7 +392,7 @@ def test_late_rows_are_recompressed_once_settled_and_the_disk_comes_back(conn):
     assert conn.execute("SELECT message FROM history_compression_events WHERE chunk = %s AND action = 'recompress' "
                         "ORDER BY at DESC LIMIT 1", (name,)).fetchone()[0] == "reindex: concurrently"
     assert conn.execute("SELECT bool_and(x.indisvalid), count(*) FROM pg_index x WHERE x.indrelid = %s::regclass",
-                        (name,)).fetchone() == (True, 3)
+                        (name,)).fetchone() == (True, indexes_before)
     # nothing lost or doubled: the late values won, the backfill is in
     rows = conn.execute("SELECT count(*), count(*) FILTER (WHERE value = 999.25), count(*) FILTER (WHERE value = 998.75) "
                         "FROM point_history WHERE point_uri LIKE %s AND ts >= %s AND ts < %s",
