@@ -1,0 +1,103 @@
+---
+title: Deferred maintenance and FCI
+---
+
+Part of the building lifecycle record (epic Baler#221, design §6 and §8.3).
+Baler#200. Builds on [Positions and assets](/assets).
+
+## Deferred-maintenance register
+
+Work that was put off, with:
+
+- its **cost** (an estimate is fine; say so in `description`);
+- its **risk** (`low`, `medium`, `high`, `critical`);
+- the **asset or position** it affects;
+- when it was identified, and an optional **target year**.
+
+Items move through `open`, `planned`, `done` and `cancelled`. They are closed
+with a `resolution`, never deleted, so the register keeps its history.
+Edits are audited in `record_edits` (`urn:baler:deferred:<id>`).
+
+## Expected service life: cited, not copied
+
+Expected life per asset type comes from published references. The design
+names ASHRAE's public service-life database
+(https://costdatabase.ashrae.org/service_life.asp). Published values
+disagree with each other: secondary sources give a base-mounted pump 20 or
+25 years. They also change over time.
+
+So **Baler ships no service-life values.** You enter each one, with:
+
+| Field | |
+|---|---|
+| `asset_type` | Matched against an asset's type or Brick class (case-insensitive) |
+| `median_years` | The expected life you're adopting |
+| `source_title` | The reference, e.g. "ASHRAE service-life database" |
+| `source_url` | Where it is |
+| `retrieved_on` | **Required.** The date you read it |
+
+There is one reference per type per org. Setting it again replaces it, and
+the change is audited.
+
+From those, `GET /ops/service-life/assets` gives each installed asset's
+age (from its first install), expected life, remaining years, end-of-life
+year and the reference.
+
+## Replacement value and FCI
+
+Replacement-value estimates per asset are **append-only and dated**
+(`as_of`, `basis`). The newest is current.
+
+**FCI** (facility condition index) is the open deferred cost (`open` and
+`planned` items) divided by the current replacement value of the installed
+assets in scope. `GET /ops/deferred/fci` also returns the cost by risk, and
+**how many installed assets have no replacement value**. A ratio over a
+partial denominator overstates the problem, and the response says so.
+
+Baler reports the ratio only. It doesn't label it "good" or "poor": any
+banding is your organisation's policy.
+
+## Capital plan
+
+`GET /ops/deferred/capital-plan?years=20` groups, per year:
+
+- assets reaching the end of their expected life, with their replacement
+  value (an asset already past it lands in the current year);
+- open deferred items with that target year (no target: the current year).
+
+This feeds the building passport (#219).
+
+## API
+
+Reads need `viewer`, changes `operator`.
+
+| Route | What |
+|---|---|
+| `GET /ops/deferred?status=open,planned` | The register |
+| `POST /ops/deferred` | `title`, `asset_id` or `position_uri`, `cost`, `risk`, `identified_on`, `target_year`, `category`, `description`, `source` |
+| `PATCH /ops/deferred/{id}` | Edit, or change `status` (closing needs `resolution`) |
+| `GET /ops/deferred/fci` | FCI roll-up |
+| `GET /ops/deferred/capital-plan?years=` | Per-year plan |
+| `GET /ops/service-life` | The org's references |
+| `POST /ops/service-life` | Set the reference for a type |
+| `GET /ops/service-life/assets` | Installed assets with age and remaining life |
+| `GET /ops/assets/{id}/values` / `POST` | Replacement-value history / add an estimate |
+
+## UI
+
+The **Assets** page has a *Deferred maintenance and FCI* section: the FCI
+summary, the open register with an add form, service life per installed
+asset, and forms for a type's expected life and an asset's replacement
+value.
+
+## Storage
+
+Migration 0015: `lc_deferred_items`, `lc_service_life`, `lc_asset_values`.
+Code: `baler.lifecycle.deferred`.
+
+## Not built yet
+
+- FCI per site or system. It's per org and the caller's sites for now.
+- Feeding the capital plan into the building passport (#219), and
+  replace-vs-keep savings cases (#216).
+- Currency handling. Costs are summed as entered, so keep one currency per org.

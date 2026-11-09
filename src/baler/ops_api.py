@@ -25,6 +25,7 @@ from baler import (
     mapping_proposals,
     mapping_review,
     ops_freshness,
+    ops_metrics,
     orphans,
     record_edit,
     sources,
@@ -32,6 +33,8 @@ from baler import (
     warmup,
 )
 from baler.http_handler_base import BaseAPIHandler, respond_error, respond_json
+from baler.lifecycle import http as lifecycle_http
+from baler.lifecycle import routes as lifecycle_routes
 from baler.ops_status import collect_status, start_background_probes
 from baler.scope import claims_from_header, scope_for
 from baler.timeseries import connect_pool
@@ -44,7 +47,9 @@ OPENAPI_SPEC_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "ops-api
 _EDGE_ACTION = re.compile(r"/edges/([^/]+)/([^/]+)/actions/([a-z_]+)")
 
 
-def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
+def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None, lifecycle_rows=None):
+    """`lifecycle_rows` (tests): a lifecycle.rows.MemoryRows to serve the
+    lifecycle record's routes from instead of Postgres."""
     edge_holder = [edge_api]
 
     def _edges() -> edges.Edges:
@@ -62,6 +67,17 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
             self.send_response(401)
             self.end_headers()
             return False
+
+        # --- the building lifecycle record (epic #221): baler.lifecycle's
+        # routes, each with its own row in gateway/njs/policy.js
+
+        def _lifecycle(self, method: str) -> bool:
+            if not lifecycle_routes.is_lifecycle_path(urlparse(self.path).path):
+                return False
+            if self._gateway():
+                self.handle_traced(f"ops_api.lifecycle.{method.lower()}",
+                                   lambda span: lifecycle_http.serve(self, method, ts_pool, lifecycle_rows))
+            return True
 
         # --- source registry (Baler#20); admin-only in gateway/njs/policy.js
 
@@ -383,6 +399,8 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
             respond_json(self, 200, payload)
 
         def do_POST(self):
+            if self._lifecycle("POST"):
+                return
             if not self._gateway():
                 return
             m = _EDGE_ACTION.fullmatch(urlparse(self.path).path)
@@ -415,6 +433,8 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
             self.end_headers()
 
         def do_PATCH(self):
+            if self._lifecycle("PATCH"):
+                return
             if not self._gateway():
                 return
             m = re.fullmatch(r"/sources/([^/]+)", urlparse(self.path).path)
@@ -425,6 +445,8 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
             self.end_headers()
 
         def do_DELETE(self):
+            if self._lifecycle("DELETE"):
+                return
             if not self._gateway():
                 return
             m = re.fullmatch(r"/sources/([^/]+)", urlparse(self.path).path)
@@ -444,6 +466,8 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
                 return
             if self.path == "/docs":
                 docs_ui.serve(self)
+                return
+            if self._lifecycle("GET"):
                 return
             if urlparse(self.path).path in ("/sources", "/sources/kinds"):
                 if not self._gateway():
@@ -490,6 +514,11 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
                     return
                 self.handle_traced("ops_api.get_gateway_errors", self._gateway_errors_get)
                 return
+            if urlparse(self.path).path == "/metrics":
+                if not self._gateway():
+                    return
+                self.handle_traced("ops_api.get_metrics", self._metrics_get)
+                return
             if self.path == "/status":
                 if not gateway_auth.request_came_through_gateway(self):
                     self.send_response(401)
@@ -499,6 +528,20 @@ def make_handler(ts_pool=None, store=None, edge_api: edges.Edges | None = None):
                 return
             self.send_response(404)
             self.end_headers()
+
+        def _metrics_get(self, span) -> None:
+            """Prometheus text (#235): ingest lag, the listener's backlog,
+            broker drops, the rule daemons' feed lag and cycle times."""
+            with ts_pool.connection() as conn:
+                scope = scope_for(conn, claims_from_header(self.headers.get("Authorization")))
+                body = ops_metrics.render(ops_metrics.collect(conn, scope)).encode()
+            span.set_attribute("bytes", len(body))
+            self.send_response(200)
+            self.send_header("Content-Type", ops_metrics.CONTENT_TYPE)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
 
         def _get_status(self, span) -> None:
             scope = None

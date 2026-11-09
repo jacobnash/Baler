@@ -24,6 +24,9 @@ Work is proportional to what arrived, not to how many points exist:
   and one per stale rule (point_registry candidates, confirmed exactly),
   not `SELECT DISTINCT point_uri FROM point_history` plus a query per
   point per rule.
+- Quality flags (baler.quality, #268): an incremental pass over what is
+  new since a persisted watermark, on its own thread and connection, so
+  His-mode cycles never wait for it.
 
 The only code shared with mqtt_listener.py is ingest.topic_to_point_uri -
 identity must match exactly, that's a correctness requirement, not a
@@ -31,6 +34,7 @@ style choice.
 """
 
 import argparse
+import collections
 import fnmatch
 import json
 import os
@@ -591,7 +595,11 @@ def run_feed(rule_cache: RuleCache, webhooks_path: str, open_faults: OpenFaults,
     last_log = [time.monotonic(), 0]
 
     def handle(batch):
+        t0 = time.monotonic()
         status.add("cur_evaluations", handle_feed_batch(fault_conn, rule_cache, webhooks_path, batch, open_faults)["evaluations"])
+        # cumulative seconds evaluating: its rate is how busy Cur mode keeps
+        # this thread (the scale ladder's limiter evidence, #273)
+        status.add("cur_busy_s", time.monotonic() - t0)
 
     def report(stats):
         status.update("feed", stats.as_dict())
@@ -639,7 +647,8 @@ def main() -> None:
 
     open_faults = OpenFaults()
     open_faults.refresh(fault_conn_main)
-    status = heartbeat.Status("fault_detector", interval_seconds=args.his_interval, feed={}, his={}, cur_evaluations=0)
+    status = heartbeat.Status("fault_detector", interval_seconds=args.his_interval, feed={}, his={}, cur_evaluations=0,
+                              cur_busy_s=0.0)
 
     def feed_thread():
         try:
@@ -650,33 +659,76 @@ def main() -> None:
 
     threading.Thread(target=feed_thread, name="reading-feed", daemon=True).start()
 
+    if args.quality_interval:
+        def quality_thread():
+            try:
+                run_quality(store, args.quality_interval, status)
+            except Exception:  # noqa: BLE001 - exit; the watermark and feed offset make the restart lossless
+                traceback.print_exc()
+                os._exit(1)
+
+        threading.Thread(target=quality_thread, name="quality-sweep", daemon=True).start()
+
     print(f"fault detector reading the reading feed, His-mode sweep every {args.his_interval}s", flush=True)
-    last_quality = 0.0
     matcher = _Matcher(store)
+    starts: collections.deque[float] = collections.deque(maxlen=HIS_GAP_CYCLES + 1)
+    over = 0
     while True:
-        # Flags first, so the His-mode rules below already skip what
-        # this sweep found.
-        if args.quality_interval and time.monotonic() - last_quality >= args.quality_interval:
-            last_quality = time.monotonic()
-            with tracer.start_as_current_span("fault_detector.quality_sweep") as span:
-                counts = quality.sweep(ts_conn, store)
-                for k, v in counts.items():
-                    span.set_attribute(k, v)
-            # Visible: it re-judges the last hour of every classified point,
-            # so its cost grows with points x hour, unlike the rest (#243).
-            status.update("quality", {**counts, "sweep_s": round(time.monotonic() - last_quality, 3)})
         t0 = time.monotonic()
+        starts.append(t0)
         open_faults.refresh(fault_conn_main)
         stats = evaluate_his_rules(ts_conn, fault_conn_main, rule_cache.get(), args.webhooks_file, store=store,
                                    open_faults=open_faults, matcher=matcher)
         cycle = time.monotonic() - t0
-        status.update("his", {**stats, "sweep_s": round(cycle, 3)})
         if cycle > args.his_interval:
+            over += 1
             print(f"fault detector: His sweep took {cycle:.1f} s, longer than its {args.his_interval:.0f} s interval",
                   flush=True)
+        # gap_s_max: the longest start-to-start gap over the last cycles -
+        # the interval His rules actually kept (#268), whatever else ran.
+        gaps = [b - a for a, b in zip(starts, list(starts)[1:])]
+        status.update("his", {**stats, "sweep_s": round(cycle, 3), "interval_s": args.his_interval,
+                              "gap_s_max": round(max(gaps), 3) if gaps else None, "over_interval": over})
         status.beat(fault_conn_main)
         time.sleep(max(0.0, args.his_interval - cycle))
 
+
+# His cycles gap_s_max looks back over: 10 minutes at the default 30 s.
+HIS_GAP_CYCLES = 20
+# How often the quality thread drains the reading feed for late rows, and
+# refreshes its heartbeat figures, between passes.
+QUALITY_WATCH_S = 5.0
+
+
+def run_quality(store, interval: float, status: heartbeat.Status, stop: threading.Event | None = None) -> None:
+    """The quality thread (#268): baler.quality's incremental sweep on its
+    own connection, so His-mode rules keep their interval while it runs.
+    A pass every `interval` seconds (back to back while it's catching
+    up), and the late-row watcher in between. Its figures are the
+    heartbeat's `quality`, written by the other threads' beats."""
+    conn = connect()
+    sweeper = quality.Sweeper(conn, store, interval=interval)
+    sweeper.start()
+    last = -interval
+    while stop is None or not stop.is_set():
+        if time.monotonic() - last >= interval or sweeper.behind():
+            last = time.monotonic()
+            sweeper.watch()  # anything late so far is recorded before the pass moves the watermark
+            with tracer.start_as_current_span("fault_detector.quality_sweep") as span:
+                counts = sweeper.sweep()
+                for k, v in counts.items():
+                    if isinstance(v, (int, float, str)):
+                        span.set_attribute(k, v)
+            if counts["sweep_s"] > interval:
+                print(f"fault detector: quality sweep took {counts['sweep_s']:.1f} s, longer than its "
+                      f"{interval:.0f} s interval ({counts['rows']} rows, watermark {sweeper.lag_s():.0f} s behind)",
+                      flush=True)
+        sweeper.watch()
+        status.update("quality", sweeper.status())
+        if stop is not None:
+            stop.wait(QUALITY_WATCH_S)
+        else:
+            time.sleep(QUALITY_WATCH_S)
 
 if __name__ == "__main__":
     main()

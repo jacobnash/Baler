@@ -140,6 +140,7 @@ function renderUsers() {
     toggle.title = isMe ? "You can't disable your own account" : lastAdmin && !user.disabled ? "The organization's last admin" : "";
     toggle.addEventListener("click", () => (user.disabled ? setDisabled(user, false) : confirmDisable(user)));
     actions.append(edit, reset, toggle, del);
+    if (typeof mfaUserRow === "function") mfaUserRow(user, email, actions); // mfa.js (#278)
 
     tr.append(email, role, sites, added, actions);
     body.appendChild(tr);
@@ -322,7 +323,11 @@ async function initUsers() {
   }
   const me = usersState.me;
   $("account-who").textContent = `Signed in as ${me.email || "an API key"} (${me.role}).`;
-  $("change-password-btn").hidden = me.kind !== "session";
+  $("change-password-btn").hidden = me.kind !== "session" || me.mfa_enrollment_required;
+  if (typeof initMfa === "function") await initMfa(me); // mfa.js: two-step sign-in (#278)
+  // The org requires two-step sign-in and this session is only for setting
+  // it up: nothing else on the page will answer until that's done.
+  if (me.mfa_enrollment_required) return;
   if (me.role !== "admin") return;
   initSources(); // sources.js: the source registry, admin-only like Users
   initEdge(); // edge.js: edge-node broker accounts, admin-only too
