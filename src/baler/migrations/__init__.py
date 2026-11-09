@@ -24,6 +24,7 @@ from baler.migrations import (
     v0004_alerts,
     v0005_password_reset_mfa,
     v0006_override_tests,
+    v0007_operator_writes,
 )
 
 ALL = (
@@ -33,4 +34,5 @@ ALL = (
     v0004_alerts,
     v0005_password_reset_mfa,
     v0006_override_tests,
+    v0007_operator_writes,
 )

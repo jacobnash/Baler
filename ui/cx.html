@@ -153,6 +153,40 @@
         <div id="active-detail" class="hint"></div>
       </section>
 
+      <section id="writes-section">
+        <h2>Operator writes</h2>
+        <p class="hint" id="writes-status">Command a point or change a schedule from here. Every write records who, why, the priority and when it ends, and is relinquished (or reverted) by itself on time. Priorities 1-7 are reserved for life safety and the controller.</p>
+        <div class="toolbar" data-min-role="operator">
+          <label>Point <select id="write-point"></select></label>
+          <label>Value <input type="number" id="write-value" step="any" required /></label>
+          <label>Priority <select id="write-level"></select></label>
+          <label>For <input type="number" id="write-hold" min="1" max="1440" value="60" /> min</label>
+          <label>Reason <input type="text" id="write-reason" maxlength="500" required placeholder="why (recorded)" /></label>
+          <button type="button" id="write-send-btn">Write</button>
+        </div>
+        <details data-min-role="admin">
+          <summary>Schedule or calendar write (admin)</summary>
+          <div class="toolbar">
+            <label>Site <input type="text" id="sched-site" /></label>
+            <label>Edge node <input type="text" id="sched-instance" /></label>
+            <button type="button" id="sched-load-btn">Load objects</button>
+            <label>Object <select id="sched-object"></select></label>
+          </div>
+          <label>Change (JSON: exceptions, weekly, default or effective_period; dates for a calendar)
+            <textarea id="sched-fields" rows="8" cols="80" spellcheck="false"></textarea></label>
+          <div class="toolbar">
+            <label>Revert after <input type="number" id="sched-revert" min="1" max="744" value="24" /> h</label>
+            <label><input type="checkbox" id="sched-permanent" /> permanent</label>
+            <label>Reason <input type="text" id="sched-reason" maxlength="500" required /></label>
+            <button type="button" id="sched-send-btn">Write schedule</button>
+          </div>
+        </details>
+        <table>
+          <thead><tr><th>When</th><th>Who</th><th>Target</th><th>Value</th><th>Priority</th><th>Until</th><th>Status</th><th>Reason</th><th></th></tr></thead>
+          <tbody id="writes-body"></tbody>
+        </table>
+      </section>
+
       <section id="spec-section">
         <h2>Spec and alignment</h2>
         <p class="hint">Equipment schedules and point lists from the design documents. CSV/XLSX rows you import are accepted; a PDF is read into proposals (its tables locally, the rest by the configured model, if any), each citing its page, that someone must accept before they count.</p>
@@ -350,6 +384,7 @@
   <script src="cx_procedures.js"></script>
   <script src="cx_spec.js"></script>
   <script src="cx_active.js"></script>
+  <script src="cx_writes.js"></script>
   <script src="cx_agent.js"></script>
 </body>
 </html>

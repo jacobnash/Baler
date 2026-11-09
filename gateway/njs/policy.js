@@ -178,6 +178,17 @@ const ROUTES = [
   ["GET",    /^\/cx\/active-runs\/[^/]+$/,                     "commissioning", "viewer"],
   ["POST",   /^\/cx\/active-runs\/[^/]+\/confirm$/,             "commissioning", "admin"],
   ["POST",   /^\/cx\/active-runs\/[^/]+\/abort$/,               "commissioning", "operator"],
+  // Audited operator writes (Baler#213): a person (the backend refuses API
+  // keys) commands a point at levels 8-16 with a reason and an expiry -
+  // operator; schedule and calendar writes change what the building does
+  // every day - admin. Reading the live schedule objects talks to the
+  // site, so it is operator too.
+  ["GET",    /^\/cx\/projects\/[^/]+\/writes$/,                 "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/writes$/,                 "commissioning", "operator"],
+  ["POST",   /^\/cx\/writes\/[^/]+\/relinquish$/,                "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/schedule-targets$/,       "commissioning", "operator"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/schedule-writes$/,        "commissioning", "admin"],
+  ["POST",   /^\/cx\/writes\/[^/]+\/revert$/,                    "commissioning", "admin"],
   // Override tests (Baler#212): the schedules Windrow last read, and a
   // re-read (reads schedules and priority arrays, never writes).
   ["GET",    /^\/cx\/projects\/[^/]+\/schedules$/,              "commissioning", "viewer"],
