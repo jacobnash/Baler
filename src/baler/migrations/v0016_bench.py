@@ -1,5 +1,5 @@
 """
-0004 bench-test records on assets (#211, epic #221).
+0016 bench-test records on assets (#211, epic #221).
 
 - lc_bench_procedures: bench procedures as data (the Cx 6 pattern): steps,
   each with what to measure and its acceptance criterion.
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 4
+VERSION = 16
 NAME = "lifecycle bench tests"
 
 PROCEDURES = """

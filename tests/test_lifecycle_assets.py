@@ -148,8 +148,8 @@ def test_through_ops_api(monkeypatch):
     from baler.ops_api import make_handler
 
     monkeypatch.setenv("BALER_GATEWAY_SECRET", "gw")
-    monkeypatch.setenv("BALER_JWT_SECRET", "jwt-secret-for-tests-0123456789abcdef")
-    token = jwt.encode({"sub": "u1", "org_id": "org1", "role": "operator"}, "jwt-secret-for-tests-0123456789abcdef",
+    monkeypatch.setenv("BALER_JWT_SECRET", "test-secret-do-not-use-in-prod-need-32-bytes-min")
+    token = jwt.encode({"sub": "u1", "org_id": "org1", "role": "operator"}, "test-secret-do-not-use-in-prod-need-32-bytes-min",
                        algorithm="HS256")
     server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(lifecycle_rows=rows.MemoryRows()))
     server.daemon_threads = True
@@ -162,7 +162,7 @@ def test_through_ops_api(monkeypatch):
         assert r.status_code == 201, r.text
         assert requests.get(f"{base}/assets", headers=h).json()[0]["manufacturer"] == "Baldor"
         assert requests.delete(f"{base}/assets", headers=h).status_code == 405
-        no_org = jwt.encode({"sub": "svc"}, "jwt-secret-for-tests-0123456789abcdef", algorithm="HS256")
+        no_org = jwt.encode({"sub": "svc"}, "test-secret-do-not-use-in-prod-need-32-bytes-min", algorithm="HS256")
         assert requests.get(f"{base}/assets", headers={**h, "Authorization": f"Bearer {no_org}"}).status_code == 403
     finally:
         server.shutdown()

@@ -1,0 +1,82 @@
+---
+title: Security scanning
+---
+
+Dependency updates, dependency and image vulnerability scanning, secret scanning and static
+analysis run automatically. Everything is in `.github/workflows/security.yml` and
+`.github/dependabot.yml`, separate from CI (`ci.yml`), so a scanner outage or a newly published
+advisory never blocks a deploy. To report a vulnerability, see [`SECURITY.md`](https://github.com/jacobnash/Baler/blob/main/SECURITY.md).
+
+## What runs
+
+| Check | Covers | When | Blocks a PR? |
+|---|---|---|---|
+| **Dependency review** | Python, npm and Actions dependencies a PR adds or upgrades | every PR | **yes**, on a high or critical advisory |
+| **Secret scan (PR)** | the commits a PR adds (gitleaks) | every PR | **yes**, on any finding |
+| Secret scan (history) | the whole git history | pushes to `main`, weekly, on demand | no (report only) |
+| Python dependency audit | the resolved dependency set of `pyproject.toml` and its extras (pip-audit) | every run | no (report only) |
+| npm dependency audit | `docs-site`, `tools/live-check`, `e2e-haxall` lockfiles | every run | no (report only) |
+| App image scan | the image every service runs, built from `Dockerfile` (Grype): OS packages and Python packages with a fix available, high or critical | every run | no (report only) |
+| CodeQL | Python, JavaScript/TypeScript (UI, gateway njs, tools) and the workflows themselves, `security-extended` queries | every run | no: results go to the repository's code scanning page |
+| Dependabot | version-update PRs, weekly and grouped: pip, npm (three projects), GitHub Actions, Docker base images (four Dockerfiles) | weekly | n/a |
+
+**Dependency review needs the dependency graph.** GitHub's dependency review only works with the
+repository's dependency graph turned on (Settings, Advanced Security). Until it is, the job checks for
+that first, passes with a warning that the review was skipped, and blocks nothing. With the graph on,
+it runs and blocks as described.
+
+**Why only two checks block.** Dependency review and the PR secret scan judge only what a pull
+request changes, so they can fail on *new* problems without failing on anything already on `main`.
+The other scans look at the whole tree and history. They start as report-only so they can't turn CI
+red on findings that predate them. Their jobs stay green and add a warning annotation when they find something. Each one becomes blocking (remove its step's `continue-on-error`) once
+its existing findings have been triaged and fixed or accepted (below). Code scanning results can
+also be required on PRs from the repository's branch protection settings.
+
+## How the jobs are locked down
+
+- Every job runs on a GitHub-hosted runner. Nothing in this workflow runs on the self-hosted
+  deploy runners.
+- The workflow is triggered by `pull_request`, never `pull_request_target`, so a fork's PR runs
+  with a read-only token and no repository secrets.
+- The default token is read-only (`contents: read`). Only the CodeQL job gets more:
+  `security-events: write`, to upload its results.
+- No job is given a repository secret, and every checkout uses `persist-credentials: false`.
+- Third-party actions are pinned to full commit SHAs. The gitleaks binary is downloaded at a fixed
+  version and checked against its published SHA-256. Dependabot proposes the bumps.
+- Workflow logs of a public repository are public. The PR secret scan runs with `--redact`, so a
+  value never reaches the log, only the rule, file and line. The history scan prints only a count.
+
+## Triage and accepting a risk
+
+Triage findings from the job output and the code scanning page. **Keep exploit details out of
+public text**: issues, PR descriptions, commit messages and the ignore files below. If a finding
+is a real vulnerability in Baler's own code, handle it as a private security advisory (see
+`SECURITY.md`) and open a public issue only once it is fixed, or with a neutral title.
+
+A finding that doesn't apply, or whose risk is accepted, is recorded next to the scanner, with a
+comment saying why, who decided, and a date to look at it again:
+
+| Scanner | Where to accept |
+|---|---|
+| Dependency review | `allow-ghsas` in `.github/dependency-review-config.yml` |
+| pip-audit | one id per line in `.github/security/pip-audit-ignore.txt` |
+| Grype (image) | `ignore` in `.grype.yaml` |
+| gitleaks | the finding's fingerprint in `.gitleaksignore`, or a `gitleaks:allow` comment on the line. This is for false positives only, such as test fixtures and documented example values. A real secret is never accepted: rotate it, then remove it. |
+| CodeQL | dismiss the alert on the code scanning page, with a reason |
+
+## Reproducing locally
+
+The history secret scan prints only a count. To see the findings, run gitleaks yourself on a
+clone (any recent release):
+
+```bash
+gitleaks git --redact .
+```
+
+Python and npm audits:
+
+```bash
+pip install pip-audit && pip install -e ".[dev,llm,validate,cx-gl36,cx-spec,export]"
+pip-audit --skip-editable
+(cd docs-site && npm audit --package-lock-only)
+```

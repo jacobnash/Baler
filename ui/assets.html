@@ -100,6 +100,93 @@
         <input name="reason" placeholder="why removed (required)" required />
         <button type="submit">Remove</button>
       </form>
+      <h3>Warranties</h3>
+      <table id="warranty-table">
+        <thead><tr><th>Kind</th><th>Provider</th><th>Starts</th><th>Ends</th><th>Status</th><th>Source</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <form id="warranty-form" class="inline-form">
+        <select name="kind"><option>parts_and_labor</option><option>parts</option><option>labor</option><option>extended</option><option>other</option></select>
+        <input name="provider" placeholder="provider" />
+        <input name="starts_on" type="date" title="blank: the asset's first install (start-up)" />
+        <input name="duration_months" placeholder="months" size="6" inputmode="numeric" />
+        <input name="ends_on" type="date" title="or give the end date" />
+        <input name="terms" placeholder="terms" />
+        <button type="submit">Add warranty</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Warranty alerts</h2>
+      <p class="hint">Warranties ending in the next 90 days, and faults or Cx issues that opened on an asset while it was under warranty (past year).</p>
+      <h3>Expiring</h3>
+      <table id="expiring-table"><thead><tr><th>Asset</th><th>Kind</th><th>Ends</th><th>Days left</th></tr></thead><tbody></tbody></table>
+      <h3>Failures under warranty</h3>
+      <table id="failures-table"><thead><tr><th>Opened</th><th>What</th><th>Position</th><th>Asset</th><th>Warranty ends</th></tr></thead><tbody></tbody></table>
+    </section>
+
+    <section>
+      <h2>Preventive maintenance</h2>
+      <p class="hint">What's due, by calendar, by run hours counted from the status point's raw history, or by a
+        condition on a point. Points can be names under the asset's position (e.g. <code>sf-status</code>).
+        Baler isn't a CMMS: export the due work to yours.
+        <a href="/docs/pm-schedules" target="_blank" rel="noopener">Docs</a>.</p>
+      <p><a id="pm-csv" href="#">Download due work (CSV)</a> · <a id="pm-cobie" href="#">COBie Job sheet (CSV)</a></p>
+      <table id="pm-due-table">
+        <thead><tr><th>Status</th><th>Task</th><th>Asset</th><th>Basis</th><th>Since</th><th>Due / measure</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <form id="pm-form" class="inline-form">
+        <input name="title" placeholder="task title" required />
+        <input name="asset_type" placeholder="asset type (fan…)" />
+        <select name="trigger"><option>calendar</option><option value="run_hours">run hours</option><option>condition</option></select>
+        <input name="interval_days" placeholder="days" size="5" inputmode="numeric" />
+        <input name="interval_hours" placeholder="run hours" size="7" inputmode="decimal" />
+        <input name="run_point" placeholder="status point" />
+        <input name="condition_point" placeholder="condition point" />
+        <select name="condition_op"><option>&gt;=</option><option>&gt;</option><option>&lt;=</option><option>&lt;</option></select>
+        <input name="condition_value" placeholder="limit" size="5" inputmode="decimal" />
+        <button type="submit">Add PM task</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Deferred maintenance and FCI</h2>
+      <p class="hint">FCI = open deferred cost / replacement value of the installed assets that have one.
+        Expected service life per type is entered by you, with the reference and the date you read it
+        (Baler ships no values). <a href="/docs/deferred-maintenance" target="_blank" rel="noopener">Docs</a>.</p>
+      <p id="fci-summary"></p>
+      <table id="deferred-table">
+        <thead><tr><th>Title</th><th>Risk</th><th>Cost</th><th>Target year</th><th>Status</th><th>Asset / position</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <form id="deferred-form" class="inline-form">
+        <input name="title" placeholder="deferred work" required />
+        <input name="position_uri" placeholder="position URI" size="30" />
+        <input name="cost" placeholder="cost" size="8" inputmode="decimal" required />
+        <select name="risk"><option>low</option><option selected>medium</option><option>high</option><option>critical</option></select>
+        <input name="target_year" placeholder="target year" size="6" inputmode="numeric" />
+        <button type="submit">Add</button>
+      </form>
+      <h3>Service life</h3>
+      <table id="life-table">
+        <thead><tr><th>Asset</th><th>Installed</th><th>Age</th><th>Expected</th><th>Remaining</th><th>Replacement value</th><th>Reference</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <form id="life-form" class="inline-form">
+        <input name="asset_type" placeholder="asset type" required />
+        <input name="median_years" placeholder="years" size="5" inputmode="decimal" required />
+        <input name="source_title" placeholder="reference (title)" required />
+        <input name="source_url" placeholder="URL" />
+        <input name="retrieved_on" type="date" required title="the date you read it" />
+        <button type="submit">Set expected life</button>
+      </form>
+      <form id="value-form" class="inline-form">
+        <input name="asset_id" placeholder="asset id" required />
+        <input name="replacement_value" placeholder="replacement value" inputmode="decimal" required />
+        <input name="basis" placeholder="basis (quote, estimate…)" />
+        <button type="submit">Record replacement value</button>
+      </form>
     </section>
 
     <section>
@@ -127,6 +214,7 @@
       </table>
     </section>
   </main>
+  <script src="apibase.js"></script>
   <script src="auth.js"></script>
   <script src="assets.js"></script>
 </body>

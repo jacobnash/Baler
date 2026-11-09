@@ -285,6 +285,14 @@ When the expression reaches more points than that, the response is the first pag
 - `series` holds the first `seriesLimit` of them, in point-id order.
 - `after` is the last point id on the page. Pass it back as `?after=` to get the next page. It's
   `null` on the last page, and on every response that fits in one page.
+- `incomplete` says why the page stops short (`seriesLimit of 1000 reached; pass after to read on`),
+  and is `null` when `after` is.
+- The response headers say the same: `X-Baler-Incomplete`, `X-Baler-After`, and
+  `Link: <?expr=...&after=...>; rel="next"`, the next page's URL relative to the request.
+
+A client that ignores `after` gets the first `seriesLimit` points' series and nothing else, so check
+`after` (or `pointCount` against the series it got), or send `seriesLimit=0` for every point in one
+response.
 
 Only the page's points are described and have their history read. So a page costs about the
 same at any graph size, and an auto-rollup is chosen for the page's points, not for all of them.

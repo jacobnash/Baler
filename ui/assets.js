@@ -1,7 +1,7 @@
 // Assets page (#197): the lifecycle record's assets and install/remove
 // history, over ops_api's /ops/assets and /ops/positions routes. Plain
 // globals, no build step, like every other page here.
-const OPS_URL = new URLSearchParams(location.search).get("ops") || "/ops";
+const OPS_URL = apiBase("ops", "/ops");  // same-origin paths only (apibase.js)
 const statusEl = document.getElementById("status");
 let currentAsset = null;
 
@@ -72,6 +72,9 @@ async function showAsset(id) {
   const tests = await api(`/assets/${encodeURIComponent(id)}/bench-tests`);
   fill("#bench-table tbody", tests, [(t) => t.tested_at.slice(0, 16), (t) => t.procedure.name, "verdict",
     (t) => (t.before_install ? "yes" : "no"), (t) => (t.baseline ? "baseline" : ""), "technician"]);
+  const ws = await api(`/assets/${encodeURIComponent(id)}/warranties`);
+  fill("#warranty-table tbody", ws, ["kind", "provider", "starts_on", "ends_on", "status",
+    (w) => (w.source ? `doc ${w.source.document_id || "?"} p. ${w.source.page || "?"}` : "")]);
   document.getElementById("install-form").hidden = a.status !== "in_stock";
   document.getElementById("remove-form").hidden = a.status !== "installed";
 }
@@ -90,6 +93,52 @@ async function loadProcedures() {
     Object.assign(document.createElement("option"), { value: p.id, textContent: p.name })));
 }
 
+async function loadDeferred() {
+  const [items, f, life] = await Promise.all([api("/deferred?status=open,planned"), api("/deferred/fci"), api("/service-life/assets")]);
+  document.getElementById("fci-summary").textContent = f.fci == null
+    ? `Open deferred cost ${f.deferred_cost}; no replacement values yet, so no FCI.`
+    : `FCI ${(f.fci * 100).toFixed(1)}%: ${f.deferred_cost} deferred / ${f.replacement_value} replacement value. ${f.note}`;
+  fill("#deferred-table tbody", items, ["title", "risk", "cost", "target_year", "status", (i) => i.asset_id || i.position_uri]);
+  fill("#life-table tbody", life, [(r) => `${r.asset.tag || r.asset.serial || r.asset_id} (${r.asset.asset_type || ""})`, "installed_on",
+    "age_years", "expected_life_years", "remaining_years", "replacement_value",
+    (r) => (r.reference ? `${r.reference.source_title} (read ${r.reference.retrieved_on})` : "")]);
+}
+
+async function loadPM() {
+  const items = await api("/pm/due");
+  const tbody = document.querySelector("#pm-due-table tbody");
+  fill("#pm-due-table tbody", items, ["status", "title", (i) => i.asset.tag || i.asset.serial || i.asset_id, "basis",
+    (i) => `${i.since.slice(0, 10)} (${i.since_what})`,
+    (i) => i.due_at ? i.due_at.slice(0, 10) : i.run_hours != null ? `${i.run_hours} h run` : i.value != null ? i.value : "", () => ""]);
+  [...tbody.children].forEach((tr, n) => {
+    const b = Object.assign(document.createElement("button"), { type: "button", textContent: "Done" });
+    b.addEventListener("click", async () => {
+      try {
+        await api(`/pm/tasks/${encodeURIComponent(items[n].task_id)}/complete`, { method: "POST", body: JSON.stringify({ asset_id: items[n].asset_id }) });
+        await loadPM();
+      } catch (err) { say(`error: ${err.message}`); }
+    });
+    tr.lastChild.appendChild(b);
+  });
+}
+
+async function downloadCSV(path, name) {
+  const res = await fetch(`${OPS_URL}${path}`, { headers: authHeaders() });
+  if (!res.ok) { say(`download failed: ${res.status}`); return; }
+  const url = URL.createObjectURL(await res.blob());
+  Object.assign(document.createElement("a"), { href: url, download: name }).click();
+  URL.revokeObjectURL(url);
+}
+
+async function loadAlerts() {
+  const al = await api("/warranties/alerts");
+  const label = (a) => `${a.manufacturer || ""} ${a.model || ""} (${a.serial || a.tag || a.id})`;
+  fill("#expiring-table tbody", al.expiring, [(w) => label(w.asset), "kind", "ends_on", "days_left"]);
+  fill("#failures-table tbody", al.failures_under_warranty, [(f) => f.failure.opened_at.slice(0, 10),
+    (f) => `${f.failure.kind}: ${f.failure.title}`, "position_uri", (f) => label(f.asset),
+    (f) => f.warranties.map((w) => w.ends_on).join(", ")]);
+}
+
 initAuth(() => {
   loadAssets().catch((err) => say(`error: ${err.message}`));
   loadProcedures().catch((err) => say(`error: ${err.message}`));
@@ -100,6 +149,52 @@ initAuth(() => {
     say(`bench test recorded: ${t.verdict}`);
     f.reset();
     await showAsset(currentAsset.id);
+  });
+  loadDeferred().catch((err) => say(`error: ${err.message}`));
+  onSubmit("deferred-form", async (f) => {
+    const body = formJSON(f);
+    body.cost = Number(body.cost);
+    if (body.target_year) body.target_year = parseInt(body.target_year, 10);
+    await api("/deferred", { method: "POST", body: JSON.stringify(body) });
+    f.reset();
+    await loadDeferred();
+  });
+  onSubmit("life-form", async (f) => {
+    const body = formJSON(f);
+    body.median_years = Number(body.median_years);
+    await api("/service-life", { method: "POST", body: JSON.stringify(body) });
+    f.reset();
+    await loadDeferred();
+  });
+  onSubmit("value-form", async (f) => {
+    const body = formJSON(f);
+    const id = body.asset_id;
+    delete body.asset_id;
+    body.replacement_value = Number(body.replacement_value);
+    await api(`/assets/${encodeURIComponent(id)}/values`, { method: "POST", body: JSON.stringify(body) });
+    f.reset();
+    await loadDeferred();
+  });
+  loadPM().catch((err) => say(`error: ${err.message}`));
+  document.getElementById("pm-csv").addEventListener("click", (ev) => { ev.preventDefault(); downloadCSV("/pm/due/export?format=csv", "pm-due.csv"); });
+  document.getElementById("pm-cobie").addEventListener("click", (ev) => { ev.preventDefault(); downloadCSV("/pm/due/export?format=cobie-job", "cobie-job.csv"); });
+  onSubmit("pm-form", async (f) => {
+    const body = formJSON(f);
+    for (const k of ["interval_days"]) if (body[k]) body[k] = parseInt(body[k], 10);
+    for (const k of ["interval_hours", "condition_value"]) if (body[k]) body[k] = Number(body[k]);
+    if (body.trigger !== "condition") { delete body.condition_op; delete body.condition_point; delete body.condition_value; }
+    await api("/pm/tasks", { method: "POST", body: JSON.stringify(body) });
+    f.reset();
+    await loadPM();
+  });
+  loadAlerts().catch((err) => say(`error: ${err.message}`));
+  onSubmit("warranty-form", async (f) => {
+    const body = formJSON(f);
+    if (body.duration_months) body.duration_months = Number(body.duration_months);
+    await api(`/assets/${encodeURIComponent(currentAsset.id)}/warranties`, { method: "POST", body: JSON.stringify(body) });
+    f.reset();
+    await showAsset(currentAsset.id);
+    await loadAlerts();
   });
   onSubmit("filter-form", loadAssets);
   onSubmit("create-form", async (f) => {

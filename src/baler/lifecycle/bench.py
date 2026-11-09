@@ -25,7 +25,7 @@ The seed templates (TEMPLATES) carry structure only: steps and units, no
 tolerances. Tolerances come from the device's own submittal or the
 project's specification, and a person enters them.
 
-Schema: migration 0004.
+Schema: migration 0016.
 """
 
 from __future__ import annotations
