@@ -185,6 +185,13 @@ def envelope(point: str, value, ts: float) -> bytes:
     return json.dumps({"point": point, "value": value, "ts": ts}).encode()
 
 
+def batch_envelope(ts: float, points: dict) -> bytes:
+    """Windrow's batched envelope (WINDROW_MQTT_ENVELOPE=batch, Baler#234):
+    one device's poll tick on f"{prefix}/batch", byte for byte what
+    mqtt_sink.batch_payload makes for readings sharing a timestamp."""
+    return json.dumps({"ts": ts, "points": points}).encode()
+
+
 def value_at(pattern: str, idx: int, tick: int):
     """Deterministic synthetic value for point idx at reading number tick."""
     if pattern == "const":

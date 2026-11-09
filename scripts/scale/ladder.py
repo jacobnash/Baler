@@ -673,7 +673,8 @@ def start_loadgen(ep: Endpoints, args, points: int, phase: str, stats_file: Path
            "--interval", str(args.interval), "--procs", str(args.procs), "--port", str(ep.mqtt_port),
            "--password", ep.gen_password, "--tags-from", str(tags_from), "--tags-rate", str(args.tags_rate),
            "--points-per-equip", str(args.points_per_equip), "--equips-per-site", str(args.equips_per_site),
-           "--pattern", args.pattern, "--stats-file", str(stats_file), "--duration", str(duration)]
+           "--pattern", args.pattern, "--stats-file", str(stats_file), "--duration", str(duration),
+           "--envelope", getattr(args, "envelope", "point") if phase == "readings" else "point"]
     return subprocess.Popen(cmd, cwd=common.REPO)
 
 
@@ -997,7 +998,11 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
     step["generator"] = {"target_rps": points / args.interval, "achieved_rps": round(offered_rps, 1),
                          "offered_ratio": round(offered_rps / (points / args.interval), 4),
                          "behind_max_s": st.get("behind_max_s"), "procs": st.get("procs"), "cpu_s": st.get("cpu_s"),
-                         "behind_soak_max_s": max((x["gen_behind_s"] for x in samples), default=None)}
+                         "behind_soak_max_s": max((x["gen_behind_s"] for x in samples), default=None),
+                         # Baler#234: readings vs MQTT messages (a batch carries a whole equip)
+                         "envelope": st.get("envelope", "point"),
+                         "messages_per_s": round(offered_rps * st["messages"] / st["sent"], 1)
+                         if st.get("messages") and st.get("sent") else None}
     step["lag"] = canary.stats(soak_start)
     step["broker"] = sys1
     step["db"] = db_metrics(conn)
@@ -1240,6 +1245,9 @@ def main(argv=None) -> None:
         p.add_argument("--points-per-equip", type=int, default=10)
         p.add_argument("--equips-per-site", type=int, default=50)
         p.add_argument("--pattern", choices=common.PATTERNS, default="mix")
+        p.add_argument("--envelope", choices=["point", "batch"], default="point",
+                       help="readings per point, or Windrow's batched envelope: one message per equip per "
+                            "interval (Baler#234)")
         p.add_argument("--warmup", type=float, default=60.0)
 
     for name, func in (("run", cmd_run), ("crash", cmd_crash)):

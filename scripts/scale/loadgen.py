@@ -6,6 +6,12 @@ in exactly the envelope Windrow publishes (windrow/mqtt_sink.py):
   {prefix}/{label}/tags {"point": "<label>/tags", "value": "<json tags>", "ts": t}
   {prefix}/{label}      {"point": "<label>", "value": <reading>, "ts": t}
 
+With --envelope batch (Baler#234), readings go as Windrow's optional
+batched envelope instead: one message per equip per interval,
+  {prefix}/batch        {"ts": t, "points": {"<label>": <reading>, ...}}
+QoS 1, not retained. Acks and `sent` still count readings (a batch's
+PUBACK acknowledges all of its readings); `messages` counts MQTT messages.
+
 QoS 1, retained, as Windrow does. Tags and equip messages go first (the
 graph grows as it would for real equipment), then readings for every point
 once per --interval, spread evenly across the interval rather than in a
@@ -69,23 +75,24 @@ class Acks:
 
     def on_publish(self, client, userdata, mid, reason_code=None, properties=None):
         with self.lock:
-            sec = self.pending.pop(mid, None)
-            if sec is None:
+            got = self.pending.pop(mid, None)
+            if got is None:
                 self.early.add(mid)  # acked before publish() returned
                 return
-            self._count(sec)
+            self._count(*got)
 
-    def sent(self, mid: int, sec: int):
+    def sent(self, mid: int, sec: int, readings: int = 1):
+        """`readings`: how many readings the message carries (a batch)."""
         with self.lock:
             if mid in self.early:
                 self.early.discard(mid)
-                self._count(sec)
+                self._count(sec, readings)
             else:
-                self.pending[mid] = sec
+                self.pending[mid] = (sec, readings)
 
-    def _count(self, sec: int):
-        self.acked += 1
-        self.buckets[sec] = self.buckets.get(sec, 0) + 1
+    def _count(self, sec: int, readings: int = 1):
+        self.acked += readings
+        self.buckets[sec] = self.buckets.get(sec, 0) + readings
 
     def take_buckets(self) -> dict[int, int]:
         with self.lock:
@@ -93,12 +100,13 @@ class Acks:
             return b
 
 
-def _publish(client, acks: Acks, topic: str, payload: bytes, sec: int, stop) -> bool:
+def _publish(client, acks: Acks, topic: str, payload: bytes, sec: int, stop, readings: int = 1,
+             retain: bool = True) -> bool:
     """Publish with backpressure: a full paho queue waits, never drops."""
     while not stop.is_set():
-        info = client.publish(topic, payload, qos=1, retain=True)
+        info = client.publish(topic, payload, qos=1, retain=retain)
         if info.rc == mqtt.MQTT_ERR_SUCCESS:
-            acks.sent(info.mid, sec)
+            acks.sent(info.mid, sec, readings)
             return True
         if info.rc == mqtt.MQTT_ERR_QUEUE_SIZE:
             time.sleep(0.002)
@@ -120,6 +128,7 @@ def worker(proc: int, equips: range, args, out: mp.Queue, stop) -> None:
             break
         time.sleep(0.1)
     sent = 0
+    messages = 0
     behind_max = 0.0
     last = time.monotonic()
     phase = "tags"
@@ -129,7 +138,7 @@ def worker(proc: int, equips: range, args, out: mp.Queue, stop) -> None:
         now = time.monotonic()
         if force or now - last >= STATS_EVERY:
             last = now
-            out.put({"proc": proc, "phase": phase, "t": time.time(), "sent": sent, "acked": acks.acked,
+            out.put({"proc": proc, "phase": phase, "t": time.time(), "sent": sent, "messages": messages, "acked": acks.acked,
                      "behind_s": behind, "behind_max_s": behind_max, "buckets": acks.take_buckets()})
 
     items = []  # (topic, label, global idx, pattern) for readings
@@ -159,12 +168,46 @@ def worker(proc: int, equips: range, args, out: mp.Queue, stop) -> None:
                     break
                 n += 1
                 sent += 1
+                messages += 1
                 report()
         deadline = time.monotonic() + 60
         while acks.acked < sent and time.monotonic() < deadline and not stop.is_set():
             time.sleep(0.05)
         report(force=True)
-    if args.phase in ("readings", "both") and items:
+    if args.phase in ("readings", "both") and items and args.envelope == "batch":
+        # One message per equip per interval (Baler#234), spread evenly.
+        phase = "readings"
+        groups = []
+        for g in equips:
+            prefix = shape.equip_prefix(g)
+            groups.append((f"{prefix}/batch", [(label, idx, t[4] if args.pattern == "mix" else args.pattern)
+                                               for idx, label, t in shape.equip_points(g)]))
+        n = len(groups)
+        rate = n / args.interval
+        t0 = time.monotonic()
+        end = t0 + args.duration if args.duration else float("inf")
+        ms = 0  # batch messages sent this phase
+        while not stop.is_set() and time.monotonic() < end:
+            now = time.monotonic()
+            due = int((now - t0) * rate) + 1
+            behind = (due - ms) / rate if due > ms else 0.0
+            behind_max = max(behind_max, behind)
+            burst = 0
+            while ms < due and burst < 500:
+                topic, pts = groups[ms % n]
+                tick = ms // n
+                ts = time.time()
+                payload = common.batch_envelope(ts, {label: common.value_at(pattern, idx, tick) for label, idx, pattern in pts})
+                if not _publish(client, acks, topic, payload, int(ts), stop, readings=len(pts), retain=False):
+                    break
+                ms += 1
+                messages += 1
+                sent += len(pts)
+                burst += 1
+            report(behind=behind)
+            if ms >= due:
+                time.sleep(min(0.02, max(0.0, (ms + 1) / rate - (time.monotonic() - t0))))
+    elif args.phase in ("readings", "both") and items:
         phase = "readings"
         n = len(items)
         rate = n / args.interval
@@ -185,6 +228,7 @@ def worker(proc: int, equips: range, args, out: mp.Queue, stop) -> None:
                     break
                 rs += 1
                 sent += 1
+                messages += 1
                 burst += 1
             report(behind=behind)
             if rs >= due:
@@ -227,6 +271,7 @@ class Totals:
     def snapshot(self) -> dict:
         now = time.time()
         sent = sum(p["sent"] for p in self.procs.values())
+        messages = sum(p.get("messages", 0) for p in self.procs.values())
         acked = sum(p["acked"] for p in self.procs.values())
         self.history.append((now, sent, acked))
         self.history = [h for h in self.history if now - h[0] <= 30]
@@ -238,7 +283,7 @@ class Totals:
         return {
             "points": self.args.points, "interval_s": self.args.interval, "procs": self.n_procs,
             "target_rate": target, "phase": ",".join(sorted(phases)), "t": now, "started": self.started,
-            "sent": sent, "acked": acked,
+            "sent": sent, "acked": acked, "messages": messages, "envelope": self.args.envelope,
             "sent_rate_10s": (sent - old[1]) / dt, "acked_rate_10s": (acked - old[2]) / dt,
             "behind_s": max((p["behind_s"] for p in self.procs.values()), default=0.0),
             "behind_max_s": max((p["behind_max_s"] for p in self.procs.values()), default=0.0),
@@ -271,6 +316,9 @@ def parse_args(argv=None):
     ap.add_argument("--port", type=int, default=int(env.get("SCALE_MQTT_PORT", "21883")))
     ap.add_argument("--username", default="scalegen")
     ap.add_argument("--password", default=os.environ.get("SCALE_GEN_MQTT_PASSWORD") or env.get("SCALE_GEN_MQTT_PASSWORD", ""))
+    ap.add_argument("--envelope", choices=["point", "batch"], default="point",
+                    help="readings per point (Windrow's default) or one batch message per equip per interval "
+                         "(WINDROW_MQTT_ENVELOPE=batch, Baler#234)")
     ap.add_argument("--inflight", type=int, default=1000)
     ap.add_argument("--queue", type=int, default=20000)
     ap.add_argument("--stats-file", help="JSON stats, rewritten every second")

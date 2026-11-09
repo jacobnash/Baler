@@ -20,6 +20,18 @@ recipe.
 - Every bridge imports `windrow.mqtt_sink` (`connect()`, `publish_reading()`)
   for this — never re-derive the envelope/publish logic per bridge.
 
+**Optional batched envelope (Baler#234).** An edge node with
+`WINDROW_MQTT_ENVELOPE=batch` (off by default) sends a device's live readings
+for one poll tick as a single message on `f"{topic_prefix}/batch"`:
+`{"ts": t, "points": {"<point>": value, ...}}`, or
+`{"points": [{"point", "value", "ts"}, ...]}` when the timestamps differ.
+It uses QoS 1 and is **not retained**. Tags, alarms and backfill stay per
+point. Baler's `mqtt_listener` accepts both envelopes. It expands a batch
+into the same `{topic_prefix}/{point}` topics, so each reading gets the same
+`urn:point:` id, and it acknowledges the message once its last reading has
+committed. A message on a topic ending in `/batch` with a `value` field is
+an ordinary reading of a point labelled `batch`.
+
 Nothing that consumes this cares which protocol produced it. That's what
 makes this a zero-coordination-cost pattern: adding a new source never
 requires touching a central registry, config, or any other bridge's code.
