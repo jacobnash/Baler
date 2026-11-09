@@ -72,7 +72,7 @@ def _activities(h, span, claims, sid) -> None:
 
 
 ROUTES: list[Route] = [
-    ("POST", re.compile(r"/projects/([^/]+)/schedules"), "import_schedule", _import),
-    ("GET", re.compile(r"/projects/([^/]+)/schedules"), "list_schedules", _list),
-    ("GET", re.compile(r"/schedules/([^/]+)/activities"), "schedule_activities", _activities),
+    ("POST", re.compile(r"/projects/([^/]+)/construction-schedules"), "import_schedule", _import),
+    ("GET", re.compile(r"/projects/([^/]+)/construction-schedules"), "list_schedules", _list),
+    ("GET", re.compile(r"/construction-schedules/([^/]+)/activities"), "schedule_activities", _activities),
 ]

@@ -195,6 +195,34 @@ def test_his_stuck_rule_opens_on_synthetic_unchanging_history(fault_conn, tmp_pa
 
 
 @pytest.mark.integration
+def test_his_hunting_rule_opens_on_an_oscillating_command_and_skips_sparse_points(fault_conn, tmp_path):
+    """#214: a valve command swinging every 4 minutes, sampled every 30 s,
+    opens a hunting fault with its metrics; a point sampled every 15 min
+    can't be judged and opens nothing."""
+    import math
+
+    ts_conn = connect()
+    fast, slow = "urn:point:test-fd:hunt-valve", "urn:point:test-fd:hunt-slow"
+    ts_conn.execute("DELETE FROM point_history WHERE point_uri = ANY(%s)", ([fast, slow],))
+    now = datetime.now(timezone.utc)
+    for i in range(120):
+        write_point_value(ts_conn, fast, 50 + 22 * math.sin(2 * math.pi * 30 * i / 240), now - timedelta(seconds=30 * i))
+    for i in range(5):
+        write_point_value(ts_conn, slow, float(i % 2) * 50, now - timedelta(minutes=15 * i))
+
+    webhooks_file = tmp_path / "webhooks.json"
+    webhooks_file.write_text("[]")
+    rules = [{"id": "test-fd:hunting", "mode": "his", "type": "hunting", "applies_to": {"topic_glob": "test-fd:hunt-*"},
+              "window_seconds": 3600, "max_reversals_per_hour": 12, "deadband": 2.0}]
+
+    evaluate_his_rules(ts_conn, fault_conn, rules, str(webhooks_file), now=now)
+
+    faults = list_faults(fault_conn, rule_id="test-fd:hunting", status="open")
+    assert [f["point_uri"] for f in faults] == [fast]
+    assert faults[0]["detail"]["period_s"] == 240.0
+
+
+@pytest.mark.integration
 def test_his_stuck_rule_does_not_fire_on_real_changing_fan_status(fault_conn, tmp_path):
     """Negative case against real data: the mock device's fan_status
     genuinely toggles every 5s - a stuck rule with a reasonable window

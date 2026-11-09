@@ -1,0 +1,92 @@
+---
+title: Continuous compliance
+---
+
+The [requirement pack](/requirement-packs) that proved OR 3 at acceptance
+keeps running in operations (Baler#207, epic #221 §3.3). It runs on the Cx 6
+scheduler, writes a per-space log, alerts on exceedances through the
+existing webhook path, and keeps the history for surveys.
+
+## Turning it on
+
+```bash
+# adopt a published, confirmed pack version, then set the facility's frequency
+curl -X POST  $BALER/cx/projects/$P/packs -d '{"pack": "'$PACK_VERSION'"}'
+curl -X PATCH $BALER/cx/projects/$P -d '{"settings": {"compliance": {"every_hours": 24}}}'
+```
+
+- `every_hours` (1 to 744) is how often the log is written. Joint Commission
+  EC.02.05.01 EP 15 leaves the frequency to the facility to define and
+  document; this setting is where it is defined, and the printable log
+  states it.
+- `alerts` (default `true`) opens and resolves faults for exceedances.
+- `POST /cx/projects/{id}/compliance/runs` runs it now (202; poll
+  `GET /cx/compliance-runs/{id}`).
+
+## What is judged
+
+Each run takes every **active** row (confirmed by a person, every value
+filled) of every pack version the project has adopted, and every space whose
+`space_type` the row applies to, in the project's current phase. For each
+space and row it records one log row:
+
+| Status | When |
+|---|---|
+| `pass` | every sample in the row's window meets the criterion, and the space's points of the row's evidence class reported for at least the row's `coverage` of the window |
+| `fail` | any sample doesn't. The evidence lists, per point, the count of exceedances, the first and last, and the worst value. |
+| `inconclusive` | no point of that class on the space, coverage too low, or the row needs something not wired yet (see below) |
+
+The points are the space's own `point_uris` whose Brick class falls under the
+row's `evidence.point_class` (subclass-aware). Raw history is read, never a
+rollup. Values are compared as stored: **the row's unit must be the point's
+unit.** Baler converts nothing, and the unit is part of what a person
+confirmed.
+
+Every log row carries the pack version, the standard, the edition and the
+citation it was judged by, so a survey answer says exactly which edition the
+room was held to.
+
+## Alerts
+
+An exceedance opens a fault in the shared faults table, the same way
+Cx 8's fault mirroring does: rule id `compliance:<pack_id>:<row_id>`, the
+exceeding point, severity `high`, and detail naming the space, requirement,
+citation and worst value. It fires `fault.opened` to the fault webhooks
+([Webhooks](/webhooks)). The next passing run resolves it (`fault.resolved`).
+An inconclusive run leaves an open fault open.
+
+## The log, for surveys
+
+```bash
+curl "$BALER/cx/spaces/$OR3/compliance?days=90"               # JSON
+curl "$BALER/cx/spaces/$OR3/compliance?days=90&format=html"   # printable
+```
+
+One row per requirement per run: window, requirement, citation, status and
+evidence. The printable page has the Cx reports' Content-Security-Policy.
+
+## Readiness
+
+The latest completed run answers the [readiness report](/readiness)'s
+`requirements` criterion for each room.
+
+## Not yet
+
+- Rows that apply to an equipment class (judged per equipment, not per space).
+- Engines other than `procedure` / `range` (Cx checks, SHACL, GL36) in the
+  continuous run.
+- Air changes per hour: needs airflow and room volume as a derivation.
+- Pressure relationships judged across the `door` adjacency (today the room's
+  own differential pressure sensor is read against the row's value).
+- Unit conversion.
+
+## Also in this change
+
+The Cx 6 scheduler's `extra` ticks were stored but never called, so the
+active-test sweeper only ran at startup. The scheduler now runs each extra
+tick every minute, each on its own (one failing never stops the others).
+Compliance is one of them.
+
+## Storage
+
+Migration `cx_compliance_runs` / `cx_compliance_log` (0022).

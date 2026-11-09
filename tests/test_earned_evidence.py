@@ -46,14 +46,14 @@ def test_earned_evidence_report(api):
     base, repo = api
     pid = hx.project(base)["id"]
     with open(XER, "rb") as f:
-        sched = requests.post(f"{base}/projects/{pid}/schedules", json={"data": base64.b64encode(f.read()).decode()},
+        sched = requests.post(f"{base}/projects/{pid}/construction-schedules", json={"data": base64.b64encode(f.read()).decode()},
                               headers=hx.A).json()
     proc = requests.post(f"{base}/projects/{pid}/procedures", json={"template": "ahu_startup", "status": "active"},
                          headers=hx.A).json()
 
     # proposals, never applied: "AHU-1 start-up" names AHU-1 and start-up
-    sugg = hx.check(requests.get(f"{base}/schedules/{sched['id']}/link-suggestions", headers=hx.A),
-                    "/schedules/{id}/link-suggestions", "get", 200)
+    sugg = hx.check(requests.get(f"{base}/construction-schedules/{sched['id']}/link-suggestions", headers=hx.A),
+                    "/construction-schedules/{id}/link-suggestions", "get", 200)
     assert [(s["activity_code"], s["kind"], s["params"]["procedure_id"]) for s in sugg] == [("M-1000", "procedure_passed", proc["id"])]
     assert requests.get(f"{base}/projects/{pid}/schedule-links", headers=hx.A).json() == []
 
@@ -62,8 +62,8 @@ def test_earned_evidence_report(api):
     _link(base, pid, "M-1010", "points_online", {"equip_uris": [fx.VAV], "min_pct": 95, "within_hours": 24})
     tab = _link(base, pid, "M-1020", "form_signed", {"title": "TAB report linked, Level 3"})
 
-    url = f"{base}/schedules/{sched['id']}/earned-evidence?as_of={AS_OF.isoformat().replace('+', '%2B')}"
-    rep = hx.check(requests.get(url, headers=hx.A), "/schedules/{id}/earned-evidence", "get", 200)
+    url = f"{base}/construction-schedules/{sched['id']}/earned-evidence?as_of={AS_OF.isoformat().replace('+', '%2B')}"
+    rep = hx.check(requests.get(url, headers=hx.A), "/construction-schedules/{id}/earned-evidence", "get", 200)
     assert rep["counts"] == {"done_by_data": 0, "due_not_evidenced": 2, "marked_done_no_evidence": 1,
                              "ahead_of_schedule_status": 0, "not_linked": 0}
     assert [r["code"] for r in rep["marked_done_no_evidence"]] == ["M-1000"]  # schedule says done, no test passed

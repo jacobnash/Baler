@@ -1,5 +1,5 @@
 """
-0004 schedule evidence (#218, epic #221 §9): links from schedule activities
+0026 schedule evidence (#218, epic #221 §9): links from schedule activities
 (by activity code, so they survive a re-import) to the evidence that shows
 them done, and the sign-offs a person records for form evidence. Read and
 written by baler.commissioning.earned_api.
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 4
+VERSION = 26
 NAME = "schedule evidence"
 
 LINKS = """

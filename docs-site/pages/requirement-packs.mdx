@@ -1,0 +1,101 @@
+---
+title: Requirement packs
+---
+
+A requirement such as "an operating room holds positive pressure to its
+corridor" depends on three things that hard-coding gets wrong:
+
+- the standard's **edition** the building was designed to;
+- the **jurisdiction**;
+- the owner's own standards on top.
+
+So in Baler requirements are **data**, in versioned packs, and each one is
+checked by an engine Baler already runs (Baler#205, epic #221 §3.2). A pack
+adds the citation, the edition, the jurisdiction and where the row applies.
+It never adds a new engine.
+
+## A pack
+
+```json
+{
+  "pack_id": "owner-opr-ahu",
+  "version": "2027.1",
+  "title": "Owner design standard: AHUs",
+  "source": {"standard": "Example owner design standard", "edition": "2027", "kind": "owner"},
+  "jurisdiction": ["owner:example"],
+  "requirements": [
+    {
+      "id": "dat-band",
+      "title": "Discharge air temperature within band",
+      "citation": {"ref": "Section 4.2", "page": 12},
+      "applies_to": {"equip_class": ["Air_Handling_Unit"], "phase": ["acceptance", "operations"]},
+      "criterion": {"quantity": "temperature", "op": "between", "min": null, "max": null, "unit": "degF"},
+      "evidence": {"point_class": "Discharge_Air_Temperature_Sensor", "window_hours": 24, "coverage": 0.95},
+      "check": {"engine": "procedure", "criterion": "range"}
+    }
+  ]
+}
+```
+
+| Field | Rule |
+|---|---|
+| `source.edition` | Required. A requirement without an edition is a guess. |
+| `citation` | `{ref, page}` only: a table, section or clause, and a page. **No quoted text.** A row with any other text field is refused. |
+| `applies_to` | `space_type` (matches a [space](/spaces)'s type), `equip_class` (Brick, subclass-aware: a rooftop unit is an AHU), `phase`. A row needs a space type or an equipment class. |
+| `criterion` | `quantity`, `op` (`>=`, `<=`, `>`, `<`, `==`, `between`), `value` or `min`/`max`, `unit`. Values may be **blank** (`null`). Each built-in quantity names the units it is entered in; Baler doesn't convert. |
+| `evidence` | The point class that evidences it, the window (hours) and the coverage it needs. |
+| `check` | The engine, one of the four below. |
+| `verified_by` | Set by Baler when a person confirms the numbers. |
+
+The engines a row can name, each checked to exist when the pack is imported:
+
+| `check.engine` | Names | Lives in |
+|---|---|---|
+| `cx` | `check_id`: `exists`, `live`, or a `pair:`, `template:`, `gl36:`, `cx:econ_` id | `commissioning/checks.py`, `ladder.py` |
+| `procedure` | `criterion`: `range`, `availability` or `response` | `commissioning/procedures.py` |
+| `shacl` | `template`: a template in `ontology/cx-expected-points.ttl` | `commissioning/templates.py` |
+| `gl36` | `item`: a ConStrain item Baler runs | `commissioning/gl36.py` |
+
+`GET /cx/pack-schema` returns the engines, phases, operators and quantities.
+
+## Nothing is active until a person confirms its numbers
+
+1. **Import** a pack (`POST /cx/packs`). It becomes a **draft** version in
+   your org's library.
+2. **Enter** each row's values for your edition
+   (`PATCH /cx/packs/{id}/requirements/{rid}`, e.g. `{"min": 52, "max": 58}`).
+3. **Confirm** each row (`POST .../requirements/{rid}/confirm`). Baler
+   records who, when, and the edition they confirmed it against. Confirming
+   is refused while a value is blank, and changing a value later clears the
+   confirmation.
+4. **Publish** (`POST /cx/packs/{id}/publish`, admin). The version is frozen:
+   its values can't change. Unconfirmed rows are published too, but stay
+   inactive.
+
+Only confirmed rows with every value filled are **active**; the summary on
+every pack shows `rows`, `confirmed`, `blank` and `active`. Every change is
+appended to the pack's `history`.
+
+## Buildings keep their version
+
+A project adopts a published version (`POST /cx/projects/{id}/packs`,
+`{"pack": "<pack version id>"}`). A new edition is a new version of the
+pack, and a project moves to it only when someone adopts it. The older
+adoption is kept with a `retired_at`, so the version a building was
+accepted under stays on record. A building designed to FGI 2018 stays
+judged by FGI 2018.
+
+## What we ship, and what we don't
+
+We ship the schema, and structure-only packs that name the quantities and
+cite the tables with **blank values** (the ASHRAE 170 operating-room
+example is #208). We never ship a standard's text or tables. Packs grow
+from documents people already hold: extraction from a user's own copy
+proposes rows for a person to confirm (#206).
+
+## Not yet
+
+- Judging packs against live data, and feeding the results to the
+  [readiness report](/readiness): continuous compliance (#207).
+- A UI for packs.
+- Importing YAML (JSON only today).

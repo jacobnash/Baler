@@ -35,7 +35,7 @@ An activity with several links is evidenced when all of them are met. A
 sign-off records who, when and the document reference. Until the document
 store (#201) can be pointed at, the reference is a title you type.
 
-**Suggested links** (`GET /cx/schedules/{id}/link-suggestions`) are
+**Suggested links** (`GET /cx/construction-schedules/{id}/link-suggestions`) are
 proposals and are never applied. An activity whose name names an
 equipment tag (`AHU-1`) and says start-up or functional is matched to an
 active procedure of that kind that applies to that equipment. An activity
@@ -44,7 +44,7 @@ that only names equipment gets a `points_online` suggestion.
 ## The report
 
 ```bash
-curl "$BALER/cx/schedules/$S/earned-evidence?as_of=2027-02-15T12:00:00Z"
+curl "$BALER/cx/construction-schedules/$S/earned-evidence?as_of=2027-02-15T12:00:00Z"
 ```
 
 | Section | Activities |
@@ -62,7 +62,7 @@ evidence came from BACnet or from a form.
 
 ## Storage
 
-Migration `0004_schedule_evidence` adds `cx_schedule_links` and
+Migration `0026_schedule_evidence` adds `cx_schedule_links` and
 `cx_evidence_signoffs`.
 
 ## Not yet

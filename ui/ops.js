@@ -1,4 +1,4 @@
-const OPS_API_URL = new URLSearchParams(location.search).get("ops") || "/ops";
+const OPS_API_URL = apiBase("ops", "/ops");
 
 const statusEl = document.getElementById("status");
 const chipEl = document.getElementById("system-chip");
@@ -8,6 +8,10 @@ const platformEl = document.getElementById("platform-chips");
 const jobsEl = document.getElementById("jobs-chips");
 const toolsEl = document.getElementById("tools-chips");
 const emptyCtaEl = document.getElementById("empty-cta");
+const alertsSectionEl = document.getElementById("alerts-section");
+const alertsEl = document.getElementById("alerts-list");
+const processesSectionEl = document.getElementById("processes-section");
+const processesEl = document.getElementById("processes-list");
 
 function escapeHtml(s) {
   return String(s)
@@ -39,6 +43,25 @@ function renderBuilding(building) {
   buildingEl.innerHTML = (building.cards || []).map(cardHtml).join("");
 }
 
+// What baler.alerts has open, and per-process exception/restart counts
+// (#277). Both lists are only sent to callers who see the whole install.
+function renderAlerts(body) {
+  const open = body.alerts || [];
+  alertsSectionEl.hidden = open.length === 0;
+  alertsEl.innerHTML = open.map((a) => cardHtml({
+    label: a.title,
+    detail: `${a.detail ? a.detail + " - " : ""}since ${a.opened_at}`,
+    state: a.severity === "critical" ? "down" : "degraded",
+  })).join("");
+  const procs = (body.processes || []).filter((p) => p.errors > 0);
+  processesSectionEl.hidden = procs.length === 0;
+  processesEl.innerHTML = procs.map((p) => cardHtml({
+    label: p.service,
+    detail: `${p.errors} unhandled exception(s), last ${p.last_error_at}: ${p.last_error || ""}; ${p.starts} start(s)`,
+    state: "degraded",
+  })).join("");
+}
+
 async function refresh() {
   statusEl.textContent = "refreshing…";
   const res = await fetch(`${OPS_API_URL}/status`, { headers: { ...authHeaders() } });
@@ -54,6 +77,7 @@ async function refresh() {
   chipEl.textContent = summaryLabel(body.summary, body.attention.length);
 
   renderBuilding(body.building);
+  renderAlerts(body);
   platformEl.innerHTML = body.platform.map(cardHtml).join("");
   jobsEl.innerHTML = body.jobs.map(cardHtml).join("");
   toolsEl.innerHTML = body.tools.map(cardHtml).join("");

@@ -2,9 +2,17 @@
 # applied on top of docker-compose.yml with its own project name and
 # BALER_VOLUME_PREFIX, so it runs beside a live stack without touching it.
 # Same postgres and oxigraph images as the live stack (the restore must be
-# into the same TimescaleDB version); only these differ:
+# into the same TimescaleDB version); only these differ.
+#
+# Every container and volume it creates carries the label
+# baler.scratch=restore-drill. restore_drill.py refuses to start or remove
+# a project that has any container or volume without it, and removes only
+# volumes that have it: an existing stack, live or not, is never a scratch
+# stack, whatever project name it is given.
 services:
   postgres:
+    labels:
+      baler.scratch: restore-drill
     # Loopback only, on a free port Docker picks: no clash with the live
     # stack's 5433. The drill asks `docker compose port` for it.
     ports: !override
@@ -19,5 +27,15 @@ services:
     # refreshes the aggregates it checks itself.
     command: postgres -c timescaledb.max_background_workers=0
   oxigraph:
+    labels:
+      baler.scratch: restore-drill
     ports: !override
       - "127.0.0.1::7878"
+
+volumes:
+  postgres-data:
+    labels:
+      baler.scratch: restore-drill
+  oxigraph-data:
+    labels:
+      baler.scratch: restore-drill

@@ -130,6 +130,6 @@ ROUTES: list[Route] = [
     ("GET", re.compile(r"/projects/([^/]+)/schedule-links"), "list_schedule_links", _list_links),
     ("DELETE", re.compile(r"/schedule-links/([^/]+)"), "delete_schedule_link", _delete_link),
     ("POST", re.compile(r"/schedule-links/([^/]+)/signoff"), "sign_schedule_link", _sign),
-    ("GET", re.compile(r"/schedules/([^/]+)/earned-evidence"), "earned_evidence", _report),
-    ("GET", re.compile(r"/schedules/([^/]+)/link-suggestions"), "schedule_link_suggestions", _suggest),
+    ("GET", re.compile(r"/construction-schedules/([^/]+)/earned-evidence"), "earned_evidence", _report),
+    ("GET", re.compile(r"/construction-schedules/([^/]+)/link-suggestions"), "schedule_link_suggestions", _suggest),
 ]

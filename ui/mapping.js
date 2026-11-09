@@ -1,8 +1,8 @@
 // Mapping review queue (Baler#184): the human end of the tagging ladder.
 // Reads GET /ops/mapping/proposals and /ops/mapping/summary, answers with
 // POST /ops/mapping/decide. ops_api scopes all three to the caller's sites.
-const OPS_API_URL = new URLSearchParams(location.search).get("ops") || "/ops";
-const INGEST_URL = new URLSearchParams(location.search).get("ingest") || "/ingest";
+const OPS_API_URL = apiBase("ops", "/ops");
+const INGEST_URL = apiBase("ingest", "/ingest");
 
 const statusEl = document.getElementById("status");
 const summaryEl = document.getElementById("mapping-summary");

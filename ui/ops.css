@@ -41,6 +41,8 @@
 .ops-card.state-quiet .state,
 .ops-card.state-degraded .state { color: var(--color-warning); }
 .ops-card.state-down .state { color: var(--color-critical); }
+/* a job this install doesn't run yet (e.g. no backup has reported) */
+.ops-card.state-off .state { color: var(--muted, inherit); opacity: 0.7; }
 
 .ops-cta {
   border: 1px dashed var(--border);
