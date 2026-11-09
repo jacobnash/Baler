@@ -24,8 +24,13 @@ the limiter"; tested in tests/test_scale_limiter.py on recorded samples):
    locks), or the listener's writer busy all the time (Postgres sets the
    pace). One saturated part = high confidence; several = medium; none =
    low ("unattributed").
-5. A rule daemon behind on, or missing readings from, the reading feed:
-   attributed to its own CPU the same way.
+5. The rule daemons' work (Baler#273): Cur-mode rule evaluation
+   (fault_detector) or Cur-mode derivations (derivation_engine) behind on,
+   or missing readings from, the reading feed; or derivation ticks
+   starting more than an interval late or leaving the chain top lagging
+   its inputs past 2 intervals + 30 s. Attributed to the daemon's CPU, else
+   Postgres waits, else a thread busy evaluating with CPU to spare (round
+   trips).
 6. Read probes over budget: the worst one (median / budget) and the span
    that took most of its time, from its Jaeger trace, plus the API's
    throttling during the probes.
@@ -71,6 +76,8 @@ def _phase(step: dict, name: str) -> dict:
 
 
 def interval_s(step: dict) -> float:
+    if step.get("interval_s"):
+        return step["interval_s"]
     rps = step.get("offered_target_rps")
     return step["points"] / rps if rps else 5.0
 
@@ -224,6 +231,101 @@ def attribute_ingest(soak: dict, workers: int = 1) -> tuple[str, list[str], list
     return prefix + best[1], evidence, also, conf
 
 
+# The rule daemons' work, by what it is (#273): the limiter names the work,
+# then the daemon and what it ran out of.
+CUR_WORK = {"fault_detector": "Cur-mode rule evaluation", "derivation_engine": "Cur-mode derivations"}
+TICKS = "derivation ticks"
+BUSY = 0.90  # a thread's share of time spent evaluating: saturated at this
+
+
+def _synthetic(step: dict) -> dict:
+    return step.get("synthetic") or {}
+
+
+def _cur_busy(step: dict, svc: str) -> float | None:
+    syn = _synthetic(step)
+    part = syn.get("rules") if svc == "fault_detector" else syn.get("derivations")
+    return (part or {}).get("cur_busy")
+
+
+def _daemon_cause(step: dict, soak: dict, svc: str, busy: float | None) -> tuple[str, str, list[str]]:
+    """(why, confidence, evidence) for a rule daemon that can't keep up:
+    its CPU, else a busy thread waiting on Postgres round trips."""
+    ev = []
+    s = cpu_saturation(svc, (soak.get("containers") or {}).get(svc) or {})
+    if busy is not None:
+        ev.append(f"{svc} evaluating {_pct(busy)} of the time")
+    if s and s[0] >= 1.0:
+        ev.append(s[1])
+        return s[1].split(" ", 1)[1], "high", ev
+    w = pg_wait_saturation(soak.get("pg") or {})
+    if w and w[0] >= 1.0:
+        ev.append(w[1])
+        return f"waiting on {w[1]}", "medium", ev
+    if busy is not None and busy >= BUSY:
+        return f"busy {_pct(busy)} of the time, CPU not at its limit (Postgres round trips)", "medium", ev
+    return "CPU not at its limit", "low", ev
+
+
+def rule_daemon_hits(step: dict, soak: dict) -> list[tuple[str, str, str, list[str]]]:
+    """Rule 5: (limiter, component, confidence, evidence) for each rule
+    daemon's work that fell behind - Cur-mode rule evaluation
+    (fault_detector) or Cur-mode derivations (derivation_engine) behind on
+    the reading feed, or derivation ticks overrunning their interval or
+    leaving the chain top lagging its inputs - worst first."""
+    hits = []
+    for svc, r in (step.get("rules") or {}).items():
+        f = r.get("feed") or {}
+        if f.get("missed_readings_delta") or (f.get("lag_s_last") or 0) > LAG_S:
+            what = (f"missed {f['missed_readings_delta']:,} readings" if f.get("missed_readings_delta")
+                    else f"{f['lag_s_last']} s behind")
+            why, conf, ev = _daemon_cause(step, soak, svc, _cur_busy(step, svc))
+            work = CUR_WORK.get(svc, svc)
+            name = (f"{work}: {svc} behind on the reading feed: {why}" if conf == "high"
+                    else f"{work}: {svc} behind on the reading feed ({what}; {why})")
+            hits.append((name, work, conf, [f"{svc} {what} on the reading feed", *ev]))
+    syn = _synthetic(step)
+    tick = (syn.get("derivations") or {}).get("tick") or {}
+    iv = tick.get("interval_s") or interval_s(step)
+    top = (syn.get("chain_lag") or {}).get("top") or {}
+    budget = 2 * interval_s(step) + LAG_S
+    late = (tick.get("late_s_max") or 0) > iv
+    lagging = top.get("p95_s") is not None and top["p95_s"] > budget
+    if late or lagging:
+        ev = []
+        if late:
+            ev.append(f"tick passes started up to {tick['late_s_max']} s late (interval {iv:g} s)")
+        if lagging:
+            ev.append(f"chain top p95 {top['p95_s']} s behind its inputs (> {budget:g} s)")
+        why, conf, more = _daemon_cause(step, soak, "derivation_engine", tick.get("busy"))
+        name = (f"{TICKS}: a pass of {tick.get('rows_per_pass')} rows takes {tick.get('mean_s')} s against its "
+                f"{iv:g} s interval; {why}")
+        hits.append((name, TICKS, conf, ev + more))
+    return hits
+
+
+def synthetic_headroom(step: dict) -> list[dict]:
+    """The synthetic load's parts and how close each ran to its limit."""
+    syn = _synthetic(step)
+    out = []
+    tick = (syn.get("derivations") or {}).get("tick") or {}
+    if tick.get("busy") is not None:
+        iv = tick.get("interval_s") or interval_s(step)
+        ratio = max(tick["busy"] / BUSY, (tick.get("late_s_max") or 0) / iv)
+        out.append({"part": TICKS, "ratio": round(ratio, 3),
+                    "detail": f"derivation ticks busy {_pct(tick['busy'])} (mean pass {tick.get('mean_s')} s of {iv:g} s)"})
+    for svc, work in CUR_WORK.items():
+        busy = _cur_busy(step, svc)
+        if busy is not None:
+            out.append({"part": work, "ratio": round(busy / BUSY, 3), "detail": f"{work} busy {_pct(busy)} ({svc})"})
+    top = (syn.get("chain_lag") or {}).get("top") or {}
+    if top.get("p95_s") is not None:
+        budget = 2 * interval_s(step) + LAG_S
+        out.append({"part": "derivation chain", "ratio": round(max(top["p95_s"], 0) / budget, 3),
+                    "detail": f"chain top p95 {top['p95_s']} s behind its inputs (budget {budget:g} s)"})
+    return out
+
+
 def worst_probe(step: dict) -> dict | None:
     bad = []
     for p in step.get("probes") or []:
@@ -296,6 +398,7 @@ def headroom(step: dict) -> list[dict]:
         if f.get("lag_s_max") is not None:
             out.append({"part": f"{svc} feed", "ratio": round(f["lag_s_max"] / LAG_S, 3),
                         "detail": f"{svc} feed lag max {f['lag_s_max']} s"})
+    out.extend(synthetic_headroom(step))
     behind = gen_behind(step)
     if behind is not None:
         out.append({"part": "generator", "ratio": round(behind / interval_s(step), 3),
@@ -376,18 +479,14 @@ def verdict(step: dict) -> dict:
             name = f"broker drops ({step['ingest']['broker_dropped_delta']:,}; subscriber unattributed)"
         return done(name, name.split(":")[0].split(" (")[0], conf, also)
 
-    # 5. rule daemons on the reading feed
-    for svc, r in (step.get("rules") or {}).items():
-        f = r.get("feed") or {}
-        if f.get("missed_readings_delta") or (f.get("lag_s_last") or 0) > LAG_S:
-            what = (f"missed {f['missed_readings_delta']:,} readings" if f.get("missed_readings_delta")
-                    else f"{f['lag_s_last']} s behind")
-            ev.append(f"{svc} {what} on the reading feed")
-            s = cpu_saturation(svc, (soak.get("containers") or {}).get(svc) or {})
-            if s and s[0] >= 1.0:
-                ev.append(s[1])
-                return done(f"{svc} behind on the reading feed: {s[1].split(' ', 1)[1]}", svc, "high")
-            return done(f"{svc} behind on the reading feed ({what}; CPU not at its limit)", svc, "low")
+    # 5. the rule daemons: Cur mode on the reading feed, derivation ticks
+    hits = rule_daemon_hits(step, soak)
+    if hits:
+        name, comp, conf, more = hits[0]
+        ev.extend(more)
+        for _, _, _, m in hits[1:]:
+            ev.extend(m)
+        return done(name, comp, conf, [h[0] for h in hits[1:]])
 
     # 6. reads
     p = worst_probe(step)
