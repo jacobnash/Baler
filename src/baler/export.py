@@ -93,7 +93,8 @@ _PG_COLUMNS = "ts AT TIME ZONE 'UTC', value, value_text, value_bool, unit, label
 # Cx records, in an order that satisfies their foreign keys on import. How
 # each is narrowed to the exported projects: "project" (project_id), "run"
 # (run_id of an exported cx_runs row), "issue" (issue_id of an exported
-# cx_issues row). Tables that don't exist in this install are skipped, so
+# cx_issues row), "adopted_pack" (a pack version an exported project
+# adopted). Tables that don't exist in this install are skipped, so
 # tables added later (assets #197, packs #205) only need a line here.
 CX_TABLES: list[tuple[str, str]] = [
     ("cx_projects", "self"),
@@ -112,6 +113,21 @@ CX_TABLES: list[tuple[str, str]] = [
     ("cx_active_runs", "project"),
     ("cx_agent_sessions", "project"),
     ("cx_agent_proposals", "project"),
+    # The building record beyond Cx (epic #221); skipped where this install
+    # doesn't have them yet.
+    ("cx_spaces", "project"),
+    ("cx_space_adjacency", "project"),
+    ("cx_space_serving", "project"),
+    ("cx_packs", "adopted_pack"),
+    ("cx_project_packs", "project"),
+    ("cx_compliance_runs", "project"),
+    ("cx_compliance_log", "project"),
+    ("cx_performance_baselines", "project"),
+    ("cx_savings_cases", "project"),
+    ("cx_schedules", "project"),
+    ("cx_schedule_activities", "project"),
+    ("cx_schedule_links", "project"),
+    ("cx_evidence_signoffs", "project"),
 ]
 # Point-keyed records, narrowed by the site's prefixes (Scope.allows).
 POINT_TABLES = ["faults"]
@@ -501,6 +517,8 @@ def _cx_where(kind: str, site_id: str | None) -> tuple[str, list]:
         return f"WHERE run_id IN (SELECT id FROM cx_runs WHERE project_id IN ({projects}))", p
     if kind == "issue":
         return f"WHERE issue_id IN (SELECT id FROM cx_issues WHERE project_id IN ({projects}))", p
+    if kind == "adopted_pack":  # org-level library rows, narrowed to the versions these projects adopted
+        return f"WHERE id IN (SELECT pack_ref FROM cx_project_packs WHERE project_id IN ({projects}))", p
     raise ValueError(kind)
 
 
