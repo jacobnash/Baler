@@ -87,3 +87,46 @@ def test_ontology_graph_never_merged_into_existing_new_graph():
     assert migrate.migrate_graph(s)["ontology"] == "kept-both"
     assert len(s.ds.graph(URIRef(migrate.OLD_ONTOLOGY_GRAPH))) == 1
     assert len(s.ds.graph(URIRef(migrate.NEW_ONTOLOGY_GRAPH))) == 1
+
+
+class _Conn:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql):
+        return None
+
+
+def test_wait_for_postgres_retries_refused_connections(monkeypatch):
+    # pg_isready can pass during the image's first-start init, which then
+    # restarts the server: the first connections are refused.
+    import psycopg
+
+    monkeypatch.setattr(migrate.time, "sleep", lambda s: None)
+    calls = []
+
+    def connect(dsn, **kw):
+        calls.append(kw)
+        if len(calls) < 3:
+            raise psycopg.OperationalError("connection refused")
+        return _Conn()
+
+    migrate._wait_for_postgres("postgresql://x", connect=connect)
+    assert len(calls) == 3
+    assert calls[0]["connect_timeout"] == 5
+
+
+def test_wait_for_postgres_gives_up_after_attempts(monkeypatch):
+    import psycopg
+    import pytest
+
+    monkeypatch.setattr(migrate.time, "sleep", lambda s: None)
+
+    def connect(dsn, **kw):
+        raise psycopg.OperationalError("connection refused")
+
+    with pytest.raises(psycopg.OperationalError):
+        migrate._wait_for_postgres("postgresql://x", attempts=3, connect=connect)

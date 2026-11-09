@@ -16,7 +16,17 @@ Checks:
     newest compressed chunk, equal a fold of the raw rows;
   * a write into a compressed chunk works (an idempotent re-insert);
   * the graph has as many triples as the backup file;
-  * the latest commissioning run's report renders.
+  * the latest commissioning run's report renders;
+  * the schema migrations (#264) and the history chunk interval (#270)
+    came back as the dump has them.
+
+Source (#276): --source local restores from --backup-dir, --source offsite
+fetches the newest complete set from the BALER_BACKUP_S3_* bucket and
+decrypts it with BALER_BACKUP_AGE_IDENTITY_FILE, and --source auto (the
+default) takes whichever is newer when off-site is configured with an
+identity, else local. The result goes to /ops/status (the live database's
+service_heartbeats, row "restore_drill") unless --no-status, and a failure
+to BALER_BACKUP_ALERT_COMMAND.
 
 Needs docker, and baler importable (run it from a checkout after
 `pip install -e .`). See docs-site/pages/backups.mdx.
@@ -30,6 +40,7 @@ import gzip
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -48,6 +59,12 @@ _COPY = re.compile(r"^COPY (\S+) \((.*)\) FROM stdin;$")
 _OWNER = re.compile(r"^-- Name: [^;]+; Type: TABLE; Schema: public; Owner: (\S+)$")
 _STAMP = re.compile(r"(\d{8}T\d{6}Z)")
 _V = "COALESCE(value, value_bool::int::float8)"  # timeseries.ROLLUP_DDL's value expression
+_CATALOG_ROWS = {"_timescaledb_catalog.hypertable": "hypertables",
+                 "_timescaledb_catalog.compression_settings": "compression_settings",
+                 "_timescaledb_catalog.dimension": "dimensions"}
+# restore-drill.compose.yml puts this label on everything it creates; only
+# what carries it is ever stopped or removed.
+SCRATCH_LABEL, SCRATCH_VALUE = "baler.scratch", "restore-drill"
 
 
 # --- the dump: what the restore has to reproduce ----------------------------
@@ -62,6 +79,7 @@ class DumpFacts:
         self.owner: str | None = None
         self.hypertables: list[dict] = []
         self.compression_settings: list[dict] = []
+        self.dimensions: list[dict] = []
         self.compressed_samples: dict[str, int] = {}  # compressed chunk table -> samples packed into it
         with gzip.open(path, "rt", encoding="utf-8", errors="replace") as f:
             table, cols, n, meta_idx = None, [], 0, None
@@ -80,11 +98,17 @@ class DumpFacts:
                     table = None
                     continue
                 n += 1
-                if table in ("_timescaledb_catalog.hypertable", "_timescaledb_catalog.compression_settings"):
-                    row = dict(zip(cols, line.rstrip("\n").split("\t")))
-                    (self.hypertables if table.endswith("hypertable") else self.compression_settings).append(row)
+                if table in _CATALOG_ROWS:
+                    getattr(self, _CATALOG_ROWS[table]).append(dict(zip(cols, line.rstrip("\n").split("\t"))))
                 elif meta_idx is not None:
                     self.compressed_samples[table] += int(line.split("\t")[meta_idx])
+
+    def chunk_interval(self, table: str = "point_history") -> int | None:
+        """The hypertable's time dimension's chunk interval, microseconds."""
+        ht = next((h for h in self.hypertables if h.get("table_name") == table), None)
+        dim = ht and next((d for d in self.dimensions if d.get("hypertable_id") == ht["id"]
+                           and d.get("interval_length", "\\N").isdigit()), None)
+        return int(dim["interval_length"]) if dim else None
 
     def point_history_samples(self) -> int | None:
         """Rows in point_history's chunks plus the samples packed into its
@@ -127,14 +151,31 @@ def live_project_name() -> str:
     return re.sub(r"[^a-z0-9_-]", "", name.lower())
 
 
+class NotScratch(SystemExit):
+    """The named project isn't (only) a restore-drill scratch stack."""
+
+
+def _docker_lines(*args: str) -> list[str]:
+    out = subprocess.run(["docker", *args], check=True, capture_output=True, text=True).stdout
+    return [ln for ln in out.splitlines() if ln.strip()]
+
+
 class Scratch:
     """postgres + oxigraph from docker-compose.yml under their own project
-    name and volume prefix. Only ever removes volumes that Docker labels
-    as belonging to this project."""
+    name and volume prefix. Refuses the live project's name and the default
+    volume prefix outright, and any project that already has a container
+    or volume restore-drill.compose.yml didn't create (no baler.scratch
+    label): that's someone's stack. Only ever removes volumes that carry
+    both this project's compose label and the scratch label."""
 
     def __init__(self, project: str, pg_user: str | None = None):
+        live_prefix = os.environ.get("BALER_VOLUME_PREFIX") or os.environ.get("TIMBERDOODLE_VOLUME_PREFIX")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project):
+            raise NotScratch(f"invalid scratch project name {project!r}")
         if project == live_project_name():
-            raise SystemExit(f"refusing to use the live compose project {project!r} as a scratch stack")
+            raise NotScratch(f"refusing to use the live compose project {project!r} as a scratch stack")
+        if project in {"baler", "timberdoodle", live_prefix}:
+            raise NotScratch(f"refusing to use {project!r} as a scratch stack: it's a live stack's volume prefix")
         self.project = project
         self.env = {**os.environ, "COMPOSE_PROJECT_NAME": project, "BALER_VOLUME_PREFIX": project,
                     "COMPOSE_FILE": os.pathsep.join([os.path.join(REPO, "docker-compose.yml"), DRILL_COMPOSE])}
@@ -152,8 +193,38 @@ class Scratch:
                              capture_output=capture, text=True)
         return out.stdout.strip() if capture else ""
 
+    def foreign(self) -> list[str]:
+        """Containers and volumes this project would touch that the drill
+        didn't create: anything under its compose label, or named with its
+        volume prefix, that lacks the scratch label."""
+        out = []
+        for line in _docker_lines("ps", "-a", "--filter", f"label=com.docker.compose.project={self.project}",
+                                  "--format", f'{{{{.Names}}}}\t{{{{.Label "{SCRATCH_LABEL}"}}}}'):
+            name, _, label = line.partition("\t")
+            if label.strip() != SCRATCH_VALUE:
+                out.append(f"container {name}")
+        vols = set(_docker_lines("volume", "ls", "-q", "--filter", f"label=com.docker.compose.project={self.project}"))
+        vols |= {v for v in _docker_lines("volume", "ls", "-q", "--filter", f"name={self.project}_")
+                 if v.startswith(self.project + "_")}
+        if vols:
+            for line in _docker_lines("volume", "inspect", "--format",
+                                      f'{{{{.Name}}}}\t{{{{index .Labels "{SCRATCH_LABEL}"}}}}', *sorted(vols)):
+                name, _, label = line.partition("\t")
+                if label.strip() != SCRATCH_VALUE:
+                    out.append(f"volume {name}")
+        return out
+
+    def guard(self) -> None:
+        found = self.foreign()
+        if found:
+            raise NotScratch(
+                f"refusing to use compose project {self.project!r} as a scratch stack: it has "
+                f"{', '.join(found)}, which no restore drill created (no {SCRATCH_LABEL}={SCRATCH_VALUE} label). "
+                "Pick another --project. If these really are leftovers of an older drill, remove them yourself "
+                "after checking: docker compose -p <project> down; docker volume rm <volume>")
+
     def up(self) -> None:
-        self.down()  # a scratch stack left by an interrupted drill
+        self.down()  # a scratch stack left by an interrupted drill (guarded)
         self.compose("up", "-d", "--wait", "postgres", "oxigraph")
         self.attach()
 
@@ -180,9 +251,10 @@ class Scratch:
                 time.sleep(0.5)
 
     def down(self) -> None:
+        self.guard()
         self.compose("down", "--remove-orphans")
-        vols = subprocess.run(["docker", "volume", "ls", "-q", "--filter", f"label=com.docker.compose.project={self.project}"],
-                              check=True, capture_output=True, text=True).stdout.split()
+        vols = _docker_lines("volume", "ls", "-q", "--filter", f"label=com.docker.compose.project={self.project}",
+                             "--filter", f"label={SCRATCH_LABEL}={SCRATCH_VALUE}")
         if vols:
             subprocess.run(["docker", "volume", "rm", *vols], check=True, capture_output=True)
 
@@ -353,6 +425,41 @@ def check_graph(oxigraph_url: str, path: str | None, rep: Report) -> None:
     rep.check("graph triples", got == want, f"backup {want}, restored {got}")
 
 
+def check_schema_migrations(conn: psycopg.Connection, rep: Report) -> None:
+    """#264: baler_schema_migrations came back whole (the table check counts
+    its rows; this checks they're 1..N, and plans what this code's migrate
+    service would still apply, read-only)."""
+    from baler import schema
+
+    if not _one(conn, "SELECT to_regclass('baler_schema_migrations') IS NOT NULL"):
+        rep.check("schema migrations", True, "skipped: the dump predates versioned migrations (migrate adopts it)")
+        return
+    versions = [v for (v,) in conn.execute("SELECT version FROM baler_schema_migrations ORDER BY 1").fetchall()]
+    rep.facts["schema_migrations"] = versions
+    ok = bool(versions) and versions == list(range(1, len(versions) + 1))
+    detail = f"1..{versions[-1]} recorded" if ok else f"recorded {versions}"
+    if ok and versions[-1] <= schema.head():
+        pending = [m.VERSION for m, _ in schema.plan(conn)]  # read-only
+        detail += f"; this code's head is {schema.head()}" + (
+            f", migrate would apply {pending}" if pending else ", nothing pending")
+    elif ok:
+        detail += f"; newer than this code (head {schema.head()})"
+    rep.check("schema migrations", ok, detail)
+
+
+def check_chunk_interval(conn: psycopg.Connection, facts: DumpFacts, rep: Report) -> None:
+    """#270: point_history's chunk interval (BALER_HISTORY_CHUNK_INTERVAL)
+    is the dump's, so new chunks after the restore are sized as before."""
+    want = facts.chunk_interval()
+    got = _one(conn, "SELECT d.interval_length FROM _timescaledb_catalog.dimension d JOIN _timescaledb_catalog.hypertable h "
+                     "ON h.id = d.hypertable_id WHERE h.schema_name = 'public' AND h.table_name = 'point_history' "
+                     "AND d.interval_length IS NOT NULL")
+    rep.facts["chunk_interval_us"] = got
+    rep.check("point_history chunk interval", want is not None and got == want,
+              f"dump {timedelta(microseconds=want) if want else None}, restored "
+              f"{timedelta(microseconds=got) if got else None}")
+
+
 def render_cx_report(dsn: str, oxigraph_url: str) -> tuple[str, str, int] | None:
     """(run id, the run report's HTML, results) for the newest finished
     commissioning run, the way GET /cx/runs/{id}/report?format=html builds
@@ -403,7 +510,9 @@ def run_checks(scratch: Scratch, pg_file: str | None, ox_file: str | None, windo
         backup_at = datetime.strptime(m.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc) if m else None
         with psycopg.connect(scratch.dsn, autocommit=True) as conn:
             check_tables(conn, facts, rep)  # first, before anything below writes
+            check_schema_migrations(conn, rep)
             if check_timescaledb(conn, dump_version, rep):
+                check_chunk_interval(conn, facts, rep)
                 hist = check_history(conn, facts, backup_at, rep)
                 if hist and hist["newest"]:
                     check_rollups(conn, hist["newest"], window_hours, rep)
@@ -412,17 +521,76 @@ def run_checks(scratch: Scratch, pg_file: str | None, ox_file: str | None, windo
     check_graph(scratch.oxigraph_url, ox_file, rep)
 
 
+def _offsite():
+    sys.path.insert(0, HERE)
+    import restore
+
+    return restore.offsite_modules(), restore
+
+
+def pick_source(args, rep: Report) -> str:
+    """local or offsite, for --source auto: off-site only when it's
+    configured with an identity to decrypt it and its newest complete set is
+    newer than the newest local one."""
+    if args.source != "auto":
+        return args.source
+    if not os.environ.get("BALER_BACKUP_S3_BUCKET", "").strip() or not (
+            args.identity_file or os.environ.get("BALER_BACKUP_AGE_IDENTITY_FILE", "").strip()):
+        return "local"
+    offsite, _ = _offsite()
+    target = None
+    try:
+        target = offsite.target_from_env()
+        found = offsite.latest_good(target) if target else None
+    except Exception as exc:  # noqa: BLE001 - an unreachable off-site copy is a finding, not a crash
+        rep.check("off-site copy reachable", False, offsite.redact(str(exc), target))
+        return "local"
+    local = latest_backup(args.backup_dir, "postgres")
+    m = _STAMP.search(os.path.basename(local)) if local else None
+    if found and (m is None or found.stamp >= m.group(1)):
+        return "offsite"
+    return "local"
+
+
+def report_status(rep: Report, args) -> None:
+    """The drill's result where /ops/status shows it, and the alert hook."""
+    from baler import backup_status
+
+    prev = backup_status.previous("restore_drill", REPO) or {}
+    detail = {"ok": rep.ok, "finished_at": backup_status.now_iso(), "host": socket.gethostname(),
+              "source": rep.facts.get("source"), "backup": os.path.basename(rep.facts.get("postgres_file") or "")
+              or None, "seconds": rep.facts.get("seconds"),
+              "failed": [f"{c['check']}: {c['detail']}" for c in rep.checks if not c["ok"]][:10],
+              "checks": len(rep.checks),
+              "point_history": rep.facts.get("point_history"),
+              "last_ok_at": backup_status.now_iso() if rep.ok else prev.get("last_ok_at")}
+    backup_status.record("restore_drill", detail, REPO)
+    if not rep.ok:
+        backup_status.alert("restore_drill_failed", detail)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--backup-dir", default=os.path.join(REPO, "backups"),
                         help="Where to find the newest backup when no file is named (default: backups/).")
     parser.add_argument("--postgres-file", help="Postgres backup to restore (default: the newest in --backup-dir).")
     parser.add_argument("--oxigraph-file", help="Oxigraph backup to restore (default: the newest in --backup-dir).")
+    parser.add_argument("--source", choices=["auto", "local", "offsite"], default="auto",
+                        help="Restore the newest local backup, the newest off-site one, or (auto, the default) the "
+                             "newer of the two when an off-site target and identity are configured, else local.")
+    parser.add_argument("--offsite-stamp", default="latest", help="With --source offsite: this set instead of the newest.")
+    parser.add_argument("--identity-file", help="age identity file for an off-site set (default: "
+                                                "$BALER_BACKUP_AGE_IDENTITY_FILE).")
+    parser.add_argument("--download-dir", help="Where an off-site set is downloaded and decrypted (a private temporary "
+                                               "directory under it, removed afterwards; default: the system's temp "
+                                               "directory).")
     parser.add_argument("--project", default=DEFAULT_PROJECT,
                         help=f"Compose project and volume prefix of the scratch stack (default: {DEFAULT_PROJECT}).")
     parser.add_argument("--window-hours", type=int, default=6,
                         help="Hours of each window the continuous aggregates are refreshed and checked over (default: 6).")
     parser.add_argument("--report", help="Also write the report as JSON to this file.")
+    parser.add_argument("--no-status", action="store_true",
+                        help="Don't report the result to the live database (/ops/status) or BALER_BACKUP_ALERT_COMMAND.")
     parser.add_argument("--keep", action="store_true", help="Leave the scratch stack running afterwards (remove it with --down).")
     parser.add_argument("--down", action="store_true", help="Only remove a scratch stack left by --keep, then exit.")
     args = parser.parse_args()
@@ -430,17 +598,51 @@ def main() -> None:
     if args.down:
         Scratch(args.project).down()
         return
-    pg_file = args.postgres_file or latest_backup(args.backup_dir, "postgres")
-    ox_file = args.oxigraph_file or latest_backup(args.backup_dir, "oxigraph")
-    if not pg_file and not ox_file:
-        parser.error(f"no backups in {args.backup_dir}; pass --postgres-file/--oxigraph-file")
-
     started = datetime.now(timezone.utc)
     rep = Report()
-    rep.facts.update({"postgres_file": pg_file, "oxigraph_file": ox_file, "project": args.project,
-                      "started": started.isoformat()})
-    print(f"restore drill: {pg_file or '-'} + {ox_file or '-'} -> scratch project {args.project}", flush=True)
+    named = bool(args.postgres_file or args.oxigraph_file)
+    source = "files" if named else pick_source(args, rep)
+    work = None
+    try:
+        if source == "offsite":
+            offsite, restore = _offsite()
+            work = offsite.WorkDir(args.download_dir, prefix="baler-restore-drill-")
+            try:
+                files = restore.fetch_offsite(args.offsite_stamp, work.path, args.identity_file)
+            except SystemExit as exc:
+                rep.check("fetch the off-site copy", False, str(exc))
+                files = {}
+            pg_file, ox_file = files.get("postgres"), files.get("oxigraph")
+        else:
+            pg_file = args.postgres_file or (None if named else latest_backup(args.backup_dir, "postgres"))
+            ox_file = args.oxigraph_file or (None if named else latest_backup(args.backup_dir, "oxigraph"))
+            if not pg_file and not ox_file:
+                rep.check("a backup to restore", False, f"no backups in {args.backup_dir}")
+        rep.facts.update({"source": source, "postgres_file": pg_file, "oxigraph_file": ox_file,
+                          "project": args.project, "started": started.isoformat()})
+        if pg_file or ox_file:
+            try:
+                drill(args, rep, pg_file, ox_file)
+            except NotScratch as exc:
+                rep.check("scratch stack is the drill's own", False, str(exc))
+    finally:
+        if work is not None:
+            work.__exit__(None, None, None)
+    rep.facts["seconds"] = round((datetime.now(timezone.utc) - started).total_seconds(), 1)
+    print(f"restore drill {'PASSED' if rep.ok else 'FAILED'} in {rep.facts['seconds']} s", flush=True)
+    if args.report:
+        with open(args.report, "w") as f:
+            json.dump({"ok": rep.ok, "checks": rep.checks, "facts": rep.facts}, f, indent=2, default=str)
+    if not args.no_status:
+        report_status(rep, args)
+    sys.exit(0 if rep.ok else 1)
+
+
+def drill(args, rep: Report, pg_file: str | None, ox_file: str | None) -> None:
+    print(f"restore drill ({rep.facts['source']}): {pg_file or '-'} + {ox_file or '-'} -> scratch project {args.project}",
+          flush=True)
     scratch = Scratch(args.project, DumpFacts(pg_file).owner if pg_file else None)
+    scratch.guard()  # before anything is started or stopped
     try:
         scratch.up()
         restore = [sys.executable, os.path.join(HERE, "restore.py"), "--compose-project-dir", REPO,
@@ -458,12 +660,6 @@ def main() -> None:
                   f"(remove: {sys.argv[0]} --down --project {args.project})")
         else:
             scratch.down()
-    rep.facts["seconds"] = round((datetime.now(timezone.utc) - started).total_seconds(), 1)
-    print(f"restore drill {'PASSED' if rep.ok else 'FAILED'} in {rep.facts['seconds']} s", flush=True)
-    if args.report:
-        with open(args.report, "w") as f:
-            json.dump({"ok": rep.ok, "checks": rep.checks, "facts": rep.facts}, f, indent=2, default=str)
-    sys.exit(0 if rep.ok else 1)
 
 
 if __name__ == "__main__":

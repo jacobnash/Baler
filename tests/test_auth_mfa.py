@@ -1,5 +1,5 @@
 """Password reset and MFA against Postgres (#278). Needs docker compose's
-postgres (migration 0003 applied by the migrate service)."""
+postgres (migration 0005 applied by the migrate service)."""
 
 from datetime import datetime, timedelta, timezone
 

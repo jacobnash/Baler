@@ -1,5 +1,5 @@
 """
-0003 self-service password reset and multi-factor login (#278).
+0005 self-service password reset and multi-factor login (#278).
 
 - orgs.mfa_required: an org admin can require every user to have MFA on.
 - users: the TOTP secret (sealed with BALER_MFA_KEY when that is set),
@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 3
+VERSION = 5
 NAME = "password reset and multi-factor login"
 
 ORGS = "ALTER TABLE orgs ADD COLUMN IF NOT EXISTS mfa_required BOOLEAN NOT NULL DEFAULT FALSE"
