@@ -512,6 +512,87 @@ first request after restart and warm-up, warm is the median of the next 5):
 | Readings traced per batch, not per message | 10k points: listener CPU about 44 → 13% |
 | Restarts resume the session; broker queue 200,000 | crash test below: missing readings → 0 |
 
+### Reads at scale: paging (#244)
+
+nash-srv's 100k step (commit `c36aec3`, ingest stopped) showed where the read time went:
+`read?filter=point` 15.9 s (33 MB: building records 7.6 s, encoding 6.1 s), `readAll(equip)` 15.0 s
+(9.4 s of it describing points), `/ops/status` 3.4 s (one scan of the last hour of `point_history`,
+36M rows). With no paging, faster queries couldn't fix those: the responses held every point.
+
+The fix makes each request's cost follow its page, not the graph or the history:
+
+- **Paged reads.** A Haystack filter `read` returns at most `limit` records, or `BALER_READ_LIMIT`
+  (1000) when the request names no limit, plus meta `after` to read on
+  ([Haystack API](/haystack-api#reading-large-graphs-pages)). `/ingest/his` describes and reads at
+  most `seriesLimit` points (`BALER_HIS_SERIES_LIMIT`, 1000), plus `after`
+  ([Query](/his-query#many-points-pages)). The pages are keyset pages on the entity id. The UI tree and
+  `haystack_client.read` follow `after` to the end.
+- **The match no longer decodes every candidate.** The compiled filter dropped nested-Dict nodes with
+  `STR(?s)` and non-IRIs with `isIRI(?s)`. For each candidate, that's a dictionary lookup or term
+  decode in Oxigraph: 1.1 s of a 1.2 s `point` match at 100k. `match_entities` now drops them in
+  Python, with the same result.
+- **`/ops/status` reads `point_registry`** (#243), not an hour of history. Only points whose coarse
+  `last_ts` sits within `REGISTRY_GRANULARITY_S` of the hour boundary are checked against
+  `point_history`, one primary-key probe each. The count is exact.
+- **The Cx inventory reads only the project's equipment.** It used to read every `hasPoint` triple
+  in the graph before scoping.
+- **Site membership is walked from the sites**, not backwards from every record on the page. That
+  walk was 0.5 s of a 1000-record page even in a graph with no Site.
+
+**Synthetic 100k points** (`scripts/scale`'s shape, 12.7 triples a point, 10k equips, 12 samples per
+point in the last hour). Same 4-vCPU VM, shared with another agent's ladder (load average 3–8).
+Probes go through the gateway as the ladder runs them (warm median of 4), with the stack idle. Before
+is `c36aec3`, after is this branch, on the same volumes.
+
+| Probe (budget) | before | after |
+|---|---|---|
+| read?filter=point (1.5 s) | 24.31 s, 31.3 MB | 1.08 s, 0.31 MB (first page) |
+| read?filter=equip (0.5 s) | 2.71 s | 0.27 s |
+| readAll(equip).hisRead(today) (2 s) | 21.92 s, 58 MB | 1.60 s, 0.65 MB (first 1000 of 100k series) |
+| /ops/status (1 s) | 0.23 s | 0.06 s |
+| Cx report, 500-point project (2 s) | 3.51 s | 1.18 s |
+| curVal, 1000 points (1 s) | 0.33 s | 0.40 s |
+
+Before, `haystack_api` was OOM-killed under the scale stack's 2 GB cap while it built 100k records,
+so it got 6 GB for the "before" column. After, it stays well under 2 GB.
+
+In-process, without the gateway and with less contention, the same reads took 0.55 s (point),
+0.21 s (equip), 0.84 s (readAll page) and 0.04 s (ops), against 16.5 s, 1.96 s, 34.5 s and 0.25 s
+before. `/ops/status` no longer grows with history. Same 100k points, at 1 and 36 samples each:
+
+| point_history rows | old scan | registry count | /ops/status |
+|---|---|---|---|
+| 100,000 | 0.027 s | 0.016 s | 0.055 s |
+| 3,600,050 | 0.593 s | 0.017 s | 0.058 s |
+
+**The harness at 25k, under load** (run `20261109T015355Z`, same VM, `--steps 25k --soak 300`, ingest
+at 5,000 readings/s alongside). This step **passes**: 100% of 1,524,999 acknowledged readings stored, 0 broker
+drops, p95 lag 1.44 s, and every probe within budget. nash-srv failed this step on `c36aec3`, on reads
+(`read?filter=point` 3.46 s, `readAll(equip)` 3.34 s).
+
+| Probe (budget) | 25k, under load |
+|---|---|
+| read?filter=point (1.5 s) | 0.57 s |
+| read?filter=equip (0.5 s) | 0.28 s |
+| readAll(equip).hisRead(today) (2 s) | 0.56 s |
+| /ops/status (1 s) | 0.05 s |
+| Cx report, 500 points (2 s) | 0.38 s |
+| curVal, 1000 points (1 s) | 0.24 s |
+| hisRead 1000 points (5 s) | 0.29 s |
+
+**Limiter removed → next limiter exposed.** Response size no longer limits these probes. What's left
+grows with the graph:
+
+- **The match itself.** `read` still matches the whole filter before it takes a page: 0.42 s for
+  `point` at 100k (match and transfer of 100k ids, about 4 µs a point), so about 4 s at 1M.
+- **Expanding equipment to points.** `readAll(equip)` expands every matched equip before it takes a
+  page: 0.46–0.8 s at 100k.
+- **Record weight.** A page of 1000 records costs what its triples cost. The first `point` page is
+  mostly `derivations.json`'s computed points, at 600 triples each.
+
+Paging past those needs an ordered id index that a page can seek into, which Oxigraph doesn't
+provide. Oxigraph sorts by decoding every IRI: `ORDER BY ?s LIMIT 1000` took 6 s at 100k.
+
 ### Rule daemons on the reading feed (#243)
 
 Same dev VM (4 vCPU), quieter this time: no other stacks running. Soak 300 s, clean stack,

@@ -260,6 +260,8 @@ fan-status or occupancy point over a day.
 | `expr` | the query, required |
 | `tz` | IANA timezone for span resolution and calendar bucketing; defaults to `BALER_TZ`, then `UTC` |
 | `limit` | per-point raw-row cap; defaults to 10,000, max 200,000 (rollups aren't capped — they're already bucketed) |
+| `seriesLimit` | most series (points) in one response; defaults to `BALER_HIS_SERIES_LIMIT` (1000), `0` for no limit. See [Many points: pages](#many-points-pages) |
+| `after` | the previous page's `after`, to read the next page of points |
 
 The response is one object with the resolved `span` (`start`/`end` epoch seconds, the
 `label`, the `tz` used), the `rollup` in effect (or `null`), `matched` (the entity ids the filter
@@ -272,6 +274,24 @@ that point. Full schema: [the Ingest API reference](/api/ingest).
 of 5-second data across forty points is millions of rows, and one browser request shouldn't be
 able to ask for that by accident. When you see `truncated: true`, add a `.hisRollup(...)` — that's
 what it's for — rather than raising `limit`.
+
+### Many points: pages
+
+One response carries at most `seriesLimit` series, 1000 by default. `readAll(equip)` on a 100k-point
+graph was 42 MB, and building it spent most of its 15 s describing points no chart could draw.
+When the expression reaches more points than that, the response is the first page:
+
+- `pointCount` is every point the expression reaches.
+- `series` holds the first `seriesLimit` of them, in point-id order.
+- `after` is the last point id on the page. Pass it back as `?after=` to get the next page. It's
+  `null` on the last page, and on every response that fits in one page.
+
+Only the page's points are described and have their history read. So a page costs about the
+same at any graph size, and an auto-rollup is chosen for the page's points, not for all of them.
+Pages are keyset, like the Haystack `read` op's: a walk stays correct while points are added. Within a
+page, series are still sorted for display (equipment, then name), and post calls (`sort`, `first`,
+`hisInterpolate`) apply to that page. The Query page charts the first page and says when there are
+more. Narrow the filter to chart the rest.
 
 Errors: a malformed or unsupported expression is a **400** whose body names the problem and the
 position in the text (`unsupported function 'foo' at position 12; only hisRead(span) and

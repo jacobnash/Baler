@@ -180,6 +180,25 @@ def _count_visible(conn, sql: str, scope) -> int:
     return sum(1 for (uri,) in conn.execute(sql).fetchall() if uri and scope.allows(uri))
 
 
+# The points with a sample in the last hour, from point_registry (#243)
+# rather than a scan of that hour of point_history: at 100k points that
+# hour was 36M rows and the scan 3.6 s of a 3.4 s endpoint (Baler#244).
+# A registry row's last_ts is at most REGISTRY_GRANULARITY_S older than the
+# point's newest sample, so last_ts inside the hour means seen, last_ts more
+# than that older than the hour means not; only the points in between (ones
+# that went quiet about an hour ago) are confirmed against point_history,
+# one primary-key probe each. Exact, and the cost follows the number of
+# points, never the number of history rows.
+SEEN_LAST_HOUR_SQL = f"""
+SELECT point_uri FROM point_registry WHERE last_ts > now() - interval '1 hour'
+UNION ALL
+SELECT r.point_uri FROM point_registry r
+WHERE r.last_ts <= now() - interval '1 hour'
+  AND r.last_ts > now() - interval '1 hour' - interval '{timeseries.REGISTRY_GRANULARITY_S} seconds'
+  AND EXISTS (SELECT 1 FROM point_history h WHERE h.point_uri = r.point_uri AND h.ts > now() - interval '1 hour')
+"""
+
+
 def _building_signals(scope=None) -> dict[str, Any]:
     out: dict[str, Any] = {
         "last_ingest_at": None,
@@ -196,13 +215,7 @@ def _building_signals(scope=None) -> dict[str, Any]:
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=timezone.utc)
                 out["last_ingest_at"] = ts.astimezone(timezone.utc).isoformat()
-            # GROUP BY, not DISTINCT: on a hypertable the planner can pick
-            # TimescaleDB's SkipScan for DISTINCT, which walked each point's
-            # index entries one point at a time (2-3 s at ~800 points x 10 s
-            # data, depending on the stats of the moment, Baler#106). This
-            # is one ts-index range scan and a hash (~0.1 s).
-            out["points_seen_last_hour"] = _count_visible(
-                conn, "SELECT point_uri FROM point_history WHERE ts > now() - interval '1 hour' GROUP BY point_uri", scope)
+            out["points_seen_last_hour"] = _count_visible(conn, SEEN_LAST_HOUR_SQL, scope)
             try:
                 out["open_faults"] = _count_visible(
                     conn, "SELECT point_uri FROM faults WHERE status = 'open'", scope)

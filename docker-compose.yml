@@ -40,6 +40,10 @@ x-daemon-env: &daemon-env
   # subscription (#233). Only mqtt_listener reads it. One worker stores
   # ~15k readings/s on nash-srv; give the container a CPU per worker.
   BALER_LISTENER_WORKERS: ${BALER_LISTENER_WORKERS:-}
+  # Blank-safe (blank = 1000): page sizes for reads with no limit of their
+  # own - haystack_api's read-by-filter, ingest_api's /his series (#244).
+  BALER_READ_LIMIT: ${BALER_READ_LIMIT:-}
+  BALER_HIS_SERIES_LIMIT: ${BALER_HIS_SERIES_LIMIT:-}
   # Blank-safe: only ops_api reads it (the Connectors page's local Windrow).
   WINDROW_API_URL: ${WINDROW_API_URL:-}
   # Only auth_api.py (issues tokens) actually needs this - blanket-added

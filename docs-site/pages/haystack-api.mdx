@@ -78,6 +78,57 @@ conversion), date, time and Uri literals, and `^symbol` terms all work.
 Reads are scoped to the caller's sites once sites own data. See
 [Multi-Site](/multi-site#who-sees-which-data). Anything out of scope reads as if it didn't exist.
 
+## Reading large graphs: pages
+
+A filter `read` answers a page at a time. With the spec's `limit` it returns at most that many
+records; without one, at most `BALER_READ_LIMIT` (default 1000). A graph smaller than that never
+notices: its reads come back exactly as they always did, in one grid with no extra meta.
+
+A page that stops short of the end says so in its grid meta:
+
+| meta | |
+|---|---|
+| `incomplete` | why the grid is short, e.g. `limit of 1000 reached; pass after to read on` |
+| `limit` | the page size used |
+| `after` | the id of the last record the page covered |
+
+To read on, send the same `filter` (and `limit`) again with `after` set to that Ref. `after` is a
+Baler extension: servers that don't page ignore it, and Haxall never sets the meta. Keep going until a
+page comes back without `after`:
+
+```python
+import openhay as oh
+
+c = oh.Client("http://localhost:8080/api/demo", user="admin@acme.example", password="change-me")
+recs, after = [], None
+while True:
+    req = {"filter": "point"} | ({"after": after} if after else {})
+    page = c.call("read", oh.Grid.from_rows([req]))
+    recs += page.rows
+    after = page.meta.get("after")
+    if after is None:
+        break
+```
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "$BASE/api/read?filter=point&after=@urn:point:fbf~2Fahu-3~2Fsat"
+```
+
+Pages come in id order and are keyset pages: page *n+1* starts after the last id of page *n*, not at
+an offset. So a walk stays correct while records are added or removed. A record that exists for the
+whole walk is returned exactly once. One added or removed during the walk may or may not appear.
+Every page costs about the same however far in it is. A page can come back empty, with no `after`,
+when the previous one ended exactly on the last match.
+
+Baler's own clients follow `after` to the end: the Equipment page's tree (`ui/app.js`) and
+`baler.haystack_client.HaystackClient.read` (used by the Haystack puller and `baler_fn`) when it's
+given no `limit`. openhay's `Client.read` and other third-party clients get the first page. To fetch
+everything in one grid instead, pass a `limit` as large as the graph, or set `BALER_READ_LIMIT=0` for
+the whole install (one unbounded grid, as before). That's what reads at scale can't afford: at 100k
+points one grid was 33 MB and took 16 s to build and encode ([Scale test](/scale-test#reads-at-scale-paging-244)).
+
+Reads by `id`, `nav`, `watchSub`/`watchPoll` and `hisRead` aren't paged.
+
 ## Formats
 
 Requests can be `GET` with Zinc-encoded query params, or `POST` with a grid in Zinc, JSON (Haystack 3

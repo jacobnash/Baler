@@ -331,6 +331,22 @@ paths:
             type: integer
             minimum: 1
             maximum: 200000
+        - name: seriesLimit
+          in: query
+          description: >-
+            Most series (points) per response (Baler#244). Defaults to
+            `BALER_HIS_SERIES_LIMIT` (1000); `0` for no limit. Only the page's
+            points are described and read, so a page costs the same at any
+            graph size. Pages are in point-id order; within one, series are
+            sorted for display and post calls apply to the page.
+          schema:
+            type: integer
+            minimum: 0
+        - name: after
+          in: query
+          description: The previous page's `after`; this page starts with the next point id.
+          schema:
+            type: string
         - name: compact
           in: query
           description: >-
@@ -577,6 +593,17 @@ components:
           items: { type: string }
         matchedCount:
           type: integer
+        pointCount:
+          type: integer
+          description: Every point the expression reaches, on this page or not.
+        seriesLimit:
+          type: [integer, "null"]
+          description: The most series this response could carry (null - no limit).
+        after:
+          type: [string, "null"]
+          description: >-
+            When more points follow, this page's last point id: pass it as
+            `after` for the next page. Null on the last (or only) page.
         hints:
           type: array
           description: |
