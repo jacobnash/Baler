@@ -45,8 +45,9 @@ So every BALER_HISTORY_KEEPER_INTERVAL_S (300 s) the keeper:
   again) on every pass;
 - **reclaims** the space after a recompression, or whenever a compressed
   chunk takes more than BALER_HISTORY_RECLAIM_RATIO (1.5) x its stats size
-  on disk: VACUUM the chunk (truncates the emptied heap), REINDEX it (the
-  heap's indexes, empty but full-size), VACUUM its compressed relation, and
+  on disk: VACUUM the chunk (truncates the emptied heap), REINDEX it
+  CONCURRENTLY (the heap's indexes, empty but full-size; never the plain
+  form on a chunk still taking writes, see _reindex), VACUUM its compressed relation, and
   VACUUM FULL that relation only if it is still over the ratio;
 - reports what it found (on-disk bytes of the compressed chunks next to
   the stats figure, partial and failing chunks, the policy's last error)
@@ -236,25 +237,33 @@ class Policy:
 
 @dataclass
 class Settle:
-    """Per partial chunk: when its write counter last moved, and when it was
-    first seen partial. In memory: a restart costs one settle period."""
+    """Per compressed chunk: when its write counter last moved (settled: no
+    writes for SETTLE_S); per partial chunk, when it was first seen partial.
+    In memory: a restart costs one settle period."""
     writes: dict[str, tuple[int, datetime]] = field(default_factory=dict)
     partial_since: dict[str, datetime] = field(default_factory=dict)
 
     def observe(self, chunks: list[Chunk], now: datetime) -> None:
-        live = set()
+        compressed, partial = set(), set()
         for c in chunks:
-            if not c.partial:
+            if not c.compressed:
                 continue
-            live.add(c.name)
-            self.partial_since.setdefault(c.name, now)
+            compressed.add(c.name)
+            if c.partial:
+                partial.add(c.name)
+                self.partial_since.setdefault(c.name, now)
             prev = self.writes.get(c.name)
             if prev is None or prev[0] != c.writes:
                 self.writes[c.name] = (c.writes, now)
         for name in list(self.partial_since):
-            if name not in live:
-                self.partial_since.pop(name, None)
-                self.writes.pop(name, None)
+            if name not in partial:
+                self.partial_since.pop(name)
+        for name in list(self.writes):
+            if name not in compressed:
+                self.writes.pop(name)
+
+    def settled(self, name: str, now: datetime, settle_s: float = SETTLE_S) -> bool:
+        return self.quiet_s(name, now) >= settle_s
 
     def quiet_s(self, name: str, now: datetime) -> float:
         prev = self.writes.get(name)
@@ -353,17 +362,54 @@ def _run(conn, stmts: list) -> None:
         conn.execute(s)
 
 
-def _reclaim_stmts(c: Chunk) -> list:
+# Indexes REINDEX CONCURRENTLY left behind when it failed part-way: the new
+# copy (_ccnew) or the old one it hadn't dropped yet (_ccold), both invalid.
+_LEFTOVER_INDEXES_SQL = """
+SELECT format('%%I.%%I', n.nspname, i.relname)
+FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid JOIN pg_namespace n ON n.oid = i.relnamespace
+WHERE x.indrelid = %s::regclass AND NOT x.indisvalid AND i.relname ~ '_cc(new|old)[0-9]*$'
+"""
+
+
+def _reindex(conn, c: Chunk, settled: bool) -> str:
+    """Rebuild the chunk's indexes (empty once its rows are back in the
+    columnstore, but still full-size): which form ran, for the event.
+
+    CONCURRENTLY, so writes into the chunk carry on meanwhile. Plain
+    REINDEX holds a SHARE lock that blocks them for its whole run, and the
+    writes into these chunks are late rows from the listener, which acks a
+    reading over MQTT only after commit: a stalled batch is broker
+    backpressure, and then drops (#245's soak). If CONCURRENTLY fails, its
+    leftover invalid index copies are dropped, and plain REINDEX runs only
+    on a settled chunk (no writes for SETTLE_S), where it blocks nothing in
+    practice; otherwise it is skipped until a later reclaim. Needs an
+    autocommit connection (CONCURRENTLY can't run in a transaction block)."""
     rel = sql.SQL(c.name)  # format('%I.%I'): already quoted
-    stmts: list = [sql.SQL("VACUUM {}").format(rel), sql.SQL("REINDEX TABLE {}").format(rel)]
-    if c.compressed_rel:
-        stmts.append(sql.SQL("VACUUM {}").format(sql.SQL(c.compressed_rel)))
-    return stmts
+    try:
+        conn.execute(sql.SQL("REINDEX TABLE CONCURRENTLY {}").format(rel))
+        return "concurrently"
+    except psycopg.Error as exc:
+        why = (exc.diag.message_primary or str(exc)).strip()
+    for (idx,) in conn.execute(_LEFTOVER_INDEXES_SQL, (c.name,)).fetchall():
+        conn.execute(sql.SQL("DROP INDEX CONCURRENTLY IF EXISTS {}").format(sql.SQL(idx)))
+    if not settled:
+        log.warning("history_keeper: REINDEX CONCURRENTLY of %s failed (%s); chunk still taking writes, so no plain "
+                    "REINDEX (it would block them): left for a later reclaim", c.name, why)
+        return f"skipped (concurrently failed: {why}; chunk not settled)"
+    conn.execute(sql.SQL("REINDEX TABLE {}").format(rel))
+    log.warning("history_keeper: REINDEX CONCURRENTLY of %s failed (%s); ran plain REINDEX on the settled chunk",
+                c.name, why)
+    return f"plain (concurrently failed: {why})"
 
 
-def attempt(conn, c: Chunk, action: str, ratio: float = RECLAIM_RATIO) -> dict:
+def attempt(conn, c: Chunk, action: str, ratio: float = RECLAIM_RATIO, settled: bool = False) -> dict:
     """One action on one chunk, recorded in history_compression_events
-    either way. Never raises for a database error: it's the result."""
+    either way. Never raises for a database error: it's the result.
+    `settled`: the chunk had no writes for SETTLE_S before this pass (see
+    _reindex). A successful reclaim's event carries the REINDEX form that
+    ran in `message` ("reindex: concurrently")."""
+    if not conn.autocommit:
+        raise ValueError("history_keeper needs an autocommit connection (VACUUM, REINDEX CONCURRENTLY)")
     t0 = time.monotonic()
     if action == "compress":
         stmts: list = [sql.SQL("SELECT compress_chunk({}::regclass, if_not_compressed => true)").format(sql.Literal(c.name))]
@@ -376,7 +422,11 @@ def attempt(conn, c: Chunk, action: str, ratio: float = RECLAIM_RATIO) -> dict:
         _run(conn, stmts)
         if action in ("recompress", "reclaim"):
             # the heap the late rows went into, its indexes, the dead batches
-            _run(conn, _reclaim_stmts(c))
+            rel = sql.SQL(c.name)  # format('%I.%I'): already quoted
+            conn.execute(sql.SQL("VACUUM {}").format(rel))
+            out["reindex"] = _reindex(conn, c, settled)
+            if c.compressed_rel:
+                conn.execute(sql.SQL("VACUUM {}").format(sql.SQL(c.compressed_rel)))
             after = _one_chunk(conn, c.name)
             if after and after.compressed_rel and after.bloated(ratio):
                 conn.execute(sql.SQL("VACUUM FULL {}").format(sql.SQL(after.compressed_rel)))
@@ -390,7 +440,8 @@ def attempt(conn, c: Chunk, action: str, ratio: float = RECLAIM_RATIO) -> dict:
     out["disk_after"] = after.disk_bytes if after else None
     out["stats_bytes"] = after.stats_bytes if after else c.stats_bytes
     try:
-        conn.execute(_RECORD_SQL, (c.name, action, out["ok"], out.get("sqlstate"), out.get("message"),
+        message = out.get("message") or (f"reindex: {out['reindex']}" if out.get("reindex") else None)
+        conn.execute(_RECORD_SQL, (c.name, action, out["ok"], out.get("sqlstate"), message,
                                    out.get("detail"), out.get("context"), out["duration_s"], out["disk_before"],
                                    out["disk_after"], out["stats_bytes"]))
     except psycopg.Error as exc:  # the action itself is what matters
@@ -472,7 +523,7 @@ class Keeper:
                                    self.max_chunks, self.ratio, self.reclaimed):
             self.status.update("working_on", {"chunk": c.name, "action": action, "why": why,
                                               "since": datetime.now(timezone.utc).isoformat()})
-            result = attempt(self.conn, c, action, self.ratio)
+            result = attempt(self.conn, c, action, self.ratio, self.settle.settled(c.name, now, self.settle_s))
             if result["ok"] and action in ("recompress", "reclaim") and result.get("disk_after") is not None:
                 self.reclaimed[c.name] = result["disk_after"]
             done.append(result)

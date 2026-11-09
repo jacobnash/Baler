@@ -123,7 +123,7 @@ The `history_keeper` service (`python -m baler.history_keeper`, a pass every
 | Policy failures | Copies new failed runs of the policy job from `job_errors` into `history_compression_events` and logs them. |
 | Retry | Compresses each chunk that should be compressed by now (older than `compress_after` plus one policy schedule) and isn't. On failure it records the SQLSTATE, message, detail and context, and retries with backoff (5 min, doubling to 6 h). |
 | Recompress | Recompresses a chunk with late rows (status *partial*) once it has had no writes for `BALER_HISTORY_RECOMPRESS_SETTLE_S` (600 s), or after `BALER_HISTORY_RECOMPRESS_MAX_DEFER_S` (3600 s) whatever. |
-| Reclaim | After a recompression, or when a compressed chunk takes more than `BALER_HISTORY_RECLAIM_RATIO` (1.5) × its stats size on disk: `VACUUM` the chunk (truncates the emptied heap), `REINDEX` it (empty but full-size indexes), `VACUUM` its compressed relation, and `VACUUM FULL` that relation only if it is still over the ratio. |
+| Reclaim | After a recompression, or when a compressed chunk takes more than `BALER_HISTORY_RECLAIM_RATIO` (1.5) × its stats size on disk: `VACUUM` the chunk (truncates the emptied heap), `REINDEX TABLE CONCURRENTLY` it (empty but full-size indexes; writes into the chunk carry on meanwhile), `VACUUM` its compressed relation, and `VACUUM FULL` that relation only if it is still over the ratio. |
 
 It does nothing while the policy job is running (the two would queue on the
 same locks) or paused (`alter_job(..., scheduled => false)`), at most
@@ -152,6 +152,16 @@ compression of the chunk: about 470 s for that hour on nash-srv, at about
 3. keep free disk for the uncompressed size of every chunk a storm can touch
    before it settles. For a spool replay that is the outage's length of
    chunks, about 18 GB per hour of 100k points.
+
+The `REINDEX` is `CONCURRENTLY` because plain `REINDEX` holds a lock that
+blocks writes into the chunk while it runs, and the writes into these chunks
+are late rows from the listener, which acknowledges a reading over MQTT only
+after its batch commits: a stalled batch becomes broker backpressure, then
+drops. If the concurrent form fails, its leftover invalid index copies are
+dropped and plain `REINDEX` runs only on a settled chunk (no writes for
+`BALER_HISTORY_RECOMPRESS_SETTLE_S`); otherwise it waits for a later reclaim.
+Each event records the form that ran (`message`: `reindex: concurrently`,
+`reindex: plain (...)` or `reindex: skipped (...)`).
 
 `VACUUM FULL` takes an `ACCESS EXCLUSIVE` lock on the compressed relation, so
 reads of that chunk wait while it copies the compressed data (seconds for an

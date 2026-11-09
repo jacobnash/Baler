@@ -335,7 +335,7 @@ services:
   # point_history compression upkeep (#337, baler.history_keeper): retries
   # chunks the TimescaleDB compression policy failed on and records their
   # real error, recompresses chunks that took late rows once they settle,
-  # and gives the disk back (VACUUM/REINDEX). Its card on /ops/status shows
+  # and gives the disk back (VACUUM/REINDEX CONCURRENTLY). Its card on /ops/status shows
   # failing chunks and the compressed chunks' true size on disk.
   history_keeper:
     build: .

@@ -95,11 +95,64 @@ def test_a_bloated_compressed_chunk_is_reclaimed_and_heavy_work_is_capped():
     assert _plan([*due, fat], max_chunks=2)[-1] == ("fat", "reclaim")  # reclaim isn't capped
 
 
-def test_settle_forgets_chunks_once_recompressed():
+def test_settle_tracks_writes_to_compressed_chunks():
     s = hk.Settle()
-    s.observe([_chunk("late", status=hk.COMPRESSED | hk.PARTIAL)], NOW)
-    s.observe([_chunk("late", status=hk.COMPRESSED)], NOW + HOUR)
-    assert s.partial_since == {} and s.writes == {}
+    s.observe([_chunk("late", status=hk.COMPRESSED | hk.PARTIAL, writes=5)], NOW)
+    s.observe([_chunk("late", status=hk.COMPRESSED, writes=5)], NOW + HOUR)
+    assert s.partial_since == {}  # recompressed: no longer partial
+    assert s.settled("late", NOW + HOUR, settle_s=600)  # no writes for an hour
+    s.observe([_chunk("late", status=hk.COMPRESSED, writes=6)], NOW + 2 * HOUR)
+    assert not s.settled("late", NOW + 2 * HOUR, settle_s=600)  # a late write just now
+    s.observe([], NOW + 3 * HOUR)  # dropped
+    assert s.writes == {}
+
+
+class _ReindexConn:
+    """Records statements; REINDEX ... CONCURRENTLY fails when told to,
+    leaving an invalid _ccnew copy behind as Postgres does."""
+
+    autocommit = True
+
+    def __init__(self, concurrently_fails=False):
+        self.fails, self.ran = concurrently_fails, []
+
+    def execute(self, query, params=None):
+        text = query.as_string(None) if hasattr(query, "as_string") else query
+        self.ran.append(text)
+        if "CONCURRENTLY" in text and text.startswith("REINDEX") and self.fails:
+            raise psycopg.errors.FeatureNotSupported("cannot reindex this relation concurrently")
+
+        class _Cur:
+            def fetchall(self_inner):
+                return [("_timescaledb_internal.\"c1_ts_idx_ccnew\"",)] if "pg_index" in text else []
+
+        return _Cur()
+
+
+def test_reindex_is_concurrent_so_late_writes_are_not_blocked():
+    conn = _ReindexConn()
+    assert hk._reindex(conn, _chunk("_timescaledb_internal._hyper_1_1_chunk"), settled=False) == "concurrently"
+    assert conn.ran == ["REINDEX TABLE CONCURRENTLY _timescaledb_internal._hyper_1_1_chunk"]
+
+
+def test_a_failed_concurrent_reindex_falls_back_only_on_a_settled_chunk():
+    c = _chunk("_timescaledb_internal._hyper_1_1_chunk")
+    busy = _ReindexConn(concurrently_fails=True)
+    form = hk._reindex(busy, c, settled=False)
+    assert form.startswith("skipped") and "cannot reindex this relation concurrently" in form
+    assert not any(q.startswith("REINDEX TABLE _timescaledb") for q in busy.ran)  # never the blocking form
+    assert any(q.startswith("DROP INDEX CONCURRENTLY") and "_ccnew" in q for q in busy.ran)  # leftover copy dropped
+    quiet = _ReindexConn(concurrently_fails=True)
+    assert hk._reindex(quiet, c, settled=True).startswith("plain (concurrently failed")
+    assert quiet.ran[-1] == "REINDEX TABLE _timescaledb_internal._hyper_1_1_chunk"
+
+
+def test_attempt_refuses_a_connection_in_a_transaction():
+    class InTx:
+        autocommit = False
+
+    with pytest.raises(ValueError, match="autocommit"):
+        hk.attempt(InTx(), _chunk(), "reclaim")
 
 
 # --- unit: the Ops card -----------------------------------------------------------
@@ -329,6 +382,11 @@ def test_late_rows_are_recompressed_once_settled_and_the_disk_comes_back(conn):
     assert after.compressed and not after.partial
     assert after.disk_bytes <= 2 * after.stats_bytes, (after.disk_bytes, after.stats_bytes)
     assert done["disk_before"] == inflated.disk_bytes and done["disk_after"] == after.disk_bytes
+    assert done["reindex"] == "concurrently"  # never blocks late writes into the chunk
+    assert conn.execute("SELECT message FROM history_compression_events WHERE chunk = %s AND action = 'recompress' "
+                        "ORDER BY at DESC LIMIT 1", (name,)).fetchone()[0] == "reindex: concurrently"
+    assert conn.execute("SELECT bool_and(x.indisvalid), count(*) FROM pg_index x WHERE x.indrelid = %s::regclass",
+                        (name,)).fetchone() == (True, 3)
     # nothing lost or doubled: the late values won, the backfill is in
     rows = conn.execute("SELECT count(*), count(*) FILTER (WHERE value = 999.25), count(*) FILTER (WHERE value = 998.75) "
                         "FROM point_history WHERE point_uri LIKE %s AND ts >= %s AND ts < %s",
