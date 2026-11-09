@@ -169,7 +169,7 @@ first). When a step passes, that is where the next step will most likely fail.
 
 | # | When | Limiter |
 |---|---|---|
-| 1 | live-safety tripped; the Docker data root below `--min-free-gb`; the generator more than one interval behind schedule during the soak (`generator.behind_soak_max_s`), or offering under 99% of the target | `live-safety`, `disk space (…)`, `generator-bound (behind_s max 12.3 > 5 s, …)`. None of these is a Baler ceiling. |
+| 1 | live-safety tripped; the Docker data root (DockerRootDir, not the checkout's disk) below `--min-free-gb`; the generator more than one interval behind schedule during the soak (`generator.behind_soak_max_s`), or offering under 99% of the target | `live-safety`, `disk space (…)`, `generator-bound (behind_s max 12.3 > 5 s, …)`. None of these is a Baler ceiling. |
 | 2 | a container restarted or was OOM-killed | `fault_detector OOM-killed (memory 99% of cap)` |
 | 3 | the graph didn't take a step's tags in time | `graph ingest (…)` |
 | 4 | ingest symptoms: broker drops, < 99% stored, p95 lag ≥ 30 s or growing, lost canaries, listener queue past 80% of its cap, broker queue growing | the most saturated part of the ingest chain: `ingest listener: mqtt_listener CPU-capped (throttled 38%)`, `… CPU-bound (busiest thread 96% of a core)`, `broker: mosquitto …`, `postgres CPU-capped (…)`, `postgres write-bound (IO:WALSync 55%, …)`, `postgres locks (…)`, `disk (util p90 98%, 240 MB/s written)`; `broker drops (N; subscriber unattributed)` if none is at its limit |
@@ -388,7 +388,10 @@ tail -f ~/scale-soak.log
 
 Disk at 100k: about 18 GB raw per 1-hour chunk and a hot window up to about 80 GB, plus about
 9 GB/day compressed at 5 B/row. Keep `--min-free-gb` (default 5) where it is; the soak stops
-(`inconclusive`) rather than fill the disk. Raise `SCALE_MEM_POSTGRES` if the box has the
+(`inconclusive`) rather than fill the disk. Like `run`, it watches the disk holding Docker's data
+root (`docker info --format '{{.DockerRootDir}}'`), which on nash-srv is a separate disk from the
+checkout's. It falls back to the checkout's disk, with a warning, only when that root can't be
+read or isn't visible from the host. Raise `SCALE_MEM_POSTGRES` if the box has the
 memory: the sizing rule wants a chunk in 25% of it.
 
 ## Results

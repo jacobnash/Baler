@@ -643,16 +643,30 @@ def stored_in(conn, a: float, b: float) -> int:
                          datetime.fromtimestamp(b, tz=timezone.utc))).fetchone()[0]
 
 
+_DISK_FALLBACK_WARNED = False
+
+
 def disk_check(min_free_gb: float) -> tuple[bool, dict]:
-    """(stop?, free space): the guard watches Docker's data root, where the
-    stack's volumes grow - not the checkout's disk, which it used to (#269).
-    Both are reported; the checkout's is the fallback when the Docker root
-    isn't visible from here."""
-    root = common.docker_root()
-    docker, repo = common.free_gb(root), common.free_gb(common.REPO)
+    """(stop?, free space) for `run` and `soak`. The guard watches Docker's
+    data root (`docker info` DockerRootDir), where the stack's volumes grow,
+    not the checkout's disk, which it used to (#269): on nash-srv they are
+    separate disks, and a guard on the checkout's would never fire while a
+    soak fills Docker's. Both are reported. Only when the Docker root can't
+    be read or stat'ed does it fall back to the checkout's disk, with a
+    warning (once)."""
+    global _DISK_FALLBACK_WARNED
+    root = common.docker_root_reported()
+    docker = common.free_gb(root) if root else None
+    repo = common.free_gb(common.REPO)
+    info = {"docker_root": root or None, "docker_root_free_gb": None if docker is None else round(docker, 1),
+            "repo_free_gb": None if repo is None else round(repo, 1),
+            "watched": "docker_root" if docker is not None else "checkout"}
+    if docker is None and not _DISK_FALLBACK_WARNED:
+        _DISK_FALLBACK_WARNED = True
+        why = f"{root} isn't visible from here" if root else "`docker info` gave no DockerRootDir"
+        print(f"WARNING: disk guard: {why}; watching the checkout's disk ({common.REPO}) instead, "
+              "which may not be where the stack's volumes grow", file=sys.stderr, flush=True)
     watched = docker if docker is not None else repo
-    info = {"docker_root": root, "docker_root_free_gb": docker and round(docker, 1),
-            "repo_free_gb": repo and round(repo, 1)}
     return watched is not None and watched < min_free_gb, info
 
 

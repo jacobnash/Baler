@@ -212,23 +212,31 @@ def _run(cmd: list[str], cwd: Path | None = None) -> str:
 _DOCKER_ROOT: str | None = None
 
 
-def docker_root() -> str:
-    """Docker's data root (`docker info` DockerRootDir): where the scale
-    stack's volumes, images and logs live, which is often not the disk the
-    checkout is on (Baler#269)."""
+def docker_root_reported() -> str:
+    """`docker info`'s DockerRootDir, or "" when it can't be read (no
+    docker CLI, daemon unreachable). Cached for the process."""
     global _DOCKER_ROOT
     if _DOCKER_ROOT is None:
-        _DOCKER_ROOT = _run(["docker", "info", "--format", "{{.DockerRootDir}}"]) or "/var/lib/docker"
+        _DOCKER_ROOT = _run(["docker", "info", "--format", "{{.DockerRootDir}}"])
     return _DOCKER_ROOT
 
 
+def docker_root() -> str:
+    """Docker's data root: where the scale stack's volumes, images and logs
+    live, which is often not the disk the checkout is on (on nash-srv it's
+    a separate disk; Baler#269). Docker's default when it can't be read."""
+    return docker_root_reported() or "/var/lib/docker"
+
+
 def free_gb(path: str | Path) -> float | None:
-    """Free GB on the filesystem holding `path` (None if it isn't visible
-    from here, e.g. a remote or rootless Docker's root)."""
+    """Free GB (available to this user) on the filesystem holding `path`;
+    None if it isn't visible from here, e.g. a remote or rootless Docker's
+    root, or one this user may not stat."""
     try:
-        return shutil.disk_usage(path).free / 1e9
+        st = os.statvfs(path)
     except OSError:
         return None
+    return st.f_bavail * st.f_frsize / 1e9
 
 
 def hardware() -> dict:

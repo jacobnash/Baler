@@ -11,6 +11,7 @@ cgroup, /proc and diskstats text. No services.
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -154,28 +155,73 @@ def test_summarize_throttled_share_is_weighted_by_periods():
 
 # ---------------------------------------------------------------- the defects #269 fixed
 
-def test_disk_guard_watches_dockers_data_root(monkeypatch):
-    """Filling Docker's data root below --min-free-gb stops the soak, even
-    when the checkout's disk has room (it used to watch the checkout's)."""
-    monkeypatch.setattr(common, "docker_root", lambda: "/docker-data")
-    seen = []
+class _Statvfs:
+    """os.statvfs over fake filesystems: {path prefix: free GB}; a path
+    under none of them raises (not visible from here)."""
 
-    def free_gb(path):
-        seen.append(str(path))
-        return 1.5 if str(path) == "/docker-data" else 500.0
+    def __init__(self, filesystems: dict[str, float]):
+        self.filesystems, self.calls = filesystems, []
 
-    monkeypatch.setattr(common, "free_gb", free_gb)
+    def __call__(self, path):
+        path = str(path)
+        self.calls.append(path)
+        for prefix, free in sorted(self.filesystems.items(), key=lambda kv: -len(kv[0])):
+            if path == prefix or path.startswith(prefix.rstrip("/") + "/"):
+                return SimpleNamespace(f_bavail=int(free * 1e9 / 4096), f_frsize=4096)
+        raise FileNotFoundError(path)
+
+
+@pytest.fixture
+def two_disks(monkeypatch):
+    """nash-srv's layout: the checkout on the root disk, Docker's data root
+    on a separate one."""
+    def setup(docker_free, repo_free, reported="/data/docker"):
+        monkeypatch.setattr(common, "docker_root_reported", lambda: reported)
+        monkeypatch.setattr(ladder, "_DISK_FALLBACK_WARNED", False)
+        fs = _Statvfs({"/data": docker_free, str(common.REPO): repo_free} if docker_free is not None
+                      else {str(common.REPO): repo_free})
+        monkeypatch.setattr(common.os, "statvfs", fs)
+        return fs
+    return setup
+
+
+def test_disk_guard_watches_dockers_data_root_on_its_own_filesystem(two_disks):
+    """Docker's disk below --min-free-gb stops the step while the checkout's
+    disk has plenty: the old guard (on the checkout) would never fire."""
+    fs = two_disks(docker_free=1.5, repo_free=500.0)
     stop, info = ladder.disk_check(5.0)
-    assert stop and info["docker_root_free_gb"] == 1.5 and info["repo_free_gb"] == 500.0
-    assert "/docker-data" in seen
-    monkeypatch.setattr(common, "free_gb", lambda p: 50.0 if str(p) == "/docker-data" else 0.1)
-    assert ladder.disk_check(5.0)[0] is False  # a full checkout disk alone doesn't stop it
+    assert stop and info == {"docker_root": "/data/docker", "docker_root_free_gb": 1.5, "repo_free_gb": 500.0,
+                             "watched": "docker_root"}
+    assert "/data/docker" in fs.calls
 
 
-def test_disk_guard_falls_back_to_the_checkout_disk(monkeypatch):
-    monkeypatch.setattr(common, "docker_root", lambda: "/not-visible")
-    monkeypatch.setattr(common, "free_gb", lambda p: None if str(p) == "/not-visible" else 2.0)
-    assert ladder.disk_check(5.0)[0] is True
+def test_a_full_checkout_disk_alone_does_not_stop_it(two_disks):
+    two_disks(docker_free=80.0, repo_free=0.5)
+    stop, info = ladder.disk_check(5.0)
+    assert not stop and info["watched"] == "docker_root"
+
+
+@pytest.mark.parametrize("reported", ["", "/var/lib/docker-remote"])
+def test_disk_guard_falls_back_to_the_checkout_disk_with_a_warning(two_disks, capsys, reported):
+    """No DockerRootDir from `docker info`, or one not visible from here
+    (remote/rootless Docker): the checkout's disk, and a warning once."""
+    two_disks(docker_free=None, repo_free=2.0, reported=reported)
+    stop, info = ladder.disk_check(5.0)
+    assert stop and info["watched"] == "checkout" and info["docker_root_free_gb"] is None
+    assert "WARNING: disk guard" in capsys.readouterr().err
+    ladder.disk_check(5.0)
+    assert capsys.readouterr().err == ""  # once per process
+
+
+def test_run_and_soak_both_use_the_docker_root_guard():
+    """`ladder.py run` and `ladder.py soak` stop on the same check."""
+    import inspect
+
+    import soak
+
+    for src in (inspect.getsource(ladder.run_step), inspect.getsource(soak)):
+        assert "disk_check(args.min_free_gb)" in src
+        assert "disk_usage(common.REPO)" not in src
 
 
 def test_disk_low_names_the_disk_and_is_inconclusive():
