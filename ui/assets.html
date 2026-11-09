@@ -75,6 +75,20 @@
         <thead><tr><th>Position</th><th>Installed</th><th>Why</th><th>Removed</th><th>Why</th></tr></thead>
         <tbody></tbody>
       </table>
+      <h3>Bench tests</h3>
+      <p class="hint">The earliest passing bench test before install is the asset's first baseline.
+        <a href="/docs/bench-tests" target="_blank" rel="noopener">Docs</a>.</p>
+      <table id="bench-table">
+        <thead><tr><th>Tested</th><th>Procedure</th><th>Verdict</th><th>Before install</th><th>Baseline</th><th>Technician</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <form id="bench-form" class="inline-form">
+        <select name="procedure_id" id="bench-procedure"></select>
+        <input name="tested_at" type="datetime-local" />
+        <input name="technician" placeholder="technician" />
+        <textarea name="measurements" rows="2" cols="50" placeholder='measurements: {"stroke-time": 88, "stroke-open": true}'></textarea>
+        <button type="submit">Record bench test</button>
+      </form>
       <form id="install-form" class="inline-form">
         <input name="position_uri" placeholder="position URI (urn:equip:…)" size="40" />
         <input name="at" type="datetime-local" />

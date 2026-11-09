@@ -69,6 +69,9 @@ async function showAsset(id) {
   const { history, ...fields } = a;
   document.getElementById("detail-fields").textContent = JSON.stringify(fields, null, 2);
   fill("#history-table tbody", history, ["position_uri", (h) => h.installed_at, "install_reason", (h) => h.removed_at || "still installed", "remove_reason"]);
+  const tests = await api(`/assets/${encodeURIComponent(id)}/bench-tests`);
+  fill("#bench-table tbody", tests, [(t) => t.tested_at.slice(0, 16), (t) => t.procedure.name, "verdict",
+    (t) => (t.before_install ? "yes" : "no"), (t) => (t.baseline ? "baseline" : ""), "technician"]);
   document.getElementById("install-form").hidden = a.status !== "in_stock";
   document.getElementById("remove-form").hidden = a.status !== "installed";
 }
@@ -80,8 +83,24 @@ function onSubmit(id, fn) {
   });
 }
 
+async function loadProcedures() {
+  const procs = await api("/bench/procedures");
+  const sel = document.getElementById("bench-procedure");
+  sel.replaceChildren(...procs.filter((p) => p.status === "active").map((p) =>
+    Object.assign(document.createElement("option"), { value: p.id, textContent: p.name })));
+}
+
 initAuth(() => {
   loadAssets().catch((err) => say(`error: ${err.message}`));
+  loadProcedures().catch((err) => say(`error: ${err.message}`));
+  onSubmit("bench-form", async (f) => {
+    const body = formJSON(f);
+    body.measurements = body.measurements ? JSON.parse(body.measurements) : {};
+    const t = await api(`/assets/${encodeURIComponent(currentAsset.id)}/bench-tests`, { method: "POST", body: JSON.stringify(body) });
+    say(`bench test recorded: ${t.verdict}`);
+    f.reset();
+    await showAsset(currentAsset.id);
+  });
   onSubmit("filter-form", loadAssets);
   onSubmit("create-form", async (f) => {
     const a = await api("/assets", { method: "POST", body: JSON.stringify(formJSON(f)) });
