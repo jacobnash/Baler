@@ -1,5 +1,5 @@
 """
-0003 positions vs installed assets (#197, epic #221).
+0011 positions vs installed assets (#197, epic #221).
 
 A position ("AHU-1 supply fan motor") is the Brick equipment the points
 hang on: permanent, it lives in the graph and is referred to here by its
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 3
+VERSION = 11
 NAME = "lifecycle assets and install events"
 
 ASSETS = """

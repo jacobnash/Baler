@@ -75,3 +75,14 @@ button.danger { border-color: var(--color-critical); color: var(--color-critical
    table's Actions header) escaped an unpositioned wrapper and widened the
    page to ~700px at phone width */
 .cx-main .table-scroll, .cx-main .cx-grid-wrap { position: relative; }
+
+/* Manual results (Baler#275): a phone-width form, one field per row. */
+.manual-entry form { display: grid; gap: .5rem; max-width: 36rem; }
+.manual-entry label { display: grid; gap: .2rem; }
+.manual-entry fieldset label { display: inline-flex; gap: .3rem; margin-right: 1rem; align-items: center; }
+.manual-entry input[type="radio"] { width: 1.4rem; height: 1.4rem; }
+.manual-entry button[type="submit"] { min-height: 2.75rem; }
+@media (max-width: 640px) {
+  .manual-entry form { max-width: none; }
+  .manual-entry select, .manual-entry input, .manual-entry textarea { width: 100%; font-size: 16px; }
+}

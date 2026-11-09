@@ -23,7 +23,7 @@ CSV or as rows shaped like a COBie Job sheet. Baler is not a CMMS: it says
 what's due and why, and the work order lives elsewhere.
 
 Intervals typed here are the user's. Intervals read from O&M manuals are
-proposals (#202) until a person confirms them. Schema: migration 0004.
+proposals (#202) until a person confirms them. Schema: migration 0014.
 """
 
 from __future__ import annotations

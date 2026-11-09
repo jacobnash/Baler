@@ -86,6 +86,29 @@
         <input name="reason" placeholder="why removed (required)" required />
         <button type="submit">Remove</button>
       </form>
+      <h3>Warranties</h3>
+      <table id="warranty-table">
+        <thead><tr><th>Kind</th><th>Provider</th><th>Starts</th><th>Ends</th><th>Status</th><th>Source</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <form id="warranty-form" class="inline-form">
+        <select name="kind"><option>parts_and_labor</option><option>parts</option><option>labor</option><option>extended</option><option>other</option></select>
+        <input name="provider" placeholder="provider" />
+        <input name="starts_on" type="date" title="blank: the asset's first install (start-up)" />
+        <input name="duration_months" placeholder="months" size="6" inputmode="numeric" />
+        <input name="ends_on" type="date" title="or give the end date" />
+        <input name="terms" placeholder="terms" />
+        <button type="submit">Add warranty</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Warranty alerts</h2>
+      <p class="hint">Warranties ending in the next 90 days, and faults or Cx issues that opened on an asset while it was under warranty (past year).</p>
+      <h3>Expiring</h3>
+      <table id="expiring-table"><thead><tr><th>Asset</th><th>Kind</th><th>Ends</th><th>Days left</th></tr></thead><tbody></tbody></table>
+      <h3>Failures under warranty</h3>
+      <table id="failures-table"><thead><tr><th>Opened</th><th>What</th><th>Position</th><th>Asset</th><th>Warranty ends</th></tr></thead><tbody></tbody></table>
     </section>
 
     <section>
@@ -138,6 +161,7 @@
       </table>
     </section>
   </main>
+  <script src="apibase.js"></script>
   <script src="auth.js"></script>
   <script src="assets.js"></script>
 </body>
