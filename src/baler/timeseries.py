@@ -502,6 +502,36 @@ def read_range(conn: psycopg.Connection, point_uri: str, start_ts: datetime, end
     return [(ts, _row_to_value((v, vt, vb))) for ts, v, vt, vb, _q in iter_rows(cur)]
 
 
+READ_BULK_CHUNK = 5_000
+
+
+def read_range_bulk(conn: psycopg.Connection, point_uris: list[str], start_ts: datetime, end_ts: datetime
+                    ) -> dict[str, list[tuple]]:
+    """read_range for many points at once: {uri: [(ts, value)]}, the same
+    inclusive bounds and order, one query per READ_BULK_CHUNK points (an
+    index range scan per point) instead of one per point. For
+    derivation_engine, whose rows each read their inputs over the same
+    window (#273: two queries per row were most of a row's time). Every
+    point is in the result, [] if it has no rows in the window."""
+    out: dict[str, list[tuple]] = {uri: [] for uri in point_uris}
+    uris = list(out)
+    for i in range(0, len(uris), READ_BULK_CHUNK):
+        cur = conn.execute(
+            """
+            SELECT u.uri, h.ts, h.value, h.value_text, h.value_bool
+            FROM unnest(%s::text[]) AS u(uri)
+            CROSS JOIN LATERAL (
+                SELECT ts, value, value_text, value_bool FROM point_history
+                WHERE point_uri = u.uri AND ts >= %s AND ts <= %s ORDER BY ts
+            ) h
+            """,
+            (uris[i:i + READ_BULK_CHUNK], start_ts, end_ts),
+        )
+        for uri, ts, v, vt, vb in iter_rows(cur):
+            out[uri].append((ts, _row_to_value((v, vt, vb))))
+    return out
+
+
 def read_range_many(
     conn: psycopg.Connection, point_uris: list[str], start_ts: datetime, end_ts: datetime, limit: int,
     with_quality: bool = False, good_only: bool = False,

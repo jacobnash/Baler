@@ -185,7 +185,7 @@ def _masking_fault(fault_conn, point_uri: str) -> dict | None:
 
 
 def _read_input_series(ts_conn, fault_conn, point_uri: str, start: datetime, end: datetime,
-                       masked: dict[str, str] | None = None) -> list[tuple]:
+                       masked: dict[str, str] | None = None, prefetched: dict | None = None) -> list[tuple]:
     """An open stale/stuck fault on this point means "treat as absent this
     pass" - empty series, not a silently-passed bad value. Reuses
     fault_detector.py's existing signal instead of a second validity
@@ -196,6 +196,10 @@ def _read_input_series(ts_conn, fault_conn, point_uri: str, start: datetime, end
         if masked is not None:
             masked[point_uri] = fault["rule_id"]
         return []
+    if prefetched is not None:
+        hit = prefetched.get((point_uri, start))
+        if hit is not None:
+            return hit
     return timeseries.read_range(ts_conn, point_uri, start, end)
 
 
@@ -327,12 +331,37 @@ def _record_and_trace_success(
 
 
 def _read_formula_inputs(ts_conn, fault_conn, input_uris: dict[str, str], input_windows: dict, window_seconds: float,
-                         now: datetime, masked: dict[str, str] | None = None) -> dict[str, list[tuple]]:
+                         now: datetime, masked: dict[str, str] | None = None,
+                         prefetched: dict | None = None) -> dict[str, list[tuple]]:
     inputs = {}
     for name, point_uri in input_uris.items():
         window = input_windows.get(name, window_seconds)
-        inputs[name] = _read_input_series(ts_conn, fault_conn, point_uri, now - timedelta(seconds=window), now, masked)
+        inputs[name] = _read_input_series(ts_conn, fault_conn, point_uri, now - timedelta(seconds=window), now, masked,
+                                          prefetched)
     return inputs
+
+
+PREFETCH_MIN_ROWS = 2
+
+
+def _prefetch_inputs(ts_conn, rows: list, input_vars: list[str], input_windows: dict, window_seconds: float,
+                     now: datetime) -> dict | None:
+    """Every row's input series in one bulk read per distinct window
+    (timeseries.read_range_bulk), keyed (point, window start): what
+    _read_input_series would read per input per row, at one query for the
+    lot (#273). None for a single row (nothing to save) or no connection."""
+    if ts_conn is None or len(rows) < PREFETCH_MIN_ROWS:
+        return None
+    by_start: dict[datetime, set[str]] = {}
+    for row in rows:
+        for name in input_vars:
+            start = now - timedelta(seconds=input_windows.get(name, window_seconds))
+            by_start.setdefault(start, set()).add(str(getattr(row, name)))
+    out: dict = {}
+    for start, uris in by_start.items():
+        for uri, series in timeseries.read_range_bulk(ts_conn, sorted(uris), start, now).items():
+            out[(uri, start)] = series
+    return out
 
 
 def _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation: Derivation, now: datetime, dry_run: bool,
@@ -351,6 +380,10 @@ def _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation: Deriv
     trace: list[TraceEntry] = []
     if rows is None:
         rows = list(store.query(derivation["select"]))
+    if trigger_point_uri is not None:
+        rows = [r for r in rows if trigger_point_uri in {str(getattr(r, name)) for name in input_vars}]
+    rows = [r for r in rows if not _target_disabled(health_conn, derivation_id, str(getattr(r, target_var)))]
+    prefetched = _prefetch_inputs(ts_conn, rows, input_vars, input_windows, window_seconds, now)
     for row in rows:
         target_uri = str(getattr(row, target_var))
         input_uris = {name: str(getattr(row, name)) for name in input_vars}
@@ -365,7 +398,8 @@ def _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation: Deriv
             span.set_attribute("target", target_uri)
             masked: dict[str, str] = {}
             try:
-                inputs = _read_formula_inputs(ts_conn, fault_conn, input_uris, input_windows, window_seconds, now, masked)
+                inputs = _read_formula_inputs(ts_conn, fault_conn, input_uris, input_windows, window_seconds, now, masked,
+                                              prefetched)
                 row_extra = {name: str(getattr(row, name)) for name in extra_vars}
                 value = sandbox.run_with_timeout(fn, inputs, row_extra)
             except Exception as exc:  # noqa: BLE001 - one target's sandboxed formula failing must not stop evaluation of every other target
