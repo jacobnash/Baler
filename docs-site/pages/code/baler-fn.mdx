@@ -62,6 +62,7 @@ A session against `<url>/api/<project>`. It authenticates every request with
 | `his_read_df(id, range="today")` | history as a DataFrame with one column, `val`, indexed by UTC timestamp (`ts`) |
 | `his_write(id, items)` | sends samples to a point's history and returns how many were sent. Needs an `operator` key. |
 | `phable()` | a `phable.HaystackClient` on the same URL and key |
+| `phable_read_all(filter, limit=None)` | phable's `read_all`, following Baler's pages: one phable Grid of every match |
 | `haystack` | the underlying `baler.haystack_client.HaystackClient` |
 | `base_url` | `<url>/api/<project>` |
 
@@ -91,8 +92,11 @@ when the read is complete, and otherwise the cursor to pass to `read_page(..., a
 `.incomplete` is the server's reason when it cut a read short. The notebook image bakes this client in,
 so after upgrading Baler rebuild it: `docker compose --profile notebook up -d --build jupyter`.
 
-If you need units, typed values or ops that aren't listed above, use `client.phable()`. phable's
-`read_all` returns the first page only; check the grid's `meta` for `after`, or use `read()` here.
+If you need units, typed values or ops that aren't listed above, use `client.phable()`. **phable's
+`read_all` returns the first page only** (one request, 1,000 records by default), and
+`Grid.to_pandas()` drops the grid meta that says so. For a phable Grid of every record, use
+`client.phable_read_all("point")`, or `baler_fn.phable_read_all(phable_client, "point")` with a phable
+client of your own. Both follow `after` and return one Grid.
 
 **Writing.** `his_write(id, items)` accepts any of these:
 

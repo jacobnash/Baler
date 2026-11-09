@@ -162,7 +162,7 @@ one. On a site with 1,000 matches or fewer nothing changes: one grid, no extra m
 | `baler_fn.connect().read` / `read_df` | yes, unless given a `limit`; `read_page` for one page |
 | `baler.openhay_paging.read` / `openhay_paging.Client` | yes: Baler's wrapper around openhay |
 | openhay `Client.read` | **no**: first page, meta dropped. Use `openhay_paging`, or `call("read")` as above |
-| phable `read_all` | **no**: first page; the returned grid's `meta` has `after` |
+| phable `read_all` (the notebook's library) | **no**: one request, first page; the grid's `meta` has `after`, which `to_pandas()` drops. `baler_fn.phable_read_all` follows it |
 | Windrow's Haystack source pointed at a Baler | **no** (openhay's `read`); see below |
 | SkySpark/Axon `read`/`readAll` via a connector, other clients | no, unless they follow `after` themselves |
 

@@ -256,3 +256,41 @@ def test_openhay_paging_client_hands_over_to_native_paging(monkeypatch):
     assert [r["id"].id for r in c.read("point")] == ["a", "b"]
     got = c.read_page("point", 1)
     assert got.after == "p9" and got.limit == 1 and got.incomplete == "limit of 1 reached"
+
+
+class _FakePhable:
+    """phable.HaystackClient's `call`, over canned pages keyed by `after`."""
+
+    def __init__(self, pages):
+        self.pages, self.sent = pages, []
+
+    def call(self, path, data):
+        import phable
+
+        row = data.rows[0]
+        after = row.get("after")
+        self.sent.append(after.val if isinstance(after, phable.Ref) else None)
+        return self.pages[self.sent[-1]]
+
+    def read_all(self, filter, limit=None):
+        return self.pages[None]
+
+
+def test_phable_read_all_follows_after_where_phables_stops():
+    import phable
+
+    from baler_fn import phable_read_all
+
+    def grid(ids, after=None, extra=()):
+        meta = {"ver": "3.0"} | ({"after": phable.Ref(after), "incomplete": "limit of 2 reached"} if after else {})
+        return phable.Grid(meta=meta, cols=[phable.GridCol("id"), *map(phable.GridCol, extra)],
+                           rows=[{"id": phable.Ref(i)} for i in ids])
+
+    c = _FakePhable({None: grid(["a", "b"], "b"), "b": grid(["c", "d"], "d", ["dis"]), "d": grid(["e"])})
+    assert len(c.read_all("point").rows) == 2  # phable's own: the first page
+    g = phable_read_all(c, "point")
+    assert [r["id"].val for r in g.rows] == ["a", "b", "c", "d", "e"] and c.sent == [None, "b", "d"]
+    assert [col.name for col in g.cols] == ["id", "dis"] and "after" not in g.meta
+    assert len(phable_read_all(c, "point", limit=2).rows) == 2
+    with pytest.raises(RuntimeError, match="same `after`"):
+        phable_read_all(_FakePhable({None: grid(["a"], "a"), "a": grid(["a"], "a")}), "point")

@@ -99,12 +99,21 @@ class BalerClient:
 
         phable doesn't follow Baler's read pages: its `read_all` returns
         the first page (1,000 records by default), with grid meta `after`
-        set when more follow. Use read()/read_df() here for every record."""
+        set when more follow. Use phable_read_all() (a phable Grid of every
+        record) or read()/read_df() here instead."""
         try:
             import phable
         except ImportError as exc:
             raise ImportError('phable is not installed: pip install "phable[pandas,pyarrow]"') from exc
         return phable.HaystackClient(self.base_url, self._api_key)
+
+
+    def phable_read_all(self, filter: str, limit: int | None = None) -> Any:
+        """phable's read_all, following Baler's pages: one phable Grid of
+        every match (baler_fn.paging.phable_read_all)."""
+        from baler_fn.paging import phable_read_all
+
+        return phable_read_all(self.phable(), filter, limit)
 
 
 def _ref(id: str) -> str:
