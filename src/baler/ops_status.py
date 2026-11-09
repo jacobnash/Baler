@@ -21,7 +21,7 @@ from typing import Any
 
 import psycopg
 
-from baler import heartbeat, reading_feed, timeseries
+from baler import alerts, errors, heartbeat, reading_feed, timeseries
 
 COMPONENTS: list[dict[str, Any]] = [
     {
@@ -235,6 +235,15 @@ def _building_signals(scope=None) -> dict[str, Any]:
             # The listener supervisor's broker-drop count and workers (#233).
             out["listener"] = heartbeat.details(conn).get("mqtt_listener")
             conn.rollback()
+            # Process starts and unhandled exceptions (baler.errors), and what
+            # the alerter (baler.alerts) currently has open (#277). Install-
+            # wide, and an exception message can name another org's points,
+            # so only an unrestricted caller sees them.
+            if scope is None or scope.unrestricted:
+                out["processes"] = errors.summary(conn)
+                conn.rollback()
+                out["alerts"] = alerts.open_alerts(conn)
+                conn.rollback()
             try:
                 org_row = conn.execute("SELECT COUNT(*) FROM orgs").fetchone()
                 out["org_count"] = int(org_row[0]) if org_row else 0
@@ -548,6 +557,10 @@ def collect_status(scope=None) -> dict[str, Any]:
         "jobs": [c for c in ordered if c["layer"] == "jobs"],
         "tools": [c for c in ordered if c["layer"] == "tools"],
         "attention": attention,
+        # What baler.alerts has sent and not yet cleared, and each process's
+        # start and unhandled-exception counts (#277).
+        "alerts": building.get("alerts", []),
+        "processes": building.get("processes", []),
         "first_actions": [
             {
                 "id": "connect_source",
