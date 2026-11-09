@@ -28,6 +28,12 @@ def conn():
         c.execute(f"DELETE FROM auth_events WHERE org_id IN (SELECT id FROM orgs WHERE name LIKE '{ORG}%')")
         c.execute(f"DELETE FROM user_sites WHERE user_id IN (SELECT u.id FROM users u JOIN orgs o ON o.id = u.org_id "
                   f"WHERE o.name LIKE '{ORG}%')")
+        # Children before parents, like test_auth.py's cleanup: API keys
+        # (and their revocation rows) reference the org.
+        c.execute(f"DELETE FROM revoked_tokens WHERE jti IN (SELECT jti FROM api_keys WHERE org_id IN "
+                  f"(SELECT id FROM orgs WHERE name LIKE '{ORG}%'))")
+        c.execute(f"DELETE FROM api_keys WHERE org_id IN (SELECT id FROM orgs WHERE name LIKE '{ORG}%')")
+        c.execute(f"DELETE FROM sites WHERE org_id IN (SELECT id FROM orgs WHERE name LIKE '{ORG}%')")
         c.execute(f"DELETE FROM users WHERE org_id IN (SELECT id FROM orgs WHERE name LIKE '{ORG}%')")
         c.execute(f"DELETE FROM orgs WHERE name LIKE '{ORG}%'")
 
