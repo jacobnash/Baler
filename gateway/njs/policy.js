@@ -103,6 +103,22 @@ const ROUTES = [
   ["POST",   /^\/ops\/edges\/[^/]+\/[^/]+\/actions\/(list_devices|list_connections|modbus_list_connections|list_announced)$/, "devices", "viewer"],
   ["POST",   /^\/ops\/edges\/[^/]+\/[^/]+\/actions\/[a-z_]+$/, "devices", "admin"],
 
+  // Building lifecycle record (epic #221), served by ops_api from
+  // baler.lifecycle. Reads viewer, changes operator; ops_api also keeps
+  // each org's rows to itself and positions to the caller's sites.
+  // Positions vs installed assets (#197): install/remove history is
+  // append-only, so there is no DELETE.
+  ["GET",    /^\/ops\/assets$/,                         "assets", "viewer"],
+  ["POST",   /^\/ops\/assets$/,                         "assets", "operator"],
+  ["GET",    /^\/ops\/assets\/changes$/,                 "assets", "viewer"],
+  ["GET",    /^\/ops\/assets\/[^/]+$/,                   "assets", "viewer"],
+  ["PATCH",  /^\/ops\/assets\/[^/]+$/,                   "assets", "operator"],
+  ["GET",    /^\/ops\/assets\/[^/]+\/audit$/,             "assets", "viewer"],
+  ["POST",   /^\/ops\/assets\/[^/]+\/(install|remove|retire)$/, "assets", "operator"],
+  ["GET",    /^\/ops\/positions\/history$/,              "assets", "viewer"],
+  ["GET",    /^\/ops\/positions\/asset-at$/,             "assets", "viewer"],
+  ["POST",   /^\/ops\/positions\/replace$/,               "assets", "operator"],
+
   // commissioning_api (Baler#37): reads viewer, changes operator,
   // archiving a project admin. The backend also checks the caller's org
   // and sites against the project itself.

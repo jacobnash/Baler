@@ -1,0 +1,99 @@
+---
+title: Positions and assets
+---
+
+Part of the building lifecycle record (epic Baler#221, design
+`todo/building-lifecycle-ubis.md` §6). Baler#197.
+
+A **position** is where something is installed: "AHU-1 supply fan motor". It
+is the Brick equipment the points hang on, so it already exists in the graph
+and has a URI (`urn:equip:...`). It is permanent.
+
+An **asset** is the physical thing installed there: make, model, serial,
+cost. Assets come and go. Baler keeps the two apart, and links them only
+through **install and remove events**, each with a time and a reason:
+
+```
+position AHU-1/SF-motor ──installed── asset A102 (Baldor, 2026-03-01 → 2031-07-14, removed: bearing failure)
+                         └─installed── asset A517 (WEG, 2031-07-14 → now)
+```
+
+## Why keep them apart
+
+- **History is never overwritten.** A replacement appends a remove and an
+  install. "When were the pumps changed, and to what brand?" is a query, not
+  archaeology.
+- **Baselines attach to the asset.** A start-up trend taken in 2026 belongs
+  to the motor that was there in 2026. `GET /ops/positions/asset-at` answers
+  which asset was in a position at any moment, so a comparison is never made
+  against different hardware.
+
+## Rules
+
+Checked before anything is written:
+
+- an asset is in at most one position at a time, and a position holds at
+  most one asset at a time (to put a new one in, *replace*);
+- an asset's events run forward in time, and none can be in the future;
+- a removal needs a reason;
+- a retired asset can't be installed again, and must be removed first.
+
+Correcting an asset's fields (a mistyped serial) is allowed. Each change is
+logged in `record_edits` with the old and new value, under the entity
+`urn:baler:asset:<id>`, and listed by `GET /ops/assets/{id}/audit`. Events
+can't be edited or deleted.
+
+Assets belong to an org. Installed assets are visible only to callers whose
+sites include the position; assets in stock are visible to the whole org.
+
+## API
+
+All under the gateway's `/ops/` prefix. Reads need `viewer`, changes `operator`.
+
+| Route | What |
+|---|---|
+| `GET /ops/assets` | List. Filters: `q`, `status` (`installed`, `in_stock`, `retired`), `position`, `manufacturer`, `type` |
+| `POST /ops/assets` | Create: `tag`, `asset_type`, `brick_class`, `manufacturer`, `model`, `serial`, `cost`, `currency`, `acquired_on`, `site_id`, `attributes` |
+| `GET /ops/assets/{id}` | The asset, its status and current position, and its install history |
+| `PATCH /ops/assets/{id}` | Correct fields (audited) |
+| `POST /ops/assets/{id}/install` | `position_uri`, `at` (default now), `reason`, `cost`, `work_ref` |
+| `POST /ops/assets/{id}/remove` | `at`, `reason` (required), `work_ref` |
+| `POST /ops/assets/{id}/retire` | `reason` |
+| `GET /ops/assets/{id}/audit` | Every change, newest first |
+| `POST /ops/positions/replace` | `position_uri`, `at`, `remove_reason`, and `asset_id` (one in stock) or `asset` (a new one's fields) |
+| `GET /ops/positions/history?uri=` | Every asset the position has held |
+| `GET /ops/positions/asset-at?uri=&at=` | Which asset was there at that moment |
+| `GET /ops/assets/changes` | Replacements: `since`, `until`, `type`, `manufacturer` (the new asset's) |
+
+Example: motors replaced in 2031, and which went to a different brand:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "$BALER/ops/assets/changes?since=2031-01-01&until=2032-01-01&type=motor"
+# [{"position_uri": "urn:equip:...", "at": "2031-07-14T10:00:00+00:00",
+#   "from": {"manufacturer": "Baldor", ...}, "to": {"manufacturer": "WEG", ...},
+#   "removed_reason": "bearing failure", "brand_changed": true}]
+```
+
+## UI
+
+**Assets** in the top navigation: the asset list, a form to add one, each
+asset's history with install and remove forms, a position's history, and the
+replacements query.
+
+## Storage
+
+Migration 0003: `lc_assets` and `lc_asset_events` (append-only). The routes
+live in `baler.lifecycle.assets` and are served by `ops_api`.
+
+## Not built yet
+
+- Warranties (#198), PM schedules (#199), deferred maintenance (#200) and
+  bench tests (#211) build on this model in their own PRs.
+- Linking documents (#201) and start-up results (Cx 6 test runs) to an asset.
+  `asset-at` is the primitive those use.
+- Correcting a mistaken event (a void event, rather than an edit).
+- Including assets in the building export (`python -m baler.export`).
+- A database-level guard against two people installing into the same
+  position at the same instant. The check runs before the write, not in one
+  transaction with it.
