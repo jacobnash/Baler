@@ -108,6 +108,14 @@ def _write_tags(store, uri: URIRef, tags: dict) -> None:
     store.add_many(triples)  # one round trip for every tag instead of one per tag
 
 
+def tag_triples(uri: URIRef, tags: dict) -> list:
+    """The triples _write_tags would write for `tags` on `uri`, for a
+    caller batching many records into one write (baler.tag_ingest)."""
+    out: list = []
+    _dict_triples(uri, tags, out)
+    return out
+
+
 def _dict_triples(subject, tags: dict, out: list) -> None:
     """A record's (or nested Dict's) tags as triples on `subject`."""
     for tag, value in tags.items():

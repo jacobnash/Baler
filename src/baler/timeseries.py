@@ -294,7 +294,11 @@ def write_point_values(conn: psycopg.Connection, rows, then=None) -> int:
                 with cur.copy(f"COPY point_history_stage ({cols}) FROM STDIN") as copy:
                     for rec in latest.values():
                         copy.write_row(rec)
-                cur.execute(f"INSERT INTO point_history ({cols}) SELECT {cols} FROM point_history_stage" + _UPSERT_SET)
+                # ORDER BY: concurrent writers (several listener workers,
+                # #233; hisWrite) lock point_history rows in one order, so
+                # an overlapping key can't deadlock them.
+                cur.execute(f"INSERT INTO point_history ({cols}) SELECT {cols} FROM point_history_stage "
+                            "ORDER BY point_uri, ts" + _UPSERT_SET)
                 cur.execute(_REGISTRY_STAGE_SQL)
         if then is not None:
             then(conn)
