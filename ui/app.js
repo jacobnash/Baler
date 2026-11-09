@@ -6,8 +6,8 @@ const params = new URLSearchParams(location.search);
 // Relative by default so this works as served by the gateway at /ui/ (same
 // origin - see gateway/nginx.conf). Override with ?api=... / ?ingest=...
 // when serving ui/ standalone (ui_server.py).
-const HAYSTACK_API_URL = params.get("api") || "/api";
-const INGEST_API_URL = params.get("ingest") || "/ingest";
+const HAYSTACK_API_URL = apiBase("api", "/api");
+const INGEST_API_URL = apiBase("ingest", "/ingest");
 
 const statusEl = document.getElementById("status");
 const treeEl = document.getElementById("tree");
@@ -159,7 +159,7 @@ async function loadEquipment() {
 
 // Derivations by id, for naming computed points (Baler#62). Optional: a
 // caller who can't read derivations just gets "computed" with no name.
-const DERIVATION_API_URL = params.get("derivation") || "/derivation";
+const DERIVATION_API_URL = apiBase("derivation", "/derivation");
 let derivationsPromise = null;
 function loadDerivations() {
   if (!derivationsPromise) {
@@ -291,7 +291,7 @@ function hisLink(uri, text = null) {
 // Cx verdict per equipment from the latest commissioning run
 // (commissioning_api GET /cx/equipment-status). Optional: a deployment
 // without Cx, or a 403, just shows no dots.
-const CX_API_URL = params.get("cx") || "/cx";
+const CX_API_URL = apiBase("cx", "/cx");
 let cxStatus = {};
 
 async function loadCxStatus() {

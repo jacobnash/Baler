@@ -42,7 +42,7 @@
   };
 })();
 
-const AUTH_API_URL = new URLSearchParams(location.search).get("auth") || "/auth";
+const AUTH_API_URL = apiBase("auth", "/auth");
 const TOKEN_KEY = "td_token";
 
 const getToken = () => localStorage.getItem(TOKEN_KEY);
