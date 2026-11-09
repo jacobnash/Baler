@@ -10,7 +10,7 @@ import json
 import os
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlparse
 
 from rdflib import URIRef
 
@@ -290,7 +290,7 @@ def make_handler(store, ts_pool):
                     if compact:
                         hisquery.compact_series(result)
                     sp.set_attribute("samples", sum(len(s["history"]["ts"] if compact else s["history"]) for s in result["series"]))
-                    respond_json_streamed(self, 200, result)
+                    respond_json_streamed(self, 200, result, his_paging_headers(self.path, result))
 
         def do_PATCH(self):
             if not self._require_gateway():
@@ -441,6 +441,21 @@ def make_handler(store, ts_pool):
                 self.end_headers()
 
     return IngestHandler
+
+
+def his_paging_headers(path: str, result: dict) -> dict[str, str]:
+    """A cut-short /his page's paging as headers too (#280), like the
+    Haystack read's: `X-Baler-Incomplete`, `X-Baler-After` and a relative
+    `Link: <?...&after=...>; rel="next"` with the request's own query."""
+    if not result.get("after"):
+        return {}
+    query = [(k, v) for k, v in parse_qsl(urlparse(path).query, keep_blank_values=True) if k != "after"]
+    query.append(("after", result["after"]))
+    headers = {"X-Baler-Incomplete": result["incomplete"], "X-Baler-After": result["after"],
+               "Link": f'<?{urlencode(query, quote_via=quote)}>; rel="next"'}
+    # http.server writes headers as latin-1: an IRI beyond it rides in the
+    # (percent-encoded) Link and the body only.
+    return {k: v for k, v in headers.items() if v.isascii()}
 
 
 def main() -> None:

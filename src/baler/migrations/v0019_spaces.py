@@ -1,5 +1,5 @@
 """
-0003 spaces (#209, epic #221 §4): rooms, zones, suites and floors of a
+0019 spaces (#209, epic #221 §4): rooms, zones, suites and floors of a
 project's building, which rooms are next to which, and the terminal units
 that serve each one (the rest of the chain is the graph's brick:feeds).
 Read and written by baler.commissioning.spaces_api.
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 3
+VERSION = 19
 NAME = "spaces"
 
 SPACES = """

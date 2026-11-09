@@ -153,3 +153,16 @@ def test_prefix_settings_are_normalized():
     from baler.commissioning_api import _check_settings
 
     assert _check_settings({"prefixes": [" fbf/a/ ", "fbf/a", "fbf/b"]})["prefixes"] == ["fbf/a", "fbf/b"]
+
+
+def test_the_scheduler_tick_runs_every_sweeper_even_if_one_fails():
+    from datetime import datetime, timezone
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    calls = []
+
+    def boom(now):
+        raise RuntimeError("one sweeper failing")
+    s = runner.Scheduler(db.MemoryRepo(), None, lambda: t0, every_s=3600, extra=[boom, calls.append])
+    s.stop()
+    s.tick()
+    assert calls == [t0]

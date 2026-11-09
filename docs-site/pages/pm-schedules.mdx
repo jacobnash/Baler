@@ -1,0 +1,102 @@
+---
+title: PM schedules
+---
+
+Part of the building lifecycle record (epic Baler#221, design §8.3).
+Baler#199. Builds on [Positions and assets](/assets).
+
+Baler says **what preventive maintenance is due, and why**. It is not a
+CMMS: work orders live in yours. You export the due work as CSV, or as a
+COBie Job sheet.
+
+## Tasks
+
+A task applies to **one asset** (`asset_id`), or to **every installed asset
+of a type** (`asset_type`, matched against the asset's type or Brick class).
+A type-wide task follows replacements on its own: the new fan picks it up,
+with its count starting at its own install.
+
+| `trigger` | Due when | Fields |
+|---|---|---|
+| `calendar` | `interval_days` have passed | `interval_days` |
+| `run_hours` | the equipment has run `interval_hours` | `interval_hours`, `run_point` (a status point) |
+| `condition` | a point's latest value crosses a limit | `condition_point`, `condition_op` (`>=`, `>`, `<=`, `<`), `condition_value`, `condition_unit` |
+
+The count starts at the latest **completion** of that task on that asset. If
+there is none, it starts when the asset was installed in its current position.
+
+**Points relative to the position.** `run_point` and `condition_point`
+can be absolute URIs, or a name under the asset's position:
+`sf-status` for an asset at `urn:equip:fbf/hosp/ahu-1/sf` means
+`urn:point:fbf/hosp/ahu-1/sf/sf-status`. One type-wide task then works for
+every asset of that type.
+
+`source` records where an interval came from (`{document_id, page, quote}`).
+Intervals typed here are the user's. Intervals read from O&M manuals (#202)
+are proposals until a person confirms them.
+
+## Run hours, from raw history
+
+Run hours are counted from **every stored sample** of the status point. No
+5-minute or hourly aggregate is used, because a short cycle is invisible in
+an average.
+
+- A sample's value holds until the next sample, for at most **15 minutes**.
+  A gap in the data is never counted as running.
+- "On" is a true boolean, a number above 0.5, or text such as `on`, `run`,
+  `running`, `active`.
+- Samples flagged bad (`quality`) are skipped, as everywhere else.
+- The value of the last sample before the window (within 15 minutes) holds
+  from the window's start.
+
+A task is `due_soon` at 90% of its interval, `overdue` at 100%.
+
+## Status
+
+`ok`, `due_soon` (calendar: within 14 days; run hours: at 90%), `overdue`,
+or `unknown`. A condition task is `unknown` when there's no numeric value,
+or when the latest value is over a day old. A run-hours task is `unknown`
+when its point doesn't resolve for the position.
+
+## API
+
+Reads need `viewer`, changes `operator`.
+
+| Route | What |
+|---|---|
+| `GET /ops/pm/tasks` | Every task |
+| `POST /ops/pm/tasks` | Add one: `title`, `description`, `asset_id` or `asset_type`, `trigger` and its fields, `duration_hours`, `source` |
+| `PATCH /ops/pm/tasks/{id}` | Edit, or `status: paused` / `active` (audited) |
+| `POST /ops/pm/tasks/{id}/complete` | `asset_id`, `done_at` (default now), `note`, `work_ref`. For a run-hours task it records the run-hour reading since install |
+| `GET /ops/pm/tasks/{id}/completions` | The completions, oldest first |
+| `GET /ops/pm/due?status=overdue,due_soon` | Due work, most urgent first, each with its basis and measurement |
+| `GET /ops/pm/due/export?format=csv` | The due work (default `overdue,due_soon`) as CSV |
+| `GET /ops/pm/due/export?format=cobie-job` | Active tasks as COBie Job rows (CSV) |
+
+## COBie Job export
+
+The rows use the column names of the COBie Job worksheet, as defined in
+NIBS *National BIM Standard-United States, Version 3*, section 4.2,
+**COBie, Annex A**. This is a citation only: no text of the standard is
+reproduced here. `Frequency`/`FrequencyUnit` are the interval and `day` or
+`hour`. A condition task has no frequency, and its limit goes in
+`Description`. Writing a complete COBie workbook is #204.
+
+## UI
+
+The **Assets** page has a *Preventive maintenance* section: what's due, a
+*Done* button per item, an add-task form, and both downloads.
+
+## Storage
+
+Migration 0014: `lc_pm_tasks` and `lc_pm_completions` (append-only). Code:
+`baler.lifecycle.pm`.
+
+## Not built yet
+
+- Pushing to a CMMS through its API. Export only, for now.
+- Applying PM intervals confirmed from O&M extraction (#202) and COBie
+  import (#204).
+- Run hours over years of 1-minute samples is a full scan of the window.
+  It reads from the last completion, so it's usually months, not years.
+  It hasn't been measured at that scale.
