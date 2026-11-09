@@ -21,6 +21,7 @@ RELEASED = {
     "v0001_baseline.py": "1d2d0e4ae1765256e289d1faa354932cc3f1b0f6b194935121534a92dc772ae5",
     "v0002_reading_feed.py": "69e91be0315b236e7e6dde2b7b89aeabb041f6b798cacd8617594d47d80b2a79",
     "v0003_quality_watermark.py": "023829bf0df44304f1c1e376af7a20e73cfd69c4350ccfee665922dcfdb1ce8a",
+    "v0004_alerts.py": "79c2a620550d18df9f2317e0659efb56149a3e47e16428f5a33b077d262dd198",
 }
 
 
