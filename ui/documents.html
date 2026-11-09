@@ -69,6 +69,15 @@
     <section id="detail" hidden>
       <h2 id="detail-title"></h2>
       <p><button type="button" id="download">Download</button> <button type="button" id="verify">Verify integrity</button> <span id="verify-result"></span></p>
+      <h3>Proposed facts</h3>
+      <p class="hint">Warranty terms, PM tasks, nameplate data, start-up checklists and TAB measurements read from
+        this document. Each cites its page and quote. Nothing is applied until you confirm it.
+        <a href="/docs/document-extraction" target="_blank" rel="noopener">Docs</a>.</p>
+      <p><button type="button" id="extract">Extract proposals</button> <span id="extract-result"></span></p>
+      <table id="proposals-table">
+        <thead><tr><th>Kind</th><th>Fact</th><th>Page</th><th>Quote</th><th>By</th><th>Status</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
       <h3>Links</h3>
       <table id="links-table"><thead><tr><th>Kind</th><th>Target</th><th>Page</th><th>Note</th></tr></thead><tbody></tbody></table>
       <form id="link-form" class="inline-form">

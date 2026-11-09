@@ -1,0 +1,103 @@
+---
+title: Facts from documents
+---
+
+Part of the building lifecycle record (epic Baler#221, design §5).
+Baler#202. Builds on the [document store](/documents).
+
+O&M manuals, submittals, start-up guides, warranty letters and TAB reports
+hold facts an owner needs. Baler reads a stored document's pages and
+**proposes** those facts. Each proposal cites the page and the verbatim text
+it came from. **A person confirms each one** (correcting it if needed) or
+rejects it. **Nothing is applied on its own.** This is the same rule as Cx 7
+spec extraction.
+
+## What it proposes
+
+| Kind | Payload |
+|---|---|
+| `warranty` | `duration_months`, `covers` (parts / labor / parts_and_labor), `starts_from` (e.g. start-up), `terms` |
+| `pm_task` | `title`, `trigger` (`calendar` or `run_hours`), `interval_days` or `interval_hours`, `parts` (e.g. `filter 24x24x2`) |
+| `nameplate` | `manufacturer`, `model`, `serial`, `tag` |
+| `startup_checklist` | `title`, `steps` (a candidate Cx 6 procedure) |
+| `tab_measurement` | `space`, `terminal`, `quantity`, `design`, `measured`, `unit` |
+
+## Who reads it
+
+The provider is the one the commissioning features already use,
+`BALER_LLM_PROVIDER` (see `.env.example`). No new service or key is involved:
+
+- **`none`** (also what you get with no key configured): **local rules
+  only**, regular expressions over the page text. It's offline and free. It
+  finds plainly worded warranty durations ("warranted ... for one (1) year from
+  the date of start-up"), PM intervals ("every 3 months", "every 2,000
+  operating hours", "monthly"), filter sizes, `Model No:` / `Serial No:` /
+  `Manufacturer:` lines, and numbered start-up checklists. **It does not
+  read TAB tables.**
+- **`anthropic`**: Claude reads the page text, with structured output and
+  the same model setting as Cx 7 (`BALER_CX_MODEL`, else `BALER_LLM_MODEL`,
+  else the default in `commissioning/llm.py`).
+- **`openai`**: any OpenAI-compatible endpoint (Ollama, Groq, ...), with page
+  text in chunks of `BALER_LLM_MAX_CHARS`.
+
+The rules always run first. A model's proposals are added to them, and
+duplicates (same kind, page and quote) are removed.
+
+**Every quote is checked against its page.** A proposal whose quote isn't
+on the page it cites is moved to the page it is on. If it isn't on any page,
+it's **dropped**, and the run's `info.dropped` counts it, because weaker
+models invent quotes. If the model fails, the run still returns the rules'
+proposals and records the error.
+
+The model only sees text that pdfplumber extracted from the stored file. A
+scanned document with no text layer can't be extracted.
+
+## Reviewing
+
+Confirming records the fact as you confirmed it (`decided_payload`), next
+to what was read (`payload`), who confirmed it, and when. Rejecting records
+the rejection. Every decision is audited on the document
+(`proposal.confirm`, `proposal.reject`).
+
+A confirmed proposal is not yet a warranty, a PM task or an asset field.
+Applying confirmed facts to assets (#197), warranties (#198) and PM
+schedules (#199) comes once those land: see *Not built yet*.
+
+## API
+
+| Route | What |
+|---|---|
+| `POST /ops/documents/{id}/extract` | Run an extraction. Body: optional `kinds` (a subset). Returns the run and its proposals (operator) |
+| `GET /ops/documents/{id}/proposals?status=` | The document's proposals |
+| `GET /ops/document-proposals?status=&kind=` | Across all of the org's documents |
+| `POST /ops/document-proposals/{id}/decide` | `action` (`confirm` / `reject`), optional corrected `payload`, `note` (operator) |
+
+## UI
+
+**Documents**, then open a document: *Extract proposals*, then *Confirm*
+(edit the JSON to correct it) or *Reject* for each proposal.
+
+## How well does it work?
+
+**Not measured yet.** The unit tests show the rules find each kind of fact
+in a hand-written O&M sample, and that invented quotes are dropped. That
+isn't a measure of recall on real manuals. A small labelled set of real O&M
+pages is needed before quoting any accuracy number (the drawing-schedule
+work, #203, builds the same kind of eval set for schedules).
+
+## Storage
+
+Migration 0004: `lc_doc_extractions` and `lc_doc_proposals`. Code:
+`baler.lifecycle.extraction`.
+
+## Not built yet
+
+- **Applying** confirmed facts: a warranty onto an asset, a PM task onto a
+  type, nameplate data onto an asset, a checklist as a Cx 6 procedure. That
+  waits for #197, #198 and #199 to merge. It will always be a separate,
+  explicit step.
+- Background extraction for long manuals. Extraction runs in the request
+  for now.
+- Sending the PDF itself, page images included, to Claude, as Cx 7 does. For
+  now only page text is sent.
+- An eval set for O&M extraction.
