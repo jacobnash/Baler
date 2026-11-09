@@ -43,6 +43,7 @@ RELEASED = {
     "v0023_performance_baselines.py": "aaab2593e1d34b4c193d9a06442af11af7b5443f08c9499360b097d22291246d",
     "v0024_savings_cases.py": "ab1b3ad721ca8a9f2b87d58e957419347ae996de295fab2381afb326d16634de",
     "v0025_schedules.py": "0bba79126def2795d1a8e51e138a9a647d48d7376a9dcfb2c001f24fd1697f04",
+    "v0026_schedule_evidence.py": "5233dcc0908bf5665b33c8e41807183feba767b8b82bb6eac68845f6915e19c7",
 }
 
 

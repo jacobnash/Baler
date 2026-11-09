@@ -296,6 +296,10 @@ check("commissioning (/cx/): reads viewer, changes operator, archive admin, site
     assert.equal(policy.resolveRoute("POST", "/cx/projects/p1/construction-schedules").minRole, "operator");
     assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/construction-schedules").minRole, "viewer");
     assert.equal(policy.resolveRoute("GET", "/cx/construction-schedules/s1/activities").minRole, "viewer");
+    // Baler#218 earned evidence: under /construction-schedules, like #217
+    assert.equal(policy.resolveRoute("GET", "/cx/construction-schedules/s1/earned-evidence").minRole, "viewer");
+    assert.equal(policy.resolveRoute("GET", "/cx/construction-schedules/s1/link-suggestions").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/schedule-links/l1/signoff").minRole, "operator");
     // Cx 6 procedures
     assert.equal(policy.resolveRoute("GET", "/cx/procedure-templates").minRole, "viewer");
     assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/procedures").minRole, "viewer");
