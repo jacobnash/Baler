@@ -150,8 +150,8 @@ jobs:
       - run: pip install -e ".[dev,validate,export,offsite]"
       # docker-container builder + Actions cache token: the type=gha layer
       # cache in .github/ci/build-app-image.sh needs both (#27)
-      - uses: docker/setup-buildx-action@v4
-      - uses: crazy-max/ghaction-github-runtime@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+      - uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487  # v4.0.0
       # One app image build for every service (not one per service), from
       # the Actions layer cache; shard 1 writes the cache for the next run.
       - run: .github/ci/build-app-image.sh ${{ matrix.shard == 1 && '--write-cache' || '' }}
@@ -258,8 +258,8 @@ jobs:
           "bin/hx init -headless -suUser su -suPass $HAXALL_SU_PASSWORD -httpPort 8080 /haxall/var/ci && bin/hx run /haxall/var/ci"
       # docker-container builder + Actions cache token: the type=gha layer
       # cache in .github/ci/build-app-image.sh needs both (#27)
-      - uses: docker/setup-buildx-action@v4
-      - uses: crazy-max/ghaction-github-runtime@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+      - uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487  # v4.0.0
       - run: .github/ci/build-app-image.sh  # reads the cache; integration (1) writes it
       - run: docker compose up -d --no-build --wait --wait-timeout 300
       - name: Wait for Haxall
