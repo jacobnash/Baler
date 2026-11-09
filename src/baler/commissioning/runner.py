@@ -527,10 +527,24 @@ class Scheduler:
 
     def _loop(self) -> None:
         while not self._stop.wait(self.every_s):
+            self.tick()
+
+    def tick(self) -> None:
+        """One pass: queue what's due, then every extra (the Cx 9 sweeper,
+        the fleet sweeper, operator-write expiry, ...). Each runs on its
+        own, so one failing never skips the others - least of all a
+        sweeper. (Before this, `extra` was stored and never called: the
+        periodic sweeps only ran at startup.)"""
+        now = self.clock()
+        try:
+            schedule_tick(self.repo, self.worker, now)
+        except Exception:
+            log.exception("cx schedule tick failed")
+        for fn in self.extra:
             try:
-                schedule_tick(self.repo, self.worker, self.clock())
+                fn(now)
             except Exception:
-                log.exception("cx schedule tick failed")
+                log.exception("cx scheduler extra %r failed", fn)
 
     def stop(self) -> None:
         self._stop.set()
