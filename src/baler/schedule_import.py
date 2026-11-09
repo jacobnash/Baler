@@ -41,17 +41,15 @@ class ScheduleError(ValueError):
 
 
 def _date(v: str | None) -> str | None:
-    """'2026-03-02 08:00' / '2026-03-02T08:00:00' -> ISO, or None."""
+    """'2026-03-02 08:00' / '2026-03-02T08:00:00' -> ISO, or None. Wall
+    time as the schedule states it: no zone is invented."""
     v = (v or "").strip()
     if not v:
         return None
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-        try:
-            # wall time as the schedule states it: no zone is invented
-            return datetime.strptime(v[:19] if "T" in v else v, fmt).isoformat()  # noqa: DTZ007
-        except ValueError:
-            continue
-    raise ScheduleError(f"unreadable date {v!r}")
+    try:
+        return datetime.fromisoformat(v[:19]).isoformat()
+    except ValueError as exc:
+        raise ScheduleError(f"unreadable date {v!r}") from exc
 
 
 def _status(actual_start, actual_finish) -> str:
