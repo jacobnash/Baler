@@ -54,6 +54,11 @@ x-daemon-env: &daemon-env
   BALER_MQTT_PUBLIC_HOST: ${BALER_MQTT_PUBLIC_HOST:-}
   BALER_MQTT_PUBLIC_PORT: ${BALER_MQTT_PUBLIC_PORT:-1883}
   BALER_MQTT_PUBLIC_TLS_PORT: ${BALER_MQTT_PUBLIC_TLS_PORT:-}
+  # Blank-safe (blank = off): every process posts each unhandled exception
+  # (type, message, file/line - no locals) here as signed JSON (#277,
+  # baler.errors). Counts land in /ops/status either way.
+  BALER_ERROR_TRACKING_URL: ${BALER_ERROR_TRACKING_URL:-}
+  BALER_ERROR_TRACKING_SECRET: ${BALER_ERROR_TRACKING_SECRET:-}
 
 x-daemon-depends-on: &daemon-depends-on
   postgres:
@@ -347,6 +352,9 @@ services:
       <<: *daemon-env
       # reads derivations.json to find computed points whose derivation is gone
       BALER_DATA_DIR: /data
+      # when the Backups / Restore drill cards turn degraded (#276, #196)
+      OPS_BACKUP_STALE_HOURS: ${OPS_BACKUP_STALE_HOURS:-36}
+      OPS_DRILL_STALE_DAYS: ${OPS_DRILL_STALE_DAYS:-8}
     volumes:
       - .:/app
       - baler-data:/data:ro
@@ -356,6 +364,52 @@ services:
     healthcheck:
       <<: *http-api-healthcheck
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8007/openapi.yaml')"]
+
+  # Operator alerts and the dead-man's switch (#277, baler.alerts): judges
+  # what /ops/status knows every BALER_ALERT_INTERVAL_SECONDS and sends one
+  # notice when something breaks and one when it clears, by webhook and/or
+  # email. Sends nothing until a channel is configured in .env, and pings
+  # nothing unless BALER_DEADMAN_URL is set. Its own process, so a slow mail
+  # server or webhook never holds up /ops/status.
+  alerter:
+    restart: unless-stopped
+    build: .
+    command: python -m baler.alerts
+    environment:
+      <<: *daemon-env
+      BALER_ALERT_INTERVAL_SECONDS: ${BALER_ALERT_INTERVAL_SECONDS:-}
+      BALER_ALERT_FOR_SECONDS: ${BALER_ALERT_FOR_SECONDS:-}
+      BALER_ALERT_CLEAR_SECONDS: ${BALER_ALERT_CLEAR_SECONDS:-}
+      BALER_ALERT_REPEAT_SECONDS: ${BALER_ALERT_REPEAT_SECONDS:-}
+      BALER_ALERT_INSTANCE: ${BALER_ALERT_INSTANCE:-}
+      BALER_ALERT_WEBHOOK_URL: ${BALER_ALERT_WEBHOOK_URL:-}
+      BALER_ALERT_WEBHOOK_SECRET: ${BALER_ALERT_WEBHOOK_SECRET:-}
+      BALER_ALERT_EMAIL_TO: ${BALER_ALERT_EMAIL_TO:-}
+      # The data volume, mounted read-only below, is what "disk low" watches.
+      BALER_ALERT_DISK_PATHS: ${BALER_ALERT_DISK_PATHS:-/pgdata}
+      BALER_ALERT_DISK_MIN_FREE_PCT: ${BALER_ALERT_DISK_MIN_FREE_PCT:-}
+      BALER_ALERT_CERT_HOSTS: ${BALER_ALERT_CERT_HOSTS:-}
+      BALER_ALERT_CERT_DAYS: ${BALER_ALERT_CERT_DAYS:-}
+      BALER_ALERT_GATEWAY_5XX: ${BALER_ALERT_GATEWAY_5XX:-}
+      BALER_ALERT_GATEWAY_WINDOW_SECONDS: ${BALER_ALERT_GATEWAY_WINDOW_SECONDS:-}
+      BALER_ALERT_RESTART_COUNT: ${BALER_ALERT_RESTART_COUNT:-}
+      BALER_ALERT_RESTART_WINDOW_SECONDS: ${BALER_ALERT_RESTART_WINDOW_SECONDS:-}
+      BALER_ALERT_RESTART_IGNORE: ${BALER_ALERT_RESTART_IGNORE:-}
+      BALER_DEADMAN_URL: ${BALER_DEADMAN_URL:-}
+      BALER_DEADMAN_INTERVAL_SECONDS: ${BALER_DEADMAN_INTERVAL_SECONDS:-}
+      BALER_SMTP_HOST: ${BALER_SMTP_HOST:-}
+      BALER_SMTP_PORT: ${BALER_SMTP_PORT:-}
+      BALER_SMTP_TLS: ${BALER_SMTP_TLS:-}
+      BALER_SMTP_USER: ${BALER_SMTP_USER:-}
+      BALER_SMTP_PASSWORD: ${BALER_SMTP_PASSWORD:-}
+      BALER_SMTP_FROM: ${BALER_SMTP_FROM:-}
+    volumes:
+      - .:/app
+      - postgres-data:/pgdata:ro
+      # the gateway's 5xx log, for the "gateway answering with server errors" alert
+      - gateway-logs:/gateway-logs:ro
+    depends_on: *daemon-depends-on
+    extra_hosts: *host-gateway
 
   # Commissioning (Baler#32/#37): projects, phases, scoped inventory,
   # SHACL expected-point templates, verification runs. Gateway /cx/.

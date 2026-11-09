@@ -223,7 +223,8 @@ def test_collect_status_answers_from_the_background_round(mock_building):
     with patch("baler.ops_status._probes", cache), patch("baler.ops_status._probe_one", side_effect=_fake_probe) as probe:
         doc = ops_status.collect_status()
     # only the inferred (no I/O) components were judged per request
-    assert {c[0][0]["id"] for c in probe.call_args_list} == {"ingest_listener", "fault_detector", "derivation_engine"}
+    assert {c[0][0]["id"] for c in probe.call_args_list} == {"ingest_listener", "fault_detector", "derivation_engine",
+                                                             "backups", "restore_drill"}
     assert {c["id"] for c in doc["platform"]} >= {"historian", "data_api"}
 
 
