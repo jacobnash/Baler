@@ -439,9 +439,7 @@ def check_schema_migrations(conn: psycopg.Connection, rep: Report) -> None:
     ok = bool(versions) and versions == list(range(1, len(versions) + 1))
     detail = f"1..{versions[-1]} recorded" if ok else f"recorded {versions}"
     if ok and versions[-1] <= schema.head():
-        with conn.transaction():
-            pending = [m.VERSION for m, _ in schema.plan(conn)]
-            conn.execute("SELECT 1")
+        pending = [m.VERSION for m, _ in schema.plan(conn)]  # read-only
         detail += f"; this code's head is {schema.head()}" + (
             f", migrate would apply {pending}" if pending else ", nothing pending")
     elif ok:
