@@ -248,6 +248,7 @@ first). When a step passes, that is where the next step will most likely fail.
 | 3 | the graph didn't take a step's tags in time | `graph ingest (…)` |
 | 4 | ingest symptoms: broker drops, < 99% stored, p95 lag ≥ 30 s or growing, lost canaries, listener queue past 80% of its cap, broker queue growing | the most saturated part of the ingest chain: `ingest listener: mqtt_listener CPU-capped (throttled 38%)`, `… CPU-bound (busiest thread 96% of a core)`, `broker: mosquitto …`, `postgres CPU-capped (…)`, `postgres write-bound (IO:WALSync 55%, …)`, `postgres locks (…)`, `disk (util p90 98%, 240 MB/s written)`; `broker drops (N; subscriber unattributed)` if none is at its limit |
 | 5 | the rule daemons' work ([#273](https://github.com/jacobnash/Baler/issues/273)): a rule daemon missed readings from the reading feed, or ended the soak > 30 s behind; or derivation ticks started more than one interval late, or left the chain top more than 2 intervals + 30 s behind its inputs | the work, then the daemon and what it ran out of (its CPU; else Postgres waits; else a thread evaluating ≥ 90% of the time with CPU to spare, i.e. Postgres round trips): `Cur-mode rule evaluation: fault_detector behind on the reading feed: CPU-bound (…)`, `Cur-mode derivations: derivation_engine behind …`, `derivation ticks: a pass of 7692 rows takes 58.2 s against its 60 s interval; CPU-bound (…)` |
+| 5b | fault_detector's periodic work over its interval (#268), from its heartbeat at the end of the soak: the last quality pass's `sweep_s` ≥ its interval, the quality `watermark_lag_s` ≥ 2 intervals, or His cycles more than 1.5 intervals apart (`his.gap_s_max`) | `fault_detector quality sweep over its interval: quality sweep 412 s of its 300 s interval (9,000,000 rows, 600 s of history)`, `fault_detector his cycle over its interval: …`; high confidence with its CPU at its limit, else medium. The same three ratios are in `headroom`. |
 | 6 | a read probe over budget or not HTTP 200 | the worst probe (median / budget), the span that took most of its median request, and its API's CPU during the probes: `reads: read?filter=point (2.1 s > 1.5 s) haystack.encode 48%` |
 | 7 | anything else `evaluate()` failed the step for | `unattributed: <reason>` |
 
@@ -715,8 +716,8 @@ tell you either way. That is the point of the change.
   history read 2.2M rows in 13 s. That's about 72M rows an hour at 100k points, longer than
   its interval. It used to `fetchall` all of them at once, which OOM-killed the daemon
   (1 GB cap) once a full hour of 25k-point history existed. It now reads 150 points at a
-  time, and its duration is in the heartbeat (`quality.sweep_s`), but it still has to become
-  incremental.
+  time, and its duration is in the heartbeat (`quality.sweep_s`). It's incremental now, on its
+  own thread: see [Quality sweep](#quality-sweep-268-limiter-removed-next-limiter-exposed).
 
 Batched writes cost almost nothing to make durable. At 1,000-row batches, `synchronous_commit=on`
 measured 17–25k rows/s against 15–21k for `off`; single-row writes pay the fsync (about 1.3×).
@@ -924,6 +925,52 @@ rows a minute (the chain tops plus the seeded derivations) would take about 115 
 interval. Both estimates come from a 4-CPU VM; nash-srv will measure the real ones. The fix
 candidates are a second Cur-mode worker sharded by equip, and running each derivation's rows as
 one sandboxed call instead of a thread per row.
+
+### Quality sweep (#268): limiter removed, next limiter exposed
+
+**Before:** `quality.sweep` ran inline in fault_detector's His loop and re-judged the last hour of
+every classified point on each pass, so His rules waited for the whole pass and a pass grew with
+the history behind it (nash-srv: 25 s at 25k, 68 s at 50k, 170 s at 100k; a full hour at 20,000
+readings/s projected to about 680 s, past the 300 s interval). **After:** a pass runs on its own
+thread and connection and judges only what is new since a persisted watermark, plus an overlap,
+plus late rows the reading feed shows ([Sample quality](/quality#how-the-sweep-stays-incremental)).
+
+Local runs (dev VM, 4 CPUs shared with other agents' stacks and test runs, so per-row costs are
+noisy; `--soak 900`, mix pattern, 60% of points classified):
+
+| Run | Pass | Rows judged | `sweep_s` | His cycle gap |
+|---|---|---|---|---|
+| 25k, main (load/CPU 2.3–3.6) | 1st / 2nd / 3rd | 0.79M / 1.72M / 2.70M | 10.6 / 26.2 / 50.2 s | inline: 30 s + the pass, up to ~80 s |
+| 25k, #268 (load/CPU 3.4–8, ingest 145–260 s behind) | steady passes | 1.04M / 0.84M / 0.76M / 0.58M … 1.44M | 39.3 / 23.9 / 25.2 / 28.8 … 23.8 s | `gap_s_max` 30.07–30.20 s, 0 cycles over |
+| 50k, #268 (10k/s offered, 4.7k/s stored: generator- and host-bound) | steady passes | 0.83M / 1.31M / 1.06M / 0.90M (+ 300k context) | 19.6 / 26.8 / 17.3 / 6.3 s | `gap_s_max` 30.28–30.32 s, 0 cycles over |
+
+- **Rows per pass follow the ingest rate**, not the hour: about stored rate × classified share ×
+  (interval + overlap). In these runs the listener ran 2–4 minutes behind (the host's other load),
+  so the overlap widened to the measured delay (170–300 s) instead of sending every row down the
+  late path; at a 30 s overlap the same 25k run, without the adaptive overlap, recorded 413k
+  "late" rows in 3 minutes.
+- **A/B on one database at one moment** (end of the 50k soak): main's `sweep` over the last hour
+  read 2.82M rows in 51.2 s (18.2 µs/row); the incremental pass over the last 330 s read 0.68M rows
+  plus 0.30M context rows in 14.9 s (21.8 µs/row, the context probes included). The spike check
+  itself went from 4.0 to 1.3 µs/sample.
+- **Late rows:** three readings published mid-soak at 25k, 10 minutes late, 50 minutes late and on
+  time, out of range: all three flagged `out_of_range` (the first two found by the feed watcher,
+  the third by the window); `quality_late` drained; 0 readings missed by the watcher.
+- fault_detector used 0.03 cores on average at 50k (p90 0.04); its feed lag peaked at 3.1 s.
+
+At 100k points and 20,000 readings/s with 60% classified, a pass is about 12k rows/s × 330 s =
+4M rows, roughly 90 s at the measured 22 µs/row (160 s if ingest runs 5 minutes behind and the
+overlap reaches its cap): inside the 300 s interval, where the hour re-scan was not.
+
+**Next limiter exposed.** No longer the His loop: cycles kept 30.0–30.3 s at 25k and 50k. In
+fault_detector the next wall is the pass's own per-row cost: a pass is
+rate × (interval + overlap) × ~22 µs, so it overruns a 300 s interval at about 40k classified
+rows/s (Python decode and judging on one thread, sharing the GIL with the Cur-mode feed thread),
+and the per-pass `point_meta` SPARQL (1–3.6 s at 50k) grows with the classified points. Both are
+in the heartbeat (`quality.window_s`, `quality.meta_s`) and the limiter's rule 5b names a pass that
+overruns. On this host the step limiter was ingest (generator and listener under shared CPU), not
+fault_detector: its headroom ratios at 50k were His cycle 0.67, quality watermark 0.27, quality
+sweep 0.06.
 
 ### nash-srv
 

@@ -31,6 +31,9 @@ the limiter"; tested in tests/test_scale_limiter.py on recorded samples):
    its inputs past 2 intervals + 30 s. Attributed to the daemon's CPU, else
    Postgres waits, else a thread busy evaluating with CPU to spare (round
    trips).
+5b. fault_detector's periodic work over its interval (#268): the quality
+   sweep's pass longer than its interval or its watermark falling behind,
+   or His-mode cycles not keeping their interval.
 6. Read probes over budget: the worst one (median / budget) and the span
    that took most of its time, from its Jaeger trace, plus the API's
    throttling during the probes.
@@ -56,6 +59,8 @@ WRITER_BUSY = 0.80      # listener's share of time inside flush()
 LISTENER_QUEUE = 0.80   # listener queue peak / its cap
 MEM = 0.95              # memory peak / cap
 LAG_S = 30.0            # p95 lag pass condition (ladder.MAX_P95_LAG_S)
+QUALITY_LAG = 2.0       # quality watermark lag / its interval: behind (about 1 when keeping up)
+HIS_GAP = 1.5           # His cycle start-to-start gap / its interval
 
 ONE_CORE = ("mqtt_listener", "fault_detector", "derivation_engine", "haystack_api", "ingest_api",
             "commissioning_api", "ops_api", "mosquitto")
@@ -364,6 +369,33 @@ def read_limiter(step: dict, p: dict) -> tuple[str, list[str], str]:
     return head, ev, conf
 
 
+def periodic(step: dict) -> list[tuple[float, str, str]]:
+    """fault_detector's periodic work against its interval, from its
+    heartbeat (#268): [(ratio, part, detail)], ratio 1.0 = at the limit.
+    The quality sweep: its last pass's sweep_s over its interval, and its
+    watermark lag over QUALITY_LAG intervals. His mode: the longest
+    cycle-to-cycle gap over HIS_GAP intervals."""
+    out = []
+    for svc, r in (step.get("rules") or {}).items():
+        hb = r.get("heartbeat") or {}
+        q = hb.get("quality") or {}
+        iv = q.get("interval_s")
+        if iv and q.get("sweep_s") is not None:
+            out.append((q["sweep_s"] / iv, f"{svc} quality sweep",
+                        (f"{svc} quality sweep {q['sweep_s']} s of its {iv:g} s interval "
+                         f"({q.get('rows', 0):,} rows, {q.get('span_s')} s of history)")))
+        if iv and q.get("watermark_lag_s") is not None:
+            out.append((q["watermark_lag_s"] / (QUALITY_LAG * iv), f"{svc} quality watermark",
+                        f"{svc} quality watermark {q['watermark_lag_s']} s behind (interval {iv:g} s)"))
+        his = hb.get("his") or {}
+        hiv = his.get("interval_s") or hb.get("interval_seconds")
+        if hiv and his.get("gap_s_max") is not None:
+            out.append((his["gap_s_max"] / (HIS_GAP * hiv), f"{svc} his cycle",
+                        (f"{svc} His cycles up to {his['gap_s_max']} s apart (interval {hiv:g} s, "
+                         f"last sweep {his.get('sweep_s')} s)")))
+    return out
+
+
 def headroom(step: dict) -> list[dict]:
     """Every measured part and how close it ran to its limit (ratio 1.0 =
     at the threshold), highest first."""
@@ -399,6 +431,8 @@ def headroom(step: dict) -> list[dict]:
             out.append({"part": f"{svc} feed", "ratio": round(f["lag_s_max"] / LAG_S, 3),
                         "detail": f"{svc} feed lag max {f['lag_s_max']} s"})
     out.extend(synthetic_headroom(step))
+    for ratio, part, detail in periodic(step):
+        out.append({"part": part, "ratio": round(ratio, 3), "detail": detail})
     behind = gen_behind(step)
     if behind is not None:
         out.append({"part": "generator", "ratio": round(behind / interval_s(step), 3),
@@ -487,6 +521,20 @@ def verdict(step: dict) -> dict:
         for _, _, _, m in hits[1:]:
             ev.extend(m)
         return done(name, comp, conf, [h[0] for h in hits[1:]])
+
+    # 5b. fault_detector's periodic work over its interval (#268)
+    over = sorted((p for p in periodic(step) if p[0] >= 1.0), key=lambda p: -p[0])
+    if over:
+        _, part, detail = over[0]
+        ev.extend(p[2] for p in over)
+        svc = part.split(" ")[0]
+        s = cpu_saturation(svc, (soak.get("containers") or {}).get(svc) or {})
+        if s and s[0] >= 1.0:
+            ev.append(s[1])
+            return done(f"{part} over its interval: {detail.split(' ', 1)[1]}; {s[1]}", svc, "high",
+                        [p[1] for p in over[1:]])
+        return done(f"{part} over its interval: {detail.split(' ', 1)[1]}", svc, "medium",
+                    [p[1] for p in over[1:]])
 
     # 6. reads
     p = worst_probe(step)
