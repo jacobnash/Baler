@@ -16,7 +16,7 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import psycopg
@@ -243,6 +243,13 @@ def _building_signals(scope=None) -> dict[str, Any]:
             out["heartbeats"] = {s: t.astimezone(timezone.utc).isoformat()
                                  for s, t in heartbeat.latest(conn).items()}
             conn.rollback()  # latest() may have hit a missing table
+            # How often each process started lately (service_runtime, #277):
+            # a daemon in a restart loop - OOM-killed and restarted by
+            # compose every couple of minutes (#336) - beats between kills,
+            # so its heartbeat alone looks healthy. Counts only, so every
+            # caller sees them.
+            out["recent_starts"] = _recent_start_counts(conn)
+            conn.rollback()
             # The rule daemons' place in the reading feed (#243): lag, misses.
             out["reading_feed"] = reading_feed.consumer_status(conn)
             conn.rollback()
@@ -441,13 +448,40 @@ def _infer_faults(building: dict[str, Any], *, platform_ok: bool) -> tuple[str, 
     return "ok", f"running; {n} open fault(s)"
 
 
+def _restart_window() -> tuple[int, float]:
+    """(starts, seconds): the alerter's own restart-loop threshold
+    (BALER_ALERT_RESTART_COUNT / _WINDOW_SECONDS), so the card and the
+    `restarts:` alert agree."""
+    cfg = alerts.Config.from_env()
+    return cfg.restart_count, cfg.restart_window_s
+
+
+def _recent_start_counts(conn) -> dict[str, int]:
+    """{process: starts within the restart window}, {} without the table."""
+    _, window = _restart_window()
+    since = datetime.now(timezone.utc) - timedelta(seconds=window)
+    return {s: sum(1 for t in times if t >= since) for s, times in errors.recent_starts(conn).items()}
+
+
+def _restart_state(building: dict[str, Any], process: str) -> tuple[str, str] | None:
+    """("degraded", why) when the process started restart-count times or
+    more within the window: it is crash- or OOM-looping (#336) even though
+    each incarnation beats its heartbeat until it dies."""
+    count, window = _restart_window()
+    n = (building.get("recent_starts") or {}).get(process, 0)
+    if count <= 0 or n < count:
+        return None
+    return "degraded", (f"restart loop: started {n} times in the last {window / 60:.0f} min "
+                        "(OOM-killed? see `docker compose ps` and dmesg)")
+
+
 def _infer_derivations(building: dict[str, Any], *, platform_ok: bool) -> tuple[str, str | None]:
     if not platform_ok:
         return "down", "historian unreachable"
     stale = _heartbeat_state(building, "derivation_engine")
     if stale:
         return stale
-    behind = _feed_state(building, "derivation_engine")
+    behind = _restart_state(building, "baler-derivation-engine") or _feed_state(building, "derivation_engine")
     if behind:
         return behind
     disabled = building.get("disabled_derivation_targets", 0)
