@@ -3,6 +3,7 @@ Per-sample quality flags (#183). The pure checks need nothing; the
 storage, sweep and consumer tests need docker-compose's Postgres.
 """
 
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -412,3 +413,85 @@ def test_the_mqtt_listener_stores_the_envelope_s_quality(monkeypatch):
     on_message(None, None, Msg('{"value": 140.0, "ts": 1800000000, "quality": {"status_flags": ["overridden"]}}'))
     on_message(None, None, Msg('{"value": 72.0, "ts": 1800000001}'))
     assert got == [(140.0, "overridden"), (72.0, None)]  # the value is stored as sent either way
+
+
+@pytest.mark.integration
+def test_a_row_committed_during_a_pass_is_caught_by_a_concurrent_watcher(conn, sweeper, monkeypatch):
+    """#337: the watcher runs on its own thread, so it can read the feed in
+    the middle of a pass. A row committed then, with its ts inside the
+    window but after the pass read its point, is neither the window's (it
+    was read before the row existed) nor the next window's (that starts at
+    this one's end, less the overlap): the watcher must count it late."""
+    uri = "urn:test-quality:during"
+    meta = {uri: ZONE}
+    now = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(minutes=5)
+    _write(conn, uri, [(now - timedelta(minutes=30 - i), 72.0 + (i % 3) * 0.1) for i in range(30)])
+    sweeper.start(now - timedelta(minutes=20))
+    in_window = now - timedelta(minutes=5)  # > the old watermark - overlap, <= this pass's end
+    real = quality.judge_window
+    seen = {}
+
+    def judge_then_a_row_arrives(*a, **kw):
+        out = real(*a, **kw)
+        _write(conn, uri, [(in_window, 180.0)], feed=True)  # committed after the window read the point
+        seen["late"] = sweeper.watch()  # what the watcher thread does meanwhile
+        return out
+
+    monkeypatch.setattr(quality, "judge_window", judge_then_a_row_arrives)
+    out = sweeper.sweep(now=now, meta=meta)
+    assert seen["late"] == 1
+    # judged by the same pass's late phase, which runs after its window
+    assert out["late_rows"] == 1 and _flags(conn, uri) == {in_window: "out_of_range"}
+    monkeypatch.setattr(quality, "judge_window", real)
+    assert sweeper.sweep(now=now + timedelta(minutes=1), meta=meta)["late_rows"] == 0
+
+
+def test_the_watcher_keeps_reading_the_feed_while_a_pass_runs(monkeypatch):
+    """#337: nash-srv's quality consumer missed 3,007,304 readings with
+    passes of up to 253 s, because the watcher ran only between passes.
+    Now a pass that blocks doesn't stop it."""
+    import threading
+
+    from baler import heartbeat
+
+    started, release, watched = threading.Event(), threading.Event(), []
+
+    class FakeSweeper:
+        def __init__(self, *a, **kw):
+            pass
+
+        def start(self):
+            pass
+
+        def behind(self):
+            return False
+
+        def lag_s(self):
+            return 0.0
+
+        def sweep(self):
+            started.set()
+            release.wait(10)  # a long pass
+            return {"sweep_s": 0.1, "rows": 0}
+
+        def watch(self):
+            watched.append(started.is_set() and not release.is_set())
+            return 0
+
+        def status(self):
+            return {}
+
+    monkeypatch.setattr(quality, "Sweeper", FakeSweeper)
+    monkeypatch.setattr(fault_detector, "connect", lambda: None)
+    monkeypatch.setattr(fault_detector, "QUALITY_WATCH_S", 0.01)
+    stop = threading.Event()
+    t = threading.Thread(target=fault_detector.run_quality, args=(None, 300.0, heartbeat.Status("t"), stop), daemon=True)
+    t.start()
+    assert started.wait(5)
+    deadline = time.monotonic() + 5
+    while sum(watched) < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    release.set()
+    stop.set()
+    t.join(5)
+    assert sum(watched) >= 3  # watched the feed again and again while the pass was still running

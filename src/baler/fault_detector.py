@@ -671,31 +671,48 @@ def run_quality(store, interval: float, status: heartbeat.Status, stop: threadin
     """The quality thread (#268): baler.quality's incremental sweep on its
     own connection, so His-mode rules keep their interval while it runs.
     A pass every `interval` seconds (back to back while it's catching
-    up), and the late-row watcher in between. Its figures are the
-    heartbeat's `quality`, written by the other threads' beats."""
+    up). The late-row watcher runs on a thread and connection of its own
+    (#337): on this one it only read the reading feed between passes, so
+    a pass that ran for minutes left it behind by that much and the feed
+    pruned batches it hadn't read. Its figures are the heartbeat's
+    `quality`, written by the other threads' beats."""
     conn = connect()
-    sweeper = quality.Sweeper(conn, store, interval=interval)
+    sweeper = quality.Sweeper(conn, store, interval=interval, watch_conn=connect())
     sweeper.start()
+    stop = stop or threading.Event()
+    watcher = threading.Thread(target=watch_quality, args=(sweeper, status, stop), name="quality-watch", daemon=True)
+    watcher.start()
     last = -interval
-    while stop is None or not stop.is_set():
-        if time.monotonic() - last >= interval or sweeper.behind():
-            last = time.monotonic()
-            sweeper.watch()  # anything late so far is recorded before the pass moves the watermark
-            with tracer.start_as_current_span("fault_detector.quality_sweep") as span:
-                counts = sweeper.sweep()
-                for k, v in counts.items():
-                    if isinstance(v, (int, float, str)):
-                        span.set_attribute(k, v)
-            if counts["sweep_s"] > interval:
-                print(f"fault detector: quality sweep took {counts['sweep_s']:.1f} s, longer than its "
-                      f"{interval:.0f} s interval ({counts['rows']} rows, watermark {sweeper.lag_s():.0f} s behind)",
-                      flush=True)
+    try:
+        while not stop.is_set():
+            if time.monotonic() - last >= interval or sweeper.behind():
+                last = time.monotonic()
+                with tracer.start_as_current_span("fault_detector.quality_sweep") as span:
+                    counts = sweeper.sweep()
+                    for k, v in counts.items():
+                        if isinstance(v, (int, float, str)):
+                            span.set_attribute(k, v)
+                if counts["sweep_s"] > interval:
+                    print(f"fault detector: quality sweep took {counts['sweep_s']:.1f} s, longer than its "
+                          f"{interval:.0f} s interval ({counts['rows']} rows, watermark {sweeper.lag_s():.0f} s behind)",
+                          flush=True)
+            if not watcher.is_alive():
+                raise RuntimeError("the quality late-row watcher thread died")
+            stop.wait(QUALITY_WATCH_S)
+    finally:
+        stop.set()
+
+
+def watch_quality(sweeper: quality.Sweeper, status: heartbeat.Status, stop: threading.Event) -> None:
+    """The late-row watcher (#337): drains the reading feed every
+    QUALITY_WATCH_S whatever the sweep is doing, and keeps the heartbeat's
+    `quality` figures fresh. An exception ends it, and run_quality (the
+    thread's owner) raises in turn, so the daemon restarts both."""
+    while not stop.is_set():
         sweeper.watch()
         status.update("quality", sweeper.status())
-        if stop is not None:
-            stop.wait(QUALITY_WATCH_S)
-        else:
-            time.sleep(QUALITY_WATCH_S)
+        stop.wait(QUALITY_WATCH_S)
+
 
 if __name__ == "__main__":
     main()
