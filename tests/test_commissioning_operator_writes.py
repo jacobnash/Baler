@@ -81,7 +81,7 @@ class MockWindrow:
         if action in ("write_schedule", "write_calendar"):
             assert suffix == action.replace("_", "-") and body["id"] == "c1"
             obj = self.objects[body["object"]]
-            obj.update({k: v for k, v in body.items() if k not in ("id", "object")})
+            obj.update({k: v for k, v in body.items() if k not in ("id", "object", "who", "reason")})
             return copy.deepcopy(obj)
         raise AssertionError(f"unexpected action {action}")
 
@@ -298,7 +298,8 @@ def test_schedule_write_admin_only_audited_and_reverted(served, oas):
     row = r.json()
     assert row["status"] == "active" and row["before"]["exceptions"] == [] and row["who"] == "adm@example.com"
     sent = [s for s in w.sent if s[0] == "write_schedule"]
-    assert sent == [("write_schedule", {"id": "c1", "object": "schedule,1", "exceptions": _norm_exceptions()})]
+    assert sent == [("write_schedule", {"id": "c1", "object": "schedule,1", "exceptions": _norm_exceptions(),
+                                         "who": "adm@example.com", "reason": "open house Saturday"})]
     assert w.objects["schedule,1"]["exceptions"] == _norm_exceptions()
     # the sweeper writes the old exceptions back at revert_at
     assert ow.sweep(repo, w, T0 + timedelta(days=5)) == []

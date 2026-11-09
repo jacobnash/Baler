@@ -52,10 +52,14 @@ Windrow#26 contract (Baler's side; Windrow implements it):
                   default?: value, effective_period?: [start, end]}
   write_calendar {id, object: "calendar,N", dates: [period, ...]}
 
-  Keys left out are not written. Shapes are windrow/bacnet_schedules.py's
-  read format (null value = relinquish). The result is the object read
-  back after the write, in that same format. Like point_write, it carries
-  expires_at and is refused after it.
+  plus `who` and `reason`, which Windrow logs (the audit of record is
+  here). Keys left out are not written. Shapes are
+  windrow/bacnet_schedules.py's read format (null value = relinquish). The
+  result is the object read back after the write, in that same format.
+  Like point_write, it carries expires_at and is refused after it.
+  Implemented by Windrow PR #37 (docs/command-channel.md, "Schedule and
+  calendar writes"); a refused field names itself and the fields already
+  written, which lands in the row's error.
 """
 
 from __future__ import annotations
@@ -364,9 +368,12 @@ def connection(commander, site: str, instance: str, connection_id: str) -> dict 
     return next((c for c in conns if isinstance(c, dict) and c.get("id") == connection_id), None)
 
 
-def _send(commander, row: dict, fields: dict) -> dict:
+def _send(commander, row: dict, fields: dict, why: str | None = None) -> dict:
+    """`who` and `reason` ride along for Windrow's own log (Windrow#37);
+    the audit of record is the row here."""
     action = WRITE_SCHEDULE if row["value"]["kind"] == "schedule" else WRITE_CALENDAR
-    body = {"id": row["connection_id"], "object": row["value"]["object"], **fields}
+    body = {"id": row["connection_id"], "object": row["value"]["object"], **fields,
+            "who": row.get("who") or row.get("user_sub"), "reason": why or row["reason"]}
     got = commander.command(row["site"], row["instance"], action, body, timeout=COMMAND_TIMEOUT_S,
                             suffix=action.replace("_", "-"))
     return got if isinstance(got, dict) else {}
@@ -413,7 +420,7 @@ def revert_schedule(repo, commander, row: dict, now: datetime, by: str | None, w
         return repo.get_row(TABLE, row["id"]) or row
     back = {k: copy.deepcopy((row["before"] or {}).get(k)) for k in fields}
     try:
-        after = _send(commander, row, back)
+        after = _send(commander, row, back, why)
     except Exception as exc:
         _log(repo, row, {"action": "revert", "ok": False, "error": str(exc)[:500]}, now)
         repo.update_row(TABLE, row["id"], {"error": str(exc)[:1000]})

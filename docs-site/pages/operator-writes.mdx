@@ -89,11 +89,19 @@ value means relinquish:
 | `write_schedule` | `id` (connection), `object` (`schedule,N`), and any of `weekly`, `exceptions`, `default`, `effective_period` |
 | `write_calendar` | `id`, `object` (`calendar,N`), `dates` |
 
+Both also carry `who` and `reason`, which Windrow logs. The audit of
+record is Baler's row.
+
 A key that is left out is not written. The result is the object read back
 after the write. As with `point_write`, the command carries `expires_at`,
-and Windrow refuses it after that time. Until a Windrow implements the
-contract, it answers "unknown action": the write is recorded as `failed`,
-and nothing is changed.
+and Windrow refuses it after that time.
+
+Windrow PR #37 implements this contract. It validates every field before
+it sends anything, and writes one field at a time. If the device refuses a
+field, Windrow's error names that field and the ones already written, and
+Baler records the error on the write's row. A Windrow without the actions
+answers "unknown action": the write is recorded as `failed`, and nothing
+is changed.
 
 ## Not changed
 
