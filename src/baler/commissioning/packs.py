@@ -42,6 +42,9 @@ Rules:
     procedure  a procedure criterion kind (range, availability, response)
     shacl      a template in ontology/cx-expected-points.ttl
     gl36       a ConStrain item Baler runs (commissioning.gl36.ITEMS)
+    attested   not judged from data: a person attests with a document (a
+               filter submittal, a TAB report). Continuous compliance
+               leaves such a row inconclusive; it is never a silent pass.
 - **Nothing is active until a person confirms its numbers.** A value may
   be blank (structure-only packs ship that way). Entering or changing a
   value clears the row's `verified_by`; confirming records who and when.
@@ -55,6 +58,8 @@ Rules:
 from __future__ import annotations
 
 import copy
+import json
+import os
 import re
 from datetime import datetime
 
@@ -62,7 +67,7 @@ from baler.commissioning import procedures
 from baler.commissioning import templates as tpl
 
 STATUSES = ("draft", "published", "retired")
-ENGINES = ("cx", "procedure", "shacl", "gl36")
+ENGINES = ("cx", "procedure", "shacl", "gl36", "attested")
 PHASES = ("design", "construction", "startup", "functional", "acceptance", "warranty", "operations")
 OPS = (">=", "<=", ">", "<", "between", "==")
 CX_FAMILIES = ("exists", "live", "pair:", "template:", "gl36:", "cx:econ_")
@@ -73,6 +78,9 @@ _ID = re.compile(r"[a-z0-9][a-z0-9_.-]{0,79}")
 _VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}")
 _CLASS = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,99}")
 _SLUG = re.compile(r"[a-z][a-z0-9_]{0,59}")
+# Structure-only packs Baler ships (#208): citations and blank values, never
+# a standard's text or numbers.
+LIBRARY_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "packs")
 
 # The quantities rows are written in, with the unit a value is entered in
 # and the point classes that usually evidence them. Units are the ones the
@@ -127,6 +135,8 @@ def check_ref(check, where: str, shacl_ids: set[str] | None = None) -> dict:
     if not isinstance(check, dict) or check.get("engine") not in ENGINES:
         raise ValueError(f"{where}: check.engine must be one of {', '.join(ENGINES)}")
     eng = check["engine"]
+    if eng == "attested":
+        return {"engine": eng}
     if eng == "cx":
         cid = check.get("check_id")
         if not isinstance(cid, str) or not (cid in ("exists", "live") or cid.startswith(CX_FAMILIES[2:])):
@@ -323,3 +333,14 @@ def summary(pack: dict) -> dict:
     rows = pack["requirements"]
     return {"rows": len(rows), "confirmed": sum(1 for r in rows if r.get("verified_by")),
             "blank": sum(1 for r in rows if blanks(r)), "active": len(active_rows(pack))}
+
+
+def library() -> dict[str, dict]:
+    """The shipped packs, by pack_id, each checked by normalize()."""
+    out = {}
+    for name in sorted(os.listdir(LIBRARY_DIR)) if os.path.isdir(LIBRARY_DIR) else []:
+        if name.endswith(".json"):
+            with open(os.path.join(LIBRARY_DIR, name)) as f:
+                doc = normalize(json.load(f))
+            out[doc["pack_id"]] = doc
+    return out

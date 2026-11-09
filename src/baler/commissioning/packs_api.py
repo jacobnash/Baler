@@ -62,8 +62,16 @@ def _list(h, span, claims) -> None:
 
 
 def _import(h, span, claims) -> None:
-    """A pack document becomes a draft version in the caller's org."""
-    doc = packs.normalize(h.read_json_body())
+    """A pack document becomes a draft version in the caller's org; or
+    {"library": "<pack_id>"}, one of the structure-only packs Baler ships."""
+    body = h.read_json_body()
+    if isinstance(body, dict) and set(body) == {"library"}:
+        lib = packs.library()
+        if body["library"] not in lib:
+            raise ValueError(f"no shipped pack {body['library']!r}: one of {', '.join(sorted(lib))}")
+        doc = lib[body["library"]]
+    else:
+        doc = packs.normalize(body)
     have = h.REPO.find_rows(PACKS, org_id=claims["org_id"], pack_id=doc["pack_id"], version=doc["version"])
     if have:
         raise ValueError(f"{doc['pack_id']} {doc['version']} already exists: give a new version")
@@ -152,6 +160,11 @@ def _adopt(h, span, claims, pid) -> None:
     respond_json(h, 201, {"adoption": db.public_row(adoption), "pack": public(row, full=False)})
 
 
+def _library(h, span, claims) -> None:
+    respond_json(h, 200, [{"pack_id": d["pack_id"], "version": d["version"], "title": d["title"], "source": d["source"],
+                           "notice": d["notice"], "rows": len(d["requirements"])} for d in packs.library().values()])
+
+
 def _schema(h, span, claims) -> None:
     respond_json(h, 200, {"engines": list(packs.ENGINES), "cx_families": list(packs.CX_FAMILIES), "phases": list(packs.PHASES),
                           "ops": list(packs.OPS), "quantities": packs.QUANTITIES})
@@ -159,6 +172,7 @@ def _schema(h, span, claims) -> None:
 
 ROUTES: list[Route] = [
     ("GET", re.compile(r"/pack-schema"), "pack_schema", _schema),
+    ("GET", re.compile(r"/pack-library"), "pack_library", _library),
     ("GET", re.compile(r"/packs"), "list_packs", _list),
     ("POST", re.compile(r"/packs"), "import_pack", _import),
     ("GET", re.compile(r"/packs/([^/]+)"), "get_pack", _get),

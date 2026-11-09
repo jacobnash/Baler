@@ -1,0 +1,74 @@
+---
+title: "Example pack: ASHRAE 170 OR"
+---
+
+Baler ships one worked-example [requirement pack](/requirement-packs): the
+structure of an ASHRAE Standard 170 operating-room pack (Baler#208, epic
+#221 §3.1). It is in `packs/ashrae-170-operating-room.json` and in
+`GET /cx/pack-library`.
+
+## What it is
+
+Six rows, each naming a quantity, citing where the standard sets it, saying
+which engine checks it, and leaving the value **blank**:
+
+| Row | Quantity | Engine |
+|---|---|---|
+| `or-pressure-to-adjacent` | pressure to adjacent spaces, `>=`, inH2O | `procedure` / `range` on the room's differential pressure sensor |
+| `or-total-ach` | total air changes per hour, `>=` | `procedure` / `range` (needs ACH as a derivation; see below) |
+| `or-outdoor-ach` | outdoor air changes per hour, `>=` | as above |
+| `or-temperature` | design temperature, `between`, degF | `procedure` / `range` on the room temperature sensor |
+| `or-relative-humidity` | relative humidity, `between`, %RH | `procedure` / `range` on the room humidity sensor |
+| `or-final-filter` | final filter efficiency, `>=`, MERV | `attested`: a person attests with the filter submittal or a site check |
+
+Every citation is a table/section reference, every value is `null`, and
+every row's note says **verify against your edition**. The file holds no
+text and no numbers from the standard. A test checks that: no criterion
+value, and no digit in any row title or note.
+
+## Why the values are blank
+
+The values depend on the edition the building was designed to. Public
+summaries of ASHRAE 170 disagree with each other: some give one lower
+humidity bound and some another, some give one air-change rate and some
+"depending on year of construction", some give a MERV rating for the final
+filter and some HEPA. They differ because they summarise different
+editions. That is the point of editions: a requirement without one is a
+guess. So the person who holds the edition enters the numbers, and confirms
+them.
+
+The pack names the 2021 edition. For another edition, import it and change
+the `version` and `source.edition` before you enter values (or extract rows
+from your own copy, see [Pack extraction](/pack-extraction)). Check the
+table references against your copy too: table numbering moves between
+editions.
+
+## Using it
+
+```bash
+curl $BALER/cx/pack-library
+curl -X POST $BALER/cx/packs -d '{"library": "ashrae-170-or"}'   # a draft in your org
+# enter each value from your copy, then confirm each row
+curl -X PATCH $BALER/cx/packs/$PACK/requirements/or-relative-humidity -d '{"min": ..., "max": ...}'
+curl -X POST  $BALER/cx/packs/$PACK/requirements/or-relative-humidity/confirm
+curl -X POST  $BALER/cx/packs/$PACK/publish
+curl -X POST  $BALER/cx/projects/$P/packs -d '{"pack": "'$PACK'"}'
+```
+
+Until a row is confirmed it is inactive: blank values are never judged.
+
+## The `attested` engine
+
+Filtration isn't something a trend shows. The pack schema gains one engine
+for that: `attested`, meaning a person attests with a document (the filter
+submittal, a TAB report). Continuous compliance (#207) leaves an attested
+row inconclusive; it is never a silent pass. Recording the attestation
+itself (who, which document page) is future work and depends on the
+document store (#201).
+
+## Not yet
+
+- ACH rows need airflow and room volume as a derivation before they can be
+  judged from data.
+- Other space types (isolation rooms, protective environments, sterile
+  storage) and other standards (FGI) follow the same structure.

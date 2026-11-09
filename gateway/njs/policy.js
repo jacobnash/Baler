@@ -186,6 +186,7 @@ const ROUTES = [
   ["POST",   /^\/cx\/agent-proposals\/[^/]+\/reject$/,          "commissioning", "operator"],
   // Requirement packs (#205): org library; publishing freezes a version (admin)
   ["GET",    /^\/cx\/pack-schema$/,                         "commissioning", "viewer"],
+  ["GET",    /^\/cx\/pack-library$/,                        "commissioning", "viewer"],
   ["GET",    /^\/cx\/packs$/,                               "commissioning", "viewer"],
   ["POST",   /^\/cx\/packs$/,                               "commissioning", "operator"],
   ["GET",    /^\/cx\/packs\/[^/]+$/,                         "commissioning", "viewer"],

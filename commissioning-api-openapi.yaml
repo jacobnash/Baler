@@ -1749,6 +1749,28 @@ paths:
           content:
             application/json:
               schema: { type: object, required: [engines, quantities], properties: { engines: { type: array, items: { type: string } }, quantities: { type: object } } }
+  /pack-library:
+    get:
+      tags: [Packs]
+      operationId: listCxPackLibrary
+      summary: The structure-only packs Baler ships (import one with POST /packs {"library":"<pack_id>"})
+      responses:
+        "200":
+          description: Shipped packs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [pack_id, version, title, source, rows]
+                  properties:
+                    pack_id: { type: string }
+                    version: { type: string }
+                    title: { type: string }
+                    source: { type: object }
+                    notice: { type: [string, "null"] }
+                    rows: { type: integer }
   /packs:
     get:
       tags: [Packs]
@@ -1765,13 +1787,16 @@ paths:
     post:
       tags: [Packs]
       operationId: importCxPack
-      summary: Import a pack document as a draft version (operator)
+      summary: Import a pack document, or a shipped pack ({"library":"<pack_id>"}), as a draft version (operator)
       description: Rows carry citations (ref, page), never quoted standard text. Values may be blank.
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/PackDocument" }
+            schema:
+              oneOf:
+                - { $ref: "#/components/schemas/PackDocument" }
+                - { type: object, required: [library], properties: { library: { type: string } }, additionalProperties: false }
       responses:
         "201":
           description: The draft
@@ -1956,7 +1981,7 @@ components:
           type: object
           required: [engine]
           properties:
-            engine: { type: string, enum: [cx, procedure, shacl, gl36] }
+            engine: { type: string, enum: [cx, procedure, shacl, gl36, attested] }
             check_id: { type: string }
             criterion: { type: string }
             template: { type: string }
