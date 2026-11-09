@@ -360,16 +360,30 @@ def graph_counts(ep: Endpoints) -> dict:
             "count_scale_points_s": round(t_points, 3), "count_triples_s": round(t_triples, 3)}
 
 
+# Whether a reading-feed consumer's miss is a real loss that fails a step
+# or soak (#337). Mirrors baler.reading_feed.CONSUMER_RULES (the harness
+# doesn't import Baler; tests/test_scale_soak.py checks they agree), which
+# says what a miss means for each. A consumer not listed counts as required.
+FEED_MISS_REQUIRED = {"fault_detector": True, "derivation_engine": True, "tag_ingest": True, "quality": False}
+
+
+def feed_miss_required(consumer: str) -> bool:
+    return FEED_MISS_REQUIRED.get(consumer, True)
+
+
 def feed_status(conn) -> dict:
-    """The rule daemons' place in the reading feed (Baler#243): consumed
-    offset, lag and readings missed, per consumer. {} on a Baler without
-    the feed (then their QoS 0 drops show only as broker drops)."""
+    """Every reading-feed consumer's place in it (Baler#243): consumed
+    offset, lag and readings missed. The rule daemons, baler.quality's
+    late-row watcher (`quality`) and tag_ingest (#337: nash-srv's soak
+    missed 3M readings at `quality` that the ladder never looked at). {} on
+    a Baler without the feed (then their QoS 0 drops show only as broker
+    drops). Test consumers (`test:...`) are left out."""
     try:
         rows = conn.execute(
             """SELECT c.consumer, c.seq, c.missed_readings, c.missed_batches,
                       (SELECT COALESCE(sum(n), 0) FROM reading_feed f WHERE f.seq > c.seq),
                       (SELECT extract(epoch FROM now() - min(committed_at)) FROM reading_feed f WHERE f.seq > c.seq)
-               FROM reading_feed_consumers c WHERE c.consumer IN ('fault_detector', 'derivation_engine')""").fetchall()
+               FROM reading_feed_consumers c WHERE c.consumer NOT LIKE 'test:%'""").fetchall()
     except Exception:  # noqa: BLE001 - no feed (an older Baler)
         conn.rollback()
         return {}
@@ -378,10 +392,10 @@ def feed_status(conn) -> dict:
             for name, seq, mr, mb, lr, ls in rows}
 
 
-def heartbeat_details(conn) -> dict:
+def heartbeat_details(conn, services: tuple[str, ...] = ("fault_detector", "derivation_engine")) -> dict:
     try:
         return {s: d for s, d in conn.execute(
-            "SELECT service, detail FROM service_heartbeats WHERE service IN ('fault_detector', 'derivation_engine')")}
+            "SELECT service, detail FROM service_heartbeats WHERE service = ANY(%s)", (list(services),))}
     except Exception:  # noqa: BLE001
         conn.rollback()
         return {}
@@ -537,6 +551,18 @@ def db_metrics(conn) -> dict:
         row = q("SELECT before_compression_total_bytes, after_compression_total_bytes, number_compressed_chunks "
                 "FROM hypertable_compression_stats('point_history')").fetchone()
         out["compression"] = {"before_bytes": row[0], "after_bytes": row[1], "compressed_chunks": row[2]}
+        # after_bytes is chunk_compression_stats' figure, from when each chunk
+        # was compressed; late rows and recompression leave more than that
+        # on disk (#337: 565 MB in the stats, 12 GB on disk). The truth:
+        on_disk = q("""SELECT COALESCE(sum(d.total_bytes), 0),
+                              count(*) FILTER (WHERE _timescaledb_functions.chunk_status(
+                                  format('%I.%I', c.chunk_schema, c.chunk_name)::regclass) & 8 = 8)
+                       FROM timescaledb_information.chunks c
+                       JOIN chunks_detailed_size('point_history') d
+                         ON d.chunk_schema = c.chunk_schema AND d.chunk_name = c.chunk_name
+                       WHERE c.hypertable_name = 'point_history' AND c.is_compressed""").fetchone()
+        out["compression"].update(on_disk_bytes=int(on_disk[0]), partial_chunks=int(on_disk[1]),
+                                  on_disk_vs_stats=round(int(on_disk[0]) / row[1], 2) if row[1] else None)
         # the policy the run had (#245): compress_after and how often it runs
         pol = q("SELECT config->>'compress_after', schedule_interval::text FROM timescaledb_information.jobs "
                 "WHERE proc_name = 'policy_compression' AND hypertable_name = 'point_history'").fetchone()
@@ -938,9 +964,11 @@ def evaluate(step: dict) -> tuple[str, list[str]]:
                            "the listener if readings are missing, else fault_detector/derivation_engine missed readings)")
     for svc, r in (step.get("rules") or {}).items():
         feed = r.get("feed") or {}
-        if feed.get("missed_readings_delta"):
+        if feed.get("missed_readings_delta") and feed_miss_required(svc):
             reasons.append(f"{svc} missed {feed['missed_readings_delta']} readings (fell more than the reading feed's "
                            "retention behind)")
+        elif feed.get("missed_readings_delta"):
+            pass  # a consumer that covers a miss another way (quality): in rules.<svc>.feed, not a failure
         elif (feed.get("lag_s_last") or 0) > MAX_P95_LAG_S:
             reasons.append(f"{svc} is {feed['lag_s_last']} s behind on the reading feed at the end of the soak")
     reasons.extend(synthetic.reasons(step))
@@ -1121,7 +1149,7 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
             r = step["rules"].setdefault(svc, {})
             r["feed"] = {"missed_readings_delta": f1["missed_readings"] - f0.get("missed_readings", 0),
                          "lag_s_max": max(lags, default=None), "lag_s_last": f1["lag_s"],
-                         "lag_readings_last": f1["lag_readings"]}
+                         "lag_readings_last": f1["lag_readings"], "miss_required": feed_miss_required(svc)}
             r["heartbeat"] = details.get(svc)
     finally:
         if ev and not ev.stopped:

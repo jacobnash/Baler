@@ -152,7 +152,10 @@ acknowledges publishes its ACL denies.
 `SCALE_MEM_<SERVICE>`; the defaults are in `compose.scale.yml`, e.g. postgres 2 CPUs / 6 GB and
 mqtt_listener 1 CPU / 1 GB). `ladder.py` clamps CPU caps to the host's CPU count, because Docker
 refuses a cap above it. `SCALE_CPUSET=2-5` pins the whole stack to some host CPUs. Each
-container's log is capped at 3 × 50 MB, because postgres runs with `log_statement=all`.
+container's log is capped at 3 × 50 MB. Postgres logs as `docker-compose.yml`'s does
+(`BALER_PG_LOG_STATEMENT`, default `none`): it used to log every statement, and at 20,000
+readings/s that rotated the compression policy's `WARNING` naming why a chunk failed out of the
+log within seconds (#337).
 Everything else (images, commands, Postgres settings, durability) is exactly what
 `docker-compose.yml` runs.
 
@@ -470,6 +473,8 @@ generator at `--points` for `--duration` seconds (default 6 h) and records:
 | | whether a compression run is in progress (polled every 2 s) | `pg_stat_activity` |
 | | the 5m/1h aggregates' watermark age; canary lag, cumulative (`lag`) and **for this sample's window** (`lag_window`: p50/p95/max of the canaries stored in it, plus how many are still pending and the oldest one's age); restarts | catalog, canary, `docker inspect` |
 | | **broker drops** (`broker`: total, since the first sample, since the previous one) | mqtt_listener's supervisor heartbeat, `broker_dropped_total` ([#272](https://github.com/jacobnash/Baler/pull/272)) |
+| | per compressed chunk (`disk.compressed`): **true bytes on disk** next to the chunk stats' figure, and whether late rows await recompression (`partial`); `compressed_now`/`recompressed_now`: chunks that finished compressing, or had their late rows recompressed, since the previous sample, whoever did it (#337) | `chunks_detailed_size`, `chunk_compression_stats`, `chunk_status` |
+| | **checkpoints** (`checkpoints`: timed vs requested, buffers, write/sync ms, and the change since the last sample; nash-srv's 6 h soak had 2,471, every one requested) and `feed`: every reading-feed consumer's offset, lag and misses; `keeper`: what history_keeper is working on | `pg_stat_checkpointer` (`pg_stat_bgwriter` before Postgres 17), `reading_feed_consumers`, its heartbeat |
 | | `detector`: fault_detector's last His sweep time and stale candidates, last quality sweep time and rows; `pg`: the newest chunk's heap and index bytes, cumulative `blks_read`/`blks_hit`, autovacuums running on chunks, the longest active statement | fault_detector heartbeat, `chunks_detailed_size`, `pg_stat_database`, `pg_stat_progress_vacuum`, `pg_stat_activity` |
 | `--probe-every` (600 s) | every read probe in `budgets.json` plus its `soak_probes`: history over the last hour and across the hot/compressed boundary, `hisRead(pastWeek)` for 100 and 1,000 points. Rounds that overlapped a compression run are marked | gateway |
 | `--late-every` (1800 s) | late data into the newest compressed chunk, over MQTT: every point's reading there **replayed** (same ts, new value: a spool or retained replay) and a new reading **backfilled** 1.23 s after it (Windrow's trend backfill). Then each must be stored exactly once, with the new value. Paced: `--late-rate` messages/s (default a tenth of the soak's rate, at least 200/s) and never more than `--late-window` (500) awaiting a PUBACK; the oldest gets `--late-ack-timeout` (60 s). Each entry records the lag just before and while it ran | generator account |
@@ -499,8 +504,17 @@ At the end it compares stored with acknowledged readings over the soak (minus it
 checks `point_history_5m` against the raw fold over the newest compressed hour, and writes
 `results/<run>-soak.json`. `summary` holds the numbers; `status`/`reasons` the verdict.
 
+At the end it also reads what `history_keeper` did since the start (`keeper`: each compress,
+recompress and reclaim, the policy's failed runs, the real error of each failure) and the chunks
+still failing (`compression_end`), and records the server's `max_wal_size`, `checkpoint_timeout`,
+`shared_buffers` and log settings in `settings.pg`.
+
 **Pass** needs all of these (`soak.evaluate_soak`, tested in `tests/test_scale_soak.py`). The
-steady phase starts after `compress_after` + 2 chunks + one schedule:
+steady phase starts where the first chunk finished compressing, as observed (`summary.warm_s`,
+`warm_from`). It used to be `compress_after` + 2 chunks + one schedule after the soak's start, as
+if the hypertable started empty there: nash-srv's 6 h soak (#337), whose stack had been ingesting
+before it, got "1783 s steady after a 19800 s warm-up, 0 compression cycle(s)" though compression
+had run 11 times from t = 12,000 s. The formula is used only when nothing compressed at all.
 
 - **Hot window bounded:** hot bytes in the second half of the steady phase at most 1.25× the
   first half's; no chunk uncompressed longer past its end than `compress_after` + chunk + 2 ×
@@ -508,12 +522,23 @@ steady phase starts after `compress_after` + 2 chunks + one schedule:
 - **Disk grows at the compressed rate:** total bytes per stored row, between two samples a whole
   number of chunk intervals apart (the same point of the hot sawtooth), at most 2× the measured
   compressed bytes per row.
-- **Compression keeps up:** no failed run. `compression_margin` reports median compression rows/s
-  over ingest rows/s (one background worker).
+- **Compression keeps up:** no chunk still failing to compress at the end (a failed policy run
+  that `history_keeper` then retried doesn't fail the soak; its real error is in
+  `summary.keeper_errors`). Without history_keeper, any failed run fails it. `compression_margin`
+  reports median compression rows/s over ingest rows/s (one background worker).
+- **Disk comes back after late rows:** every compressed chunk with no late rows waiting takes at
+  most 2× its chunk-stats size on disk at the end (`summary.settled_on_disk_vs_stats_max`;
+  `compressed_on_disk_bytes` vs `compressed_stats_bytes` overall, `partial_chunks_end`).
 - **Ingest:** ≥ 99% stored, no lost canaries, no broker drops during the soak, p95 lag under 30 s
   overall and in each sample window taken during compression (the window's own p95, not the
   cumulative one, which a single early burst holds up for hours), no growing backlog, no
   restarts. `summary.lag_window_p95_max` and `lag_windows_over_budget` say when lag was worst.
+- **Reading feed:** no missed readings at a consumer that needs every one (`fault_detector`,
+  `derivation_engine`, `tag_ingest`). `quality`'s misses are reported in `summary.feed_misses`
+  and don't fail the run: its window pass reads `point_history`, so a miss leaves only late rows
+  unflagged ([the rule](/fault-detection#scaling-and-missed-readings)). The ladder's steps judge
+  feed misses the same way. `summary.checkpoints` has timed vs requested checkpoints and how far
+  apart they came.
 - **Reads:** every probe round in budget, and at least one round during a compression run
   (otherwise `inconclusive`).
 - **Aggregates:** the 5-minute aggregate equals the raw fold over a compressed hour; watermarks no
@@ -521,8 +546,9 @@ steady phase starts after `compress_after` + 2 chunks + one schedule:
 - **Late data:** at least one late round, every replay and backfill stored once. Rounds that
   failed in the harness are listed in `summary.late_round_errors` and don't fail the run; if no
   round completed at all, the verdict is `inconclusive` (late data untested), not `pass`.
-- At least 2 chunk intervals and 2 compression cycles in the steady phase, or the verdict is
-  `inconclusive: soak too short`.
+- At least 2 chunk intervals and 4 compression cycles (a chunk compressed, or its late rows
+  recompressed) in the steady phase, or the verdict is `inconclusive: soak too short` (#337:
+  compression has to keep pace over 4 cycles while taking late writes).
 
 On nash-srv, the real one (6 h at 100k points, after `init`):
 
