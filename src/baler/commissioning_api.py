@@ -46,6 +46,7 @@ from baler.commissioning import (
     db,
     economizer,
     engine,
+    fleet,
     gates,
     gl36,
     history,
@@ -78,7 +79,7 @@ PORT = 8009
 RUN_STATEMENT_TIMEOUT = "10min"
 
 _PROJECT = re.compile(r"/projects/([^/]+)")
-_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|gate|report|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|agent/sessions|agent/proposals|writes|schedule-writes|schedule-targets|schedules|schedules/refresh|coverage)")
+_PROJECT_SUB = re.compile(r"/projects/([^/]+)/(phases|phase|gate|report|events|inventory|runs|gaps|issues|risks|procedures|faults|faults/ingest|active-runs|fleet-runs|agent/sessions|agent/proposals|writes|schedule-writes|schedule-targets|schedules|schedules/refresh|coverage)")
 _PROJECT_ISSUES = re.compile(r"/projects/([^/]+)/issues/(import|export)")
 _RUN_ISSUES = re.compile(r"/runs/([^/]+)/issues")
 _ISSUE = re.compile(r"/issues/([^/]+)")
@@ -101,6 +102,8 @@ _AGENT_SESSION_MSG = re.compile(r"/agent-sessions/([^/]+)/messages")
 _PROPOSAL_SUB = re.compile(r"/agent-proposals/([^/]+)/(accept|reject)")
 _WRITE_SUB = re.compile(r"/writes/([^/]+)/(relinquish|revert)")
 _ACTIVE_RUN_SUB = re.compile(r"/active-runs/([^/]+)/(confirm|abort)")
+_FLEET_RUN = re.compile(r"/fleet-runs/([^/]+)")
+_FLEET_RUN_SUB = re.compile(r"/fleet-runs/([^/]+)/(confirm|abort)")
 _RUN = re.compile(r"/runs/([^/]+)")
 _RUN_REPORT = re.compile(r"/runs/([^/]+)/report")
 
@@ -162,11 +165,13 @@ engine_kwargs = runner.engine_kwargs
 log = logging.getLogger(__name__)
 
 
-def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None, commander=None):
+def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None, commander=None, fleet_runner=None):
     now_fn = clock or (lambda: datetime.now(timezone.utc))
     worker = worker or runner.RunWorker(repo, now_fn)
     # Active tests (Cx 9) need a point_write route; without an executor
     # (no MQTT commander configured) planning works and confirming is 503.
+    # Fleet runs (Baler#275 d) likewise need `fleet_runner`
+    # (fleet.FleetRunner over a fleet.ChildExecutor).
     # `commander` carries audited operator point and schedule writes
     # (Baler#213); without one those answer 503.
     # `commander` (point_write.Commander) reads schedules and priority
@@ -252,6 +257,8 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                     ("POST", "faults/ingest"): ("ingest_faults", self._ingest_faults),
                     ("GET", "active-runs"): ("list_active_runs", self._list_active_runs),
                     ("POST", "active-runs"): ("plan_active_run", self._plan_active_run),
+                    ("GET", "fleet-runs"): ("list_fleet_runs", self._list_fleet_runs),
+                    ("POST", "fleet-runs"): ("plan_fleet_run", self._plan_fleet_run),
                     ("GET", "agent/sessions"): ("list_agent_sessions", self._list_agent_sessions),
                     ("POST", "agent/sessions"): ("start_agent_session", self._start_agent_session),
                     ("GET", "agent/proposals"): ("list_agent_proposals", self._list_agent_proposals),
@@ -282,6 +289,8 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                               ("POST", "revert"): ("revert_operator_write", self._revert_operator_write)}),
                 (_ACTIVE_RUN_SUB, {("POST", "confirm"): ("confirm_active_run", self._confirm_active_run),
                                    ("POST", "abort"): ("abort_active_run", self._abort_active_run)}),
+                (_FLEET_RUN_SUB, {("POST", "confirm"): ("confirm_fleet_run", self._confirm_fleet_run),
+                                  ("POST", "abort"): ("abort_fleet_run", self._abort_fleet_run)}),
             ):
                 m = rx.fullmatch(path)
                 if m:
@@ -319,6 +328,7 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 (_SPEC_ITEM, {"PATCH": ("patch_spec_item", self._patch_spec_item)}),
                 (_MAPPING, {"DELETE": ("undo_mapping", self._undo_mapping)}),
                 (_ACTIVE_RUN, {"GET": ("get_active_run", self._get_active_run)}),
+                (_FLEET_RUN, {"GET": ("get_fleet_run", self._get_fleet_run)}),
                 (_AGENT_SESSION_MSG, {"POST": ("agent_message", self._agent_message)}),
                 (_AGENT_SESSION, {"GET": ("get_agent_session", self._get_agent_session)}),
             ):
@@ -1909,10 +1919,19 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             every level they hold is relinquished now (admin)."""
             if not self._require_admin(claims):
                 return
-            stopped = []
+            stopped, fleets = [], []
             for p in repo.list_projects(claims["org_id"], include_archived=True):
                 if not self._visible(p, claims):
                     continue
+                # Fleets first (Baler#275 d), so no coordinator starts another
+                # member after its live children are flagged below; a member
+                # started in between still stops at its first check
+                # (fleet.ChildExecutor) and is relinquished with the rest.
+                for f in repo.find_rows(fleet.TABLE, project_id=p["id"]):
+                    if f["status"] in ("confirmed", "running"):
+                        fleet.flag_stop(repo, None, f["id"], "kill switch")
+                        fleets.append(f["id"])
+                        self._event(p["id"], "fleet_run.kill", claims, {"fleet_run_id": f["id"]})
                 for r in repo.find_rows("cx_active_runs", project_id=p["id"]):
                     if r["status"] in ("confirmed", "running"):
                         repo.update_row("cx_active_runs", r["id"], {"abort_requested": True})
@@ -1928,7 +1947,123 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                             relinquished.append(point)
                         except Exception as exc:  # noqa: BLE001 - reported; the sweeper retries
                             relinquished.append(f"FAILED {point}: {exc}")
-            respond_json(self, 200, {"aborted": stopped, "relinquished": relinquished})
+            if fleet_runner is not None:
+                for fid in fleets:
+                    relinquished += fleet.relinquish_children(repo, fleet_runner.writer, repo.get_row(fleet.TABLE, fid) or {"id": fid, "members": []})
+            respond_json(self, 200, {"aborted": stopped, "fleets": fleets, "relinquished": relinquished})
+
+        # ------------------------------------------ fleet runs (Baler#275 d)
+
+        def _visible_fleet(self, fid: str, claims: dict) -> tuple[dict, dict] | None:
+            f = repo.get_row(fleet.TABLE, fid)
+            project = repo.get_project(f["project_id"]) if f else None
+            if f is None or project is None or not self._visible(project, claims) or \
+                    not all(repo.scope_for(claims).allows(m["equip_uri"]) for m in f["members"]):
+                respond_error(self, 404, "no such fleet run")
+                return None
+            return f, project
+
+        def _list_fleet_runs(self, span, claims, pid) -> None:
+            if self._project(pid, claims) is None:
+                return
+            scope = repo.scope_for(claims)
+            rows = [fleet.public(f) for f in reversed(repo.find_rows(fleet.TABLE, project_id=pid))
+                    if all(scope.allows(m["equip_uri"]) for m in f["members"])]
+            respond_json(self, 200, rows)
+
+        def _get_fleet_run(self, span, claims, fid) -> None:
+            hit = self._visible_fleet(fid, claims)
+            if hit is not None:
+                respond_json(self, 200, fleet.public(hit[0]))
+
+        def _plan_fleet_run(self, span, claims, pid) -> None:
+            """The fleet dry run: every write across every member, the
+            schedule, and the plan hash to confirm with. Nothing commanded."""
+            if not self._require_admin(claims):
+                return
+            p = self._project(pid, claims)
+            if p is None:
+                return
+            if p.get("archived_at"):
+                respond_error(self, 409, "project is archived")
+                return
+            body = self.read_json_body()
+            previous = None
+            if body.get("retest_of") is not None:
+                hit = self._visible_fleet(str(body["retest_of"]), claims)
+                if hit is None:
+                    return
+                previous = hit[0]
+                if previous["project_id"] != pid:
+                    raise ValueError("retest_of must be a fleet run of this project")
+            scopes, _ = self._scopes(p, claims)
+            equips = inventory.build(repo.store, scopes)
+            f = fleet.plan(repo, p, equips, body, claims.get("sub"), now_fn(), previous)
+            repo.put_rows(fleet.TABLE, [f])
+            span.set_attribute("members", len(f["members"]))
+            self._event(pid, "fleet_run.plan", claims, {"fleet_run_id": f["id"], "members": len(f["members"]),
+                                                        "writes": len(f["plan"]), "plan_hash": f["plan_hash"],
+                                                        "retest_of": f["retest_of"]})
+            respond_json(self, 201, {**fleet.public(f), "writes_allowed": active.writes_allowed()})
+
+        def _confirm_fleet_run(self, span, claims, fid) -> None:
+            """Start a planned fleet: the same envelope as one run (admin,
+            the switch, inside its window), and the body repeats the plan
+            hash - which must still be the hash of the stored plan, every
+            member of which must still validate against the inventory."""
+            if not self._require_admin(claims):
+                return
+            if not active.writes_allowed():
+                respond_error(self, 403, "active tests are switched off for this deployment (BALER_CX_ALLOW_WRITES=1 enables them)")
+                return
+            hit = self._visible_fleet(fid, claims)
+            if hit is None:
+                return
+            f, project = hit
+            body = self.read_json_body()
+            if body.get("confirm") != f["plan_hash"]:
+                raise ValueError("confirm by sending {\"confirm\": \"<this fleet's plan_hash>\"} after reading the plan")
+            if fleet_runner is None:
+                respond_error(self, 503, "no point_write route is configured on this server")
+                return
+            if f["status"] != "planned":
+                respond_error(self, 409, f"fleet run is {f['status']}")
+                return
+            now = now_fn()
+            ws, we = fleet._dt(f["window_start"]), fleet._dt(f["window_end"])
+            if not ws <= now < we:
+                respond_error(self, 409, f"outside the scheduled window ({ws.isoformat()} - {we.isoformat()})")
+                return
+            scopes, _ = self._scopes(project, claims)
+            problems = fleet.verify(f, inventory.build(repo.store, scopes))
+            if problems:
+                respond_error(self, 409, "the plan changed since it was listed - plan it again: " + "; ".join(problems[:5]))
+                return
+            repo.update_row(fleet.TABLE, fid, {"status": "confirmed", "confirmed_by": claims.get("sub"), "confirmed_at": now,
+                                                "heartbeat_at": now})
+            self._event(project["id"], "fleet_run.confirm", claims, {"fleet_run_id": fid, "plan_hash": f["plan_hash"],
+                                                                     "members": len(f["members"]), "writes": len(f["plan"])})
+            fleet_runner.start(fid)
+            respond_json(self, 202, fleet.public(repo.get_row(fleet.TABLE, fid) or f))
+
+        def _abort_fleet_run(self, span, claims, fid) -> None:
+            """Stop a fleet (operator, the safe direction): no member starts
+            again, every live member stops at its next check, and every level
+            the fleet's members hold is relinquished now. A planned fleet is
+            cancelled."""
+            hit = self._visible_fleet(fid, claims)
+            if hit is None:
+                return
+            f, project = hit
+            relinquished: list[str] = []
+            if f["status"] == "planned":
+                repo.update_row(fleet.TABLE, fid, {"status": "cancelled", "finished_at": now_fn()})
+            elif f["status"] in ("confirmed", "running"):
+                relinquished = fleet.flag_stop(repo, fleet_runner.writer if fleet_runner else None, fid,
+                                               f"aborted by {claims.get('sub')}")
+            self._event(project["id"], "fleet_run.abort", claims, {"fleet_run_id": fid, "was": f["status"],
+                                                                   "relinquished": len(relinquished)})
+            respond_json(self, 202, fleet.public(repo.get_row(fleet.TABLE, fid) or f))
 
         # ------------------------------------------ operator writes (Baler#213)
 
@@ -2402,6 +2537,10 @@ def main() -> None:
 
     writer = active.Writer(repo, point_write.Commander())
     executor = active.Executor(repo, writer, clock)
+    fleet_runner = fleet.FleetRunner(repo, fleet.ChildExecutor(repo, writer, clock), clock)
+    # Fleets (Baler#275 d) a restart interrupted: failed, their members failed,
+    # and every level they held relinquished - from the persisted fleet state.
+    fleet.recover(repo, writer, now)
     for r in repo.find_rows("cx_active_runs", status="running") + repo.find_rows("cx_active_runs", status="confirmed"):
         repo.update_row("cx_active_runs", r["id"], {"status": "failed", "error": db.INTERRUPTED, "finished_at": now})
     active.sweep(repo, writer, now)
@@ -2414,10 +2553,11 @@ def main() -> None:
     refresher = overrides.Refresher(repo, writer.commander,
                                     lambda p: runner.project_scopes(repo, p, {"org_id": p["org_id"], "site_ids": []})[0])
     runner.Scheduler(repo, worker, clock, extra=[lambda t: active.sweep(repo, writer, t),
+                                                 lambda t: fleet.sweep(repo, writer, t),
                                                  lambda t: operator_writes.sweep(repo, writer.commander, t),
                                                  refresher.tick])
     server = ThreadingHTTPServer((args.host, args.port), make_handler(repo, worker=worker, executor=executor,
-                                                                      commander=writer.commander))
+                                                                      commander=writer.commander, fleet_runner=fleet_runner))
     print(f"commissioning API listening on {args.host}:{args.port}")
     server.serve_forever()
 

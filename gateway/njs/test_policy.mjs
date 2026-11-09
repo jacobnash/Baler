@@ -326,6 +326,13 @@ check("commissioning (/cx/): reads viewer, changes operator, archive admin, site
     assert.equal(policy.resolveRoute("GET", "/cx/active-runs/a1").minRole, "viewer");
     assert.equal(policy.resolveRoute("POST", "/cx/active-runs/a1/confirm").minRole, "admin");
     assert.equal(policy.resolveRoute("POST", "/cx/active-runs/a1/abort").minRole, "operator");
+    // Baler#275 fleet runs: plan and confirm admin, abort operator
+    assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/fleet-runs").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/projects/p1/fleet-runs").minRole, "admin");
+    assert.equal(policy.resolveRoute("GET", "/cx/fleet-runs/f1").minRole, "viewer");
+    assert.equal(policy.resolveRoute("POST", "/cx/fleet-runs/f1/confirm").minRole, "admin");
+    assert.equal(policy.resolveRoute("POST", "/cx/fleet-runs/f1/abort").minRole, "operator");
+    assert.equal(policy.resolveRoute("DELETE", "/cx/fleet-runs/f1"), null);
     assert.equal(policy.resolveRoute("DELETE", "/cx/active-runs/a1"), null);
     // Cx 10 agent
     assert.equal(policy.resolveRoute("GET", "/cx/projects/p1/agent/sessions").minRole, "viewer");

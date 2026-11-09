@@ -179,6 +179,14 @@ const ROUTES = [
   ["GET",    /^\/cx\/active-runs\/[^/]+$/,                     "commissioning", "viewer"],
   ["POST",   /^\/cx\/active-runs\/[^/]+\/confirm$/,             "commissioning", "admin"],
   ["POST",   /^\/cx\/active-runs\/[^/]+\/abort$/,               "commissioning", "operator"],
+  // Fleet runs (Baler#275 d): one active test across many equipment, the
+  // same envelope per member. Planning and confirming are admin (the
+  // confirmation repeats the plan hash); stopping one is the safe direction.
+  ["GET",    /^\/cx\/projects\/[^/]+\/fleet-runs$/,             "commissioning", "viewer"],
+  ["POST",   /^\/cx\/projects\/[^/]+\/fleet-runs$/,             "commissioning", "admin"],
+  ["GET",    /^\/cx\/fleet-runs\/[^/]+$/,                      "commissioning", "viewer"],
+  ["POST",   /^\/cx\/fleet-runs\/[^/]+\/confirm$/,              "commissioning", "admin"],
+  ["POST",   /^\/cx\/fleet-runs\/[^/]+\/abort$/,                "commissioning", "operator"],
   // Audited operator writes (Baler#213): a person (the backend refuses API
   // keys) commands a point at levels 8-16 with a reason and an expiry -
   // operator; schedule and calendar writes change what the building does

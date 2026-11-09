@@ -26,6 +26,7 @@ from baler.migrations import (
     v0006_override_tests,
     v0007_operator_writes,
     v0008_manual_results,
+    v0009_fleet_runs,
 )
 
 ALL = (
@@ -37,4 +38,5 @@ ALL = (
     v0006_override_tests,
     v0007_operator_writes,
     v0008_manual_results,
+    v0009_fleet_runs,
 )

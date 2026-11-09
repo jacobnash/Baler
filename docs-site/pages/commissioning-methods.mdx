@@ -153,3 +153,80 @@ in `commissioning/test_library.py`:
 **Judging a procedure step:** a step with
 `"active": {"kind": "library", "test": "ahu_basic"}` is judged by the
 newest such run on its equipment.
+
+## Fleet active runs
+
+A fleet run is one active test across many pieces of equipment in one
+window, such as every terminal unit overnight. It is a scheduler on top of
+Cx 9, not a second way to write: each piece of equipment is its own
+ordinary active run (`fleet_id` set). So **every #45 safeguard still
+applies to every write**: `BALER_CX_ALLOW_WRITES`, admin only, the window,
+writes that expire, priority 8 as `cx:<run id>`, relinquish after each step
+and after each run, the sweeper, the kill switch, and the before-state
+captured before each unit's first write.
+
+**Planning:** send `POST /cx/projects/{id}/fleet-runs` (admin) with the
+members, the test and the limits:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `equip_uris` / `equip_class` / `retest_of` | | The members: a list, every unit of a Brick class (subclasses match), or the units that **failed** in a finished fleet run (retest-failures-only, with that fleet's test) |
+| `kind`, `test`, `response_minutes` | `command_response` | `command_response`, or `library` with a test id from the library above |
+| `concurrency_per_system` | 1 | At most this many units of one system run at once. A unit's system is the equipment that feeds it (`brick:feeds` / `brick:isFedBy`); units nothing feeds share one system |
+| `max_concurrent` | 10 | At most this many units at once, across all systems |
+| `stagger_seconds` | 30 | The least time between two units starting |
+| `max_failures` | 3 | The fleet stops by itself once this many units have failed |
+
+The dry run commands nothing. It returns:
+
+- every member with its steps, its system and its slot (the earliest time
+  it may start, worked out with the limits and the stagger);
+- **every write across the fleet**: equipment, point, value, priority,
+  hold, not-before and expiry;
+- the units that can't take the test, and why (`skipped`);
+- `plan_hash`, a sha256 over the fleet id, the test, the window, the
+  limits and every member's steps and slot.
+
+A fleet that doesn't fit the window is refused.
+
+**Confirming:** send `POST /cx/fleet-runs/{id}/confirm {"confirm": "<plan_hash>"}`.
+The typed confirmation is the plan's hash, not the fleet's id. When it
+arrives, the stored plan is hashed again and every member is checked
+against today's inventory: it must still be in your view and its steps
+must still validate (its points still writable, its command/status pairs
+the same). If anything changed, the answer is 409 and the fleet must be
+planned again, which gives a new hash. The switch, the admin role and the
+window are checked exactly as for one run.
+
+**Running:** members start in plan order, never before their slot, and
+never past the concurrency limits or the stagger. Before each start the
+coordinator checks the switch and the fleet's abort flag again. A member
+fails if any step fails or its run fails; aborted and inconclusive members
+don't count.
+
+**Stopping:** the fleet stops when:
+
+- the failure threshold is reached (`stopped`);
+- someone calls `POST /cx/fleet-runs/{id}/abort` (operator) or the kill
+  switch `POST /cx/active/kill` (`aborted`);
+- `BALER_CX_ALLOW_WRITES` is switched off (`stopped`).
+
+Then no unit starts again, every running unit stops at its next check (a
+member also checks its fleet, before every step and between polls), and
+every level the fleet's units hold is relinquished at once. When they have
+all stopped, the levels are relinquished again. The units that never ran
+are listed as `not_run`.
+
+**Crashes:** a unit's run id is saved on the fleet before the unit is
+created, and the coordinator saves a heartbeat on every pass. On restart,
+fleets that were confirmed or running are marked failed, along with their
+units, and the sweeper relinquishes every level they held, using only this
+saved state. While the process is running, the sweeper does the same once a
+minute: for any fleet that has stopped, finished or been aborted, and for
+any whose heartbeat is more than 3 minutes old (its coordinator died).
+
+**Retesting failures:** once the contractor has fixed the failed units,
+plan `{"retest_of": "<fleet id>", ...}`. Only the failed units are
+planned, so nothing else is commanded. It is a new plan with a new hash.
+On the Commissioning page, use the **Retest failures** button on a
+finished fleet.
