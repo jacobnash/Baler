@@ -87,16 +87,46 @@ def backup_oxigraph(out_dir: str, timestamp: str, oxigraph_url: str) -> str:
     return path
 
 
+class _NoStatus:
+    """Stand-in for baler.backup_status when baler isn't importable (a
+    copy of this file run on its own, as nash-srv's pinned one is): the
+    backup itself works exactly as before, just without reporting."""
+
+    @staticmethod
+    def now_iso() -> str:
+        return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+    @staticmethod
+    def previous(service, compose_project_dir):
+        return None
+
+    @staticmethod
+    def record(service, detail, compose_project_dir) -> bool:
+        return False
+
+    @staticmethod
+    def write_file(path, detail) -> None:
+        return None
+
+    @staticmethod
+    def alert(event, detail) -> None:
+        return None
+
+
 def _baler():
-    """baler.backup_status and baler.backup_offsite, from an install or,
-    failing that, from this checkout's src/ (backup.py itself runs fine from
-    a bare checkout; the off-site step needs `pip install -e '.[offsite]'`
-    for its own dependencies)."""
+    """(baler.backup_offsite, baler.backup_status), from an install or,
+    failing that, from this checkout's src/; (None, _NoStatus) when neither
+    is there. The off-site step also needs `pip install -e '.[offsite]'`."""
     try:
         from baler import backup_offsite, backup_status
     except ImportError:
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-        from baler import backup_offsite, backup_status
+        try:
+            from baler import backup_offsite, backup_status
+        except ImportError:
+            print("note: baler isn't importable from here: backing up without reporting to /ops/status "
+                  "or an off-site copy", file=sys.stderr)
+            return None, _NoStatus
     return backup_offsite, backup_status
 
 
@@ -183,7 +213,9 @@ def main() -> None:
                        "files": {k: {"name": os.path.basename(p), "bytes": os.path.getsize(p)} for k, p in files.items()}}
     report["last_ok_at"] = report["finished_at"] = status.now_iso()
 
-    if args.prune:
+    if args.prune and offsite is None:
+        report["local"]["retention_error"] = "--prune needs baler importable (run from the checkout)"
+    elif args.prune:
         try:
             daily, weekly = offsite.retention_from_env()
             pruned = offsite.prune_local(args.out_dir, daily, weekly)
@@ -193,7 +225,11 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001 - reported; the new backup stands
             report["local"]["retention_error"] = str(exc)
 
-    if not args.no_offsite and os.environ.get("BALER_BACKUP_S3_BUCKET", "").strip():
+    if not args.no_offsite and os.environ.get("BALER_BACKUP_S3_BUCKET", "").strip() and offsite is None:
+        report["offsite"] = {"enabled": True, "ok": False, "error": "baler isn't importable: run backup.py from the "
+                             "checkout with the offsite extra installed"}
+        print(f"OFF-SITE COPY FAILED (the local backup is kept): {report['offsite']['error']}", file=sys.stderr)
+    elif not args.no_offsite and os.environ.get("BALER_BACKUP_S3_BUCKET", "").strip():
         report["offsite"] = {**offsite_copy(offsite, args.out_dir, timestamp, files),
                              "last_ok_at": report["offsite"]["last_ok_at"]}
         if report["offsite"]["ok"]:

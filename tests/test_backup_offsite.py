@@ -32,6 +32,11 @@ def _ts(s: str) -> datetime:
     return off.parse_stamp(s)
 
 
+def _read(path) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
+
+
 def _stamp(dt: datetime) -> str:
     return dt.strftime(off.STAMP_FORMAT)
 
@@ -144,7 +149,7 @@ def test_encrypt_round_trip_and_wrong_key(tmp_path):
     blob = (tmp_path / "x.age").read_bytes()
     assert blob.startswith(b"age-encryption.org/v1") and b"\x1f\x8b" not in blob[:200]
     off.decrypt_file(str(tmp_path / "x.age"), str(tmp_path / "back.gz"), off.read_identities(key))
-    assert (tmp_path / "back.gz").read_bytes() == open(src, "rb").read()
+    assert (tmp_path / "back.gz").read_bytes() == _read(src)
     with pytest.raises(off.OffsiteError, match="can't decrypt"):
         off.decrypt_file(str(tmp_path / "x.age"), str(tmp_path / "no.gz"), off.read_identities(other))
 
@@ -213,7 +218,7 @@ def test_upload_is_encrypted_and_unreadable_without_the_key(target, tmp_path):
     out = tmp_path / "restored"
     out.mkdir()
     got = off.fetch_set(t, off.read_identities(key), str(out), s3=s3)
-    assert open(got["postgres"], "rb").read() == open(files["postgres"], "rb").read()
+    assert _read(got["postgres"]) == _read(files["postgres"])
     assert os.path.basename(got["oxigraph"]) == "oxigraph-20261108T033000Z.ttl.gz"
     # Least privilege: only what s3:PutObject, GetObject, ListBucket and DeleteObject allow.
     assert set(ops) <= {"PutObject", "HeadObject", "GetObject", "ListObjectsV2", "DeleteObjects",
@@ -236,7 +241,6 @@ def test_a_tampered_object_is_refused(target, tmp_path):
 
 def test_retention_keeps_the_newest_good_copy(target, tmp_path):
     t, _ = target
-    pub, _ = _keypair(tmp_path)
     s3 = off.client(t)
     end = datetime(2026, 11, 8, 3, 30, tzinfo=timezone.utc)
     stamps = [_stamp(end - timedelta(days=i)) for i in range(40)]
@@ -283,17 +287,17 @@ def _backup_module():
 
 
 def test_offsite_failure_is_reported_and_keeps_local_files(target, tmp_path):
-    t, env = target
+    _, env = target
     pub, _ = _keypair(tmp_path)
     files = _dump(tmp_path)
-    before = {k: open(p, "rb").read() for k, p in files.items()}
+    before = {k: _read(p) for k, p in files.items()}
     backup = _backup_module()
     bad = {**env, "BALER_BACKUP_AGE_RECIPIENTS": pub, "BALER_BACKUP_S3_SECRET_ACCESS_KEY": "wrong-secret-value",
            "BALER_BACKUP_S3_BUCKET": "no-such-bucket-" + uuid.uuid4().hex[:8]}
     report = backup.offsite_copy(off, str(tmp_path), "20261108T033000Z", files, bad)
     assert report["enabled"] and not report["ok"] and report["error"]
     assert "wrong-secret-value" not in json.dumps(report)
-    assert {k: open(p, "rb").read() for k, p in files.items()} == before
+    assert {k: _read(p) for k, p in files.items()} == before
     assert not list(tmp_path.glob("baler-offsite-*")) and not list(tmp_path.glob("*.partial"))
 
     # The same failure is what /ops/status shows.
