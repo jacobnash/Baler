@@ -142,6 +142,11 @@ const ROUTES = [
   ["GET",    /^\/ops\/documents\/[^/]+\/pages\/[^/]+$/,     "documents", "viewer"],
   ["POST",   /^\/ops\/documents\/[^/]+\/links$/,          "documents", "operator"],
   ["DELETE", /^\/ops\/documents\/[^/]+\/links\/[^/]+$/,   "documents", "operator"],
+  // Extraction from documents (#202): proposals only; a person confirms each.
+  ["POST",   /^\/ops\/documents\/[^/]+\/extract$/,        "documents", "operator"],
+  ["GET",    /^\/ops\/documents\/[^/]+\/proposals$/,      "documents", "viewer"],
+  ["GET",    /^\/ops\/document-proposals$/,              "documents", "viewer"],
+  ["POST",   /^\/ops\/document-proposals\/[^/]+\/decide$/, "documents", "operator"],
 
   // PM schedules (#199): due work is computed, then exported (CSV, COBie Job).
   ["GET",    /^\/ops\/pm\/tasks$/,                       "assets", "viewer"],

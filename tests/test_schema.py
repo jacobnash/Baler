@@ -34,6 +34,7 @@ RELEASED = {
     "v0014_pm.py": "859b16ea49b65c4b47aea0a499065fe8578dfecc671ef164218d0c0588e35c33",
     "v0015_deferred.py": "3ede2db1bd42e4abc3fe597ff9c085aa20a5bfb9f44814f80020cd96abb595f5",
     "v0016_bench.py": "11b70140627ffe1a0a13f6e045b2de871a9d6b187ebd2c76a9e9709c2e38bb1d",
+    "v0017_doc_proposals.py": "e340ec86a364fce550050e3d72d41b90045b7a733b964d66715d40752cc02562",
 }
 
 

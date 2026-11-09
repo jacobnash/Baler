@@ -51,6 +51,30 @@ async function showDoc(id) {
   document.getElementById("detail-title").textContent = `${current.title || current.filename} (${current.kind})`;
   document.getElementById("verify-result").textContent = "";
   fill("#links-table tbody", current.links, ["target_kind", "target", "page", "note"]);
+  await loadProposals();
+}
+
+async function decide(p, action) {
+  let body = { action };
+  if (action === "confirm") {
+    const edited = prompt("Confirm this fact (edit the JSON to correct it):", JSON.stringify(p.payload));
+    if (edited === null) return;
+    body.payload = JSON.parse(edited);
+  }
+  await api(`/document-proposals/${encodeURIComponent(p.id)}/decide`, { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json" } });
+  await loadProposals();
+}
+
+async function loadProposals() {
+  const props = await api(`/documents/${encodeURIComponent(current.id)}/proposals`);
+  fill("#proposals-table tbody", props, ["kind", (p) => JSON.stringify(p.decided_payload || p.payload), "page", "quote",
+    (p) => p.model || p.method, "status", (p) => {
+      if (p.status !== "proposed") return "";
+      const span = document.createElement("span");
+      span.append(button("Confirm", () => decide(p, "confirm").catch((e) => say(e.message))), " ",
+        button("Reject", () => decide(p, "reject").catch((e) => say(e.message))));
+      return span;
+    }]);
 }
 
 async function download() {
@@ -99,6 +123,17 @@ initAuth(async () => {
     await api(`/documents/${encodeURIComponent(current.id)}/links`, { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json" } });
     f.reset();
     await showDoc(current.id);
+  });
+  document.getElementById("extract").addEventListener("click", async () => {
+    try {
+      say("extracting…");
+      const out = await api(`/documents/${encodeURIComponent(current.id)}/extract`, { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } });
+      const e = out.extraction;
+      document.getElementById("extract-result").textContent =
+        `${out.proposals.length} proposal(s) via ${e.provider}${e.model ? " (" + e.model + ")" : ""}. ${e.info.notes || ""}`;
+      say("extracted");
+      await loadProposals();
+    } catch (err) { say(`error: ${err.message}`); }
   });
   document.getElementById("download").addEventListener("click", () => download().catch((e) => say(e.message)));
   document.getElementById("verify").addEventListener("click", async () => {

@@ -675,6 +675,36 @@ paths:
       summary: Remove a link
       responses:
         "200": {description: Removed, content: {application/json: {schema: {type: object}}}}
+  # Facts from documents, as proposals (#202). docs-site/pages/document-extraction.mdx.
+  /documents/{id}/extract:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: extractDocument
+      summary: Propose warranty, PM, nameplate, checklist and TAB facts, each citing page and quote
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: OK, content: {application/json: {schema: {type: object}}}}
+  /documents/{id}/proposals:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: documentProposals
+      summary: The document's proposals
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+  /document-proposals:
+    get:
+      operationId: listDocumentProposals
+      summary: Proposals across the org's documents (status, kind)
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+  /document-proposals/{id}/decide:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: decideDocumentProposal
+      summary: Confirm (optionally corrected) or reject a proposal
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
   # Building lifecycle record (epic #221): positions vs assets (#197).
   # Full field list: docs-site/pages/assets.mdx.
   /assets:
