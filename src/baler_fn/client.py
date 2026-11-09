@@ -16,7 +16,7 @@ from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any
 
-from baler.haystack_client import HaystackClient
+from baler.haystack_client import HaystackClient, Records
 
 DEFAULT_PROJECT = "demo"
 
@@ -42,16 +42,30 @@ class BalerClient:
         """The server's `about` record (productName, serverTime, ...)."""
         return self.haystack.about()
 
-    def read(self, filter: str, limit: int | None = None) -> list[dict]:
+    def read(self, filter: str, limit: int | None = None) -> Records:
         """Records matching a Haystack filter, as dicts. Markers are True,
-        refs are their id string, Numbers floats, dateTimes epoch seconds."""
+        refs are their id string, Numbers floats, dateTimes epoch seconds.
+
+        Every match, however many pages the server answers in (Baler pages
+        reads at 1,000 records by default, #280). With `limit`, one page of
+        at most that many: the result's `.after` is then the cursor for
+        read_page() when more follow, and None when the read is complete."""
         return self.haystack.read(filter, limit)
 
+    def read_page(self, filter: str, limit: int | None = None, after: str | None = None) -> Records:
+        """One page of a read, starting after a previous page's `.after`.
+        `.after` on the result is None on the last page."""
+        return self.haystack.read_page(filter, limit, after)
+
     def read_df(self, filter: str, limit: int | None = None) -> Any:
-        """read() as a pandas DataFrame, one row per record."""
+        """read() as a pandas DataFrame, one row per record. The paging
+        meta rides along in `df.attrs` (`after`, `incomplete`)."""
         import pandas as pd
 
-        return pd.DataFrame(self.read(filter, limit))
+        recs = self.read(filter, limit)
+        df = pd.DataFrame(recs)
+        df.attrs.update(after=recs.after, incomplete=recs.incomplete)
+        return df
 
     def his_read(self, id: str, range: str = "today") -> list[dict]:
         """History rows `{"ts": epoch_seconds, "val": ...}` for one point.
@@ -81,7 +95,11 @@ class BalerClient:
 
     def phable(self) -> Any:
         """A phable.HaystackClient on the same URL and API key, for the ops
-        and DataFrame helpers phable has (pip install "phable[pandas]")."""
+        and DataFrame helpers phable has (pip install "phable[pandas]").
+
+        phable doesn't follow Baler's read pages: its `read_all` returns
+        the first page (1,000 records by default), with grid meta `after`
+        set when more follow. Use read()/read_df() here for every record."""
         try:
             import phable
         except ImportError as exc:

@@ -20,6 +20,7 @@ wire format that modern Haxall/SkySpark servers no longer speak.
 import base64
 import hashlib
 import hmac
+import logging
 import math
 import secrets
 from collections.abc import Iterable
@@ -27,6 +28,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 import requests
+
+log = logging.getLogger(__name__)
 
 
 class HaystackAuthError(RuntimeError):
@@ -126,6 +129,57 @@ def _decode_hayson(value: dict):
     if kind == "dateTime":
         return datetime.fromisoformat(value["val"].replace("Z", "+00:00")).timestamp()
     return value
+
+
+class Records(list):
+    """A read's records (a plain list of dicts) plus the server's paging
+    meta, so a cut-short read can't pass for a complete one (#280):
+
+    - `after`: the last record id the server covered when more follow
+      (no leading @), else None. Pass it to `read_page(..., after=...)`.
+    - `incomplete`: the server's reason the grid is short (grid meta
+      `incomplete`), else None.
+    - `limit`: the page size the server used, when it said.
+    - `pages`: how many requests the read took.
+    """
+
+    def __init__(self, rows: Iterable[dict] = (), *, after: str | None = None, incomplete: str | None = None,
+                 limit: int | None = None, pages: int = 1):
+        super().__init__(rows)
+        self.after = after
+        self.incomplete = incomplete
+        self.limit = limit
+        self.pages = pages
+
+    @property
+    def complete(self) -> bool:
+        return self.after is None and not self.incomplete
+
+
+def _meta_scalar(value: Any) -> Any:
+    """A grid meta value in either JSON flavor, decoded."""
+    return _decode_haystack_scalar(value) if value is not None else None
+
+
+def _meta_ref(value: Any) -> str | None:
+    """Grid meta `after`: a Ref, Hayson ({"_kind": "ref"}) or JSON v3
+    ("r:id dis"), as its id. Anything else (absent, a marker) is None."""
+    if isinstance(value, dict) and value.get("_kind") == "ref":
+        return str(value["val"])
+    if isinstance(value, str) and value.startswith("r:"):
+        return value[2:].split(" ", 1)[0]
+    return None
+
+
+def _meta_text(value: Any) -> str | None:
+    """Grid meta `incomplete`: a Str (JSON v3 may prefix "s:"), or a marker
+    some servers send instead, as a short reason."""
+    if value is None or value is False:
+        return None
+    if value is True or value == "m:" or (isinstance(value, dict) and value.get("_kind") == "marker"):
+        return "incomplete"
+    text = str(value)
+    return text[2:] if text.startswith("s:") else text
 
 
 class HaystackClient:
@@ -240,29 +294,53 @@ class HaystackClient:
         row = self._get("about")["rows"][0]
         return {k: _decode_haystack_scalar(v) for k, v in row.items()}
 
-    def read(self, filter: str, limit: int | None = None) -> list[dict]:
-        """Every record the filter matches, or the first `limit`. A server
-        that pages (Baler, #244) answers a page at a time and names the last
-        id it covered in grid meta `after`; without a limit this follows it
-        to the end. Servers that don't page never set it: one request."""
+    def read_page(self, filter: str, limit: int | None = None, after: str | None = None) -> Records:
+        """One page of a filter read: at most `limit` records (None: the
+        server's own page size; Baler's is BALER_READ_LIMIT, 1000 by
+        default), starting after the record id `after` (a previous page's
+        `.after`; None: from the start). The result's `.after` is set when
+        the server says more follow; pass it back for the next page."""
         params: dict[str, str | int] = {"filter": filter}
         if limit is not None:
             params["limit"] = limit
-        rows: list[dict] = []
+        if after is not None:
+            params["after"] = "@" + after.lstrip("@")
+        grid = self._get("read", params)
+        meta = grid.get("meta") or {}
+        rows = [{k: _decode_haystack_scalar(v) for k, v in r.items()} for r in grid.get("rows", []) if r]
+        page_limit = _meta_scalar(meta.get("limit"))
+        return Records(rows, after=_meta_ref(meta.get("after")), incomplete=_meta_text(meta.get("incomplete")),
+                       limit=int(page_limit) if isinstance(page_limit, (int, float)) else None)
+
+    def read(self, filter: str, limit: int | None = None) -> Records:
+        """Every record the filter matches, or one page of at most `limit`.
+
+        A server that pages (Baler, #244/#280) answers a page at a time and
+        names the last id it covered in grid meta `after`; without a limit
+        this follows it to the end. Servers that don't page never set it:
+        one request. The result is a list with the paging meta on it:
+        `.after` is None when the read is complete (with a `limit`, it is
+        the cursor for `read_page(..., after=...)`), and `.incomplete` is
+        the server's reason when it cut the read short and gave no way to
+        continue - never silently dropped."""
+        if limit is not None:
+            return self.read_page(filter, limit)
+        out = Records(pages=0)
+        after: str | None = None
         while True:
-            grid = self._get("read", params)
-            rows += [r for r in grid.get("rows", []) if r]
-            after = (grid.get("meta") or {}).get("after")
-            if isinstance(after, dict) and after.get("_kind") == "ref":  # Hayson
-                after = str(after["val"])
-            elif isinstance(after, str) and after.startswith("r:"):  # JSON v3
-                after = after[2:].split(" ", 1)[0]
-            else:
-                after = None
-            if limit is not None or after is None:
-                break
-            params["after"] = "@" + after
-        return [{k: _decode_haystack_scalar(v) for k, v in row.items()} for row in rows]
+            page = self.read_page(filter, None, after)
+            out.extend(page)
+            out.pages += 1
+            if page.after is None:
+                out.limit = page.limit
+                out.incomplete = page.incomplete
+                if page.incomplete:
+                    log.warning("read %r: the server cut the read short without an `after` to continue from "
+                                "(%s); %d records may not be all of them", filter, page.incomplete, len(out))
+                return out
+            if page.after == after:
+                raise HaystackError(f"read {filter!r}: the server handed back the same `after` ({after}) twice")
+            after = page.after
 
     def his_read(self, id: str, range: str) -> list[dict]:
         rows = self._get("hisRead", {"id": id, "range": range})["rows"]
