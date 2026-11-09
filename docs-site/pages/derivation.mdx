@@ -145,7 +145,7 @@ to `#` over QoS 0, which the broker silently dropped from once the engine fell b
 - the triggered points (those matching the glob) are looked up in an index of the `select`'s rows
   by input point. The `select` runs again every `--select-refresh` seconds (default 60) or when
   the derivation changes, not once per reading;
-- each triggered row runs **once per batch**, however many of its inputs reported in it, on inputs
+- each triggered row runs **once per poll** of the feed (up to 20 batches; once per batch before #273), however many of its inputs reported in it, on inputs
   that are already committed;
 - open masking faults and auto-disabled targets are read once per pass, not once per input and
   per target;

@@ -381,3 +381,32 @@ def test_ops_degrades_a_rule_daemon_that_missed_readings_lately():
     old = _building(missed_readings=4200, last_missed_at=_iso(7200))
     assert ops_status._infer_faults(old, platform_ok=True)[0] == "ok"
     assert ops_status._infer_derivations(_building(), platform_ok=True)[0] == "ok"  # no feed row of its own yet
+
+
+def test_feed_run_together_hands_a_whole_poll_at_once():
+    """#273: derivation_engine's Cur mode handles a poll's batches together."""
+    import threading
+
+    from baler import reading_feed
+
+    stop = threading.Event()
+
+    class Fake(reading_feed.FeedConsumer):
+        def __init__(self):
+            super().__init__(None, "fake", max_batches=3)
+            self.polls = [[reading_feed.Batch(i, T0, [(f"urn:point:p{i}", None, None, None)]) for i in (1, 2, 3)], []]
+            self.committed = []
+
+        def poll(self):
+            if not self.polls:
+                stop.set()
+                return []
+            return self.polls.pop(0)
+
+        def commit(self, batches):
+            self.committed.extend(b.seq for b in batches)
+
+    seen = []
+    c = Fake()
+    c.run(lambda batches: seen.append([b.seq for b in batches]), stop=stop, idle_s=0, together=True)
+    assert seen == [[1, 2, 3]] and c.committed == [1, 2, 3]  # one call per poll, nothing for an empty poll

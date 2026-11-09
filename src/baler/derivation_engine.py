@@ -634,11 +634,14 @@ def run_feed(store, dsn: str, cache: json_store.RuleCache, targets: CurTargets, 
     consumer.start()
     globs = _GlobMemo()
 
-    def handle(batch):
+    def handle(batches):
+        # A poll's batches at once (#273): each triggered row runs once per
+        # poll, and its output rows commit once per derivation per poll, not
+        # per listener batch (a few readings each at 1-minute rates).
         derivations = cast(list[Derivation], cache.get())
-        if not batch.readings or not cur_derivations(derivations):
+        points = {uri for batch in batches for uri, *_ in batch.readings}
+        if not points or not cur_derivations(derivations):
             return
-        points = {uri for uri, *_ in batch.readings}
         t0 = time.monotonic()
         status.add("cur_rows", evaluate_cur_points(store, ts_conn, fault_conn, health_conn, derivations, points,
                                                    targets, globs))
@@ -650,7 +653,7 @@ def run_feed(store, dsn: str, cache: json_store.RuleCache, targets: CurTargets, 
         status.update("feed", stats.as_dict())
         status.beat(feed_conn)
 
-    consumer.run(handle, stop=stop, report=report)
+    consumer.run(handle, stop=stop, report=report, together=True)
 
 
 def sweep_interval(derivation: Derivation, tick_seconds: float, cur_sweep_seconds: float) -> float:
