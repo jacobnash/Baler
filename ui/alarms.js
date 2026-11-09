@@ -2,8 +2,7 @@
 // table over fault_api.py's GET /faults plus the two operator actions
 // (POST .../ack, POST .../snooze) - detection/webhook delivery are
 // fault_detector.py's job, untouched by this page.
-const params = new URLSearchParams(location.search);
-const FAULT_API_URL = params.get("fault") || "/fault";
+const FAULT_API_URL = apiBase("fault", "/fault");
 
 const statusEl = document.getElementById("status");
 const statusFilterEl = document.getElementById("status-filter");
