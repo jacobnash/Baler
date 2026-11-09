@@ -419,10 +419,18 @@ def _site_of(store, uris: list[str]) -> dict[str, str]:
     """Each entity's Brick Site (hisquery.SITE_MEMBER), in one query."""
     if not uris:
         return {}
+    # The sites first (a handful): bound, the path is walked from them, not
+    # backwards from every entity - which for 1000 points was 0.5 s of a
+    # page even with no Site in the graph at all (Baler#244).
+    sites = [str(r.site) for r in store.query(hisquery.PREFIXES + "SELECT DISTINCT ?site WHERE { ?site a brick:Site }")]
+    if not sites:
+        return {}
     values = " ".join(f"<{hisquery._uri(u)}>" for u in uris)
+    site_values = " ".join(f"<{hisquery._uri(u)}>" for u in sites)
     rows = store.query(
         hisquery.PREFIXES
-        + f"SELECT ?e ?site WHERE {{ VALUES ?e {{ {values} }} ?site a brick:Site . ?site {hisquery.SITE_MEMBER} ?e }}"
+        + f"SELECT ?e ?site WHERE {{ VALUES ?site {{ {site_values} }} VALUES ?e {{ {values} }} "
+        f"?site {hisquery.SITE_MEMBER} ?e }}"
     )
     out: dict[str, str] = {}
     for r in rows:
