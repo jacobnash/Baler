@@ -320,7 +320,10 @@ every table, the history (compressed chunks too), the continuous
 aggregates, the graph and a Cx report, then removes it (#196; CI runs it
 in `tests/test_restore_drill.py`). See
 [`docs-site/pages/backups.mdx`](docs-site/pages/backups.mdx) for the exact
-restore steps and the drill.
+restore steps and the drill. Both scripts report to Ops (Backups and
+Restore drill cards). Optionally, and off by default, each backup can also
+be encrypted (age) and copied to any S3-compatible bucket, which restore and
+the drill can fetch from (#276, `pip install -e '.[offsite]'`).
 
 ### Automating backups
 
@@ -340,9 +343,9 @@ sudo systemctl enable --now baler-backup.timer
 
 Both just call the same `backup.py` shown above on a schedule (default:
 daily) — nothing about the script changes. `scripts/systemd/` also has a
-weekly `baler-restore-drill` timer. Backups accumulate in
-`backups/` indefinitely; there's no pruning/retention yet, so watch disk
-usage or clean the directory out yourself if that becomes a problem. See
+weekly `baler-restore-drill` timer. Backups accumulate in `backups/`
+unless you pass `--prune` (keeps 7 daily and 4 weekly, and always the
+newest). See
 [`docs-site/pages/backups.mdx`](docs-site/pages/backups.mdx) for the full
 picture.
 

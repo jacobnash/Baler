@@ -160,7 +160,14 @@ services:
     ports:
       - "5433:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${BALER_PG_USER:-baler}"]
+      # Over TCP (-h 127.0.0.1), not the default Unix socket. On a fresh
+      # volume the image's entrypoint runs a temporary init server that
+      # listens on the socket only, then shuts it down and starts the real
+      # one. A socket check passed against the init server, so `migrate`
+      # (and every daemon) could connect in the gap and fail with "the
+      # database system is starting up" (seen in CI). Only the real server
+      # listens on TCP.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${BALER_PG_USER:-baler}"]
       interval: 2s
       timeout: 3s
       retries: 20
@@ -217,11 +224,11 @@ services:
     # index, and a second container would retire the first one's sessions.
     command: python -m baler.mqtt_listener
     # Pure daemons connect to Postgres/MQTT eagerly at startup and exit on
-    # failure. On a fresh DB volume, postgres' first-boot init briefly passes
-    # its healthcheck then restarts, refusing that first connection (a race the
-    # HTTP APIs dodge by connecting lazily). Restart so the daemon recovers
-    # instead of staying dead - otherwise the mqtt_listener/fault_detector-
-    # dependent e2e tests fail intermittently (seen on CI's fresh volumes).
+    # failure. On a fresh DB volume, postgres' first-boot init used to pass
+    # its (socket) healthcheck and then restart, refusing that first
+    # connection; the healthcheck now probes TCP, which the init server
+    # doesn't listen on. Restart anyway, so a daemon recovers from any
+    # later Postgres restart instead of staying dead.
     restart: unless-stopped
     environment: *daemon-env
     volumes:
@@ -340,6 +347,9 @@ services:
       <<: *daemon-env
       # reads derivations.json to find computed points whose derivation is gone
       BALER_DATA_DIR: /data
+      # when the Backups / Restore drill cards turn degraded (#276, #196)
+      OPS_BACKUP_STALE_HOURS: ${OPS_BACKUP_STALE_HOURS:-36}
+      OPS_DRILL_STALE_DAYS: ${OPS_DRILL_STALE_DAYS:-8}
     volumes:
       - .:/app
       - baler-data:/data:ro

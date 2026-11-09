@@ -110,6 +110,20 @@ COMPONENTS: list[dict[str, Any]] = [
         "probe": "inferred_derivations",
     },
     {
+        "id": "backups",
+        "label": "Backups",
+        "layer": "jobs",
+        "service": "backup",
+        "probe": "inferred_backup",
+    },
+    {
+        "id": "restore_drill",
+        "label": "Restore drill",
+        "layer": "jobs",
+        "service": "restore_drill",
+        "probe": "inferred_drill",
+    },
+    {
         "id": "charts",
         "label": "Charts",
         "layer": "tools",
@@ -232,8 +246,15 @@ def _building_signals(scope=None) -> dict[str, Any]:
             # The rule daemons' place in the reading feed (#243): lag, misses.
             out["reading_feed"] = reading_feed.consumer_status(conn)
             conn.rollback()
-            # The listener supervisor's broker-drop count and workers (#233).
-            out["listener"] = heartbeat.details(conn).get("mqtt_listener")
+            # The listener supervisor's broker-drop count and workers (#233),
+            # and what scripts/backup.py and restore_drill.py last reported
+            # (#276, #196: baler.backup_status).
+            details = heartbeat.details(conn)
+            out["listener"] = details.get("mqtt_listener")
+            out["backup"] = details.get("backup")
+            out["restore_drill"] = details.get("restore_drill")
+            # fault_detector's quality sweep (#268): its watermark lag.
+            out["quality"] = (details.get("fault_detector") or {}).get("quality")
             conn.rollback()
             try:
                 org_row = conn.execute("SELECT COUNT(*) FROM orgs").fetchone()
@@ -314,13 +335,31 @@ def _feed_state(building: dict[str, Any], consumer: str) -> tuple[str, str] | No
     return None
 
 
+# The quality sweep is behind once its watermark trails now by this many of
+# its intervals (#268): about one when keeping up, and a pass that can't
+# finish within its interval makes it grow.
+QUALITY_LAG_INTERVALS = 3.0
+
+
+def _quality_state(building: dict[str, Any]) -> tuple[str, str] | None:
+    """("degraded", why) when fault_detector's incremental quality sweep
+    has fallen behind: new samples go unflagged for longer than it's set
+    to allow."""
+    q = building.get("quality") or {}
+    lag, interval = q.get("watermark_lag_s"), q.get("interval_s")
+    if not lag or not interval or lag <= QUALITY_LAG_INTERVALS * interval:
+        return None
+    return "degraded", (f"the quality sweep is {lag:.0f} s behind (every {interval:.0f} s; last pass "
+                        f"{q.get('sweep_s')} s over {q.get('rows')} rows)")
+
+
 def _infer_faults(building: dict[str, Any], *, platform_ok: bool) -> tuple[str, str | None]:
     if not platform_ok:
         return "down", "historian unreachable"
     stale = _heartbeat_state(building, "fault_detector")
     if stale:
         return stale
-    behind = _feed_state(building, "fault_detector")
+    behind = _feed_state(building, "fault_detector") or _quality_state(building)
     if behind:
         return behind
     n = building.get("open_faults", 0)
@@ -340,6 +379,69 @@ def _infer_derivations(building: dict[str, Any], *, platform_ok: bool) -> tuple[
     if disabled:
         return "degraded", f"{disabled} target(s) auto-disabled"
     return "ok", "running; no disabled targets"
+
+
+# The newest good local backup older than this -> the Backups card is
+# degraded (a nightly job that stopped); a passing restore drill older than
+# OPS_DRILL_STALE_DAYS -> the Restore drill card is.
+BACKUP_STALE_HOURS = float(os.environ.get("OPS_BACKUP_STALE_HOURS", "36"))
+DRILL_STALE_DAYS = float(os.environ.get("OPS_DRILL_STALE_DAYS", "8"))
+
+
+def _age_s(iso: str | None) -> float | None:
+    if not iso:
+        return None
+    return (datetime.now(timezone.utc) - datetime.fromisoformat(iso)).total_seconds()
+
+
+def _ago(seconds: float) -> str:
+    return f"{seconds / 86400:.1f} d ago" if seconds >= 86400 else f"{seconds / 3600:.1f} h ago"
+
+
+def backup_state(report: dict[str, Any] | None) -> tuple[str, str]:
+    """The Backups card from backup.py's last report (#276). "off" (not
+    counted as a problem) until a backup has ever reported, so an install
+    that doesn't use backup.py, or runs an older copy of it, doesn't turn
+    the page amber; once one has, a failed local backup is down, and a
+    failed off-site copy or a stale backup degraded."""
+    if not report:
+        return "off", "no backup has reported here yet (scripts/backup.py)"
+    local = report.get("local") or {}
+    offsite = report.get("offsite") or {}
+    if not local.get("ok"):
+        last = report.get("last_ok_at")
+        return "down", (f"last backup failed: {local.get('error') or 'unknown error'}; last good one "
+                        + (_ago(_age_s(last) or 0) if last else "never"))
+    age = _age_s(report.get("last_ok_at")) or 0
+    if offsite.get("enabled") and not offsite.get("ok"):
+        last = offsite.get("last_ok_at")
+        return "degraded", (f"local backup OK {_ago(age)}, but the off-site copy failed: {offsite.get('error')}; "
+                            "last off-site copy " + (_ago(_age_s(last) or 0) if last else "never"))
+    if age > BACKUP_STALE_HOURS * 3600:
+        return "degraded", f"last good backup {_ago(age)}: is the backup timer running?"
+    size = sum(f.get("bytes", 0) for f in (local.get("files") or {}).values())
+    detail = f"last backup {_ago(age)}, {size / 1e6:.1f} MB"
+    if offsite.get("enabled"):
+        detail += f"; encrypted off-site copy OK ({offsite.get('kept', '?')} kept)"
+        if offsite.get("retention_error"):
+            return "degraded", detail + f", but pruning old copies failed: {offsite['retention_error']}"
+    else:
+        detail += "; no off-site copy configured"
+    return "ok", detail
+
+
+def drill_state(report: dict[str, Any] | None) -> tuple[str, str]:
+    """The Restore drill card from restore_drill.py's last report (#196)."""
+    if not report:
+        return "off", "no restore drill has reported here yet (scripts/restore_drill.py)"
+    age = _age_s(report.get("finished_at")) or 0
+    if not report.get("ok"):
+        failed = "; ".join(report.get("failed") or []) or "see the drill's report"
+        return "degraded", f"last drill {_ago(age)} FAILED: {failed}"
+    if age > DRILL_STALE_DAYS * 86400:
+        return "degraded", f"last passing drill {_ago(age)}: is the drill timer running?"
+    return "ok", (f"passed {_ago(age)}: {report.get('backup') or 'a backup'} ({report.get('source')}), "
+                  f"{report.get('checks')} checks")
 
 
 def _probe_one(
@@ -366,6 +468,10 @@ def _probe_one(
     elif probe == "inferred_derivations":
         platform_ok = platform_states.get("historian") == "ok"
         state, detail = _infer_derivations(building, platform_ok=platform_ok)
+    elif probe == "inferred_backup":
+        state, detail = backup_state(building.get("backup"))
+    elif probe == "inferred_drill":
+        state, detail = drill_state(building.get("restore_drill"))
     return {
         "id": comp["id"],
         "label": comp["label"],
@@ -530,7 +636,8 @@ def collect_status(scope=None) -> dict[str, Any]:
     # already says that, from the same timestamps.
     flagged = [c for c in cards if c["state"] in ("degraded", "down")]
     summary = _rank_summary([c["state"] for c in ordered + flagged if c["layer"] != "tools"])
-    attention = [c for c in ordered if c["state"] != "ok"] + flagged
+    # "off": a job this install doesn't run (no backup has ever reported).
+    attention = [c for c in ordered if c["state"] not in ("ok", "off")] + flagged
 
     return {
         "summary": summary,

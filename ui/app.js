@@ -96,7 +96,9 @@ async function haystackRead(filter) {
     const grid = await res.json();
     if (grid.meta && grid.meta.err) throw new Error(grid.meta.dis || "read failed");
     for (const r of grid.rows || []) if (Object.keys(r).length) rows.push(r);
-    after = refId(grid.meta && grid.meta.after);
+    const next = refId(grid.meta && grid.meta.after);
+    if (next && next === after) throw new Error("read failed: the server repeated its page cursor");
+    after = next;
   } while (after);
   return rows;
 }
