@@ -162,6 +162,14 @@ const ROUTES = [
   ["GET",    /^\/ops\/service-life\/assets$/,             "assets", "viewer"],
   ["GET",    /^\/ops\/assets\/[^/]+\/values$/,            "assets", "viewer"],
   ["POST",   /^\/ops\/assets\/[^/]+\/values$/,            "assets", "operator"],
+  // Bench tests (#211): procedures as data; results append-only.
+  ["GET",    /^\/ops\/bench\/templates$/,                 "assets", "viewer"],
+  ["GET",    /^\/ops\/bench\/procedures$/,                "assets", "viewer"],
+  ["POST",   /^\/ops\/bench\/procedures$/,                "assets", "operator"],
+  ["PATCH",  /^\/ops\/bench\/procedures\/[^/]+$/,          "assets", "operator"],
+  ["GET",    /^\/ops\/assets\/[^/]+\/bench-tests$/,       "assets", "viewer"],
+  ["POST",   /^\/ops\/assets\/[^/]+\/bench-tests$/,       "assets", "operator"],
+  ["GET",    /^\/ops\/assets\/[^/]+\/baseline$/,          "assets", "viewer"],
 
   // commissioning_api (Baler#37): reads viewer, changes operator,
   // archiving a project admin. The backend also checks the caller's org

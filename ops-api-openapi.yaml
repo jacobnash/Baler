@@ -751,6 +751,53 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object}}}}
       responses:
         "201": {description: The removed and installed events, content: {application/json: {schema: {type: object}}}}
+  # Bench tests (#211). docs-site/pages/bench-tests.mdx.
+  /bench/templates:
+    get:
+      operationId: benchTemplates
+      summary: Structure-only bench procedure templates
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+  /bench/procedures:
+    get:
+      operationId: listBenchProcedures
+      summary: The org's bench procedures
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+    post:
+      operationId: createBenchProcedure
+      summary: Add a bench procedure (optionally from a template)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: OK, content: {application/json: {schema: {type: object}}}}
+  /bench/procedures/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    patch:
+      operationId: patchBenchProcedure
+      summary: Edit or archive a procedure
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+  /assets/{id}/bench-tests:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listBenchTests
+      summary: The asset's bench tests, baseline marked
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+    post:
+      operationId: recordBenchTest
+      summary: Record a bench test (procedure_id or inline procedure, measurements)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: OK, content: {application/json: {schema: {type: object}}}}
+  /assets/{id}/baseline:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: assetBaseline
+      summary: The asset's baseline bench test
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
   # Deferred maintenance, service life, FCI (#200). docs-site/pages/deferred-maintenance.mdx.
   /deferred:
     get:

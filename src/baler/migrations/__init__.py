@@ -33,6 +33,7 @@ from baler.migrations import (
     v0013_warranties,
     v0014_pm,
     v0015_deferred,
+    v0016_bench,
 )
 
 ALL = (
@@ -51,4 +52,5 @@ ALL = (
     v0013_warranties,
     v0014_pm,
     v0015_deferred,
+    v0016_bench,
 )
