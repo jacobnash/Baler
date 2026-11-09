@@ -22,6 +22,7 @@ RELEASED = {
     "v0002_reading_feed.py": "69e91be0315b236e7e6dde2b7b89aeabb041f6b798cacd8617594d47d80b2a79",
     "v0003_quality_watermark.py": "023829bf0df44304f1c1e376af7a20e73cfd69c4350ccfee665922dcfdb1ce8a",
     "v0004_alerts.py": "79c2a620550d18df9f2317e0659efb56149a3e47e16428f5a33b077d262dd198",
+    "v0005_password_reset_mfa.py": "7d7381e49a7a79ce7638ea6bc670e41a91cf85637f27a39d446bece891f01312",
 }
 
 

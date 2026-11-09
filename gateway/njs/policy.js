@@ -207,6 +207,25 @@ const ROUTES = [
   ["POST",   /^\/auth\/broker-accounts\/[^/]+\/rotate$/, "auth", "admin"],
   ["DELETE", /^\/auth\/broker-accounts\/[^/]+$/,      "auth", "admin"],
   ["POST",   /^\/auth\/me\/password$/,                "auth", "viewer"],
+  // Multi-factor login and password reset (#278). The caller's own MFA:
+  // any role (an enrolment-only session reaches these, MFA_ENROLL_ROUTES).
+  ["GET",    /^\/auth\/me\/mfa$/,                     "auth", "viewer"],
+  ["POST",   /^\/auth\/me\/mfa\/totp\/setup$/,         "auth", "viewer"],
+  ["POST",   /^\/auth\/me\/mfa\/totp\/enable$/,        "auth", "viewer"],
+  ["POST",   /^\/auth\/me\/mfa\/disable$/,             "auth", "viewer"],
+  ["POST",   /^\/auth\/me\/mfa\/recovery-codes$/,      "auth", "viewer"],
+  // The org's MFA requirement, resetting a user's MFA, the audit trail.
+  ["GET",    /^\/auth\/org$/,                         "auth", "admin"],
+  ["PATCH",  /^\/auth\/org$/,                         "auth", "admin"],
+  ["DELETE", /^\/auth\/users\/[^/]+\/mfa$/,            "auth", "admin"],
+  ["GET",    /^\/auth\/events$/,                      "auth", "admin"],
+  // Public, each with its own rate-limited nginx location: the second
+  // sign-in step (its mfa_token is signed with a different key, so it is
+  // never a bearer token here), and the emailed password reset.
+  ["POST",   /^\/auth\/login\/mfa$/,                  null, null],
+  ["POST",   /^\/auth\/password-reset$/,               null, null],
+  ["POST",   /^\/auth\/password-reset\/confirm$/,       null, null],
+  ["GET",    /^\/auth\/password-reset\/config$/,        null, null],
   // Public like /auth/login (not exempted via its own nginx location,
   // since unlike login it still needs js_access to run so the public
   // "no role" branch below actually executes) - a brand-new org has to
@@ -330,6 +349,34 @@ function jtiRevoked(claims, cached) {
     return cached !== undefined && cached !== null && cached !== "";
 }
 
+/*
+ * A session carrying mfa_enroll (auth.issue_session_token: the org requires
+ * MFA and this user hasn't set it up) reaches only these: enough to see who
+ * they are, set up an authenticator, and log out (#278). auth_api checks
+ * the same on its side.
+ */
+const MFA_ENROLL_ROUTES = [
+  ["GET",  /^\/auth\/me$/],
+  ["POST", /^\/auth\/logout$/],
+  ["GET",  /^\/auth\/me\/mfa$/],
+  ["POST", /^\/auth\/me\/mfa\/totp\/setup$/],
+  ["POST", /^\/auth\/me\/mfa\/totp\/enable$/],
+];
+
+/*
+ * Whether these claims may make this request as far as MFA is concerned:
+ * always, unless the token is an enrolment-only session.
+ */
+function mfaAllows(claims, method, uri) {
+    if (!claims || claims.mfa_enroll !== true) {
+        return true;
+    }
+    const path = uri.split("?")[0];
+    return MFA_ENROLL_ROUTES.some(function (row) {
+        return row[0] === method && row[1].test(path);
+    });
+}
+
 // Resources a site-restricted token can't reach at all: they span the
 // whole org and have no per-site filter to apply.
 const WHOLE_ORG = { devices: true, gateway: true };
@@ -399,4 +446,4 @@ function unknownRouteMessage(method, uri) {
 
 const SIGN_IN_HINT = "sign in with POST /auth/login (see /auth/docs), then send Authorization: Bearer <token>";
 
-export default { ROLE_RANK, ROUTES, resolveRoute, roleSatisfies, scopeSatisfies, parseUserCutoff, sessionCutOff, jtiRevoked, bearerFromHeader, isHaystackHandshake, unknownRouteMessage, SIGN_IN_HINT };
+export default { ROLE_RANK, ROUTES, MFA_ENROLL_ROUTES, mfaAllows, resolveRoute, roleSatisfies, scopeSatisfies, parseUserCutoff, sessionCutOff, jtiRevoked, bearerFromHeader, isHaystackHandshake, unknownRouteMessage, SIGN_IN_HINT };

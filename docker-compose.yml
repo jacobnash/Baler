@@ -338,7 +338,18 @@ services:
     restart: unless-stopped
     build: .
     command: python -m baler.auth_api
-    environment: *daemon-env
+    environment:
+      <<: *daemon-env
+      # Password reset email and two-step sign-in (#278; .env.example)
+      BALER_SMTP_HOST: ${BALER_SMTP_HOST:-}
+      BALER_SMTP_PORT: ${BALER_SMTP_PORT:-}
+      BALER_SMTP_TLS: ${BALER_SMTP_TLS:-}
+      BALER_SMTP_USER: ${BALER_SMTP_USER:-}
+      BALER_SMTP_PASSWORD: ${BALER_SMTP_PASSWORD:-}
+      BALER_SMTP_FROM: ${BALER_SMTP_FROM:-}
+      BALER_PUBLIC_URL: ${BALER_PUBLIC_URL:-}
+      BALER_PASSWORD_RESET_TTL_SECONDS: ${BALER_PASSWORD_RESET_TTL_SECONDS:-}
+      BALER_MFA_KEY: ${BALER_MFA_KEY:-}
     volumes:
       - .:/app
     depends_on: *daemon-depends-on

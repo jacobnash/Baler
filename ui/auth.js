@@ -100,15 +100,92 @@ function highlightCurrentNavLink() {
 }
 highlightCurrentNavLink();
 
+// The second sign-in step (#278): shown in the same form once the password
+// was right for an account with two-step sign-in. Built here, not in each
+// page's markup, so every page with a login gate gets it.
+function authMfaField() {
+  let row = document.getElementById("login-mfa-row");
+  if (!row) {
+    row = document.createElement("label");
+    row.id = "login-mfa-row";
+    row.textContent = "Code from your authenticator app (or a recovery code) ";
+    const input = Object.assign(document.createElement("input"), {
+      id: "login-mfa-code", autocomplete: "one-time-code", inputMode: "text", required: true,
+    });
+    row.appendChild(input);
+    authLoginFormEl.insertBefore(row, authLoginFormEl.querySelector("button[type=submit]"));
+  }
+  return row;
+}
+
+// "Forgot your password?" under the form: a link to the reset page when this
+// install sends email, otherwise who to ask (admin-led reset).
+async function authForgotHint() {
+  if (document.getElementById("login-forgot")) return;
+  const p = Object.assign(document.createElement("p"), { id: "login-forgot", className: "hint" });
+  authLoginFormEl.appendChild(p);
+  let selfService = false;
+  try {
+    const res = await fetch(`${AUTH_API_URL}/password-reset/config`);
+    selfService = res.ok && (await res.json()).self_service === true;
+  } catch {
+    selfService = false;
+  }
+  if (selfService) {
+    const a = Object.assign(document.createElement("a"), { href: "reset.html", textContent: "Forgot your password?" });
+    p.appendChild(a);
+  } else {
+    p.textContent = "Forgot your password? Ask an admin of your organization to reset it.";
+  }
+}
+
 // Wires the login form and, once signed in (or already holding a token),
 // calls onReady() to let the page do its own data loading.
 function initAuth(onReady) {
+  let mfaToken = null; // set between the password step and the code step
+  const passwordInputs = () => [document.getElementById("login-email"), document.getElementById("login-password")];
+
+  function done(body) {
+    setToken(body.token);
+    mfaToken = null;
+    const row = document.getElementById("login-mfa-row");
+    if (row) row.remove();
+    passwordInputs().forEach((el) => { el.disabled = false; });
+    if (body.mfa_enrollment_required && !/ops\.html$/.test(location.pathname)) {
+      // The org requires two-step sign-in: set it up first (Ops -> Your account).
+      location.href = "ops.html#account-section";
+      return;
+    }
+    hideLoginGate();
+    if (authStatusEl) authStatusEl.textContent = "connecting…";
+    onReady();
+  }
+
   authLoginFormEl.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     authLoginErrorEl.hidden = true;
-    const email = document.getElementById("login-email").value;
-    const password = document.getElementById("login-password").value;
     try {
+      if (mfaToken) {
+        const code = document.getElementById("login-mfa-code").value.trim();
+        const res = await fetch(`${AUTH_API_URL}/login/mfa`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mfa_token: mfaToken, code }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          if (res.status === 401 && /expired/.test(body.error || "")) {
+            mfaToken = null;
+            document.getElementById("login-mfa-row").remove();
+            passwordInputs().forEach((el) => { el.disabled = false; });
+          }
+          throw new Error(body.error || `sign-in failed: ${res.status}`);
+        }
+        done(body);
+        return;
+      }
+      const email = document.getElementById("login-email").value;
+      const password = document.getElementById("login-password").value;
       const res = await fetch(`${AUTH_API_URL}/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -118,15 +195,19 @@ function initAuth(onReady) {
         throw new Error(res.status === 401 ? "invalid email or password" : `login failed: ${res.status}`);
       }
       const body = await res.json();
-      setToken(body.token);
-      hideLoginGate();
-      if (authStatusEl) authStatusEl.textContent = "connecting…";
-      onReady();
+      if (body.mfa_required) {
+        mfaToken = body.mfa_token;
+        passwordInputs().forEach((el) => { el.disabled = true; });
+        authMfaField().querySelector("input").focus();
+        return;
+      }
+      done(body);
     } catch (err) {
       authLoginErrorEl.textContent = err.message;
       authLoginErrorEl.hidden = false;
     }
   });
+  authForgotHint();
 
   if (getToken()) {
     hideLoginGate();
