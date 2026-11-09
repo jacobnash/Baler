@@ -1,0 +1,17 @@
+ERMHDR	19.12	2027-01-05	Project	admin	dbx	Project Management	USD
+%T	PROJECT
+%F	proj_id	proj_short_name	last_recalc_date
+%R	1	HOSP-EXP	2027-03-01 00:00
+%T	PROJWBS
+%F	wbs_id	proj_id	wbs_short_name	wbs_name
+%R	10	1	L3	Level 3 Mechanical
+%T	TASK
+%F	task_id	proj_id	wbs_id	task_code	task_name	task_type	status_code	target_start_date	target_end_date	act_start_date	act_end_date	phys_complete_pct
+%R	100	1	10	M-1000	AHU-1 start-up	TT_Task	TK_Complete	2027-02-01 08:00	2027-02-03 17:00	2027-02-01 08:00	2027-02-04 12:00	100
+%R	101	1	10	M-1010	Level 3 VAVs online	TT_Task	TK_Active	2027-02-04 08:00	2027-02-10 17:00	2027-02-05 08:00		40
+%R	102	1	10	M-1020	TAB complete, Level 3	TT_FinMile	TK_NotStart	2027-02-20 17:00	2027-02-20 17:00			0
+%T	TASKPRED
+%F	task_pred_id	task_id	pred_task_id	pred_type
+%R	1	101	100	PR_FS
+%R	2	102	101	PR_FS
+%E
