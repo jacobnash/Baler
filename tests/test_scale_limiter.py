@@ -87,6 +87,45 @@ def test_unattributed_failure_is_still_named():
     assert v["limiter"] == "unattributed: cx run failed" and v["confidence"] == "low"
 
 
+# ---------------------------------------------------------------- fault_detector periodic work (#268)
+
+
+def _with_fd_heartbeat(quality: dict, his: dict) -> dict:
+    step, _ = _load(FIXTURES / "pass_next_suspect.json")
+    step.setdefault("rules", {}).setdefault("fault_detector", {})["heartbeat"] = {
+        "interval_seconds": 30.0, "quality": quality, "his": his}
+    return step
+
+
+def test_a_quality_sweep_over_its_interval_is_the_limiter():
+    step = _with_fd_heartbeat({"interval_s": 300.0, "sweep_s": 412.0, "rows": 9_000_000, "span_s": 600.0,
+                               "watermark_lag_s": 900.0},
+                              {"interval_s": 30.0, "sweep_s": 0.4, "gap_s_max": 30.2})
+    v = limiter.verdict(step)
+    assert v["limiter"].startswith("fault_detector quality watermark over its interval"), v
+    assert v["component"] == "fault_detector"
+    assert "fault_detector quality sweep" in v["also"]
+    assert any("412.0 s of its 300 s interval (9,000,000 rows" in e for e in v["evidence"])
+
+
+def test_his_cycles_that_wait_are_the_limiter():
+    step = _with_fd_heartbeat({"interval_s": 300.0, "sweep_s": 40.0, "watermark_lag_s": 310.0},
+                              {"interval_s": 30.0, "sweep_s": 0.4, "gap_s_max": 170.0})
+    v = limiter.verdict(step)
+    assert v["limiter"].startswith("fault_detector his cycle over its interval: His cycles up to 170.0 s apart"), v
+
+
+def test_a_quality_sweep_within_its_interval_is_headroom_only():
+    step = _with_fd_heartbeat({"interval_s": 300.0, "sweep_s": 40.0, "rows": 6_000_000, "span_s": 330.0,
+                               "watermark_lag_s": 305.0},
+                              {"interval_s": 30.0, "sweep_s": 0.4, "gap_s_max": 30.4})
+    v = limiter.verdict(step)
+    assert v["limiter"] == "none found"
+    parts = {h["part"]: h["ratio"] for h in limiter.headroom(step)}
+    assert parts["fault_detector quality sweep"] == round(40 / 300, 3)
+    assert parts["fault_detector quality watermark"] == round(305 / 600, 3)
+
+
 # ---------------------------------------------------------------- N listener workers (#233)
 
 WORKER = "/usr/local/bin/python -m baler.mqtt_listener --child worker --index {}"

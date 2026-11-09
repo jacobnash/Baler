@@ -303,6 +303,10 @@ def cmd_soak(args) -> None:
     canary = ladder.Canary(ep)
     late = LateWriter(ep, args.interval)
     states0 = ladder.container_states()
+    # The live install sharing the host, watched as the ladder does: a
+    # sustained breach stops the soak cleanly, its reason in the result.
+    safety = ladder.live_safety(args)
+    result["live_safety"] = safety.describe()
     seen: dict[str, dict] = {}  # chunk -> last state seen (inserts while hot)
     last_job: dict = {}
     pending_runs: list[dict] = []
@@ -373,6 +377,7 @@ def cmd_soak(args) -> None:
             t1 = time.perf_counter()
             conn.execute("SELECT 1")
             sample["pg_roundtrip_s"] = round(time.perf_counter() - t1, 4)
+            tripped, sample["live"] = safety.check()
             result["samples"].append(sample)
             # Docker's data root, where the stack's volumes grow (#269), not the checkout's disk
             disk_low, free = ladder.disk_check(args.min_free_gb)
@@ -411,6 +416,12 @@ def cmd_soak(args) -> None:
             if disk_low:
                 result["disk_low"] = (free["docker_root_free_gb"] if free["docker_root_free_gb"] is not None
                                       else free["repo_free_gb"])
+                break
+            if tripped:
+                result["live_safety_tripped"] = {**sample["live"], "degraded_for_s": safety.bad_for_s(),
+                                                 "at_t": sample["t"]}
+                print(f"  live-safety: the live install degraded for {safety.bad_for_s()} s ({sample['live']}): "
+                      "stopping the soak", flush=True)
                 break
             ladder.write_result(result)
         soak_end = time.time()
@@ -528,6 +539,11 @@ def evaluate_soak(result: dict) -> tuple[str, list[str]]:
     chunk, after, sched = cfg["chunk_interval_s"], cfg.get("compress_after_s") or 0, cfg.get("schedule_s") or 0
     if result.get("disk_low"):
         other.append("host disk low; stopped (not a Baler ceiling)")
+    if result.get("live_safety_tripped"):
+        t = result["live_safety_tripped"]
+        other.append(f"live-safety: the live install on this host degraded for {t.get('degraded_for_s')} s "
+                     f"({ {k: v for k, v in t.items() if k not in ('degraded_for_s', 'at_t')} }); "
+                     f"stopped at t={t.get('at_t')} s (not a Baler ceiling)")
     if s.get("steady_s", 0) < 2 * chunk or s.get("compression_cycles_steady", 0) < 2:
         other.append(f"soak too short: {s.get('steady_s', 0):.0f} s steady after a {s['warm_s']:.0f} s warm-up, "
                      f"{s.get('compression_cycles_steady', 0)} compression cycle(s); needs 2 chunk intervals and 2 cycles")
@@ -620,3 +636,4 @@ def add_parser(sub, common_args) -> None:
     p.add_argument("--no-up", action="store_true", help="the stack is already up")
     p.add_argument("--no-build", action="store_true", help="up without rebuilding the images")
     p.add_argument("--allow-default-chunks", action="store_true", help="soak with 7-day chunks anyway")
+    ladder.add_live_args(p, sustain_default=300.0)
