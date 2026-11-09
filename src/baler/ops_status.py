@@ -232,6 +232,9 @@ def _building_signals(scope=None) -> dict[str, Any]:
             # The rule daemons' place in the reading feed (#243): lag, misses.
             out["reading_feed"] = reading_feed.consumer_status(conn)
             conn.rollback()
+            # The listener supervisor's broker-drop count and workers (#233).
+            out["listener"] = heartbeat.details(conn).get("mqtt_listener")
+            conn.rollback()
             try:
                 org_row = conn.execute("SELECT COUNT(*) FROM orgs").fetchone()
                 out["org_count"] = int(org_row[0]) if org_row else 0
@@ -252,7 +255,25 @@ def _infer_ingest(building: dict[str, Any], *, platform_ok: bool) -> tuple[str, 
     age = (datetime.now(timezone.utc) - last_dt).total_seconds()
     if age > QUIET_INGEST_SECONDS:
         return "quiet", f"last ingest {int(age)}s ago"
+    dropped = _drop_state(building)
+    if dropped:
+        return dropped
     return "ok", f"last ingest {int(age)}s ago"
+
+
+# The ingest card stays degraded this long after the broker last dropped
+# messages (#233): the broker's queue for a slow subscriber overflowed.
+DROP_WINDOW_SECONDS = 3600
+
+
+def _drop_state(building: dict[str, Any]) -> tuple[str, str] | None:
+    lst = building.get("listener") or {}
+    last = lst.get("broker_last_drop_at")
+    if not last or (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() > DROP_WINDOW_SECONDS:
+        return None
+    return "degraded", (f"the broker dropped {lst.get('broker_dropped_since_start')} message(s) since the listener "
+                        f"started, the last at {last}: a subscriber can't keep up - if it's the listener "
+                        f"({lst.get('workers')} worker(s)), raise BALER_LISTENER_WORKERS")
 
 
 # A daemon is down once its heartbeat is this stale: fault_detector beats

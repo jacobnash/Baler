@@ -12,6 +12,7 @@ connection; the integration tests need docker-compose's TimescaleDB."""
 
 import logging
 import math
+import time
 from datetime import datetime, timedelta, timezone
 
 import psycopg
@@ -176,10 +177,27 @@ def _seed(conn, start, hours, step=30):
 
 
 def _compress(conn, start, end):
-    """Compress every chunk overlapping [start, end); returns how many are compressed."""
-    conn.execute(
-        "SELECT compress_chunk(c, if_not_compressed => true) FROM show_chunks('point_history', newer_than => %s, older_than => %s) c",
-        (start - timedelta(days=8), end + timedelta(days=8)))
+    """Compress every chunk overlapping [start, end); returns how many are compressed.
+
+    The stack's own compression policy can be compressing the same chunk at
+    the same moment: test_compress_after_follows_the_setting replaces the
+    policy, and TimescaleDB runs a new policy straight away, over these
+    60-day-old chunks. compress_chunk checks `if_not_compressed` before it
+    takes the chunk's lock, so losing that race raises "already compressed"
+    (CI, PR #272) though the chunk ends up exactly as wanted. Then compress
+    again: every chunk the job finished is skipped, and the caller still
+    asserts all of them are compressed."""
+    sql = ("SELECT compress_chunk(c, if_not_compressed => true) "
+           "FROM show_chunks('point_history', newer_than => %s, older_than => %s) c")
+    span = (start - timedelta(days=8), end + timedelta(days=8))
+    for attempt in range(5):
+        try:
+            conn.execute(sql, span)
+            break
+        except psycopg.errors.DuplicateObject:
+            if attempt == 4:
+                raise
+            time.sleep(0.5)
     return conn.execute(
         "SELECT count(*) FILTER (WHERE is_compressed), count(*) FROM timescaledb_information.chunks "
         "WHERE hypertable_name = 'point_history' AND range_start < %s AND range_end > %s", (end, start)).fetchone()

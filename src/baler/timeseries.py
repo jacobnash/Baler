@@ -253,10 +253,22 @@ _REGISTRY_SET = f"""
         WHERE EXCLUDED.last_ts > point_registry.last_ts + interval '{REGISTRY_GRANULARITY_S} seconds'
 """
 REGISTRY_UPSERT_SQL = "INSERT INTO point_registry (point_uri, last_ts) VALUES (%s, %s)" + _REGISTRY_SET
-# ORDER BY point_uri: concurrent writers (listener, hisWrite) lock registry
-# rows in one order, so they can't deadlock on them.
+# Only the batch's points the registry doesn't have, or has more than the
+# granularity behind, reach the INSERT: ON CONFLICT DO UPDATE locks the
+# existing row to its commit even when its WHERE then skips the update, so
+# upserting every point of every batch had concurrent listener workers
+# (#233) queueing on each other's registry rows - most batches share most
+# points - and 3 workers stored less than 2. The pre-check reads without
+# locking; a row another writer moved meanwhile is still caught by the
+# WHERE. ORDER BY point_uri: concurrent writers (listener workers,
+# hisWrite) lock the rows they do update in one order, so they can't
+# deadlock on them.
 _REGISTRY_STAGE_SQL = ("INSERT INTO point_registry (point_uri, last_ts) "
-                       "SELECT point_uri, max(ts) FROM point_history_stage GROUP BY point_uri ORDER BY point_uri"
+                       "SELECT s.point_uri, s.ts FROM (SELECT point_uri, max(ts) AS ts FROM point_history_stage "
+                       "GROUP BY point_uri) s LEFT JOIN point_registry r ON r.point_uri = s.point_uri "
+                       "WHERE r.point_uri IS NULL "
+                       f"OR s.ts > r.last_ts + interval '{REGISTRY_GRANULARITY_S} seconds' "
+                       "ORDER BY s.point_uri"
                        + _REGISTRY_SET)
 
 
@@ -314,7 +326,11 @@ def write_point_values(conn: psycopg.Connection, rows, then=None) -> int:
                 with cur.copy(f"COPY point_history_stage ({cols}) FROM STDIN") as copy:
                     for rec in latest.values():
                         copy.write_row(rec)
-                cur.execute(f"INSERT INTO point_history ({cols}) SELECT {cols} FROM point_history_stage" + _UPSERT_SET)
+                # ORDER BY: concurrent writers (several listener workers,
+                # #233; hisWrite) lock point_history rows in one order, so
+                # an overlapping key can't deadlock them.
+                cur.execute(f"INSERT INTO point_history ({cols}) SELECT {cols} FROM point_history_stage "
+                            "ORDER BY point_uri, ts" + _UPSERT_SET)
                 cur.execute(_REGISTRY_STAGE_SQL)
         if then is not None:
             then(conn)

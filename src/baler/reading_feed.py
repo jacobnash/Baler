@@ -62,14 +62,35 @@ FROM point_history_stage
 """
 
 
-def append_from_stage(conn, alarms: list | None = None) -> None:
+def extras(alarms: list | None = None, tags: list | None = None):
+    """The feed row's `alarms` column: the batch's non-readings. A plain
+    list of alarms, as #243 wrote it, unless the batch carried tags (#233):
+    then {"alarms": [...], "tags": [...]}. Consumers read it through
+    ALARMS_SQL/TAGS_SQL, so each sees only its own part."""
+    if tags:
+        return Jsonb({"alarms": alarms or [], "tags": tags})
+    return Jsonb(alarms) if alarms else None
+
+
+# What a consumer selects for a batch's alarms, and for its tags.
+ALARMS_SQL = "CASE WHEN jsonb_typeof(alarms) = 'object' THEN alarms->'alarms' ELSE alarms END"
+TAGS_SQL = "alarms->'tags'"
+
+
+def append_from_stage(conn, alarms: list | None = None, tags: list | None = None) -> None:
     """Inside write_point_values' transaction, after the upsert: the staged
     rows (deduplicated on (point, ts), ordered by ts) become one feed row.
     `alarms` are the batch's controller alarms, [[topic, event, ts], ...]:
     not readings, so not in point_history, but they reach fault_detector
-    the same way and with the same guarantees."""
+    the same way and with the same guarantees. `tags` are its tags/equip
+    messages, [[topic, value, ts], ...], for baler.tag_ingest (#233).
+
+    Any number of listener workers append concurrently (#233): each takes
+    FEED_LOCK_KEY here, after its upsert, and holds it to its commit, so
+    feed appends - just the INSERT and the commit - run one at a time and
+    seq order is commit order across all of them."""
     conn.execute("SELECT pg_advisory_xact_lock(%s)", (FEED_LOCK_KEY,))
-    conn.execute(_APPEND_SQL, (Jsonb(alarms) if alarms else None,))
+    conn.execute(_APPEND_SQL, (extras(alarms, tags),))
 
 
 _PRUNE_SQL = """
@@ -111,6 +132,7 @@ class Batch:
     committed_at: datetime
     readings: list[tuple[str, datetime | None, Any, str | None]]  # (point_uri, ts, value, quality), ts order
     alarms: list = field(default_factory=list)  # [[topic, event, ts], ...]
+    tags: list = field(default_factory=list)  # [[topic, value, ts], ...] (tags_only consumers)
 
 
 def _value(v, vt, vb):
@@ -144,14 +166,15 @@ class FeedConsumer:
     its own connection) polls and commits."""
 
     def __init__(self, conn, name: str, max_batches: int = 20, log=None,
-                 points_only: bool = False):
+                 points_only: bool = False, tags_only: bool = False):
         """`points_only`: fetch just each reading's point (readings come as
         (point_uri, None, None, None)) - for a consumer that only needs to
         know what reported, like derivation_engine, it skips decoding the
-        values."""
+        values. `tags_only`: fetch just the batches' tags (Batch.tags; no
+        readings or alarms) - baler.tag_ingest."""
         self.conn, self.name, self.max_batches = conn, name, max_batches
         self.log = log or functools.partial(print, flush=True)
-        self.points_only = points_only
+        self.points_only, self.tags_only = points_only, tags_only
         self.seq = 0
         self.stats = FeedStats()
 
@@ -177,13 +200,18 @@ class FeedConsumer:
         max_batches). Doesn't move the offset: commit() does, once
         they're handled."""
         cur = self.conn.cursor(binary=True)
+        if self.tags_only:
+            rows = cur.execute(
+                f"SELECT seq, committed_at, {TAGS_SQL} FROM reading_feed WHERE seq > %s ORDER BY seq LIMIT %s",
+                (self.seq, self.max_batches)).fetchall()
+            return [Batch(seq, at, [], [], tags or []) for seq, at, tags in rows]
         if self.points_only:
             rows = cur.execute(
-                "SELECT seq, committed_at, point_uri, alarms FROM reading_feed WHERE seq > %s ORDER BY seq LIMIT %s",
+                f"SELECT seq, committed_at, point_uri, {ALARMS_SQL} FROM reading_feed WHERE seq > %s ORDER BY seq LIMIT %s",
                 (self.seq, self.max_batches)).fetchall()
             return [Batch(seq, at, [(u, None, None, None) for u in uris], alarms or []) for seq, at, uris, alarms in rows]
         rows = cur.execute(
-            "SELECT seq, committed_at, point_uri, ts, value, value_text, value_bool, quality, alarms "
+            f"SELECT seq, committed_at, point_uri, ts, value, value_text, value_bool, quality, {ALARMS_SQL} "
             "FROM reading_feed WHERE seq > %s ORDER BY seq LIMIT %s", (self.seq, self.max_batches)).fetchall()
         out = []
         for seq, at, uris, tss, vals, texts, bools, quals, alarms in rows:

@@ -573,7 +573,10 @@ class Sampler:
                 lt = {"queue": hb.get("queue"), "queue_peak": hb.get("queue_peak"), "queue_max": hb.get("queue_max")}
                 if p and dt > 0:
                     lt["rows_per_s"] = round((hb.get("rows", 0) - p.get("rows", 0)) / dt, 1)
-                    lt["flush_busy"] = round(max(0.0, hb.get("flush_s", 0) - p.get("flush_s", 0)) / dt, 3)
+                    # since #233 the supervisor's heartbeat sums flush_s
+                    # over `writers` workers: the busy share is per writer
+                    writers = hb.get("writers") or 1
+                    lt["flush_busy"] = round(max(0.0, hb.get("flush_s", 0) - p.get("flush_s", 0)) / dt / writers, 3)
                 tick["listener"] = lt
         self._prev = cur
         return None if first else tick

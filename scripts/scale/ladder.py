@@ -136,6 +136,9 @@ def cmd_init(args) -> None:
         "# Pin the whole stack to some host CPUs, e.g. 2-5 (blank: no pinning).",
         "SCALE_CPUSET=",
         "# Per-container caps: SCALE_CPUS_<SERVICE>=1.5, SCALE_MEM_<SERVICE>=4g (defaults in compose.scale.yml).",
+        "# Listener worker processes (#233; blank = 1). Give the listener about a CPU each:",
+        "# BALER_LISTENER_WORKERS=4 with SCALE_CPUS_MQTT_LISTENER=4.5 and SCALE_MEM_MQTT_LISTENER=2g.",
+        "BALER_LISTENER_WORKERS=",
     ]
     common.ENV_FILE.write_text("\n".join(lines) + "\n")
     common.ENV_FILE.chmod(0o600)
@@ -356,6 +359,54 @@ def heartbeat_details(conn) -> dict:
     except Exception:  # noqa: BLE001
         conn.rollback()
         return {}
+
+
+def listener_status(conn) -> dict:
+    """mqtt_listener's heartbeats (#233): 'mqtt_listener' (the supervisor:
+    workers, child restarts, broker drops), 'mqtt_listener/<n>' per worker
+    (readings/s, CPU %, time blocked on a full queue over the last ~10 s)
+    and 'mqtt_listener/tags' (the tag path's feed lag). {} on a listener
+    from before #233."""
+    try:
+        return {s: d for s, d in conn.execute(
+            "SELECT service, detail FROM service_heartbeats WHERE service LIKE 'mqtt_listener%%' "
+            "AND beat_at > now() - interval '60 seconds'") if d}
+    except Exception:  # noqa: BLE001
+        conn.rollback()
+        return {}
+
+
+def summarize_listener(samples: list[dict], before: dict, after: dict) -> dict:
+    """Per-worker throughput and CPU over the soak (the mean of each
+    worker's ~10 s heartbeat figures), child restarts and broker drops
+    during it, and the tag path's lag. Pure (tested)."""
+    workers: dict[str, dict] = {}
+    for s in samples:
+        for svc, d in (s.get("listener") or {}).items():
+            if svc.removeprefix("mqtt_listener/").isdigit():
+                w = workers.setdefault(svc, {"readings_per_s": [], "cpu_pct": [], "blocked_s_delta": []})
+                for k in w:
+                    if d.get(k) is not None:
+                        w[k].append(d[k])
+    out: dict = {"workers": {}}
+    for svc, w in sorted(workers.items()):
+        if not w["readings_per_s"]:
+            continue
+        out["workers"][svc] = {"readings_per_s_mean": round(statistics.mean(w["readings_per_s"]), 1),
+                               "cpu_pct_mean": round(statistics.mean(w["cpu_pct"]), 1) if w["cpu_pct"] else None,
+                               "cpu_pct_max": round(max(w["cpu_pct"]), 1) if w["cpu_pct"] else None,
+                               "blocked_s": round(sum(w["blocked_s_delta"]), 1)}
+    out["readings_per_s_total"] = round(sum(w["readings_per_s_mean"] for w in out["workers"].values()), 1)
+    sup0, sup1 = before.get("mqtt_listener") or {}, after.get("mqtt_listener") or {}
+    out["worker_count"] = sup1.get("workers")
+    r0, r1 = sup0.get("restarts") or {}, sup1.get("restarts") or {}
+    out["restarts_delta"] = {k: v - r0.get(k, 0) for k, v in r1.items() if v - r0.get(k, 0)}
+    d0, d1 = sup0.get("broker_dropped_total"), sup1.get("broker_dropped_total")
+    out["broker_dropped_delta"] = d1 - d0 if d0 is not None and d1 is not None else None
+    tags = (after.get("mqtt_listener/tags") or {}).get("feed") or {}
+    out["tag_path"] = {"lag_s": tags.get("lag_s"), "lag_batches": tags.get("lag_batches"),
+                       "messages": (after.get("mqtt_listener/tags") or {}).get("messages")}
+    return out
 
 
 def chunk_writes(conn) -> int:
@@ -643,6 +694,36 @@ def stored_in(conn, a: float, b: float) -> int:
                          datetime.fromtimestamp(b, tz=timezone.utc))).fetchone()[0]
 
 
+def start_tags_storm(ep: Endpoints, args, points: int, outdir: Path) -> dict:
+    """#233's done-when: tags for --tags-storm new points published while
+    the readings soak runs (as a Windrow restart re-publishes every
+    point's tags). The step records how long the graph took to take them
+    and what reading lag did meanwhile."""
+    stats_file = outdir / f"gen-storm-{points}.json"
+    gen = start_loadgen(ep, args, points + args.tags_storm, "tags", stats_file, tags_from=points)
+    return {"gen": gen, "started": time.time(), "stats_file": stats_file}
+
+
+def finish_tags_storm(storm: dict, ep: Endpoints, points: int, storm_points: int, canary: Canary) -> dict:
+    """Waits (up to 10 min) for the storm's points to reach the graph; the
+    canary's lag over the storm, from its first tag to the graph having
+    them all."""
+    storm["gen"].wait()
+    done = None
+    while time.time() - storm["started"] < 600:
+        if graph_counts(ep)["scale_points"] >= points + storm_points:
+            done = time.time()
+            break
+        time.sleep(5)
+    end = done or time.time()
+    lags = sorted(lag for pub, lag in canary.samples if storm["started"] <= pub <= end)
+    return {"points": storm_points, "messages": read_stats(storm["stats_file"]).get("sent"),
+            "graph_s": round(done - storm["started"], 1) if done else None,
+            "lag_samples": len(lags),
+            "lag_p95_s": round(lags[min(len(lags) - 1, int(len(lags) * 0.95))], 2) if lags else None,
+            "lag_max_s": round(lags[-1], 2) if lags else None}
+
+
 _DISK_FALLBACK_WARNED = False
 
 
@@ -739,6 +820,11 @@ def evaluate(step: dict) -> tuple[str, list[str]]:
             reasons.append(f"probe {p['name']}: median {p['median_s']} s > budget {p['budget_s']} s ({p['source']})")
         elif p.get("max_bytes") and p["bytes"] > p["max_bytes"]:
             reasons.append(f"probe {p['name']}: {p['bytes']} bytes > {p['max_bytes']}")
+    for child, n in ((step.get("listener") or {}).get("restarts_delta") or {}).items():
+        reasons.append(f"mqtt_listener {child} restarted {n}x")
+    storm = step.get("tags_storm") or {}
+    if storm.get("lag_p95_s") is not None and storm["lag_p95_s"] >= MAX_P95_LAG_S:
+        reasons.append(f"tags storm of {storm['points']} points pushed p95 ingest lag to {storm['lag_p95_s']} s")
     for svc, c in step.get("containers", {}).items():
         if c.get("restarts_delta"):
             reasons.append(f"{svc} restarted {c['restarts_delta']}x" + (" (OOM-killed)" if c.get("oom_killed") else ""))
@@ -797,6 +883,8 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
         w0 = chunk_writes(conn)
         sys0 = sysmon.snapshot()
         feed0 = feed_status(conn)
+        lst0 = listener_status(conn)
+        storm = start_tags_storm(ep, args, points, outdir) if args.tags_storm else None
         while time.time() - soak_start < args.soak:
             time.sleep(args.sample_every)
             tripped, live = safety.check()
@@ -810,7 +898,7 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
                 t1 = time.perf_counter()
                 sample["docker"] = docker_stats()
                 sample["docker_stats_s"] = round(time.perf_counter() - t1, 3)  # its cost, for the overhead record
-            sample.update(lag=canary.stats(soak_start), feed=feed_status(conn))
+            sample.update(lag=canary.stats(soak_start), feed=feed_status(conn), listener=listener_status(conn))
             t1 = time.perf_counter()
             conn.execute("SELECT 1")
             sample["pg_roundtrip_s"] = round(time.perf_counter() - t1, 4)
@@ -837,6 +925,9 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
         w1 = chunk_writes(conn)
         sys1 = sysmon.snapshot()
         feed1 = feed_status(conn)
+        lst1 = listener_status(conn)
+        if storm is not None:
+            step["tags_storm"] = finish_tags_storm(storm, ep, points, args.tags_storm, canary)
 
         # 3. read probes and rules, still under load
         if ev:
@@ -914,6 +1005,7 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
         step["db"]["bytes_per_day_raw_at_this_rate"] = round(step["db"]["bytes_per_row"] * stored_rps * 86400)
     step["resources"] = (evidence.resources(ev.ticks) if ev and ev.has_cgroups and ev.ticks
                          else summarize_docker(samples))
+    step["listener"] = summarize_listener(samples, lst0, lst1)
     states1 = container_states()
     step["containers"] = {svc: {**c, "restarts_delta": c["restarts"] - states0.get(svc, {}).get("restarts", 0)}
                           for svc, c in states1.items()}
@@ -949,10 +1041,11 @@ def run_header(ep: Endpoints, args) -> dict:
     conn = pg_connect(ep)
     try:
         dur = durability(conn)
+        workers = (listener_status(conn).get("mqtt_listener") or {}).get("workers")
     finally:
         conn.close()
     nproc = os.cpu_count() or 1
-    return {"run_id": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"), "kind": "ladder",
+    return {"listener_workers": workers or common.read_env().get("BALER_LISTENER_WORKERS") or 1, "run_id": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"), "kind": "ladder",
             "hardware": common.hardware(), "commits": common.commits(), "durability": dur,
             "cpu_caps": cpu_caps(nproc, common.read_env()), "cpuset": common.read_env().get("SCALE_CPUSET", ""),
             "config": {k: v for k, v in vars(args).items() if k != "func"},
@@ -1023,7 +1116,9 @@ def cmd_crash(args) -> None:
     """Durability (#190): readings flowing for --points, then `docker kill
     -s KILL` each --kill target in turn, restart it, and count readings the
     broker acknowledged (PUBACK to the generator) that never reached
-    point_history. Batching is fine; losing acknowledged data isn't."""
+    point_history. Batching is fine; losing acknowledged data isn't. With
+    several listener workers (#233) `listener_worker` kills one worker
+    process while the others keep storing; `mqtt_listener` kills them all."""
     config = guard()
     ep = Endpoints(config)
     result = run_header(ep, args)
@@ -1037,17 +1132,39 @@ def cmd_crash(args) -> None:
     for target in args.kill.split(","):
         stats_file = outdir / f"gen-{target}.json"
         gen = start_loadgen(ep, args, args.points, "readings", stats_file)
-        time.sleep(args.warmup)
-        a = int(time.time())
-        time.sleep(15)
-        cid = compose("ps", "-q", target, capture=True).stdout.strip()
-        t_kill = time.time()
-        subprocess.run(["docker", "kill", "-s", "KILL", cid], check=True, capture_output=True)
-        time.sleep(args.down_for)
-        compose("up", "-d", "--no-deps", "--wait", target, check=False)
-        t_back = time.time()
-        time.sleep(30)
-        b = int(time.time())
+        try:
+            time.sleep(args.warmup)
+            a = int(time.time())
+            time.sleep(15)
+            conn = pg_connect(ep)
+            lst0 = listener_status(conn)
+            t_kill = time.time()
+            if target == "listener_worker":
+                # One worker process (#233), not the container: the supervisor
+                # restarts it, and its persistent session has kept what it
+                # hadn't acknowledged - the rest of the workers carry on.
+                pid = ((lst0.get("mqtt_listener") or {}).get("pids") or {}).get(args.kill_worker)
+                if not pid:
+                    raise SystemExit(f"no pid for {args.kill_worker} in the mqtt_listener heartbeat (a pre-#233 listener?)")
+                # (the image has no `kill` binary)
+                compose("exec", "-T", "mqtt_listener", "python", "-c", f"import os; os.kill({int(pid)}, 9)")
+                while time.time() - t_kill < 120:
+                    time.sleep(1)
+                    now = ((listener_status(conn).get("mqtt_listener") or {}).get("pids") or {}).get(args.kill_worker)
+                    if now and now != pid:
+                        break
+            else:
+                cid = compose("ps", "-q", target, capture=True).stdout.strip()
+                subprocess.run(["docker", "kill", "-s", "KILL", cid], check=True, capture_output=True)
+                time.sleep(args.down_for)
+                compose("up", "-d", "--no-deps", "--wait", target, check=False)
+            t_back = time.time()
+            conn.close()
+            time.sleep(30)
+            b = int(time.time())
+        except BaseException:
+            gen.kill()  # a generator left running would double the next target's rows
+            raise
         gen.send_signal(signal.SIGTERM)
         gen.wait(timeout=60)
         # drain: let the listener catch up (the broker queued for its session)
@@ -1064,7 +1181,10 @@ def cmd_crash(args) -> None:
                 time.sleep(5)
         st = read_stats(stats_file)
         acked, stored = acked_in(st, a, b), stored_in(conn, a, b)
+        lst1 = listener_status(conn)
         entry = {"target": target, "window": [a, b], "killed_at": t_kill, "back_after_s": round(t_back - t_kill, 1),
+                 "listener_workers": (lst1.get("mqtt_listener") or {}).get("workers"),
+                 "listener_restarts": (lst1.get("mqtt_listener") or {}).get("restarts"),
                  "acked": acked, "stored": stored, "missing_acked": max(0, acked - stored),
                  "missing_ratio": round(max(0, acked - stored) / acked, 6) if acked else None}
         result["crash"].append(entry)
@@ -1141,6 +1261,9 @@ def main(argv=None) -> None:
     p.add_argument("--no-evidence", action="store_true", help="no limiter evidence sampling (the verdict has less to go on)")
     p.add_argument("--budgets", default=str(common.HERE / "budgets.json"))
     p.add_argument("--continue-on-fail", action="store_true")
+    p.add_argument("--tags-storm", type=int, default=0,
+                   help="publish tags for this many new points during each soak (#233: a tags storm must not "
+                        "push reading lag past 30 s)")
     p.add_argument("--no-up", action="store_true", help="the stack is already up")
     p.add_argument("--no-build", action="store_true", help="up without rebuilding the images")
     p.add_argument("--reuse", action="store_true", help="allow a stack that already has more scale points than the first step")
@@ -1150,7 +1273,10 @@ def main(argv=None) -> None:
     p.add_argument("--live-latency-factor", type=float, default=3.0)
     p = sub.choices["crash"]
     p.add_argument("--points", type=int, default=10_000)
-    p.add_argument("--kill", default="mqtt_listener,postgres", help="services to kill -9, one at a time")
+    p.add_argument("--kill", default="mqtt_listener,listener_worker,postgres",
+                   help="services to kill -9, one at a time; listener_worker is one mqtt_listener worker "
+                        "process (--kill-worker), not the container")
+    p.add_argument("--kill-worker", default="worker-0", help="which worker listener_worker kills")
     p.add_argument("--down-for", type=float, default=10.0, help="seconds a killed service stays down")
     args = ap.parse_args(argv)
     args.func(args)

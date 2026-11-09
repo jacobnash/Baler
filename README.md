@@ -61,7 +61,7 @@ CI/dev loop. `docker compose restart gateway` always fixes it.
 
 | Process | What it does | Port (direct) |
 |---|---|---|
-| `mqtt_listener` | Subscribes to `fbf/#`, writes every reading to Oxigraph + Postgres. | — |
+| `mqtt_listener` | `BALER_LISTENER_WORKERS` processes (default 1) on the shared subscription `$share/baler/fbf/#`; writes readings to Postgres in batches and tags to Oxigraph (#233). | — |
 | `ingest_api` | `POST /ingest` — same write path as the listener, for push-style sources. | 8000 |
 | `fault_api` | CRUD for fault-detection rules + webhook subscriptions, `GET /faults`. | 8002 |
 | `fault_detector` | Evaluates rules against live readings (Cur) and history (His), fires webhooks on fault open/resolve. | — |

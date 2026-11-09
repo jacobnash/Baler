@@ -123,6 +123,49 @@ def classify_on_ingest(store, uri, rules: list[MappingRule]) -> str | None:
     return rule["brick_class"]
 
 
+def _values(uris) -> str:
+    return " ".join(f"<{u}>" for u in uris)
+
+
+def classify_on_ingest_many(store, entities: dict, chunk: int = 500) -> dict:
+    """classify_on_ingest for many entities at once - {uri: rules} - as the
+    listener's tag path applies a batch of tag messages (Baler#233): two
+    reads per `chunk` entities (every type, every tag) and one write for all
+    the new classes, instead of two reads and a write per entity. Same rule
+    as classify_on_ingest, entity by entity. Returns {uri: brick class}
+    for the entities it classified."""
+    out: dict = {}
+    items = list(entities.items())
+    for i in range(0, len(items), chunk):
+        part = dict(items[i:i + chunk])
+        values = _values(part)
+        types: dict[str, list[URIRef]] = {}
+        for r in store.query(f"SELECT ?s ?type WHERE {{ VALUES ?s {{ {values} }} ?s a ?type }}"):
+            types.setdefault(str(r.s), []).append(URIRef(str(r.type)))
+        tags: dict[str, set[str]] = {}
+        for r in store.query(f"""
+            PREFIX haystack: <urn:baler:haystack#>
+            SELECT ?s ?tag WHERE {{ VALUES ?s {{ {values} }} ?s haystack:hasTag ?tag }}"""):
+            tags.setdefault(str(r.s), set()).add(str(r.tag))
+        adds = []
+        for uri, rules in part.items():
+            ts = types.get(str(uri), [])
+            if any(str(t).startswith(str(BRICK)) for t in ts):
+                continue
+            have = tags.get(str(uri), set())
+            direct = [r for r in rules if set(r["tags"]) <= have]
+            if not direct:
+                continue
+            rule = max(direct, key=lambda r: len(r["tags"]))
+            for t in ts:
+                if str(t).startswith(str(PROJ)) or t == TD.UnmappedPoint:
+                    store.remove_relationship(URIRef(str(uri)), RDF.type, t)
+            adds.append((URIRef(str(uri)), RDF.type, BRICK[rule["brick_class"]]))
+            out[uri] = rule["brick_class"]
+        store.add_many(adds)
+    return out
+
+
 def classify_point_with_fallback(store, point_uri, rules: list[MappingRule] | None = None) -> tuple[str, str | None]:
     """classify_point, kept under this name for the pullers that call it.
     It used to take an LLM callable for what the rules couldn't place; that

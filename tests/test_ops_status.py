@@ -27,6 +27,18 @@ def test_infer_ingest_ok_when_recent():
     assert "last ingest" in detail
 
 
+def test_infer_ingest_degraded_after_broker_drops():
+    """#233: overload is never silent - drops the broker counted turn the
+    ingest card degraded for an hour."""
+    now = datetime.now(timezone.utc)
+    recent = (now - timedelta(seconds=30)).isoformat()
+    lst = {"workers": 2, "broker_dropped_since_start": 4741, "broker_last_drop_at": (now - timedelta(minutes=5)).isoformat()}
+    state, detail = ops_status._infer_ingest({"last_ingest_at": recent, "listener": lst}, platform_ok=True)
+    assert state == "degraded" and "4741" in detail and "BALER_LISTENER_WORKERS" in detail
+    lst["broker_last_drop_at"] = (now - timedelta(hours=2)).isoformat()
+    assert ops_status._infer_ingest({"last_ingest_at": recent, "listener": lst}, platform_ok=True)[0] == "ok"
+
+
 def test_infer_derivations_degraded_when_targets_disabled():
     state, detail = ops_status._infer_derivations(
         {"disabled_derivation_targets": 2, "heartbeats": {"derivation_engine": _now()}}, platform_ok=True
