@@ -24,6 +24,7 @@ from baler_fn.manifest import (
     load_manifest,
     parse_manifest,
 )
+from baler_fn.paging import phable_read_all
 from baler_fn.registry import (
     FunctionInfo,
     FunctionList,
@@ -40,7 +41,7 @@ list = list_functions
 __all__ = [
     "ENTRY_POINT_GROUP", "BalerClient", "ConfigError", "FunctionInfo", "FunctionList", "FunctionSpec", "Manifest",
     "ManifestError", "baler_function", "connect", "describe", "is_baler_function", "list", "list_functions",
-    "load_manifest", "parse_manifest",
+    "load_manifest", "parse_manifest", "phable_read_all",
 ]
 
 

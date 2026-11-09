@@ -1,5 +1,5 @@
 """
-0003 manual commissioning results (Baler#275 slice a), and who closed an
+0008 manual commissioning results (Baler#275 slice a), and who closed an
 issue.
 
 - cx_manual_results: a person's pass / fail / N-A for one procedure step on
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 3
+VERSION = 8
 NAME = "manual commissioning results"
 
 RESULTS = """
