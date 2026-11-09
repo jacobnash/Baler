@@ -1110,12 +1110,9 @@ def _read_filter_grid(backend: Backend, row: dict, scope: Scope) -> oh.Grid:
     page - any read of a graph under READ_LIMIT records - has no extra meta
     and is exactly what it always was."""
     limit_v = row.get("limit")
-    if isinstance(limit_v, oh.Number):
-        limit: int | None = int(limit_v.val)
-        if limit < 1:
-            raise OpError("limit must be a positive number")
-    else:
-        limit = READ_LIMIT or None
+    limit = int(limit_v.val) if isinstance(limit_v, oh.Number) else (READ_LIMIT or None)
+    if limit is not None and limit < 1:
+        raise OpError("limit must be a positive number")
     after_v = row.get("after")
     if after_v is not None and not isinstance(after_v, (oh.Ref, str)):
         raise OpError("after must be the Ref a previous page's meta handed out")

@@ -9,6 +9,7 @@ import base64
 import hashlib
 import hmac
 import threading
+import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -200,6 +201,87 @@ def test_read_limit_and_bool_curval(backend):
     fan = next(r for r in pts if "fan" in r)
     assert fan["curVal"] is True and fan["kind"] == "Bool"
     assert len(backend.read_filter("point or fan or ahu", 1)) == 1
+
+
+# --- paged reads (Baler#244) ----------------------------------------------
+
+
+def _read(backend, flt, **extra):
+    return ha.dispatch(backend, "read", oh.Grid.from_rows([{"filter": flt, **extra}]))
+
+
+def _walk(backend, flt, **extra):
+    """Every page of a filter read, following meta `after`: (ids, pages)."""
+    ids, pages, after = [], 0, None
+    while True:
+        g = _read(backend, flt, **extra, **({"after": after} if after is not None else {}))
+        pages += 1
+        ids += [r["id"].id for r in g.rows if r.get("id") is not None]
+        after = g.meta.get("after")
+        if after is None:
+            return ids, pages
+        assert g.meta["limit"] == oh.Number(extra.get("limit", oh.Number(ha.READ_LIMIT)).val)
+        assert "limit of" in g.meta["incomplete"]
+
+
+def test_a_read_under_the_default_limit_is_unchanged(backend):
+    g = _read(backend, "point or fan or ahu")
+    assert len(g.rows) == 3 and g.meta == {}  # no paging meta: exactly what a spec client always got
+
+
+def test_default_limit_pages_and_the_pages_are_the_whole_read(backend, monkeypatch):
+    whole = [r["id"].id for r in backend.read_filter("point or fan or ahu", None)]
+    monkeypatch.setattr(ha, "READ_LIMIT", 1)
+    first = _read(backend, "point or fan or ahu")
+    assert len(first.rows) == 1 and first.meta["after"] == first.rows[0]["id"]
+    ids, pages = _walk(backend, "point or fan or ahu")
+    assert ids == whole and pages == 3  # id order, each record once
+    monkeypatch.setattr(ha, "READ_LIMIT", 0)  # 0: no default limit, one grid
+    assert [r["id"].id for r in _read(backend, "point or fan or ahu").rows] == whole
+
+
+def test_explicit_limit_pages_too_and_must_be_positive(backend):
+    ids, pages = _walk(backend, "point or fan or ahu", limit=oh.Number(2))
+    assert len(ids) == 3 and pages == 2
+    with pytest.raises(ha.OpError):
+        _read(backend, "point", limit=oh.Number(0))
+    with pytest.raises(ha.OpError):
+        _read(backend, "point", after=oh.Number(3))
+
+
+def test_paging_is_stable_under_concurrent_writes(backend, store):
+    """Keyset paging: records added or removed mid-walk never make one that
+    exists throughout come back twice or go missing."""
+    first = _read(backend, "point or fan or ahu", limit=oh.Number(1))
+    after = first.meta["after"]
+    seen = [first.rows[0]["id"].id]
+    # before the cursor (sorts first), after it, and a removal ahead of it
+    store.add_many([(URIRef("urn:equip:aaa"), HAYSTACK.hasTag, Literal("ahu")),
+                    (URIRef("urn:point:zzz"), HAYSTACK.hasTag, Literal("fan"))])
+    store.graph.remove((URIRef(FAN), None, None))
+    while after is not None:
+        g = _read(backend, "point or fan or ahu", limit=oh.Number(1), after=after)
+        seen += [r["id"].id for r in g.rows]
+        after = g.meta.get("after")
+    assert len(seen) == len(set(seen))
+    assert ha.uri_to_ref(DAT) in seen and ha.uri_to_ref(AHU) in seen  # there throughout: each once
+    assert ha.uri_to_ref("urn:point:zzz") in seen and ha.uri_to_ref("urn:equip:aaa") not in seen
+
+
+def test_live_tag_filters_page_too(backend):
+    whole = [r["id"].id for r in backend.read_filter("his", None)]
+    assert len(whole) == 2
+    ids, _pages = _walk(backend, "his", limit=oh.Number(1))
+    assert ids == whole
+
+
+def test_http_get_pages_with_after(http, monkeypatch):
+    monkeypatch.setattr(ha, "READ_LIMIT", 2)
+    g = oh.decode_grid(_req(f"{http}/api/demo/read?filter=point%20or%20fan%20or%20ahu")[2])
+    assert len(g.rows) == 2 and isinstance(g.meta["after"], oh.Ref)
+    after = urllib.parse.quote("@" + g.meta["after"].id)
+    rest = oh.decode_grid(_req(f"{http}/api/demo/read?filter=point%20or%20fan%20or%20ahu&after={after}")[2])
+    assert len(rest.rows) == 1 and "after" not in rest.meta
 
 
 def test_read_rejects_hisread_expression(backend):

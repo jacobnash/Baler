@@ -241,10 +241,27 @@ class HaystackClient:
         return {k: _decode_haystack_scalar(v) for k, v in row.items()}
 
     def read(self, filter: str, limit: int | None = None) -> list[dict]:
+        """Every record the filter matches, or the first `limit`. A server
+        that pages (Baler, #244) answers a page at a time and names the last
+        id it covered in grid meta `after`; without a limit this follows it
+        to the end. Servers that don't page never set it: one request."""
         params: dict[str, str | int] = {"filter": filter}
         if limit is not None:
             params["limit"] = limit
-        rows = self._get("read", params)["rows"]
+        rows: list[dict] = []
+        while True:
+            grid = self._get("read", params)
+            rows += [r for r in grid.get("rows", []) if r]
+            after = (grid.get("meta") or {}).get("after")
+            if isinstance(after, dict) and after.get("_kind") == "ref":  # Hayson
+                after = str(after["val"])
+            elif isinstance(after, str) and after.startswith("r:"):  # JSON v3
+                after = after[2:].split(" ", 1)[0]
+            else:
+                after = None
+            if limit is not None or after is None:
+                break
+            params["after"] = "@" + after
         return [{k: _decode_haystack_scalar(v) for k, v in row.items()} for row in rows]
 
     def his_read(self, id: str, range: str) -> list[dict]:

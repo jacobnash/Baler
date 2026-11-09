@@ -77,18 +77,28 @@ const classLabel = (cls) => cls.replace(/_/g, " ");
 
 class SessionExpired extends Error {}
 
-// GET /api/read?filter=... -> the grid's rows (Hayson, the API's JSON default).
+// GET /api/read?filter=... -> every matching record (Hayson, the API's JSON
+// default). The API answers a page at a time (Baler#244: a page is bounded,
+// one grid of a 100k-point graph wasn't); a page that stops short names its
+// last id in meta `after`, passed back to read on.
 async function haystackRead(filter) {
-  const url = `${HAYSTACK_API_URL}/read?filter=${encodeURIComponent(filter)}`;
-  const res = await fetch(url, { headers: { ...authHeaders(), Accept: "application/json" } });
-  if (res.status === 401) {
-    handleUnauthorized();
-    throw new SessionExpired("session expired");
-  }
-  if (!res.ok) throw new Error(`read failed: ${res.status}`);
-  const grid = await res.json();
-  if (grid.meta && grid.meta.err) throw new Error(grid.meta.dis || "read failed");
-  return grid.rows || [];
+  const rows = [];
+  let after = null;
+  do {
+    let url = `${HAYSTACK_API_URL}/read?filter=${encodeURIComponent(filter)}`;
+    if (after) url += `&after=${encodeURIComponent("@" + after)}`;
+    const res = await fetch(url, { headers: { ...authHeaders(), Accept: "application/json" } });
+    if (res.status === 401) {
+      handleUnauthorized();
+      throw new SessionExpired("session expired");
+    }
+    if (!res.ok) throw new Error(`read failed: ${res.status}`);
+    const grid = await res.json();
+    if (grid.meta && grid.meta.err) throw new Error(grid.meta.dis || "read failed");
+    for (const r of grid.rows || []) if (Object.keys(r).length) rows.push(r);
+    after = refId(grid.meta && grid.meta.after);
+  } while (after);
+  return rows;
 }
 
 // Ref ids are entity URIs with everything outside Haystack's ref charset
