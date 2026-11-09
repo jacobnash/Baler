@@ -17,7 +17,15 @@ from functools import lru_cache
 
 from opentelemetry import trace
 
-from baler import bacnet_alarms, mapping, mqtt_util, quality, reading_feed, tracing
+from baler import (
+    bacnet_alarms,
+    heartbeat,
+    mapping,
+    mqtt_util,
+    quality,
+    reading_feed,
+    tracing,
+)
 from baler.ingest import (
     ingest_equip_tags,
     ingest_haystack_equip_tags,
@@ -120,7 +128,7 @@ class ReadingBatcher:
 
     def __init__(self, client, store, ts_conn, max_rows: int = 5000, max_wait: float = 0.25, max_queued: int = 50_000,
                  feed: bool = False, feed_retention_s: float = reading_feed.DEFAULT_RETENTION_S,
-                 prune_every: float = 5.0):
+                 prune_every: float = 5.0, beat_every: float = 5.0):
         self.client, self.store, self.ts_conn = client, store, ts_conn
         self.max_rows, self.max_wait = max_rows, max_wait
         # The reading feed (#243): each committed batch, readings and
@@ -136,6 +144,14 @@ class ReadingBatcher:
         self.generation = 0
         self.rows = 0
         self.batches = 0
+        # What the heartbeat reports (Baler#269): seconds spent in flush()
+        # (the write path's busy time: near 1 s per second means the writer,
+        # not the broker, sets the pace), and the deepest queue since the
+        # last beat.
+        self.flush_s = 0.0
+        self.queue_peak = 0
+        self.beat_every = beat_every
+        self._last_beat = 0.0
         self.thread = threading.Thread(target=self._run, name="reading-batcher", daemon=True)
 
     def start(self) -> None:
@@ -160,7 +176,12 @@ class ReadingBatcher:
                     print(f"ingest: {n / (now - last_report):.0f} readings/s, {b} batches "
                           f"(avg {n / max(b, 1):.0f} rows), queue {self.queue.qsize()}", flush=True)
                     last_report, last_rows, last_batches = now, self.rows, self.batches
-                batch = [self.queue.get()]
+                self.maybe_beat()
+                try:
+                    batch = [self.queue.get(timeout=self.beat_every)]
+                except queue.Empty:
+                    continue  # idle: still beat
+                self.queue_peak = max(self.queue_peak, self.queue.qsize() + 1)
                 deadline = time.monotonic() + self.max_wait
                 while len(batch) < self.max_rows:
                     left = deadline - time.monotonic()
@@ -181,7 +202,28 @@ class ReadingBatcher:
             traceback.print_exc()
             os._exit(1)
 
+    def maybe_beat(self) -> None:
+        """mqtt_listener's heartbeat (Baler#269): queue depth now and its
+        peak since the last beat, rows and batches written, and seconds
+        spent writing them. One upsert every `beat_every` s, from this
+        thread, on the connection it writes with."""
+        now = time.monotonic()
+        if self.ts_conn is None or now - self._last_beat < self.beat_every:
+            return
+        self._last_beat = now
+        heartbeat.beat(self.ts_conn, "mqtt_listener", {
+            "queue": self.queue.qsize(), "queue_peak": self.queue_peak, "queue_max": self.queue.maxsize,
+            "rows": self.rows, "batches": self.batches, "flush_s": round(self.flush_s, 3)})
+        self.queue_peak = self.queue.qsize()
+
     def flush(self, batch: list) -> None:
+        t0 = time.monotonic()
+        try:
+            self._flush(batch)
+        finally:
+            self.flush_s += time.monotonic() - t0
+
+    def _flush(self, batch: list) -> None:
         with tracer.start_as_current_span("mqtt_listener.flush") as span:
             readings = [(topic, value, ts, flag) for _, _, _, topic, value, ts, flag in batch if flag is not ALARM]
             alarms = [[topic, value, ts] for _, _, _, topic, value, ts, flag in batch if flag is ALARM]

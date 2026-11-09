@@ -49,6 +49,11 @@ services:
     ports: !override
       - "127.0.0.1:${SCALE_OXIGRAPH_PORT:-27878}:7878"
   postgres:
+    # docker-compose.yml's command plus pg_stat_statements, in the scale
+    # stack only: the ladder's limiter evidence reads its top queries per
+    # step (Baler#269). timescaledb must stay first in the preload list.
+    # Keep the rest in step with docker-compose.yml's command.
+    command: postgres -c log_statement=all -c shared_preload_libraries=timescaledb,pg_stat_statements
     cpus: ${SCALE_CPUS_POSTGRES:-2.0}
     mem_limit: ${SCALE_MEM_POSTGRES:-6g}
     cpuset: "${SCALE_CPUSET:-}"

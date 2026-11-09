@@ -209,6 +209,28 @@ def _run(cmd: list[str], cwd: Path | None = None) -> str:
         return ""
 
 
+_DOCKER_ROOT: str | None = None
+
+
+def docker_root() -> str:
+    """Docker's data root (`docker info` DockerRootDir): where the scale
+    stack's volumes, images and logs live, which is often not the disk the
+    checkout is on (Baler#269)."""
+    global _DOCKER_ROOT
+    if _DOCKER_ROOT is None:
+        _DOCKER_ROOT = _run(["docker", "info", "--format", "{{.DockerRootDir}}"]) or "/var/lib/docker"
+    return _DOCKER_ROOT
+
+
+def free_gb(path: str | Path) -> float | None:
+    """Free GB on the filesystem holding `path` (None if it isn't visible
+    from here, e.g. a remote or rootless Docker's root)."""
+    try:
+        return shutil.disk_usage(path).free / 1e9
+    except OSError:
+        return None
+
+
 def hardware() -> dict:
     """What the numbers were measured on: never compare a 1-CPU and a
     12-CPU run without seeing this (Baler#190)."""
@@ -231,8 +253,8 @@ def hardware() -> dict:
         cpuset = sorted(os.sched_getaffinity(0))
     except AttributeError:
         cpuset = []
-    docker_root = _run(["docker", "info", "--format", "{{.DockerRootDir}}"]) or "/var/lib/docker"
-    disk = shutil.disk_usage(docker_root if os.path.exists(docker_root) else "/")
+    root = docker_root()
+    disk = shutil.disk_usage(root if os.path.exists(root) else "/")
     return {
         "hostname": platform.node(),
         "nproc": os.cpu_count(),
@@ -242,7 +264,7 @@ def hardware() -> dict:
         "kernel": platform.release(),
         "loadavg_at_start": os.getloadavg(),
         "docker_version": _run(["docker", "version", "--format", "{{.Server.Version}}"]),
-        "docker_root": docker_root,
+        "docker_root": root,
         "disk_total_gb": round(disk.total / 1e9, 1),
         "disk_free_gb": round(disk.free / 1e9, 1),
     }
