@@ -1,5 +1,5 @@
 """
-0004 pack proposals (#206, epic #221 §3.1): requirement rows a model read
+0021 pack proposals (#206, epic #221 §3.1): requirement rows a model read
 from a document the user holds, waiting for a person.
 
 - cx_pack_extractions: one per uploaded PDF: its sha256, name and size
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 4
+VERSION = 21
 NAME = "pack proposals"
 
 EXTRACTIONS = """

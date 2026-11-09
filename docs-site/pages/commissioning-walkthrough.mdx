@@ -44,8 +44,11 @@ Sources: [ASHRAE Guideline 0 overview](https://cxplanner.com/commissioning-101/a
 | Project and phases | A Cx project with an editable phase list (default: design, construction, start-up, functional, acceptance, warranty, operations; the demo adds maintenance) |
 | Expected equipment and points | SHACL templates (`ontology/cx-expected-points.ttl`) checked against the Brick/Haystack model |
 | Is it installed, alive, responding | The verification ladder: existence, liveness (trend data), responsiveness |
-| Start-up and functional tests | Procedures (power-on, start-up, functional), including S1-S3 sequence criteria seeded from a spec's acceptance criteria |
+| Start-up and functional tests | Procedures (power-on, start-up, functional), including S1-S3 sequence criteria seeded from a spec's acceptance criteria. Each step can be judged from history, by a person (pass/fail/N-A, note, photos, witness; works offline on a phone) or by an active test; see [Manual, passive and active steps](/commissioning-methods) |
+| Test coverage | Tested vs sampled, per equipment class and method, in the report and `GET /cx/projects/{id}/coverage` |
 | Sequence checks | Optional ASHRAE Guideline 36 items (`gl36:*` results) |
+| Functional tests from overrides | Every human override of a setpoint or command, judged against the schedule in force (`override:*` results, `settings.overrides`, see [Passive override tests](/commissioning-overrides)) |
+| Operator overrides and schedule changes | Audited writes from the Commissioning page: who, why, priority and expiry, auto-relinquished or reverted (see [Operator writes](/operator-writes)) |
 | Issues log | Cx issues opened from failing (or inconclusive) results. A passing run only *resolves* one (`ready_for_retest`, shown as "resolved, pending verification"); a later run over data from after the fix records the retest; only a person closes it, and the close cites that retest |
 | Waivers | An accepted risk on an issue (reason, owner, retest trigger and review-by date, all required), so a known failure or an inconclusive result can be signed off. The accepter is named by the display name on their account (Ops -> Users), labelled CxA in the report when it matches `settings.cxa_name` |
 | Phase sign-off | Phase gates: moving into start-up, functional testing and acceptance (and later) checks the records first (`settings.phase_gates`: `warn`, `block` or `off`) |

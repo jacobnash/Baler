@@ -151,12 +151,16 @@ def drilled(tmp_path_factory):
         subprocess.run([sys.executable, os.path.join(SCRIPTS, "backup.py"), "--out-dir", str(out / "backups"),
                         "--oxigraph-url", src.oxigraph_url, "--compose-project-dir", REPO], env=src.env, check=True)
         report_path = out / "report.json"
+        # No off-site target anywhere (#196 stands on its own): the drill
+        # restores the newest local backup. It reports to the "live" stack
+        # its environment names, here the source stack, as backup.py did.
+        env = {k: v for k, v in src.env.items() if not k.startswith("BALER_BACKUP_")}
         drill = subprocess.run([sys.executable, os.path.join(SCRIPTS, "restore_drill.py"), "--backup-dir",
                                 str(out / "backups"), "--project", dst.project, "--keep", "--report", str(report_path)],
-                               check=False)
+                               env=env, check=False)
         report = json.loads(report_path.read_text())
         dst.attach()
-        yield {"src": src, "dst": dst, "report": report, "returncode": drill.returncode, **seeded}
+        yield {"src": src, "dst": dst, "report": report, "returncode": drill.returncode, "out": out, **seeded}
     finally:
         dst.down()
         src.down()
@@ -176,10 +180,29 @@ def test_drill_passes(drilled):
     names = {c["check"] for c in drilled["report"]["checks"]}
     # The checks that matter actually ran (not skipped for lack of data).
     for name in ("every table has the dump's rows", "point_history samples", "write into a compressed chunk",
+                 "schema migrations", "point_history chunk interval",
                  "point_history_5m = raw fold, compressed window", "point_history_1h = raw fold, recent window",
                  "Cx report renders", "graph triples"):
         assert name in names
     assert not any("skipped" in c["detail"] for c in drilled["report"]["checks"])
+    assert drilled["report"]["facts"]["source"] == "local"
+
+
+def test_backup_and_drill_reported_to_ops_status(drilled):
+    """Both scripts wrote their result where /ops/status reads it (#276,
+    #196): the source stack's service_heartbeats, judged by ops_status."""
+    from baler import ops_status
+
+    with psycopg.connect(drilled["src"].dsn, autocommit=True) as conn:
+        rows = dict(conn.execute("SELECT service, detail FROM service_heartbeats "
+                                 "WHERE service IN ('backup', 'restore_drill')").fetchall())
+    assert rows["backup"]["ok"] and rows["backup"]["local"]["ok"] and not rows["backup"]["offsite"]["enabled"]
+    assert ops_status.backup_state(rows["backup"])[0] == "ok"
+    assert rows["restore_drill"]["ok"] and rows["restore_drill"]["source"] == "local"
+    assert rows["restore_drill"]["backup"].startswith("postgres-")
+    assert ops_status.drill_state(rows["restore_drill"])[0] == "ok"
+    status_file = json.loads((drilled["out"] / "backups" / "backup-status.json").read_text())
+    assert status_file["stamp"] == rows["backup"]["stamp"]
 
 
 def test_source_had_compressed_and_uncompressed_chunks(drilled):
@@ -231,9 +254,12 @@ def test_continuous_aggregates_after_refresh(drilled, view):
 def test_every_other_table_identical(drilled):
     tables = [r[0] for r in _both(drilled, "SELECT tablename FROM pg_tables WHERE schemaname = 'public' "
                                            "AND tablename <> 'point_history' ORDER BY 1")[0]]
-    assert {"orgs", "sites", "users", "api_keys", "faults", "cx_projects", "cx_runs", "cx_results"} <= set(tables)
+    assert {"orgs", "sites", "users", "api_keys", "faults", "cx_projects", "cx_runs", "cx_results",
+            "baler_schema_migrations"} <= set(tables)
     for t in tables:
-        src, dst = _both(drilled, f'SELECT count(*), md5(string_agg(x::text, \'|\' ORDER BY x::text)) FROM "{t}" x')
+        # The source got the backup's and the drill's own reports after the dump.
+        where = " WHERE service NOT IN ('backup', 'restore_drill')" if t == "service_heartbeats" else ""
+        src, dst = _both(drilled, f'SELECT count(*), md5(string_agg(x::text, \'|\' ORDER BY x::text)) FROM "{t}" x{where}')
         assert dst == src, t
     counts = _both(drilled, "SELECT (SELECT count(*) FROM orgs), (SELECT count(*) FROM users), (SELECT count(*) FROM sites)")
     assert counts[0] == [(1, 2, 1)]

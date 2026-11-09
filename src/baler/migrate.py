@@ -127,12 +127,31 @@ def _wait_for(store, attempts: int = 60) -> None:
             time.sleep(1)
 
 
+def _wait_for_postgres(dsn: str, attempts: int = 60, connect=None) -> None:
+    """compose's postgres healthcheck (pg_isready) can pass during the
+    image's first-start init, which then restarts the server: a connection
+    right after can be refused. Retry until a real query works."""
+    import psycopg
+
+    connect = connect or psycopg.connect
+    for i in range(attempts):
+        try:
+            with connect(dsn, autocommit=True, connect_timeout=5) as conn:
+                conn.execute("SELECT 1")
+            return
+        except psycopg.OperationalError:
+            if i == attempts - 1:
+                raise
+            time.sleep(1)
+
+
 def main() -> int:
-    from baler import schema
+    from baler import schema, timeseries
     from baler.remote_store import RemoteStore
 
     tracing.init_tracing("baler-migrate")
     with tracer.start_as_current_span("migrate.schema"):
+        _wait_for_postgres(timeseries.DEFAULT_DSN)
         schema.main(["upgrade"])
     store = RemoteStore()
     with tracer.start_as_current_span("migrate.timberdoodle_to_baler") as span:

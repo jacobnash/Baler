@@ -2,9 +2,9 @@
 // windrow.api (a separate process/repo) through the gateway's /windrow/
 // route: login required, changes admin-only, and site-restricted logins
 // are refused there (Windrow has no per-site filter - Baler#14).
-// ?windrow=<url> still points it at another instance for local dev.
-const params = new URLSearchParams(location.search);
-const WINDROW_API_URL = params.get("windrow") || "/windrow";
+// ?windrow=/<path> still points it at another same-origin path for local
+// dev (apibase.js: other origins are refused).
+const WINDROW_API_URL = apiBase("windrow", "/windrow");
 
 const statusEl = document.getElementById("status");
 const REFRESH_INTERVAL_MS = 5000;
