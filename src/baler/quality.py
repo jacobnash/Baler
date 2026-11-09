@@ -25,9 +25,11 @@ Two sources fill the flags:
     either a flag name or BACnet's own {"status_flags": [...],
     "reliability": "..."} (from_envelope). Windrow will send it once
     Windrow#20 lands; an envelope without it is ok, as before.
-  * Baler's own checks (sweep), run by fault_detector on an interval over
-    the last hour: range, spike and unit suspicion. A sweep only fills a
-    NULL - a device's own flag always wins - and never touches a value.
+  * Baler's own checks: range, spike and unit suspicion, run by
+    fault_detector's quality thread (Sweeper, #268) over what is new since
+    its watermark, plus late rows it finds in the reading feed. A pass
+    only fills a NULL - a device's own flag always wins - and never
+    touches a value.
 
 Consumers skip flagged samples (fault rules, Cx) or show the flag (the his
 APIs). `GOOD_SQL` is the filter they share.

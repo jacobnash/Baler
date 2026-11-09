@@ -24,6 +24,9 @@ Work is proportional to what arrived, not to how many points exist:
   and one per stale rule (point_registry candidates, confirmed exactly),
   not `SELECT DISTINCT point_uri FROM point_history` plus a query per
   point per rule.
+- Quality flags (baler.quality, #268): an incremental pass over what is
+  new since a persisted watermark, on its own thread and connection, so
+  His-mode cycles never wait for it.
 
 The only code shared with mqtt_listener.py is ingest.topic_to_point_uri -
 identity must match exactly, that's a correctness requirement, not a
