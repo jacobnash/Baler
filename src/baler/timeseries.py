@@ -159,6 +159,24 @@ def _setup(conn: psycopg.Connection, statement_timeout: str | None = None) -> No
     # fsync covers thousands of rows instead.
     if statement_timeout:
         conn.execute("SELECT set_config('statement_timeout', %s, false)", (statement_timeout,))
+    conn.execute(_PLANNER_WORKAROUNDS_SQL)
+
+
+# TimescaleDB planner features that give wrong answers on point_history's
+# compressed chunks, turned off for every Baler connection (only where the
+# server has them: an unknown timescaledb.* name is an error):
+# - columnar scans that read only batch metadata. A top-N read that needs
+#   only segmentby columns and ts - read_point_labels' `SELECT unit, label
+#   ... ORDER BY ts DESC LIMIT 1`, per point - planned as a bounded Sort
+#   over a "ColumnarScan ... Metadata Only" child fails with "retrieved too
+#   many tuples in a bounded sort" (TimescaleDB 2.31, reproduced: the
+#   compression integration tests failed 3 runs in 30, and every run when
+#   the compression policy had just compressed the chunks; 0 in 30 with
+#   this off). Off, the same reads decompress the batches they need.
+_PLANNER_WORKAROUNDS = ("timescaledb.enable_columnarscan_metadata_only",)
+_PLANNER_WORKAROUNDS_SQL = (
+    "SELECT set_config(name, 'off', false) FROM pg_settings WHERE name IN ("
+    + ", ".join(f"'{n}'" for n in _PLANNER_WORKAROUNDS) + ")")
 
 
 def connect(dsn: str = DEFAULT_DSN) -> psycopg.Connection:
