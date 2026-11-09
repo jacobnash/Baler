@@ -2121,6 +2121,44 @@ paths:
       summary: Interactive docs for this API
       responses:
         "200": { description: HTML }
+  /projects/{id}/passport:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Projects]
+      operationId: getCxPassport
+      summary: The building passport (handover and sale package)
+      description: |
+        Per position: start-up test vs latest, issues and accepted risks,
+        open faults, and, where this record has them, efficiency baselines,
+        replace-vs-keep cases, asset history, warranties and deferred
+        maintenance; compliance history per space; documents; the Std 202
+        deliverables. `not_in_this_record` names each part this install
+        doesn't hold yet and the issue that builds it.
+      parameters:
+        - { name: format, in: query, schema: { type: string, enum: [json, html] } }
+      responses:
+        "200":
+          description: The passport (text/html for format=html)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [project, generated_at, positions, documents, std_202_deliverables, not_in_this_record]
+                properties:
+                  project: { type: object }
+                  generated_at: { type: string, format: date-time }
+                  generated_by: { type: [string, "null"] }
+                  positions: { type: array, items: { type: object, required: [equip_uri, issues, open_faults] } }
+                  compliance_by_space: { type: [array, "null"], items: { type: object } }
+                  documents: { type: array, items: { type: object } }
+                  std_202_deliverables: { type: array, items: { type: object } }
+                  not_in_this_record: { type: object, additionalProperties: { type: string } }
+                  export: { type: string }
+            text/html:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /projects/{id}/baselines:
     parameters:
       - { $ref: "#/components/parameters/ProjectId" }
