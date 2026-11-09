@@ -215,7 +215,15 @@ jobs:
         run: pip wheel --no-deps -w openhay-wheel "openhay @ git+https://github.com/jacobnash/openhay@${{ steps.openhay.outputs.sha }}#subdirectory=crates/openhay-py"
       - run: pip install openhay-wheel/openhay-*.whl
       - run: pip install -e ".[dev,validate]"  # openhay: the cached wheel above
-      - run: docker build -t haxall:ci -f windrow/docker/haxall.Dockerfile windrow/docker
+      # The image downloads the Haxall release zip from GitHub, which has
+      # returned transient 5xx (a 504 failed haxall-matrix on #287 and #295).
+      - name: Build the Haxall image (retried on transient download errors)
+        run: |
+          for i in 1 2 3 4; do
+            docker build -t haxall:ci -f windrow/docker/haxall.Dockerfile windrow/docker && exit 0
+            [ "$i" = 4 ] || { echo "haxall image build failed (attempt $i), retrying in $((i * 15)) s"; sleep $((i * 15)); }
+          done
+          exit 1
       - run: >-
           docker run -d --name haxall -p 8280:8080 haxall:ci sh -c
           "bin/hx init -headless -suUser su -suPass $HAXALL_SU_PASSWORD -httpPort 8080 /haxall/var/ci && bin/hx run /haxall/var/ci"
