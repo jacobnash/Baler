@@ -80,8 +80,44 @@ function onSubmit(id, fn) {
   });
 }
 
+async function loadDeferred() {
+  const [items, f, life] = await Promise.all([api("/deferred?status=open,planned"), api("/deferred/fci"), api("/service-life/assets")]);
+  document.getElementById("fci-summary").textContent = f.fci == null
+    ? `Open deferred cost ${f.deferred_cost}; no replacement values yet, so no FCI.`
+    : `FCI ${(f.fci * 100).toFixed(1)}%: ${f.deferred_cost} deferred / ${f.replacement_value} replacement value. ${f.note}`;
+  fill("#deferred-table tbody", items, ["title", "risk", "cost", "target_year", "status", (i) => i.asset_id || i.position_uri]);
+  fill("#life-table tbody", life, [(r) => `${r.asset.tag || r.asset.serial || r.asset_id} (${r.asset.asset_type || ""})`, "installed_on",
+    "age_years", "expected_life_years", "remaining_years", "replacement_value",
+    (r) => (r.reference ? `${r.reference.source_title} (read ${r.reference.retrieved_on})` : "")]);
+}
+
 initAuth(() => {
   loadAssets().catch((err) => say(`error: ${err.message}`));
+  loadDeferred().catch((err) => say(`error: ${err.message}`));
+  onSubmit("deferred-form", async (f) => {
+    const body = formJSON(f);
+    body.cost = Number(body.cost);
+    if (body.target_year) body.target_year = parseInt(body.target_year, 10);
+    await api("/deferred", { method: "POST", body: JSON.stringify(body) });
+    f.reset();
+    await loadDeferred();
+  });
+  onSubmit("life-form", async (f) => {
+    const body = formJSON(f);
+    body.median_years = Number(body.median_years);
+    await api("/service-life", { method: "POST", body: JSON.stringify(body) });
+    f.reset();
+    await loadDeferred();
+  });
+  onSubmit("value-form", async (f) => {
+    const body = formJSON(f);
+    const id = body.asset_id;
+    delete body.asset_id;
+    body.replacement_value = Number(body.replacement_value);
+    await api(`/assets/${encodeURIComponent(id)}/values`, { method: "POST", body: JSON.stringify(body) });
+    f.reset();
+    await loadDeferred();
+  });
   onSubmit("filter-form", loadAssets);
   onSubmit("create-form", async (f) => {
     const a = await api("/assets", { method: "POST", body: JSON.stringify(formJSON(f)) });

@@ -640,6 +640,70 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object}}}}
       responses:
         "201": {description: The removed and installed events, content: {application/json: {schema: {type: object}}}}
+  # Deferred maintenance, service life, FCI (#200). docs-site/pages/deferred-maintenance.mdx.
+  /deferred:
+    get:
+      operationId: listDeferred
+      summary: The deferred-maintenance register (filter status)
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+    post:
+      operationId: createDeferred
+      summary: Add deferred work (cost, risk, asset or position)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: OK, content: {application/json: {schema: {type: object}}}}
+  /deferred/fci:
+    get:
+      operationId: deferredFCI
+      summary: FCI roll-up, with how many assets lack a replacement value
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+  /deferred/capital-plan:
+    get:
+      operationId: capitalPlan
+      summary: Per year, end-of-life assets and targeted deferred work
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+  /deferred/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    patch:
+      operationId: patchDeferred
+      summary: Edit or close (closing needs a resolution)
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+  /service-life:
+    get:
+      operationId: listServiceLife
+      summary: The org's service-life references
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+    post:
+      operationId: setServiceLife
+      summary: Set a type's expected life with its reference and retrieval date
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+  /service-life/assets:
+    get:
+      operationId: serviceLifeAssets
+      summary: Installed assets with age and remaining life
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+  /assets/{id}/values:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listAssetValues
+      summary: Replacement-value history
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+    post:
+      operationId: addAssetValue
+      summary: Add a dated replacement-value estimate
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: OK, content: {application/json: {schema: {type: object}}}}
 components:
   schemas:
     Freshness:

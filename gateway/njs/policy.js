@@ -118,6 +118,17 @@ const ROUTES = [
   ["GET",    /^\/ops\/positions\/history$/,              "assets", "viewer"],
   ["GET",    /^\/ops\/positions\/asset-at$/,             "assets", "viewer"],
   ["POST",   /^\/ops\/positions\/replace$/,               "assets", "operator"],
+  // Deferred maintenance, service-life references, FCI (#200): closed, never deleted.
+  ["GET",    /^\/ops\/deferred$/,                        "assets", "viewer"],
+  ["POST",   /^\/ops\/deferred$/,                        "assets", "operator"],
+  ["GET",    /^\/ops\/deferred\/fci$/,                    "assets", "viewer"],
+  ["GET",    /^\/ops\/deferred\/capital-plan$/,           "assets", "viewer"],
+  ["PATCH",  /^\/ops\/deferred\/[^/]+$/,                  "assets", "operator"],
+  ["GET",    /^\/ops\/service-life$/,                    "assets", "viewer"],
+  ["POST",   /^\/ops\/service-life$/,                    "assets", "operator"],
+  ["GET",    /^\/ops\/service-life\/assets$/,             "assets", "viewer"],
+  ["GET",    /^\/ops\/assets\/[^/]+\/values$/,            "assets", "viewer"],
+  ["POST",   /^\/ops\/assets\/[^/]+\/values$/,            "assets", "operator"],
 
   // commissioning_api (Baler#37): reads viewer, changes operator,
   // archiving a project admin. The backend also checks the caller's org
