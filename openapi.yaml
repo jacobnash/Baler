@@ -359,6 +359,16 @@ paths:
       responses:
         "200":
           description: One series per resolved point, each with its metadata and history for the span.
+          headers:
+            X-Baler-Incomplete:
+              description: Set only on a page that stops short (more points follow), with why - the same text as the body's `incomplete`.
+              schema: {type: string}
+            X-Baler-After:
+              description: The body's `after`, on a page that stops short.
+              schema: {type: string}
+            Link:
+              description: '`<?...&after=...>; rel="next"`: the next page''s URL, relative to this request (RFC 8288).'
+              schema: {type: string}
           content:
             application/json:
               schema:
@@ -604,6 +614,12 @@ components:
           description: >-
             When more points follow, this page's last point id: pass it as
             `after` for the next page. Null on the last (or only) page.
+        incomplete:
+          type: [string, "null"]
+          description: >-
+            Why this page stops short (`seriesLimit of 1000 reached; pass after
+            to read on`) when more points follow, else null - the `incomplete`
+            grid meta of a Haystack read page (Baler#280).
         hints:
           type: array
           description: |

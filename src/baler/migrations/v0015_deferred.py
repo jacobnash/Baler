@@ -1,5 +1,5 @@
 """
-0004 deferred maintenance, service-life references and FCI (#200, epic #221).
+0015 deferred maintenance, service-life references and FCI (#200, epic #221).
 
 - lc_deferred_items: deferred work with its cost, risk and the asset or
   position it affects. Closed (done/cancelled), never deleted.
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from baler.schema import Step
 
-VERSION = 4
+VERSION = 15
 NAME = "lifecycle deferred maintenance and service life"
 
 DEFERRED = """

@@ -25,7 +25,7 @@ asset rather than to the position.
 
 Field corrections (a mistyped serial) are allowed and audited in
 record_edits with the old and new values. Events are never edited.
-Schema: migration 0003.
+Schema: migration 0011.
 """
 
 from __future__ import annotations

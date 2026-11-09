@@ -19,7 +19,7 @@ Deferred maintenance, service-life references and FCI (#200, design §6, §8.3).
   life (by first install date + the type's median years) and deferred items
   targeted at that year. It feeds the building passport (#219).
 
-Schema: migration 0004.
+Schema: migration 0015.
 """
 
 from __future__ import annotations

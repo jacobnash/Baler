@@ -26,6 +26,7 @@ from baler import json_store, schema, scope
 # not here.
 
 SESSION_TTL_SECONDS = 12 * 3600
+ENROLL_TTL_SECONDS = 30 * 60
 
 # 600k rounds is OWASP's 2023+ recommendation for PBKDF2-HMAC-SHA256 -
 # stdlib-only (hashlib), no new dependency for something this codebase
@@ -68,7 +69,11 @@ def _jwt_secret() -> str:
     return secret
 
 
-def issue_session_token(user: dict, site_ids: list[str]) -> str:
+def issue_session_token(user: dict, site_ids: list[str], *, mfa: str | None = None) -> str:
+    """`mfa`: "otp" when the login passed a second factor (recorded as
+    amr), "enroll" for the enrolment-only session an org that requires MFA
+    gives a user who hasn't set it up (the gateway keeps that one to the
+    enrolment routes, policy.MFA_ENROLL_ROUTES)."""
     jti = json_store.new_id()
     claims = {
         "sub": user["id"],
@@ -82,6 +87,14 @@ def issue_session_token(user: dict, site_ids: list[str]) -> str:
         "iat": round(time.time(), 3),
         "exp": int(time.time()) + SESSION_TTL_SECONDS,
     }
+    if mfa == "otp":
+        claims["amr"] = ["pwd", "otp"]
+    elif mfa == "enroll":
+        claims["mfa_enroll"] = True
+        # long enough to set up an authenticator, no longer
+        claims["exp"] = int(time.time()) + ENROLL_TTL_SECONDS
+    elif mfa is not None:
+        raise ValueError(f"unknown mfa {mfa!r}")
     return pyjwt.encode(claims, _jwt_secret(), algorithm="HS256")
 
 
