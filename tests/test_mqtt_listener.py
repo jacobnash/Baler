@@ -312,7 +312,9 @@ def test_a_fresh_session_takes_the_retained_snapshot_once():
     on_connect = make_on_connect("$share/baler/fbf/#", on_fresh=fresh.append)
     on_connect(client, None, _Flags(False), 0, None)
     on_connect(client, None, _Flags(True), 0, None)
-    assert client.subscribe_calls == [("$share/baler/fbf/#", 1)] and fresh == [client]
+    # A shared subscription replays nothing, so it's renewed on every
+    # connect (a resumed session keeps the filter it was made with).
+    assert client.subscribe_calls == [("$share/baler/fbf/#", 1)] * 2 and fresh == [client]
 
 
 def test_a_flagged_readings_quality_survives_the_batch(monkeypatch):

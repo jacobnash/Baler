@@ -119,14 +119,20 @@ def make_on_connect(topic_pattern, batcher: ReadingBatcher | None = None, on_fre
             # persistent session (stable client id) still has its
             # subscription and its queued backlog. (A shared subscription
             # gets no retained messages at all: see RetainedSnapshot.)
+            #
+            # A shared subscription is (re)subscribed on every connect all
+            # the same: it never replays retained messages, and a resumed
+            # session keeps whatever filter it was created with, so a
+            # changed --topic-pattern would otherwise never take effect.
             present = flags.get("session present") if isinstance(flags, dict) else getattr(flags, "session_present", False)
             span.set_attribute("session_present", bool(present))
-            if present:
+            if present and not topic_pattern.startswith("$share/"):
                 print(f"connected ({reason_code}), resumed session on {topic_pattern}", flush=True)
                 return
             client.subscribe(topic_pattern, qos=1)
-            print(f"connected ({reason_code}), subscribed to {topic_pattern}", flush=True)
-            if on_fresh is not None:
+            print(f"connected ({reason_code}), {'resumed session, ' if present else ''}subscribed to {topic_pattern}",
+                  flush=True)
+            if on_fresh is not None and not present:
                 on_fresh(client)
 
     return on_connect
