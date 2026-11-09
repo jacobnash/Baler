@@ -681,6 +681,16 @@ paths:
       requestBody: {content: {application/json: {schema: {type: object}}}}
       responses:
         "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+  # Drawing schedules (#203). docs-site/pages/drawing-schedules.mdx.
+  /documents/{id}/schedules:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: readDrawingSchedules
+      summary: Find each schedule on a PDF drawing and read it (local or vision), rows as proposals
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: "The run, the schedules found and the proposals", content: {application/json: {schema: {type: object}}}}
+        "415": {description: Not a PDF}
 components:
   schemas:
     Freshness:

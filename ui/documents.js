@@ -135,6 +135,15 @@ initAuth(async () => {
       await loadProposals();
     } catch (err) { say(`error: ${err.message}`); }
   });
+  document.getElementById("schedules").addEventListener("click", async () => {
+    try {
+      say("reading schedules…");
+      const out = await api(`/documents/${encodeURIComponent(current.id)}/schedules`, { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } });
+      document.getElementById("extract-result").textContent = out.schedules.map((s) => `${s.title}: ${s.rows} rows (${s.reader})`).join("; ") || "no schedules found";
+      say("done");
+      await loadProposals();
+    } catch (err) { say(`error: ${err.message}`); }
+  });
   document.getElementById("download").addEventListener("click", () => download().catch((e) => say(e.message)));
   document.getElementById("verify").addEventListener("click", async () => {
     const v = await api(`/documents/${encodeURIComponent(current.id)}/verify`);
