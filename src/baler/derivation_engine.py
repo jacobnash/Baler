@@ -185,7 +185,7 @@ def _masking_fault(fault_conn, point_uri: str) -> dict | None:
 
 
 def _read_input_series(ts_conn, fault_conn, point_uri: str, start: datetime, end: datetime,
-                       masked: dict[str, str] | None = None) -> list[tuple]:
+                       masked: dict[str, str] | None = None, prefetched: dict | None = None) -> list[tuple]:
     """An open stale/stuck fault on this point means "treat as absent this
     pass" - empty series, not a silently-passed bad value. Reuses
     fault_detector.py's existing signal instead of a second validity
@@ -196,6 +196,10 @@ def _read_input_series(ts_conn, fault_conn, point_uri: str, start: datetime, end
         if masked is not None:
             masked[point_uri] = fault["rule_id"]
         return []
+    if prefetched is not None:
+        hit = prefetched.get((point_uri, start))
+        if hit is not None:
+            return hit
     return timeseries.read_range(ts_conn, point_uri, start, end)
 
 
@@ -226,14 +230,68 @@ def _attach_once(store, output_uri: str, target_uri: str, brick_class: str | Non
     seen[key] = time.monotonic()
 
 
+# Output rows of the derivation being evaluated, when they're batched
+# (_batched_writes): one write_point_values transaction per derivation per
+# pass, not an INSERT and a point_registry upsert per row, each its own
+# commit and fsync - 2 of the ~5 round trips a row cost, and most of its time
+# (#273: the scale ladder's typical profiles ran ~300 rows/s on one core).
+_writes: contextvars.ContextVar[list | None] = contextvars.ContextVar("derivation_writes", default=None)
+
+
+@contextlib.contextmanager
+def _batched_writes(ts_conn) -> Iterator[None]:
+    """Within it, output rows are collected and written in one transaction
+    on the way out. Per derivation, not per pass: a derivation that depends
+    on another reads the other's output from point_history in the same
+    pass. Nested uses share the outer batch."""
+    if _writes.get() is not None:
+        yield
+        return
+    rows: list = []
+    token = _writes.set(rows)
+    try:
+        yield
+    finally:
+        _writes.reset(token)
+    if rows:
+        timeseries.write_point_values(ts_conn, rows)
+
+
 def _write_and_attach(store, ts_conn, output_uri: str, target_uri: str, value, now: datetime, output_cfg: dict, input_uris: list[str], span=None) -> None:
-    timeseries.write_point_value(ts_conn, output_uri, value, now, unit=output_cfg.get("unit"), label=output_cfg.get("label"))
+    batch = _writes.get()
+    if batch is not None:
+        batch.append((output_uri, value, now, output_cfg.get("unit"), output_cfg.get("label")))
+    else:
+        timeseries.write_point_value(ts_conn, output_uri, value, now, unit=output_cfg.get("unit"), label=output_cfg.get("label"))
     _attach_once(store, output_uri, target_uri, output_cfg.get("brick_class"), input_uris)
 
     if span is not None:
         span.set_attribute("wrote_point", output_uri)
         span.set_attribute("attached_to", target_uri)
         span.set_attribute("derived_from", input_uris)
+
+
+# (derivation, target) pairs this process has recorded a success for since
+# their last failure, per health connection: recording another success
+# would rewrite consecutive_failures = 0 over 0, an UPSERT and a commit per
+# row per run for nothing (#273). The first success still writes the row, so
+# every target that has run is listed (derivation_health.list_targets).
+_healthy: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _healthy_set(health_conn) -> set:
+    try:
+        return _healthy.setdefault(health_conn, set())
+    except TypeError:  # a connection that can't be weakly referenced: no memo
+        return set()
+
+
+def _record_success_once(health_conn, derivation_id: str, target_uri: str) -> None:
+    seen = _healthy_set(health_conn)
+    if (derivation_id, target_uri) in seen:
+        return
+    derivation_health.record_target_success(health_conn, derivation_id, target_uri)
+    seen.add((derivation_id, target_uri))
 
 
 def _record_target_failure(health_conn, derivation_id: str, target_uri: str, dry_run: bool, exc: Exception, span) -> TraceEntry:
@@ -243,6 +301,7 @@ def _record_target_failure(health_conn, derivation_id: str, target_uri: str, dry
     identical bookkeeping."""
     span.set_attribute("error", str(exc))
     if health_conn is not None and not dry_run:
+        _healthy_set(health_conn).discard((derivation_id, target_uri))
         derivation_health.record_target_failure(health_conn, derivation_id, target_uri, str(exc))
     return {"target": target_uri, "error": str(exc)}
 
@@ -255,7 +314,7 @@ def _record_and_trace_success(
     handling: record the health outcome, build the matching trace entry,
     and write+attach the result if it's not None and dry_run is False."""
     if health_conn is not None and not dry_run:
-        derivation_health.record_target_success(health_conn, derivation_id, target_uri)
+        _record_success_once(health_conn, derivation_id, target_uri)
 
     span.set_attribute("computed_value", "" if value is None else str(value))
     if value is None:
@@ -272,12 +331,37 @@ def _record_and_trace_success(
 
 
 def _read_formula_inputs(ts_conn, fault_conn, input_uris: dict[str, str], input_windows: dict, window_seconds: float,
-                         now: datetime, masked: dict[str, str] | None = None) -> dict[str, list[tuple]]:
+                         now: datetime, masked: dict[str, str] | None = None,
+                         prefetched: dict | None = None) -> dict[str, list[tuple]]:
     inputs = {}
     for name, point_uri in input_uris.items():
         window = input_windows.get(name, window_seconds)
-        inputs[name] = _read_input_series(ts_conn, fault_conn, point_uri, now - timedelta(seconds=window), now, masked)
+        inputs[name] = _read_input_series(ts_conn, fault_conn, point_uri, now - timedelta(seconds=window), now, masked,
+                                          prefetched)
     return inputs
+
+
+PREFETCH_MIN_ROWS = 2
+
+
+def _prefetch_inputs(ts_conn, rows: list, input_vars: list[str], input_windows: dict, window_seconds: float,
+                     now: datetime) -> dict | None:
+    """Every row's input series in one bulk read per distinct window
+    (timeseries.read_range_bulk), keyed (point, window start): what
+    _read_input_series would read per input per row, at one query for the
+    lot (#273). None for a single row (nothing to save) or no connection."""
+    if ts_conn is None or len(rows) < PREFETCH_MIN_ROWS:
+        return None
+    by_start: dict[datetime, set[str]] = {}
+    for row in rows:
+        for name in input_vars:
+            start = now - timedelta(seconds=input_windows.get(name, window_seconds))
+            by_start.setdefault(start, set()).add(str(getattr(row, name)))
+    out: dict = {}
+    for start, uris in by_start.items():
+        for uri, series in timeseries.read_range_bulk(ts_conn, sorted(uris), start, now).items():
+            out[(uri, start)] = series
+    return out
 
 
 def _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation: Derivation, now: datetime, dry_run: bool,
@@ -296,6 +380,10 @@ def _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation: Deriv
     trace: list[TraceEntry] = []
     if rows is None:
         rows = list(store.query(derivation["select"]))
+    if trigger_point_uri is not None:
+        rows = [r for r in rows if trigger_point_uri in {str(getattr(r, name)) for name in input_vars}]
+    rows = [r for r in rows if not _target_disabled(health_conn, derivation_id, str(getattr(r, target_var)))]
+    prefetched = _prefetch_inputs(ts_conn, rows, input_vars, input_windows, window_seconds, now)
     for row in rows:
         target_uri = str(getattr(row, target_var))
         input_uris = {name: str(getattr(row, name)) for name in input_vars}
@@ -310,7 +398,8 @@ def _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation: Deriv
             span.set_attribute("target", target_uri)
             masked: dict[str, str] = {}
             try:
-                inputs = _read_formula_inputs(ts_conn, fault_conn, input_uris, input_windows, window_seconds, now, masked)
+                inputs = _read_formula_inputs(ts_conn, fault_conn, input_uris, input_windows, window_seconds, now, masked,
+                                              prefetched)
                 row_extra = {name: str(getattr(row, name)) for name in extra_vars}
                 value = sandbox.run_with_timeout(fn, inputs, row_extra)
             except Exception as exc:  # noqa: BLE001 - one target's sandboxed formula failing must not stop evaluation of every other target
@@ -434,8 +523,10 @@ def _evaluate_one(store, ts_conn, fault_conn, health_conn, derivation: Derivatio
         kind = derivation.get("kind", "formula")
         span.set_attribute("kind", kind)
         try:
-            rows = _evaluate_rollup(store, ts_conn, fault_conn, health_conn, derivation, now, dry_run) if kind == "rollup" \
-                else _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation, now, dry_run)
+            with _batched_writes(ts_conn):
+                rows = _evaluate_rollup(store, ts_conn, fault_conn, health_conn, derivation, now, dry_run) \
+                    if kind == "rollup" else _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation, now,
+                                                               dry_run)
         except Exception as exc:  # noqa: BLE001 - one derivation failing (bad SPARQL, sandboxed code) must not stop the whole sweep
             span.set_attribute("error", str(exc))
             return []
@@ -510,8 +601,9 @@ def evaluate_cur_points(store, ts_conn, fault_conn, health_conn, derivations: li
                     rows = targets.rows_for(store, derivation, hits)
                     span.set_attribute("rows", len(rows))
                     if rows:
-                        _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation,
-                                          now or datetime.now(timezone.utc), dry_run=False, rows=rows)
+                        with _batched_writes(ts_conn):
+                            _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation,
+                                              now or datetime.now(timezone.utc), dry_run=False, rows=rows)
                         ran += len(rows)
                 except Exception as exc:  # noqa: BLE001 - one triggered derivation failing must not stop the others
                     span.set_attribute("error", str(exc))
@@ -542,19 +634,58 @@ def run_feed(store, dsn: str, cache: json_store.RuleCache, targets: CurTargets, 
     consumer.start()
     globs = _GlobMemo()
 
-    def handle(batch):
+    def handle(batches):
+        # A poll's batches at once (#273): each triggered row runs once per
+        # poll, and its output rows commit once per derivation per poll, not
+        # per listener batch (a few readings each at 1-minute rates).
         derivations = cast(list[Derivation], cache.get())
-        if not batch.readings or not cur_derivations(derivations):
+        points = {uri for batch in batches for uri, *_ in batch.readings}
+        if not points or not cur_derivations(derivations):
             return
-        points = {uri for uri, *_ in batch.readings}
+        t0 = time.monotonic()
         status.add("cur_rows", evaluate_cur_points(store, ts_conn, fault_conn, health_conn, derivations, points,
                                                    targets, globs))
+        # cumulative seconds evaluating: its rate is how busy Cur mode keeps
+        # this thread (the scale ladder's limiter evidence, #273)
+        status.add("cur_busy_s", time.monotonic() - t0)
 
     def report(stats):
         status.update("feed", stats.as_dict())
         status.beat(feed_conn)
 
-    consumer.run(handle, stop=stop, report=report)
+    consumer.run(handle, stop=stop, report=report, together=True)
+
+
+def sweep_interval(derivation: Derivation, tick_seconds: float, cur_sweep_seconds: float) -> float:
+    """Seconds between a derivation's sweeps over every row: its own
+    interval_seconds, else the tick for a plain derivation, else, for a
+    Cur-mode one (which already re-runs on every reading of its inputs),
+    the much longer backstop sweep. Every Cur-mode derivation used to be
+    swept every tick as well (#273): at the scale ladder's typical-1min
+    profile that was 6.5x the configured derivation rows, all of it
+    recomputing values the reading feed had just computed."""
+    if derivation.get("interval_seconds"):
+        return float(derivation["interval_seconds"])
+    return cur_sweep_seconds if cur_derivations([derivation]) else tick_seconds
+
+
+class TickStats:
+    """The tick loop's own timing, for the heartbeat (#273): the last pass
+    (seconds, rows, the shortest interval among the derivations it ran, and
+    how late the latest of them started against its schedule), plus running
+    totals whose rates the scale ladder reads - passes, rows, seconds busy.
+    A pass that takes longer than its interval falls further behind every
+    time: `late_s` grows."""
+
+    def __init__(self):
+        self.passes, self.rows, self.busy_s = 0, 0, 0.0
+
+    def record(self, seconds: float, rows: int, interval_s: float, late_s: float) -> dict:
+        self.passes += 1
+        self.rows += rows
+        self.busy_s += seconds
+        return {"last_s": round(seconds, 3), "last_rows": rows, "interval_s": interval_s, "late_s": round(late_s, 3),
+                "passes": self.passes, "rows": self.rows, "busy_s": round(self.busy_s, 3)}
 
 
 def main() -> None:
@@ -565,6 +696,9 @@ def main() -> None:
     parser.add_argument("--dsn", default=timeseries.DEFAULT_DSN)
     parser.add_argument("--oxigraph-url", default=os.environ.get("OXIGRAPH_URL", "http://localhost:7878"))
     parser.add_argument("--tick-seconds", type=float, default=5.0)
+    parser.add_argument("--cur-sweep-seconds", type=float, default=300.0,
+                        help="how often a Cur-mode derivation with no interval_seconds is also swept over every row "
+                             "(its backstop for readings that didn't come through the reading feed)")
     parser.add_argument("--select-refresh", type=float, default=60.0,
                         help="seconds a Cur-mode derivation's select rows are reused before it runs again")
     parser.add_argument("--dry-run", action="store_true", help="run one pass against live data, print the trace, write nothing")
@@ -592,7 +726,8 @@ def main() -> None:
             print(json.dumps(entry, default=str))
         return
 
-    status = heartbeat.Status("derivation_engine", tick_seconds=args.tick_seconds, feed={}, cur_rows=0)
+    status = heartbeat.Status("derivation_engine", tick_seconds=args.tick_seconds, feed={}, cur_rows=0, cur_busy_s=0.0,
+                              tick={})
 
     def feed_thread():
         try:
@@ -604,19 +739,26 @@ def main() -> None:
     threading.Thread(target=feed_thread, name="reading-feed", daemon=True).start()
 
     next_run: dict[str, datetime] = {}
+    ticks = TickStats()
     print(f"derivation engine ticking every {args.tick_seconds}s, Cur mode from the reading feed", flush=True)
     while True:
         now = datetime.now(timezone.utc)
         derivations = cast(list[Derivation], cache.get())
         due_ids = {d["id"] for d in derivations if now >= next_run.get(d["id"], now)}
-        t0 = time.monotonic()
         if due_ids:
-            evaluate_derivations(store, ts_conn, fault_conn, health_conn, derivations, now=now, dry_run=False, only_ids=due_ids)
+            t0 = time.monotonic()
+            late = max(((now - next_run[i]).total_seconds() for i in due_ids if i in next_run), default=0.0)
+            trace = evaluate_derivations(store, ts_conn, fault_conn, health_conn, derivations, now=now, dry_run=False,
+                                         only_ids=due_ids)
             for d in derivations:
                 if d["id"] in due_ids:
-                    next_run[d["id"]] = now + timedelta(seconds=d.get("interval_seconds") or args.tick_seconds)
-        # The scheduled (non-Cur) pass's own time, for /ops/metrics (#235).
-        status.update("tick", {"derivations_due": len(due_ids), "cycle_s": round(time.monotonic() - t0, 3)})
+                    next_run[d["id"]] = now + timedelta(seconds=sweep_interval(d, args.tick_seconds, args.cur_sweep_seconds))
+            interval = min(sweep_interval(d, args.tick_seconds, args.cur_sweep_seconds)
+                           for d in derivations if d["id"] in due_ids)
+            elapsed = time.monotonic() - t0
+            # The scheduled pass's own time also feeds /ops/metrics (#235).
+            status.update("tick", {**ticks.record(elapsed, len(trace), interval, late),
+                                   "derivations_due": len(due_ids), "cycle_s": round(elapsed, 3)})
         status.beat(health_conn)
         time.sleep(args.tick_seconds)
 

@@ -247,17 +247,26 @@ class FeedConsumer:
         self.stats.lag_s = (datetime.now(timezone.utc) - oldest).total_seconds() if oldest else 0.0
         return self.stats
 
-    def run(self, handle, stop=None, idle_s: float = 0.2, report=None, report_every: float = 10.0) -> None:
+    def run(self, handle, stop=None, idle_s: float = 0.2, report=None, report_every: float = 10.0,
+            together: bool = False) -> None:
         """Poll, handle(batch) each, commit, forever (or until `stop` is
         set). `report(stats)` runs every `report_every` seconds with fresh
         lag figures (the daemon's heartbeat). An exception from handle
         propagates: the daemon exits and resumes from the offset on
-        restart, the batch unacknowledged."""
+        restart, the batch unacknowledged. `together`: handle(batches) once
+        per poll with all of them (at most max_batches), for a consumer
+        whose work is per point that reported, not per reading: it then
+        does that work once per poll, so the further behind it is, the
+        more each unit of work covers."""
         last_report = 0.0
         while stop is None or not stop.is_set():
             batches = self.poll()
-            for batch in batches:
-                handle(batch)
+            if together:
+                if batches:
+                    handle(batches)
+            else:
+                for batch in batches:
+                    handle(batch)
             self.commit(batches)
             if report is not None and time.monotonic() - last_report >= report_every:
                 last_report = time.monotonic()

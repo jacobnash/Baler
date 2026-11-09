@@ -30,7 +30,7 @@ def test_envelope_is_windrows_bytes():
 def test_shape_counts_and_topics():
     shape = common.Shape(1005, points_per_equip=10, equips_per_site=50)
     assert (shape.equips, shape.sites) == (101, 3)
-    assert shape.equip_prefix(51) == "fbf/scale/s00001/e00001"
+    assert shape.equip_prefix(51) == "fbf/scale/s00001/e00051"  # global equip index (#273)
     last = shape.equip_points(100)
     assert [p[0] for p in last] == [1000, 1001, 1002, 1003, 1004]  # partial last equip
     assert sum(len(shape.equip_points(g)) for g in range(shape.equips)) == 1005
