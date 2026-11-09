@@ -58,6 +58,7 @@ from baler.commissioning import (
     report,
     routes,
     runner,
+    savings_api,
     spec,
 )
 from baler.commissioning import templates as tpl
@@ -96,7 +97,7 @@ _RUN = re.compile(r"/runs/([^/]+)")
 _RUN_REPORT = re.compile(r"/runs/([^/]+)/report")
 
 # Building-record features (epic #221), each a route table (commissioning.routes).
-EXTENSIONS = (baselines_api,)
+EXTENSIONS = (baselines_api, savings_api)
 
 
 def _check_prefixes(value) -> list[str]:

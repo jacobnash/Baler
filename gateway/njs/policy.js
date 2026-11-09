@@ -188,6 +188,11 @@ const ROUTES = [
   ["POST",   /^\/cx\/projects\/[^/]+\/baselines$/,            "commissioning", "operator"],
   ["GET",    /^\/cx\/projects\/[^/]+\/baselines$/,            "commissioning", "viewer"],
   ["GET",    /^\/cx\/baselines\/[^/]+\/degradation$/,          "commissioning", "viewer"],
+  // Replace-vs-keep savings cases (#216)
+  ["POST",   /^\/cx\/projects\/[^/]+\/savings-cases$/,        "commissioning", "operator"],
+  ["GET",    /^\/cx\/projects\/[^/]+\/savings-cases$/,        "commissioning", "viewer"],
+  ["GET",    /^\/cx\/savings-cases\/[^/]+$/,                  "commissioning", "viewer"],
+  ["PATCH",  /^\/cx\/savings-cases\/[^/]+$/,                  "commissioning", "operator"],
 
   // auth_api - POST /auth/login has its own exact-match nginx location
   // with no js_access at all (can't require a token to get a token), so

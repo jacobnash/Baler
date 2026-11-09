@@ -21,6 +21,7 @@ from baler.migrations import (
     v0001_baseline,
     v0002_reading_feed,
     v0003_performance_baselines,
+    v0004_savings_cases,
 )
 
-ALL = (v0001_baseline, v0002_reading_feed, v0003_performance_baselines)
+ALL = (v0001_baseline, v0002_reading_feed, v0003_performance_baselines, v0004_savings_cases)

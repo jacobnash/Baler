@@ -1820,6 +1820,74 @@ paths:
                   alert: { type: [boolean, "null"] }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/savings-cases:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Runs]
+      operationId: listCxSavingsCases
+      summary: Replace-vs-keep cases
+      responses:
+        "200":
+          description: Cases
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/SavingsCase" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Runs]
+      operationId: createCxSavingsCase
+      summary: A replace-vs-keep case from a baseline; measured inputs filled in, the rest yours (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [baseline_id]
+              properties:
+                baseline_id: { type: string }
+                title: { type: string }
+                assumptions: { type: object, description: "key: number or {value, note}" }
+      responses:
+        "201":
+          description: The case
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SavingsCase" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /savings-cases/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Runs]
+      operationId: getCxSavingsCase
+      summary: A savings case
+      responses:
+        "200":
+          description: The case
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SavingsCase" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Runs]
+      operationId: editCxSavingsCase
+      summary: Change any assumption and recompute (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { assumptions: { type: object } } }
+      responses:
+        "200":
+          description: The case
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SavingsCase" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
 components:
   parameters:
     ProjectId:
@@ -1855,6 +1923,40 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    SavingsCase:
+      type: object
+      required: [id, project_id, equip_uri, title, assumptions, result, history]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        equip_uri: { type: string }
+        asset_id: { type: [string, "null"] }
+        baseline_id: { type: [string, "null"] }
+        title: { type: string }
+        assumptions:
+          type: object
+          additionalProperties:
+            type: object
+            required: [value, unit, label, source]
+            properties:
+              value: { type: [number, "null"] }
+              unit: { type: string }
+              label: { type: string }
+              source: { type: string, enum: [measured, user, default] }
+              note: { type: [string, "null"] }
+        result:
+          type: object
+          properties:
+            annual_kwh_saved: { type: number }
+            annual_savings: { type: number }
+            simple_payback_years: { type: [number, "null"] }
+            savings_over_remaining_life: { type: [number, "null"] }
+            sensitivity: { type: array, items: { type: object } }
+            formula: { type: string }
+        history: { type: array, items: { type: object } }
+        created_by: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     PerformanceBaseline:
       type: object
       required: [id, project_id, equip_uri, kind, points, fit_start, fit_end, model, status]
