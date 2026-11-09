@@ -230,6 +230,11 @@ LOOKBACK = timedelta(hours=1)
 OVERLAP = timedelta(seconds=float(os.environ.get("BALER_QUALITY_OVERLAP_S", "") or 30))
 # Margin on the measured ingest delay when it sets the overlap.
 DELAY_MARGIN = 1.25
+# A delay is measured only over at least this many readings at once: a
+# handful of genuinely late readings (a spool replay, one backfilled point)
+# must not stretch the overlap to a whole interval - they are what the late
+# path is for. Below this rate the late path is cheap anyway.
+DELAY_MIN_READINGS = 1000
 # Late rows judged per pass at most; the rest wait for the next one.
 LATE_PER_SWEEP = 200_000
 # Good samples fetched from before a pass's window, per point: the first
@@ -597,7 +602,7 @@ class Sweeper:
                 _WATCH_SQL, {"seq": self.consumer.seq, "limit": limit, "below": below, "name": self.name}).fetchone()
             if not n:
                 return found
-            if delay is not None:
+            if delay is not None and readings >= DELAY_MIN_READINGS:
                 self._widen(float(delay))
             self.consumer.seq = seq
             self.watched_readings += int(readings)

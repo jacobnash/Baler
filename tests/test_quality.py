@@ -346,14 +346,18 @@ def test_the_overlap_widens_to_the_ingest_delay_the_feed_shows(conn, sweeper):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     sweeper.start(now)
     sweeper.sweep(now=now, meta=meta)
-    _write(conn, uri, [(now - timedelta(seconds=100), 181.0)], feed=True)  # committed ~100 s after its ts
-    assert sweeper.watch() == 1  # measured as it was recorded: this one is late
+    _write(conn, uri, [(now - timedelta(seconds=3000), 180.0)], feed=True)  # one very late reading...
+    assert sweeper.watch() == 1
+    assert sweeper.overlap == quality.OVERLAP  # ...is the late path's, not a reason to widen
+    filler = [(now - timedelta(seconds=100, microseconds=i), 72.0) for i in range(1, quality.DELAY_MIN_READINGS)]
+    _write(conn, uri, [(now - timedelta(seconds=100), 181.0), *filler], feed=True)  # ~100 s after their ts
+    assert sweeper.watch() == quality.DELAY_MIN_READINGS  # measured as it was recorded: these are late
     assert 120 <= sweeper.overlap.total_seconds() <= 130
     _write(conn, uri, [(now - timedelta(seconds=60), 182.0)], feed=True)
     assert sweeper.watch() == 0  # inside the widened overlap: the next window's
     out = sweeper.sweep(now=now + timedelta(seconds=5), meta=meta)
-    assert out["overlap_used_s"] >= 120 and out["late_rows"] == 1
-    assert sorted(_flags(conn, uri).values()) == ["out_of_range", "out_of_range"]
+    assert out["overlap_used_s"] >= 120 and out["late_rows"] == 1 + quality.DELAY_MIN_READINGS
+    assert sorted(_flags(conn, uri).values()) == ["out_of_range"] * 3
     assert sweeper.status()["ingest_delay_s"] >= 100
 
 
