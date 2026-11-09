@@ -76,27 +76,36 @@ was excluded and why.
 
 ## Schedules and priority arrays from Windrow
 
-`POST /cx/projects/{id}/schedules/refresh` (operator) reads, for every
-Windrow instance on the command channel, the in-scope connections':
+**Schedules.** `POST /cx/projects/{id}/schedules/refresh` (operator) reads
+the Schedule and Calendar objects of every in-scope connection on each
+Windrow instance on the command channel, using Windrow's
+`connection_schedules` command. That covers the weekly schedule,
+exceptions by priority, calendars, the effective period, and the points
+each schedule controls. They are stored in `bacnet_schedules`.
 
-- Schedule and Calendar objects, with Windrow's `connection_schedules`
-  command (weekly schedule, exceptions by priority, calendars, effective
-  period, and the points each schedule controls), stored in
-  `bacnet_schedules`;
-- priority arrays of their commandable points, with
-  `read_priority_arrays`, stored in `point_priority_arrays` as a change
-  log (a row only when a point's levels change).
+- The refresh only reads; it never writes.
+- With `refresh_minutes` (default 15) it also runs on the scheduler tick for
+  every project that has override tests enabled. `0` means on request only.
+- `GET /cx/projects/{id}/schedules` shows what was last read and what each
+  schedule commands now.
 
-It only reads. With `refresh_minutes` (15) it also runs on the scheduler
-tick for every project that has override tests enabled; `0` means on
-request only. `GET /cx/projects/{id}/schedules` shows what was last read
-and what each schedule commands now.
+**Priority arrays.** These come with the readings themselves (Windrow#25,
+Windrow PR #34). A commandable point's reading carries an optional key:
 
-`read_priority_arrays` is the Windrow#25 contract: for a connection id,
-answer `{"points": {label: {"levels": {"8": 68.0, "16": 72.0}}}}` with the
-non-null levels of each commandable point. A Windrow without it answers
-"unknown action"; the refresh records `unsupported` for that instance and
-still reads its schedules.
+```json
+{"point": "zone-temp-sp", "value": 75.0, "ts": 1762700000.0,
+ "priority": {"active": 8, "levels": {"8": 75.0, "16": 72.0}}}
+```
+
+- Windrow re-reads the array every 60 s, and publishes at once when an
+  override is made or released.
+- `mqtt_listener` logs each point's levels into `point_priority_arrays`,
+  but only when they change, so the steady re-reads cost nothing and the
+  table answers "level 8 was held from T" for the past.
+- Windrow doesn't know who wrote a level. Baler's own writes are excluded
+  by the detector, so any other held level counts as someone else's.
+- A Windrow without this key, or a non-commandable point, publishes exactly
+  what it did before. The detector then works from history alone.
 
 Schedules are evaluated as ANSI/ASHRAE 135 describes (clause 12.24.4):
 each day starts at the schedule default, the latest time-value at or before

@@ -7,11 +7,12 @@ controllers that the override detector needs.
   `connection_schedules` command answers it (body), with the urn:point:
   URIs a schedule controls resolved from its labels (points). One row per
   object, replaced on each refresh; read_at says how old it is.
-- point_priority_arrays: priority-array observations (the Windrow#25
-  `read_priority_arrays` contract): per point, the non-null levels and
-  whether Baler itself holds each. A row is added only when a point's
-  levels differ from its previous row, so it is a change log: "level 8
-  held by someone other than Baler from T" can be answered for the past.
+- point_priority_arrays: priority-array observations, from the `priority`
+  key Windrow puts on a commandable point's reading (Windrow#25, PR #34;
+  mqtt_listener via baler.priority_arrays): per point, the held levels. A
+  row is added only when a point's levels differ from its previous row, so
+  it is a change log: "level 8 was held from T" can be answered for the
+  past.
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ PRIORITY = """
 CREATE TABLE IF NOT EXISTS point_priority_arrays (
     point_uri   TEXT NOT NULL,
     observed_at TIMESTAMPTZ NOT NULL,
-    levels      JSONB NOT NULL,              -- {"8": {"value": 68.0, "baler": false}, ...}
+    levels      JSONB NOT NULL,              -- {"8": {"value": 68.0}, "16": {"value": 72.0}}
     PRIMARY KEY (point_uri, observed_at)
 )"""
 

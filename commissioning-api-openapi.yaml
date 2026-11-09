@@ -1370,14 +1370,13 @@ paths:
     post:
       tags: [Override tests]
       operationId: refreshCxSchedules
-      summary: Read schedules, calendars and priority arrays from Windrow now (operator)
+      summary: Read schedules and calendars from Windrow now (operator)
       description: >-
         Reads only: for every Windrow instance on the command channel, its
         in-scope connections' Schedule and Calendar objects
-        (`connection_schedules`) and the priority arrays of their
-        commandable points (`read_priority_arrays`, the Windrow#25
-        contract; an instance without it reports `unsupported` and the
-        rest still refreshes). Nothing is written to a controller.
+        (`connection_schedules`). Nothing is written to a controller.
+        Priority arrays don't come through here: they arrive on each
+        commandable point's reading (`priority`, Windrow#25).
       responses:
         "200":
           description: What was read
@@ -1385,7 +1384,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [instances, schedules, calendars, priority_points, errors]
+                required: [instances, schedules, calendars, errors]
                 properties:
                   instances:
                     type: array
@@ -1395,10 +1394,8 @@ paths:
                         site: { type: string }
                         instance: { type: string }
                         connections: { type: integer }
-                        priority_arrays: { type: string, description: "ok, unsupported, or the error" }
                   schedules: { type: integer }
                   calendars: { type: integer }
-                  priority_points: { type: integer, description: Points whose priority array changed and was recorded }
                   errors: { type: array, items: { type: string } }
         "404": { $ref: "#/components/responses/NotFound" }
         "503": { description: No Windrow command channel configured }

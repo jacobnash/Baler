@@ -23,9 +23,12 @@ Finding the override (`detect`), from evidence Baler already has:
   - minus the schedule's own writes: a change within
     `schedule_slack_minutes` of a transition of a BACnet Schedule that
     controls the point (schedules.py, read from Windrow);
-  - and, where Windrow reports the controller's priority array (Windrow#25,
-    stored by `refresh`), annotated with the level a writer other than
-    Baler held. `basis: "priority_array"` counts only those.
+  - and, where Windrow reports the controller's priority array (the
+    `priority` key on a commandable point's reading, Windrow#25 / PR #34,
+    logged by mqtt_listener into point_priority_arrays), annotated with the
+    level held. Windrow can't tell who wrote a level; Baler's own writes
+    are already excluded above, so a held level here is someone else's.
+    `basis: "priority_array"` counts only overrides an observation confirms.
 
 Judging it (`judge`): the controlled variable must come within the pair's
 tolerance of the new value (a status must equal the command) within
@@ -431,14 +434,11 @@ def run(equips: list[dict], series: dict, now: datetime, settings: dict | None, 
 
 # ---------------------------------------------------------- refresh (I/O)
 
-# Windrow command-channel actions this uses. `connection_schedules` exists
-# (Baler#165). `read_priority_arrays` is the Windrow#25 contract: for a
-# connection id, the priority array of each commandable point it polls,
-#   {"points": {label: {"levels": {"8": 68.0, "16": 72.0}}}}
-# levels as strings 1-16, only the non-null ones. A Windrow without it
-# answers "unknown action", which refresh records and carries on.
+# Windrow command-channel action this uses: `connection_schedules`
+# (Baler#165). Priority arrays don't come through here: Windrow puts them
+# on each commandable point's reading (`priority`, Windrow#25 / PR #34)
+# and mqtt_listener logs their changes (baler.priority_arrays).
 SCHEDULES_ACTION = "connection_schedules"
-PRIORITY_ACTION = "read_priority_arrays"
 COMMAND_TIMEOUT_S = 30.0
 
 
@@ -447,15 +447,15 @@ def _allowed(scopes, uri: str) -> bool:
 
 
 def refresh(repo, commander, scopes, now: datetime) -> dict:
-    """Read every in-scope connection's schedules, calendars and priority
-    arrays from the Windrow instances the commander knows, and store them
-    (repo.put_schedules / repo.record_priority_arrays). Reads only: it
-    never writes to a controller. Returns what it did, per instance."""
-    summary: dict = {"instances": [], "schedules": 0, "calendars": 0, "priority_points": 0, "errors": []}
+    """Read every in-scope connection's schedules and calendars from the
+    Windrow instances the commander knows, and store them
+    (repo.put_schedules). Reads only: it never writes to a controller.
+    Returns what it did, per instance."""
+    summary: dict = {"instances": [], "schedules": 0, "calendars": 0, "errors": []}
     for (site, instance), status in sorted(commander.statuses().items()):
         if isinstance(status, dict) and status.get("state") == "offline":
             continue
-        inst = {"site": site, "instance": instance, "connections": 0, "priority_arrays": "ok"}
+        inst = {"site": site, "instance": instance, "connections": 0}
         try:
             conns = commander.command(site, instance, "list_connections", {}, timeout=COMMAND_TIMEOUT_S) or []
         except Exception as exc:  # noqa: BLE001 - one instance down never stops the rest
@@ -480,30 +480,13 @@ def refresh(repo, commander, scopes, now: datetime) -> dict:
                 repo.put_schedules(rows)
             except Exception as exc:  # noqa: BLE001
                 summary["errors"].append(f"{site}/{instance}/{c['id']}: schedules: {exc}")
-            if inst["priority_arrays"] != "ok":
-                continue
-            try:
-                arrays = commander.command(site, instance, PRIORITY_ACTION, {"id": c["id"]}, timeout=COMMAND_TIMEOUT_S) or {}
-            except Exception as exc:  # noqa: BLE001
-                inst["priority_arrays"] = "unsupported" if "unknown action" in str(exc).lower() else f"error: {exc}"
-                continue
-            obs = {}
-            for label, entry in ((arrays or {}).get("points") or {}).items():
-                uri = f"urn:point:{prefix}/{label}"
-                mine = repo.point_levels(uri)
-                levels = {}
-                for lvl, value in ((entry or {}).get("levels") or {}).items():
-                    held = mine.get(str(lvl))
-                    levels[str(lvl)] = {"value": value, "baler": bool(held) and held.get("val") == value}
-                obs[uri] = levels
-            summary["priority_points"] += repo.record_priority_arrays(obs, now)
         summary["instances"].append(inst)
     return summary
 
 
 class Refresher:
-    """The scheduler-tick hook: refresh each project with overrides
-    enabled every refresh_minutes (0 = only on request)."""
+    """The scheduler-tick hook: re-read schedules for each project with
+    overrides enabled every refresh_minutes (0 = only on request)."""
 
     def __init__(self, repo, commander, scopes_for):
         self.repo, self.commander, self.scopes_for = repo, commander, scopes_for

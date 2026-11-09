@@ -296,9 +296,8 @@ class MockWindrow:
     """The command channel of one Windrow instance with one connection.
     Records every action so the test can prove refresh only reads."""
 
-    def __init__(self, priority=True):
+    def __init__(self):
         self.actions: list[str] = []
-        self.priority = priority
 
     def statuses(self):
         return {("site-a", "edge-1"): {"state": "online"}, ("site-z", "edge-9"): {"state": "offline"}}
@@ -310,29 +309,72 @@ class MockWindrow:
         if action == "connection_schedules":
             assert body == {"id": "c1"}
             return {"schedules": [OFFICE], "calendars": [HOLIDAYS]}
-        if action == "read_priority_arrays":
-            if not self.priority:
-                raise RuntimeError("site refused read_priority_arrays: unknown action")
-            return {"points": {"zsp": {"levels": {"8": 68.0, "16": 72.0}}}}
         raise AssertionError(f"unexpected action {action}")
 
 
-def test_refresh_reads_schedules_and_priority_arrays_and_never_writes():
+def test_refresh_reads_schedules_and_never_writes():
     repo = _repo({})
-    repo.levels[(ZSP, 16)] = {"val": 72.0, "who": "cx:old", "expires_at": None}
     w = MockWindrow()
     got = overrides.refresh(repo, w, [Scope(("fbf/a",))], NOW)
-    assert set(w.actions) == {"list_connections", "connection_schedules", "read_priority_arrays"}
-    assert got["schedules"] == 1 and got["calendars"] == 1 and got["priority_points"] == 1 and not got["errors"]
+    assert set(w.actions) == {"list_connections", "connection_schedules"}  # c2 is out of scope; edge-9 offline
+    assert got["schedules"] == 1 and got["calendars"] == 1 and not got["errors"]
     found = repo.schedules_for_points([OCC])
     assert [s["name"] for s in found] == ["Office hours"] and "calendar,1" in found[0]["calendars"]
-    obs = repo.priority_observations([ZSP], NOW - timedelta(hours=1), NOW)[ZSP]
-    assert obs[0]["levels"] == {"8": {"value": 68.0, "baler": False}, "16": {"value": 72.0, "baler": True}}
-    # unchanged levels add no row; a Windrow without the action still refreshes schedules
-    assert overrides.refresh(repo, w, [Scope(("fbf/a",))], NOW + timedelta(minutes=15))["priority_points"] == 0
-    old = MockWindrow(priority=False)
-    got = overrides.refresh(repo, old, [Scope(("fbf/a",))], NOW)
-    assert got["instances"][0]["priority_arrays"] == "unsupported" and got["schedules"] == 1
+    overrides.refresh(repo, w, [Scope(("fbf/a",))], NOW + timedelta(minutes=15))
+    assert len(repo.list_schedules()) == 2  # replaced, not duplicated
+
+
+def test_priority_arrays_from_readings_are_a_change_log():
+    """Windrow#25 / PR #34: the `priority` key on a commandable point's
+    reading, logged only when the levels change; the detector reads it."""
+    from baler import priority_arrays
+
+    log = priority_arrays.ChangeLog()
+    t = NOW.timestamp()
+    assert log.observe(ZSP, {"active": 16, "levels": {"16": 72.0}}, t - 3600)
+    assert not log.observe(ZSP, {"active": 16, "levels": {"16": 72.0}}, t - 3540)  # the 60 s re-read: nothing new
+    assert log.observe(ZSP, {"active": 8, "levels": {"8": 68.0, "16": 72.0}}, t - 3000)
+    assert not log.observe(ZSP, {"active": 8}, t) and not log.observe(ZSP, "junk", t)  # malformed: ignored
+    assert log.observe(ZSP, {"active": None, "levels": {}}, t - 60)  # released
+    got = log.take()
+    assert [lv for _, _, lv in got] == [{"16": {"value": 72.0}}, {"8": {"value": 68.0}, "16": {"value": 72.0}}, {}]
+    assert log.take() == [] and got[1][1] == NOW - timedelta(seconds=3000)
+    ctx = overrides.Context(priority={ZSP: [{"observed_at": at, "levels": lv} for _, at, lv in got]})
+    level = overrides._held_level(ctx, ZSP, NOW - timedelta(seconds=3000), NOW - timedelta(seconds=2000))
+    assert level == {"level": 8, "value": 68.0, "observed_at": (NOW - timedelta(seconds=3000)).isoformat()}
+    assert overrides._held_level(ctx, ZSP, NOW - timedelta(seconds=50), NOW) is None  # only 16 or nothing held
+
+
+def test_listener_logs_priority_changes_after_the_batch(monkeypatch):
+    from types import SimpleNamespace
+
+    from baler import mqtt_listener
+
+    written = []
+    monkeypatch.setattr(mqtt_listener, "ingest_readings", lambda store, conn, rows, then=None: None)
+    monkeypatch.setattr(mqtt_listener.priority_arrays, "record", lambda conn, rows: written.extend(rows) or len(rows))
+
+    class Conn:
+        def transaction(self):
+            import contextlib
+            return contextlib.nullcontext()
+
+    class Client:
+        def ack(self, mid, qos):
+            pass
+
+    batcher = mqtt_listener.ReadingBatcher(Client(), None, Conn())
+    on_message = mqtt_listener.make_on_message(None, None, batcher)
+    for i, prio in enumerate(({"active": None, "levels": {}}, {"active": None, "levels": {}},
+                              {"active": 8, "levels": {"8": 75.0}})):
+        payload = {"point": "zsp", "value": 75.0, "ts": 100.0 + i, "priority": prio}
+        on_message(Client(), None, SimpleNamespace(topic="fbf/a/vav-3/zsp", payload=__import__("json").dumps(payload).encode(),
+                                                   mid=i + 1, qos=1, retain=False))
+    on_message(Client(), None, SimpleNamespace(topic="fbf/a/vav-3/znt", payload=b'{"value": 71.0, "ts": 100.0}',
+                                               mid=9, qos=1, retain=False))
+    batcher.flush([batcher.queue.get_nowait() for _ in range(batcher.queue.qsize())])
+    assert [(p, lv) for p, _, lv in written] == [(ZSP, {}), (ZSP, {"8": {"value": 75.0}})]
+    assert batcher.rows == 4  # every reading still stored
 
 
 def test_refresher_ticks_only_enabled_projects_at_their_interval():

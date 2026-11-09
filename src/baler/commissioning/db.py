@@ -1150,21 +1150,11 @@ class PgRepo:
 
     def record_priority_arrays(self, observations: dict[str, dict], now: datetime) -> int:
         """Append an observation per point whose levels changed since its
-        last one; returns how many were added."""
-        if not observations:
-            return 0
-        added = 0
+        last one (what mqtt_listener does for Windrow's readings)."""
+        from baler import priority_arrays
+
         with self.pool.connection() as conn, conn.transaction():
-            last = {u: lv for u, lv in conn.execute(
-                "SELECT DISTINCT ON (point_uri) point_uri, levels FROM point_priority_arrays WHERE point_uri = ANY(%s)"
-                " ORDER BY point_uri, observed_at DESC", (list(observations),)).fetchall()}
-            for uri, levels in observations.items():
-                if last.get(uri) == levels:
-                    continue
-                conn.execute("INSERT INTO point_priority_arrays (point_uri, observed_at, levels) VALUES (%s, %s, %s)"
-                             " ON CONFLICT DO NOTHING", (uri, now, json.dumps(levels, default=str)))
-                added += 1
-        return added
+            return priority_arrays.record(conn, [(u, now, lv) for u, lv in observations.items()])
 
     def priority_observations(self, point_uris: list[str], start: datetime, end: datetime) -> dict[str, list[dict]]:
         if not point_uris:

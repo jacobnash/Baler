@@ -1799,8 +1799,8 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
             respond_json(self, 200, {"tz": str(tz), "schedules": out})
 
         def _refresh_schedules(self, span, claims, pid) -> None:
-            """Read schedules, calendars and priority arrays from Windrow
-            now (reads only - nothing is written to a controller)."""
+            """Read schedules and calendars from Windrow now (reads only -
+            nothing is written to a controller)."""
             p = self._project(pid, claims)
             if p is None:
                 return
@@ -1809,7 +1809,7 @@ def make_handler(repo, clock=None, worker=None, executor=None, agent_client=None
                 return
             scopes, _ = self._scopes(p, claims)
             got = overrides.refresh(repo, commander, scopes, now_fn())
-            self._event(pid, "schedules.refresh", claims, {k: got[k] for k in ("schedules", "calendars", "priority_points")}
+            self._event(pid, "schedules.refresh", claims, {k: got[k] for k in ("schedules", "calendars")}
                         | {"errors": got["errors"][:10]})
             respond_json(self, 200, got)
 
