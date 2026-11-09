@@ -521,7 +521,7 @@ class Sweeper:
         since = self.judged_to - self.overlap
         skipped_s = 0.0
         oldest = now - LOOKBACK - self.overlap
-        if since < oldest:
+        if (oldest - since).total_seconds() > 1.0:  # not the first pass's own rounding
             skipped_s = (oldest - since).total_seconds()
             self.log(f"quality: watermark {self.judged_to.isoformat()} is more than {LOOKBACK} behind; "
                      f"{skipped_s:.0f} s of history left unjudged")
