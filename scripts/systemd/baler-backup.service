@@ -12,4 +12,18 @@ WorkingDirectory=/opt/baler
 # backup.py shells out to `docker compose exec` - systemd services don't
 # inherit a login shell's PATH, so `docker` has to be found explicitly.
 Environment=PATH=/usr/bin:/usr/local/bin
+# Bytecode outside the checkout: a root-owned __pycache__ directory in a
+# CI-managed checkout breaks the next deploy's checkout (#29).
+Environment=PYTHONPYCACHEPREFIX=/var/cache/baler/pycache
+# Optional (#276): retention, the alert command and the off-site copy
+# (BALER_BACKUP_* in .env.example). Root-only, mode 0600: it may hold the
+# bucket's credentials. The leading "-" makes it optional; without it
+# nothing is uploaded.
+EnvironmentFile=-/etc/baler/backup.env
+# Writes the newest backup into backups/ and reports to /ops/status.
+# `--out-dir /var/backups/baler` keeps them out of the checkout (see
+# backups.mdx); `--prune` applies BALER_BACKUP_KEEP_DAILY/_WEEKLY locally.
+# With an off-site copy configured, use a Python with the offsite extra:
+# /opt/baler/.venv/bin/python (pip install -e '.[offsite]'). Exits 2 if the
+# off-site copy failed (the local backup is kept), so the unit shows failed.
 ExecStart=/usr/bin/python3 scripts/backup.py

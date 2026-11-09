@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Baler — Assets</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="console.css" />
+</head>
+<body>
+  <header>
+    <h1>Assets</h1>
+    <span id="status">connecting…</span>
+    <nav class="top-nav">
+      <a href="index.html">Equipment tree</a>
+      <a href="his.html">Query</a>
+      <a href="alarms.html">Alarms</a>
+      <a href="derivations.html">Derivations</a>
+      <a href="cx.html">Commissioning</a>
+      <a href="assets.html">Assets</a>
+      <a href="connectors.html">Connectors</a>
+      <a href="ops.html">Ops</a>
+      <a href="/docs" target="_blank" rel="noopener">Docs</a>
+    </nav>
+  </header>
+  <div id="login-gate" class="login-gate">
+    <form id="login-form">
+      <h2>Sign in</h2>
+      <label>Email <input type="email" id="login-email" autocomplete="username" required /></label>
+      <label>Password <input type="password" id="login-password" autocomplete="current-password" required /></label>
+      <button type="submit">Sign in</button>
+      <p id="login-error" class="hint" hidden></p>
+    </form>
+  </div>
+  <main id="main" class="console-main" style="display: none">
+    <section>
+      <h2>Assets</h2>
+      <p class="hint">
+        A <strong>position</strong> is the equipment the points hang on (its URI in the graph) and stays put.
+        An <strong>asset</strong> is the physical thing installed there. Install and remove history is append-only:
+        a replacement adds events, it never edits the old ones. See <a href="/docs/assets" target="_blank" rel="noopener">the docs</a>.
+      </p>
+      <form id="filter-form" class="inline-form">
+        <input id="filter-q" placeholder="search tag, make, model, serial" />
+        <select id="filter-status">
+          <option value="">any status</option><option value="installed">installed</option>
+          <option value="in_stock">in stock</option><option value="retired">retired</option>
+        </select>
+        <button type="submit">Filter</button>
+      </form>
+      <table id="assets-table">
+        <thead><tr><th>Tag</th><th>Type</th><th>Manufacturer</th><th>Model</th><th>Serial</th><th>Status</th><th>Position</th><th>Since</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>New asset</h2>
+      <form id="create-form" class="inline-form">
+        <input name="tag" placeholder="tag" />
+        <input name="asset_type" placeholder="type (motor, pump…)" />
+        <input name="manufacturer" placeholder="manufacturer" />
+        <input name="model" placeholder="model" />
+        <input name="serial" placeholder="serial" />
+        <input name="cost" placeholder="cost" inputmode="decimal" />
+        <button type="submit">Add</button>
+      </form>
+    </section>
+
+    <section id="detail" hidden>
+      <h2 id="detail-title"></h2>
+      <pre id="detail-fields"></pre>
+      <h3>Install / remove history</h3>
+      <table id="history-table">
+        <thead><tr><th>Position</th><th>Installed</th><th>Why</th><th>Removed</th><th>Why</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <form id="install-form" class="inline-form">
+        <input name="position_uri" placeholder="position URI (urn:equip:…)" size="40" />
+        <input name="at" type="datetime-local" />
+        <input name="reason" placeholder="reason" />
+        <button type="submit">Install</button>
+      </form>
+      <form id="remove-form" class="inline-form">
+        <input name="at" type="datetime-local" />
+        <input name="reason" placeholder="why removed (required)" required />
+        <button type="submit">Remove</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Position history</h2>
+      <form id="position-form" class="inline-form">
+        <input name="uri" placeholder="position URI (urn:equip:…)" size="40" required />
+        <button type="submit">Show</button>
+      </form>
+      <table id="position-table">
+        <thead><tr><th>Asset</th><th>Installed</th><th>Removed</th><th>Why removed</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Replacements</h2>
+      <form id="changes-form" class="inline-form">
+        <input name="since" type="date" /> <input name="until" type="date" />
+        <input name="type" placeholder="type (pump…)" /> <input name="manufacturer" placeholder="new brand" />
+        <button type="submit">Find</button>
+      </form>
+      <table id="changes-table">
+        <thead><tr><th>When</th><th>Position</th><th>From</th><th>To</th><th>Why removed</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+  <script src="apibase.js"></script>
+  <script src="auth.js"></script>
+  <script src="assets.js"></script>
+</body>
+</html>
