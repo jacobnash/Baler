@@ -13,6 +13,8 @@ the pass conditions, and writes one JSON result per run.
   python scripts/scale/ladder.py soak --points 100000 # 6 h at one count: disk plateau, compression cycles (#245)
   python scripts/scale/ladder.py table results/*.json # Markdown results table
   python scripts/scale/ladder.py down                # remove the scale stack and its volumes
+  python scripts/scale/ladder.py run --target haxall # the same ladder against Haxall (#236, haxall.py)
+  python scripts/scale/ladder.py table baler.json --haxall haxall.json   # Baler vs Haxall side by side
 
 "Doesn't choke" (Jacob, #190) is three things, and a step passes only if
 all three hold: no data loss (stored >= 99% of what the broker acknowledged,
@@ -47,12 +49,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common
 import evidence
 import limiter
+import synthetic
 
 DEFAULT_STEPS = [10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000]
 SMALL_HOST_STEPS = [1_000, 2_500, 5_000]  # prepended when the host has few CPUs
 EMAIL, PASSWORD = "admin@scale.test", "scale-password-123"
 SCALE_GLOB = f"{common.TOPIC_ROOT}/s*"
 POINT_LIKE = f"urn:point:{common.TOPIC_ROOT}/s%"
+
+CRASH_KILL_DEFAULT = "mqtt_listener,listener_worker,postgres"
 
 # R4 pass conditions
 MIN_STORED_RATIO = 0.99
@@ -95,6 +100,8 @@ def cpu_caps(nproc: int, env: dict[str, str]) -> dict[str, str]:
 def stack_env() -> dict[str, str]:
     env = dict(os.environ)
     env.update(cpu_caps(os.cpu_count() or 1, common.read_env()))
+    # the synthetic load's webhook receiver is on the host (#273); scale stack only
+    env.setdefault("BALER_ALLOW_PRIVATE_WEBHOOKS", "1")
     return env
 
 
@@ -139,6 +146,12 @@ def cmd_init(args) -> None:
         "# Listener worker processes (#233; blank = 1). Give the listener about a CPU each:",
         "# BALER_LISTENER_WORKERS=4 with SCALE_CPUS_MQTT_LISTENER=4.5 and SCALE_MEM_MQTT_LISTENER=2g.",
         "BALER_LISTENER_WORKERS=",
+        "# The Haxall baseline (#236, --target haxall): its own project <SCALE_PROJECT>-haxall.",
+        f"SCALE_HAXALL_SU_PASSWORD={secrets.token_hex(16)}",
+        "SCALE_HAXALL_MQTT_PORT=22883", "SCALE_HAXALL_HTTP_PORT=28280",
+        "# How Haxall's history is fsync'd, once checked (docs-site scale-test.mdx, Baler vs Haxall);",
+        "# blank: Haxall results are labelled not comparable.",
+        "SCALE_HAXALL_DURABILITY=",
     ]
     common.ENV_FILE.write_text("\n".join(lines) + "\n")
     common.ENV_FILE.chmod(0o600)
@@ -182,7 +195,15 @@ def busy_ports(config: dict) -> list[int]:
     return busy
 
 
-def cmd_up(args) -> Endpoints:
+def _haxall():
+    import haxall  # the Haxall baseline target (#236): scripts/scale/haxall.py
+
+    return haxall
+
+
+def cmd_up(args):
+    if getattr(args, "target", "baler") == "haxall":
+        return _haxall().cmd_up(args)
     config = guard()
     busy = busy_ports(config)
     if busy:
@@ -215,6 +236,11 @@ def preflight(ep: Endpoints, timeout: float = 120.0) -> None:
 
 
 def cmd_down(args) -> None:
+    if getattr(args, "target", "baler") == "haxall":
+        _haxall().guard()
+        _haxall().cmd_down(args)
+        print("haxall stack and its volumes removed")
+        return
     guard()
     extra = ["--rmi", "local"] if args.rmi else []
     compose("down", "-v", "--remove-orphans", *extra)
@@ -406,6 +432,79 @@ def summarize_listener(samples: list[dict], before: dict, after: dict) -> dict:
     tags = (after.get("mqtt_listener/tags") or {}).get("feed") or {}
     out["tag_path"] = {"lag_s": tags.get("lag_s"), "lag_batches": tags.get("lag_batches"),
                        "messages": (after.get("mqtt_listener/tags") or {}).get("messages")}
+    return out
+
+
+# What the ladder reads from GET /ops/metrics (#235), the same endpoint a
+# Prometheus scraper and the post-deploy verify job (#178) read: if Baler's
+# own numbers agree with the canaries and the broker's $SYS, an operator
+# without the ladder sees an overload too.
+OPS_METRICS = {"lag_s": "baler_ingest_newest_reading_age_seconds",
+               "queue": "baler_listener_queue_depth",
+               "queue_age_s": "baler_listener_queue_oldest_age_seconds",
+               "broker_dropped_total": "baler_broker_dropped_messages_total",
+               "readings_per_s": "baler_listener_readings_per_second",
+               "redelivered_total": "baler_listener_redelivered_total"}
+
+
+def parse_prom(text: str) -> dict[str, float]:
+    """Prometheus text -> {'name{labels}': value} (the subset Baler writes)."""
+    out: dict[str, float] = {}
+    for line in text.splitlines():
+        if line and not line.startswith("#"):
+            key, _, val = line.rpartition(" ")
+            try:
+                out[key] = float(val)
+            except ValueError:
+                pass
+    return out
+
+
+def ops_metrics_sample(ep: Endpoints, s) -> dict:
+    """One read of /ops/metrics through the gateway, the OPS_METRICS subset."""
+    t0 = time.perf_counter()
+    try:
+        r = s.get(f"{ep.gateway}/ops/metrics", timeout=30)
+        r.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 - an older Baler, or a failure: recorded, not fatal
+        return {"error": repr(exc)[:200]}
+    m = parse_prom(r.text)
+    out = {k: m.get(name) for k, name in OPS_METRICS.items()}
+    out["fetch_s"] = round(time.perf_counter() - t0, 3)
+    return out
+
+
+def summarize_ops_metrics(samples: list[dict], lag: dict, sys_dropped: int | None) -> dict:
+    """What /ops/metrics said over the soak, against the canaries' lag and
+    the broker's $SYS drop count the ladder reads itself (#235). lag agrees
+    when the p95 of Baler's end-to-end lag (now minus the newest stored
+    reading) is within max(5 s, 25%) of the canaries' p95; drops agree when
+    the counter moved by the same amount (both are the broker's own). Pure."""
+    vals = [x["ops_metrics"] for x in samples if x.get("ops_metrics") and "error" not in x["ops_metrics"]]
+    errors = sum(1 for x in samples if "error" in (x.get("ops_metrics") or {}))
+    out: dict = {"samples": len(vals), "errors": errors}
+    if not vals:
+        return out
+
+    def series(k):
+        return sorted(v[k] for v in vals if v.get(k) is not None)
+
+    lags = series("lag_s")
+    if lags:
+        out["lag_s_p95"] = round(lags[min(len(lags) - 1, int(len(lags) * 0.95))], 2)
+        out["lag_s_max"] = round(lags[-1], 2)
+    out["queue_max"] = max(series("queue"), default=None)
+    out["queue_age_s_max"] = max(series("queue_age_s"), default=None)
+    drops = [v["broker_dropped_total"] for v in vals if v.get("broker_dropped_total") is not None]
+    out["broker_dropped_delta"] = int(drops[-1] - drops[0]) if len(drops) >= 2 else None
+    agrees: dict = {}
+    if "lag_s_p95" in out and lag.get("p95_s") is not None:
+        tol = max(5.0, 0.25 * lag["p95_s"])
+        agrees["lag"] = abs(out["lag_s_p95"] - lag["p95_s"]) <= tol
+        out["lag_tolerance_s"] = round(tol, 2)
+    if out["broker_dropped_delta"] is not None and sys_dropped is not None:
+        agrees["drops"] = out["broker_dropped_delta"] == sys_dropped
+    out["agrees"] = agrees
     return out
 
 
@@ -615,10 +714,18 @@ class LiveSafety:
     """Watches the live install sharing this host: its gateway's latency on
     a cheap read-only, unauthenticated GET, and the host load. Trips when
     either degrades well past its pre-run baseline - the run then stops for
-    live-safety, which is never reported as a Baler ceiling."""
+    live-safety, which is never reported as a Baler ceiling.
 
-    def __init__(self, url: str | None, load_factor: float, latency_factor: float, enabled: bool = True):
+    "Degrades" means for three checks in a row, or, with `sustain_s`, for
+    that many seconds without a good check in between (the soak's 5 min:
+    its checks are a sample apart, and a 6 h soak shouldn't stop for one
+    slow minute). The ladder and the soak share this one implementation."""
+
+    def __init__(self, url: str | None, load_factor: float, latency_factor: float, enabled: bool = True,
+                 sustain_s: float | None = None, clock=time.monotonic):
         self.enabled = enabled
+        self.sustain_s, self.clock = sustain_s, clock
+        self.bad_since: float | None = None
         self.url = url if enabled else None
         self.nproc = os.cpu_count() or 1
         self.load_factor, self.latency_factor = load_factor, latency_factor
@@ -656,13 +763,44 @@ class LiveSafety:
             lat = self._probe() or 0.0
             sample["live_latency_s"] = round(lat, 3)
             bad = bad or lat > max(self.baseline_latency * self.latency_factor, self.baseline_latency + 0.5)
-        self.strikes = self.strikes + 1 if bad else 0
-        return self.strikes >= 3, sample
+        return self.judge(bad), sample
+
+    def judge(self, bad: bool) -> bool:
+        """One check's verdict into the trip decision (pure but for the clock)."""
+        now = self.clock()
+        if not bad:
+            self.strikes, self.bad_since = 0, None
+            return False
+        self.strikes += 1
+        if self.bad_since is None:
+            self.bad_since = now
+        if self.sustain_s is not None:
+            return now - self.bad_since >= self.sustain_s
+        return self.strikes >= 3
+
+    def bad_for_s(self) -> float:
+        return round(self.clock() - self.bad_since, 1) if self.bad_since is not None else 0.0
 
     def describe(self) -> dict:
         return {"enabled": self.enabled, "live_url": self.url, "baseline_latency_s": self.baseline_latency,
                 "baseline_load_per_cpu": round(self.baseline_load, 2), "load_factor": self.load_factor,
-                "latency_factor": self.latency_factor, "note": self.note}
+                "latency_factor": self.latency_factor, "sustain_s": self.sustain_s, "note": self.note}
+
+
+def add_live_args(p, sustain_default: float | None) -> None:
+    """The live-safety options, for `run` and `soak` alike."""
+    p.add_argument("--live-url", default="http://127.0.0.1:8080/ui/", help="the live gateway, probed read-only for live-safety")
+    p.add_argument("--no-live-check", action="store_true", help="no live install on this host: no live latency or host-load watch")
+    p.add_argument("--live-load-factor", type=float, default=1.5)
+    p.add_argument("--live-latency-factor", type=float, default=3.0)
+    p.add_argument("--live-sustain", type=float, default=sustain_default,
+                   help="stop once live has been degraded this many seconds without a good check"
+                        + (" (default: three checks in a row)" if sustain_default is None else ""))
+
+
+def live_safety(args) -> LiveSafety:
+    return LiveSafety(args.live_url, args.live_load_factor, args.live_latency_factor, enabled=not args.no_live_check,
+                      sustain_s=args.live_sustain)
 
 
 # ----------------------------------------------------------------- generator
@@ -673,7 +811,9 @@ def start_loadgen(ep: Endpoints, args, points: int, phase: str, stats_file: Path
            "--interval", str(args.interval), "--procs", str(args.procs), "--port", str(ep.mqtt_port),
            "--password", ep.gen_password, "--tags-from", str(tags_from), "--tags-rate", str(args.tags_rate),
            "--points-per-equip", str(args.points_per_equip), "--equips-per-site", str(args.equips_per_site),
-           "--pattern", args.pattern, "--stats-file", str(stats_file), "--duration", str(duration)]
+           "--pattern", args.pattern, "--stats-file", str(stats_file), "--duration", str(duration),
+           "--envelope", getattr(args, "envelope", "point") if phase == "readings" else "point",
+           "--fault-share", str(getattr(args, "fault_share", 0) or 0)]
     return subprocess.Popen(cmd, cwd=common.REPO)
 
 
@@ -803,6 +943,7 @@ def evaluate(step: dict) -> tuple[str, list[str]]:
                            "retention behind)")
         elif (feed.get("lag_s_last") or 0) > MAX_P95_LAG_S:
             reasons.append(f"{svc} is {feed['lag_s_last']} s behind on the reading feed at the end of the soak")
+    reasons.extend(synthetic.reasons(step))
     lag = step.get("lag", {})
     if lag:
         if lag.get("lost"):
@@ -839,11 +980,19 @@ def evaluate(step: dict) -> tuple[str, list[str]]:
 
 # ----------------------------------------------------------------- one step
 
-def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety: LiveSafety, outdir: Path) -> dict:
+def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety: LiveSafety, outdir: Path,
+             syn: dict | None = None) -> dict:
+    # A step's size is total points, synthetics included (#273); from here
+    # on `points` is the real ones, which the generator publishes.
+    plan = synthetic.plan_for(args)
+    total, points, prev = points, plan.real_points(points), plan.real_points(prev) if prev else 0
     shape = common.Shape(points, args.points_per_equip, args.equips_per_site)
-    step: dict = {"points": points, "offered_target_rps": points / args.interval, "sites": shape.sites,
+    step: dict = {"points": total, "real_points": points, "synthetic_points": plan.points(total)["synthetic"],
+                  "profile": args.profile, "interval_s": args.interval,
+                  "offered_target_rps": points / args.interval, "sites": shape.sites,
                   "equips": shape.equips, "started": datetime.now(timezone.utc).isoformat()}
-    print(f"\n=== step {points:,} points ({shape.sites} sites, {shape.equips} equips) ===", flush=True)
+    print(f"\n=== step {total:,} points ({points:,} real, {step['synthetic_points']:,} synthetic; "
+          f"{shape.sites} sites, {shape.equips} equips; {args.profile}) ===", flush=True)
     conn = pg_connect(ep)
     states0 = container_states()
 
@@ -877,12 +1026,23 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
     samples: list[dict] = []
     ev = None
     try:
+        msess = session(ep)  # for /ops/metrics during the soak (#235)
+    except Exception as exc:  # noqa: BLE001 - recorded per sample instead
+        print(f"no session for /ops/metrics: {exc!r}", flush=True)
+        msess = None
+    try:
+        eng_start = synthetic.engines(conn)
         time.sleep(args.warmup)
+        if plan.derivations:
+            # the first passes over a step's new equips write their outputs'
+            # lineage to the graph: a one-off burst, recorded, not soaked (#273)
+            step["synthetic_settle"] = synthetic.settle(lambda: synthetic.engines(conn), eng_start, args.interval)
         ev = start_evidence(ep, sysmon, args)
         soak_start = time.time()
         w0 = chunk_writes(conn)
         sys0 = sysmon.snapshot()
         feed0 = feed_status(conn)
+        eng0, hooks0 = synthetic.engines(conn), syn["sink"].snapshot() if syn and syn.get("sink") else None
         lst0 = listener_status(conn)
         storm = start_tags_storm(ep, args, points, outdir) if args.tags_storm else None
         while time.time() - soak_start < args.soak:
@@ -899,6 +1059,9 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
                 sample["docker"] = docker_stats()
                 sample["docker_stats_s"] = round(time.perf_counter() - t1, 3)  # its cost, for the overhead record
             sample.update(lag=canary.stats(soak_start), feed=feed_status(conn), listener=listener_status(conn))
+            if msess is not None:
+                sample["ops_metrics"] = ops_metrics_sample(ep, msess)
+            sample["synthetic"] = synthetic.engines(conn)  # tick and Cur-mode timings (#273)
             t1 = time.perf_counter()
             conn.execute("SELECT 1")
             sample["pg_roundtrip_s"] = round(time.perf_counter() - t1, 4)
@@ -925,6 +1088,7 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
         w1 = chunk_writes(conn)
         sys1 = sysmon.snapshot()
         feed1 = feed_status(conn)
+        eng1, hooks1 = synthetic.engines(conn), syn["sink"].snapshot() if syn and syn.get("sink") else None
         lst1 = listener_status(conn)
         if storm is not None:
             step["tags_storm"] = finish_tags_storm(storm, ep, points, args.tags_storm, canary)
@@ -997,8 +1161,21 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
     step["generator"] = {"target_rps": points / args.interval, "achieved_rps": round(offered_rps, 1),
                          "offered_ratio": round(offered_rps / (points / args.interval), 4),
                          "behind_max_s": st.get("behind_max_s"), "procs": st.get("procs"), "cpu_s": st.get("cpu_s"),
-                         "behind_soak_max_s": max((x["gen_behind_s"] for x in samples), default=None)}
+                         "behind_soak_max_s": max((x["gen_behind_s"] for x in samples), default=None),
+                         # Baler#234: readings vs MQTT messages (a batch carries a whole equip)
+                         "envelope": st.get("envelope", "point"),
+                         "messages_per_s": round(offered_rps * st["messages"] / st["sent"], 1)
+                         if st.get("messages") and st.get("sent") else None}
     step["lag"] = canary.stats(soak_start)
+    step["ops_metrics"] = summarize_ops_metrics(samples, step["lag"], dropped)
+    if step["ops_metrics"].get("agrees") and not all(step["ops_metrics"]["agrees"].values()):
+        print(f"WARNING: /ops/metrics disagrees with the ladder's own measurements: {step['ops_metrics']}", flush=True)
+    if syn is not None:
+        hooks = hooks1 and {k: v - (hooks0 or {}).get(k, 0) for k, v in hooks1.items()}
+        step["synthetic"] = synthetic.summarize(
+            plan, total, samples, eng0, eng1, soak_end - soak_start, synthetic.fault_counts(conn, soak_start, soak_end),
+            hooks, synthetic.chain_lag(conn, syn["derivations"], synthetic.sample_equips(shape), soak_start, soak_end),
+            step["lag"])
     step["broker"] = sys1
     step["db"] = db_metrics(conn)
     if step["db"].get("bytes_per_row"):
@@ -1020,6 +1197,21 @@ def run_step(ep: Endpoints, args, points: int, prev: int, budgets: dict, safety:
     step["limiter"] = limiter.verdict(step)
     conn.close()
     return step
+
+
+def start_synthetic(ep: Endpoints, args) -> dict:
+    """The profile's derivations and rules (#273; none for stress-5s, and a
+    run with another N removes the extra), and with a fault share a webhook
+    receiver for its faults' transitions."""
+    plan = synthetic.plan_for(args)
+    s = session(ep)
+    syn: dict = synthetic.ensure(ep.gateway, s, plan)
+    if plan.fault_share:
+        syn["sink"] = synthetic.WebhookSink(f"{common.PROJECT}_default")
+        syn["sink"].register(ep.gateway, s)
+        print(f"webhook receiver {syn['sink'].url}", flush=True)
+    print(f"profile {plan.profile}: {plan.describe()}", flush=True)
+    return syn
 
 
 def summarize_docker(samples: list[dict]) -> dict:
@@ -1060,19 +1252,23 @@ def write_result(result: dict) -> Path:
 
 
 def cmd_run(args) -> None:
+    if args.target == "haxall":
+        _haxall().cmd_run(sys.modules[__name__], args)
+        return
     config = guard()
     ep = cmd_up(args) if not args.no_up else Endpoints(config)
     ensure_rules(ep)
+    syn = start_synthetic(ep, args)
     budgets = json.loads(Path(args.budgets).read_text())
     nproc = os.cpu_count() or 1
     steps = [parse_count(s) for s in args.steps.split(",")] if args.steps else default_steps(nproc)
     existing = graph_counts(ep)["scale_points"]
-    if existing > steps[0] and not args.reuse:
+    if existing > synthetic.plan_for(args).real_points(steps[0]) and not args.reuse:
         # Reads scale with the points in the graph, not with the step's load:
         # a 1k step on a graph left with 10k points times 10k-point reads.
         raise SystemExit(f"the stack already has {existing:,} scale points, more than the first step ({steps[0]:,}): "
                          "`ladder.py down` then `up` for a clean ladder, or --reuse to measure on top of them")
-    safety = LiveSafety(args.live_url, args.live_load_factor, args.live_latency_factor, enabled=not args.no_live_check)
+    safety = live_safety(args)
     result = run_header(ep, args)
     result.update(steps=[], live_safety=safety.describe())
     outdir = common.RESULTS / result["run_id"]
@@ -1081,7 +1277,7 @@ def cmd_run(args) -> None:
         print(f"note: durability not end-to-end on ({result['durability']}); results labelled not comparable", flush=True)
     prev = 0
     for points in steps:
-        step = run_step(ep, args, points, prev, budgets, safety, outdir)
+        step = run_step(ep, args, points, prev, budgets, safety, outdir, syn)
         result["steps"].append(step)
         path = write_result(result)
         print(f"step {points:,}: {step['status']} {step.get('reasons')}\n"
@@ -1119,6 +1315,11 @@ def cmd_crash(args) -> None:
     point_history. Batching is fine; losing acknowledged data isn't. With
     several listener workers (#233) `listener_worker` kills one worker
     process while the others keep storing; `mqtt_listener` kills them all."""
+    if args.target == "haxall":
+        if args.kill == CRASH_KILL_DEFAULT:
+            args.kill = "haxall,haxall_bridge"
+        _haxall().cmd_crash(sys.modules[__name__], args)
+        return
     config = guard()
     ep = Endpoints(config)
     result = run_header(ep, args)
@@ -1194,7 +1395,18 @@ def cmd_crash(args) -> None:
 
 
 def cmd_table(args) -> None:
-    """Markdown rows for docs-site/pages/scale-test.mdx's results table."""
+    """Markdown rows for docs-site/pages/scale-test.mdx's results table;
+    with --haxall, the Baler vs Haxall side-by-side for the steps both
+    runs have (#236)."""
+    if getattr(args, "haxall", None):
+        hx = json.loads(Path(args.haxall).read_text())
+        print("| Step | Baler stored/s | Haxall stored/s | Baler p95 lag | Haxall p95 lag | Baler read filter | "
+              "Haxall read filter | Baler hisRead 1000 | Haxall hisRead 1000 | Baler RAM / disk | Haxall RAM / disk |")
+        print("|---|---|---|---|---|---|---|---|---|---|---|")
+        for path in args.files:
+            for row in _haxall().side_by_side(json.loads(Path(path).read_text()), hx):
+                print(row)
+        return
     print("| Run | Host (nproc, model, RAM) | Durable | Points | Status | Offered/s | Stored/s | Stored/s per CPU | "
           "p95 lag | read?filter=point | readAll(equip) | Cx report | First failure | Limiter (or next suspect) |")
     print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
@@ -1215,6 +1427,10 @@ def cmd_table(args) -> None:
                   f"{s.get('lag', {}).get('p95_s', '-')} s | {med('read?filter=point')} | "
                   f"{med('readAll(equip) hisRead(today)')} | {med('Cx report, 500-point project')} | "
                   f"{(s.get('reasons') or ['-'])[0]} | {limiter.short(s.get('limiter')).replace('|', '/')} |")
+    syn = synthetic.table([json.loads(Path(path).read_text()) for path in args.files])
+    if syn:
+        print("\nSynthetic load (#273):\n")
+        print("\n".join(syn))
 
 
 def main(argv=None) -> None:
@@ -1224,34 +1440,47 @@ def main(argv=None) -> None:
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_init)
     sub.add_parser("guard", help="check the target is the isolated scale stack").set_defaults(func=cmd_guard)
+    def target_arg(p):
+        p.add_argument("--target", choices=("baler", "haxall"), default="baler",
+                       help="the system under test: Baler's scale stack, or the Haxall baseline (#236, "
+                            "compose.haxall.yml, project <SCALE_PROJECT>-haxall)")
+
     p = sub.add_parser("up", help="build and start the scale stack")
     p.add_argument("--no-build", action="store_true", help="use the scale-* images already built (or retagged)")
+    target_arg(p)
     p.set_defaults(func=cmd_up)
     p = sub.add_parser("down", help="remove the scale stack and its volumes")
     p.add_argument("--rmi", action="store_true", help="also remove the images built for it")
+    target_arg(p)
     p.set_defaults(func=cmd_down)
     p = sub.add_parser("table", help="Markdown results table from result JSON files")
     p.add_argument("files", nargs="+")
+    p.add_argument("--haxall", help="a --target haxall run's result JSON: print the side-by-side table instead")
     p.set_defaults(func=cmd_table)
     def generator_args(p):
-        p.add_argument("--interval", type=float, default=5.0)
+        p.add_argument("--interval", type=float, default=None, help="seconds between readings (default: the profile's)")
         p.add_argument("--procs", type=int, default=max(1, (os.cpu_count() or 2) // 2), help="generator processes")
         p.add_argument("--tags-rate", type=float, default=2000.0)
         p.add_argument("--points-per-equip", type=int, default=10)
         p.add_argument("--equips-per-site", type=int, default=50)
         p.add_argument("--pattern", choices=common.PATTERNS, default="mix")
-        p.add_argument("--warmup", type=float, default=60.0)
+        p.add_argument("--envelope", choices=["point", "batch"], default="point",
+                       help="readings per point, or Windrow's batched envelope: one message per equip per "
+                            "interval (Baler#234)")
+        p.add_argument("--warmup", type=float, default=None, help="seconds before measuring (default: the profile's)")
+        synthetic.add_args(p)  # --profile, --synthetic-per-equip, --synthetic-mix, --fault-share (#273)
 
     for name, func in (("run", cmd_run), ("crash", cmd_crash)):
         p = sub.add_parser(name)
         p.set_defaults(func=func)
         generator_args(p)
+        target_arg(p)
     import soak  # long soaks at one point count (#245): scripts/scale/soak.py
 
     soak.add_parser(sub, generator_args)
     p = sub.choices["run"]
     p.add_argument("--steps", help="comma list, e.g. 10k,25k,50k (default: 10k..1M, from 1k on hosts with < 4 CPUs)")
-    p.add_argument("--soak", type=float, default=900.0, help="seconds per step (R2: at least 900)")
+    p.add_argument("--soak", type=float, default=None, help="seconds per step (R2: at least 900; default: the profile's)")
     p.add_argument("--sample-every", type=float, default=15.0)
     p.add_argument("--graph-timeout", type=float, default=3600.0, help="seconds to wait for a step's tags to reach the graph")
     p.add_argument("--abort-lag", type=float, default=300.0, help="stop a soak early once lag passes this")
@@ -1267,18 +1496,16 @@ def main(argv=None) -> None:
     p.add_argument("--no-up", action="store_true", help="the stack is already up")
     p.add_argument("--no-build", action="store_true", help="up without rebuilding the images")
     p.add_argument("--reuse", action="store_true", help="allow a stack that already has more scale points than the first step")
-    p.add_argument("--live-url", default="http://127.0.0.1:8080/ui/", help="the live gateway, probed read-only for live-safety")
-    p.add_argument("--no-live-check", action="store_true", help="no live install on this host: no live latency or host-load watch")
-    p.add_argument("--live-load-factor", type=float, default=1.5)
-    p.add_argument("--live-latency-factor", type=float, default=3.0)
+    add_live_args(p, sustain_default=None)
     p = sub.choices["crash"]
     p.add_argument("--points", type=int, default=10_000)
-    p.add_argument("--kill", default="mqtt_listener,listener_worker,postgres",
+    p.add_argument("--kill", default=CRASH_KILL_DEFAULT,
                    help="services to kill -9, one at a time; listener_worker is one mqtt_listener worker "
-                        "process (--kill-worker), not the container")
+                        "process (--kill-worker), not the container. --target haxall: haxall,haxall_bridge")
     p.add_argument("--kill-worker", default="worker-0", help="which worker listener_worker kills")
     p.add_argument("--down-for", type=float, default=10.0, help="seconds a killed service stays down")
     args = ap.parse_args(argv)
+    synthetic.apply_profile(args)
     args.func(args)
 
 

@@ -159,6 +159,24 @@ def _setup(conn: psycopg.Connection, statement_timeout: str | None = None) -> No
     # fsync covers thousands of rows instead.
     if statement_timeout:
         conn.execute("SELECT set_config('statement_timeout', %s, false)", (statement_timeout,))
+    conn.execute(_PLANNER_WORKAROUNDS_SQL)
+
+
+# TimescaleDB planner features that give wrong answers on point_history's
+# compressed chunks, turned off for every Baler connection (only where the
+# server has them: an unknown timescaledb.* name is an error):
+# - columnar scans that read only batch metadata. A top-N read that needs
+#   only segmentby columns and ts - read_point_labels' `SELECT unit, label
+#   ... ORDER BY ts DESC LIMIT 1`, per point - planned as a bounded Sort
+#   over a "ColumnarScan ... Metadata Only" child fails with "retrieved too
+#   many tuples in a bounded sort" (TimescaleDB 2.31, reproduced: the
+#   compression integration tests failed 3 runs in 30, and every run when
+#   the compression policy had just compressed the chunks; 0 in 30 with
+#   this off). Off, the same reads decompress the batches they need.
+_PLANNER_WORKAROUNDS = ("timescaledb.enable_columnarscan_metadata_only",)
+_PLANNER_WORKAROUNDS_SQL = (
+    "SELECT set_config(name, 'off', false) FROM pg_settings WHERE name IN ("
+    + ", ".join(f"'{n}'" for n in _PLANNER_WORKAROUNDS) + ")")
 
 
 def connect(dsn: str = DEFAULT_DSN) -> psycopg.Connection:
@@ -500,6 +518,36 @@ def read_range(conn: psycopg.Connection, point_uri: str, start_ts: datetime, end
     if with_quality:
         return [(ts, _row_to_value((v, vt, vb)), q) for ts, v, vt, vb, q in iter_rows(cur)]
     return [(ts, _row_to_value((v, vt, vb))) for ts, v, vt, vb, _q in iter_rows(cur)]
+
+
+READ_BULK_CHUNK = 5_000
+
+
+def read_range_bulk(conn: psycopg.Connection, point_uris: list[str], start_ts: datetime, end_ts: datetime
+                    ) -> dict[str, list[tuple]]:
+    """read_range for many points at once: {uri: [(ts, value)]}, the same
+    inclusive bounds and order, one query per READ_BULK_CHUNK points (an
+    index range scan per point) instead of one per point. For
+    derivation_engine, whose rows each read their inputs over the same
+    window (#273: two queries per row were most of a row's time). Every
+    point is in the result, [] if it has no rows in the window."""
+    out: dict[str, list[tuple]] = {uri: [] for uri in point_uris}
+    uris = list(out)
+    for i in range(0, len(uris), READ_BULK_CHUNK):
+        cur = conn.execute(
+            """
+            SELECT u.uri, h.ts, h.value, h.value_text, h.value_bool
+            FROM unnest(%s::text[]) AS u(uri)
+            CROSS JOIN LATERAL (
+                SELECT ts, value, value_text, value_bool FROM point_history
+                WHERE point_uri = u.uri AND ts >= %s AND ts <= %s ORDER BY ts
+            ) h
+            """,
+            (uris[i:i + READ_BULK_CHUNK], start_ts, end_ts),
+        )
+        for uri, ts, v, vt, vb in iter_rows(cur):
+            out[uri].append((ts, _row_to_value((v, vt, vb))))
+    return out
 
 
 def read_range_many(

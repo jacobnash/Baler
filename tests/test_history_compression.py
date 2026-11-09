@@ -104,15 +104,60 @@ def test_bad_interval_is_logged_not_raised(monkeypatch, caplog):
 # --- integration ------------------------------------------------------------
 
 
+_POLICIES = ("SELECT job_id FROM timescaledb_information.jobs "
+             "WHERE proc_name = 'policy_compression' AND hypertable_name = 'point_history'")
+
+
+def _hold_compression_policy(c, timeout: float = 60.0) -> None:
+    """Pause point_history's compression policy and wait out any run of it
+    in progress, so no background job compresses or recompresses the chunks
+    a test is reading and writing.
+
+    test_compress_after_follows_the_setting replaces the policy, and
+    TimescaleDB runs a new policy straight away, over the 60-day-old chunks
+    these tests use, so a test's chunks could change state (uncompressed,
+    partial, compressed) under its reads: in CI (PR #281)
+    test_probes_give_the_same_rows_across_the_compressed_boundary's plain
+    reference query, `ORDER BY ts ASC LIMIT 1`, missed every old row of a
+    point while the probe found them. Locally, back-to-back runs of this
+    file failed every time once the policy had compressed the chunks
+    ("retrieved too many tuples in a bounded sort", now turned off for
+    every Baler connection: timeseries._PLANNER_WORKAROUNDS). Each test
+    compresses what it needs itself (_compress)."""
+    c.execute(f"SELECT alter_job(job_id, scheduled => false) FROM ({_POLICIES}) j")
+    deadline = time.monotonic() + timeout
+    while True:
+        running = c.execute(
+            f"SELECT (SELECT count(*) FROM timescaledb_information.job_stats "
+            f"        WHERE job_id IN ({_POLICIES}) AND job_status = 'Running') "
+            "     + (SELECT count(*) FROM pg_stat_activity WHERE application_name LIKE 'Compression Policy%%')"
+        ).fetchone()[0]
+        if not running:
+            return
+        if time.monotonic() > deadline:
+            pytest.fail(f"point_history's compression policy still running after {timeout:.0f} s")
+        time.sleep(0.2)
+
+
+def _release_compression_policy(c) -> None:
+    c.execute(f"SELECT alter_job(job_id, scheduled => true) FROM ({_POLICIES}) j")
+
+
 @pytest.fixture
 def conn():
     c = timeseries.connect()
     if not c.execute("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')").fetchone()[0]:
         pytest.skip("needs TimescaleDB")
+    _hold_compression_policy(c)
     c.execute("DELETE FROM point_history WHERE point_uri LIKE %s", (PREFIX + "%",))
-    yield c
-    c.execute("DELETE FROM point_history WHERE point_uri LIKE %s", (PREFIX + "%",))
-    c.close()
+    try:
+        yield c
+    finally:
+        try:
+            c.execute("DELETE FROM point_history WHERE point_uri LIKE %s", (PREFIX + "%",))
+        finally:
+            _release_compression_policy(c)
+            c.close()
 
 
 def _policy(conn):
@@ -382,6 +427,17 @@ def test_probes_give_the_same_rows_across_the_compressed_boundary(conn):
     _compress(conn, start, end)
     assert timeseries._compressed_below(conn) is not None
     check()
+
+
+@pytest.mark.integration
+def test_connections_turn_off_metadata_only_columnar_scans(conn):
+    """timeseries._PLANNER_WORKAROUNDS: read_point_labels' top-N read over a
+    metadata-only columnar scan fails with "retrieved too many tuples in a
+    bounded sort" on compressed chunks (TimescaleDB 2.31)."""
+    for name in timeseries._PLANNER_WORKAROUNDS:
+        row = conn.execute("SELECT setting FROM pg_settings WHERE name = %s", (name,)).fetchone()
+        if row is not None:  # a TimescaleDB without the feature has nothing to turn off
+            assert row[0] == "off", name
 
 
 def test_compressed_below_is_none_without_timescale_catalog():
