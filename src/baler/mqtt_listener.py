@@ -39,6 +39,7 @@ from baler import (
     heartbeat,
     mapping,
     mqtt_util,
+    priority_arrays,
     quality,
     reading_feed,
     tag_ingest,
@@ -268,6 +269,10 @@ class ReadingBatcher:
         self.redelivered = 0
         self._batch_t0: float | None = None
         self.last_message_at = 0.0
+        # Priority-array changes from readings' `priority` key (Windrow#25,
+        # Baler#212): written after each batch commits. Best effort - Windrow
+        # re-reads every 60 s, and a lost change is seen again next time.
+        self.priorities = priority_arrays.ChangeLog()
         self.thread = threading.Thread(target=self._run, name=name, daemon=True)
 
     def start(self) -> None:
@@ -390,6 +395,7 @@ class ReadingBatcher:
                     ingest_readings(self.store, self.ts_conn, readings)
                 if tags:
                     tag_ingest.apply(self.store, tags)
+            self._record_priorities()
             for gen, mid, qos, *_ in batch:
                 if qos and gen == self.generation:
                     self.client.ack(mid, qos)
@@ -398,6 +404,16 @@ class ReadingBatcher:
             self.alarms += len(alarms)
             self.batches += 1
             self.done += len(batch)
+
+    def _record_priorities(self) -> None:
+        changes = self.priorities.take()
+        if not changes:
+            return
+        try:
+            with self.ts_conn.transaction():
+                priority_arrays.record(self.ts_conn, changes)
+        except Exception as exc:  # noqa: BLE001 - never costs ingest; Windrow re-reads every 60 s
+            print(f"priority arrays: {len(changes)} change(s) not recorded: {exc!r}", flush=True)
 
     def prune(self) -> None:
         """Drop feed batches every consumer has read, and any past the
@@ -427,6 +443,7 @@ def make_on_message(store, ts_conn, batcher: ReadingBatcher | None = None, retai
     tags and alarms are queued for it and anything else is handled here
     and acknowledged explicitly - the client runs with manual acks.
     retained_only: skip (acknowledge) live messages, for RetainedSnapshot."""
+    direct_priorities = priority_arrays.ChangeLog()  # the batcher-less path
 
     def on_message(client, userdata, msg):
         """One bad message is logged and skipped, never fatal: this client
@@ -504,10 +521,15 @@ def make_on_message(store, ts_conn, batcher: ReadingBatcher | None = None, retai
             return False
 
         flag = quality.from_envelope(payload.get("quality"))
+        prio = payload.get("priority")  # a commandable point's priority array (Windrow#25)
         if batcher is not None:
+            if prio is not None:
+                batcher.priorities.observe(f"urn:point:{msg.topic}", prio, ts)
             batcher.put(msg, msg.topic, binary_state(value), ts, flag)
             return True
         ingest_reading(store, ts_conn, msg.topic, binary_state(value), ts, quality=flag)
+        if prio is not None and direct_priorities.observe(f"urn:point:{msg.topic}", prio, ts):
+            priority_arrays.record(ts_conn, direct_priorities.take())
         return False
 
     return on_message

@@ -23,6 +23,14 @@ from baler.migrations import (
     v0003_quality_watermark,
     v0004_alerts,
     v0005_password_reset_mfa,
+    v0006_override_tests,
 )
 
-ALL = (v0001_baseline, v0002_reading_feed, v0003_quality_watermark, v0004_alerts, v0005_password_reset_mfa)
+ALL = (
+    v0001_baseline,
+    v0002_reading_feed,
+    v0003_quality_watermark,
+    v0004_alerts,
+    v0005_password_reset_mfa,
+    v0006_override_tests,
+)

@@ -23,6 +23,7 @@ RELEASED = {
     "v0003_quality_watermark.py": "023829bf0df44304f1c1e376af7a20e73cfd69c4350ccfee665922dcfdb1ce8a",
     "v0004_alerts.py": "79c2a620550d18df9f2317e0659efb56149a3e47e16428f5a33b077d262dd198",
     "v0005_password_reset_mfa.py": "7d7381e49a7a79ce7638ea6bc670e41a91cf85637f27a39d446bece891f01312",
+    "v0006_override_tests.py": "e5127763ffc742a03ae61b643b5b6acd347120d5a880b7cd0aedd7e2d5383d28",
 }
 
 
