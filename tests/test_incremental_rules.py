@@ -16,6 +16,7 @@ The rule daemons' incremental path (Baler#243), without services:
 import json
 import os
 import random
+import weakref
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -410,3 +411,123 @@ def test_feed_run_together_hands_a_whole_poll_at_once():
     c = Fake()
     c.run(lambda batches: seen.append([b.seq for b in batches]), stop=stop, idle_s=0, together=True)
     assert seen == [[1, 2, 3]] and c.committed == [1, 2, 3]  # one call per poll, nothing for an empty poll
+
+
+# --- bounded memory (#336) ---------------------------------------------------
+
+
+class _Series(list):
+    """A list that can be weakly referenced: alive while the engine holds it."""
+
+
+def _bulk_reader(monkeypatch, per_point):
+    """read_range_bulk stand-in: `per_point` readings for every point, and
+    a log of how many points each call read and how many readings from
+    earlier calls the engine still held when it ran."""
+    refs, calls = [], []
+
+    def read(conn, uris, start, end):
+        calls.append({"points": len(uris), "still_held": sum(len(s) for s in (r() for r in refs) if s is not None)})
+        out = {u: _Series((start + timedelta(seconds=i), float(i)) for i in range(per_point)) for u in uris}
+        refs.extend(weakref.ref(s) for s in out.values())
+        return out
+
+    monkeypatch.setattr(derivation_engine.timeseries, "read_range_bulk", read)
+    return calls
+
+
+class LineageStore(SelectStore):
+    def add_entity(self, *a):
+        pass
+
+    def add_derived_from(self, *a):
+        pass
+
+
+def test_a_pass_larger_than_the_read_budget_runs_in_bounded_chunks(monkeypatch):
+    """#336: a pass whose rows' input windows hold far more readings than
+    BALER_DERIVATION_READ_BUDGET (here 300 rows x 2 inputs x 50 readings =
+    30,000 against a budget of 1,000) reads them a chunk at a time, each
+    chunk about the budget, the previous chunk freed before the next is
+    read, and still computes every row from its own inputs."""
+    monkeypatch.setattr(derivation_engine, "READ_BUDGET", 1_000)
+    monkeypatch.setattr(derivation_engine, "_Snapshot", lambda fc, hc: None)
+    monkeypatch.setattr(derivation_engine, "link_point_to_equip", lambda store, p, e: None)
+    calls = _bulk_reader(monkeypatch, per_point=50)
+    written = []
+    monkeypatch.setattr(derivation_engine.timeseries, "write_point_values", lambda conn, rows: written.extend(rows))
+    rows = [_row(f"urn:t{i}", f"urn:point:fbf/a{i}", f"urn:point:fbf/b{i}") for i in range(300)]
+    fn = "def run(inputs, row):\n    return len(inputs['a']) + len(inputs['b'])"
+    trace = derivation_engine.evaluate_derivations(LineageStore(rows), "ts", None, None,
+                                                   [{**DERIVATION, "applies_to_topic_glob": None, "fn_source": fn}])
+    assert len(trace) == 300 and all(t["computed_value"] == 100 for t in trace)
+    assert len(written) == 300
+    assert len(calls) > 1
+    # each read: at most the budget (2 inputs x 50 readings a row, 10 rows),
+    # never all 300 rows' 30,000 readings at once
+    assert max(c["points"] for c in calls) * 50 <= 1_000
+    assert sum(c["points"] for c in calls) == 600
+    # what earlier chunks read is gone when the next chunk reads
+    assert all(c["still_held"] == 0 for c in calls)
+
+
+def test_cur_mode_triggered_rows_are_read_in_bounded_chunks_too(monkeypatch):
+    """The same bound for a Cur-mode poll that triggers every row."""
+    monkeypatch.setattr(derivation_engine, "READ_BUDGET", 500)
+    monkeypatch.setattr(derivation_engine, "_Snapshot", lambda fc, hc: None)
+    monkeypatch.setattr(derivation_engine, "link_point_to_equip", lambda store, p, e: None)
+    calls = _bulk_reader(monkeypatch, per_point=25)
+    monkeypatch.setattr(derivation_engine.timeseries, "write_point_values", lambda conn, rows: None)
+    rows = [_row(f"urn:t{i}", f"urn:point:fbf/a{i}", f"urn:point:fbf/b{i}") for i in range(200)]
+    points = {p for r in rows for p in (str(r.a), str(r.b))}
+    n = derivation_engine.evaluate_cur_points(LineageStore(rows), "ts", None, None, [DERIVATION], points,
+                                             derivation_engine.CurTargets())
+    assert n == 200
+    assert len(calls) > 1 and max(c["points"] for c in calls) * 25 <= 500
+
+
+def test_output_writes_are_flushed_every_write_batch_rows(monkeypatch):
+    """#336: _batched_writes holds at most BALER_DERIVATION_WRITE_BATCH
+    output rows, however many rows the derivation has."""
+    monkeypatch.setattr(derivation_engine, "WRITE_BATCH", 3)
+    monkeypatch.setattr(derivation_engine, "link_point_to_equip", lambda store, p, e: None)
+    batches = []
+    monkeypatch.setattr(derivation_engine.timeseries, "write_point_values", lambda conn, rows: batches.append(len(rows)))
+    with derivation_engine._batched_writes("conn"):
+        for i in range(8):
+            derivation_engine._write_and_attach(CountingStore(), None, f"urn:point:computed/d/t{i}", f"urn:t{i}", 1.0,
+                                                T0, {}, ["urn:point:a"])
+    assert batches == [3, 3, 2]
+
+
+def test_budget_env_vars_fall_back_on_junk(monkeypatch, capsys):
+    monkeypatch.setenv("BALER_DERIVATION_READ_BUDGET", "lots")
+    assert derivation_engine._env_int("BALER_DERIVATION_READ_BUDGET", 7) == 7
+    assert "not a whole number" in capsys.readouterr().out
+    monkeypatch.setenv("BALER_DERIVATION_READ_BUDGET", "")
+    assert derivation_engine._env_int("BALER_DERIVATION_READ_BUDGET", 7) == 7
+    monkeypatch.setenv("BALER_DERIVATION_READ_BUDGET", "50000")
+    assert derivation_engine._env_int("BALER_DERIVATION_READ_BUDGET", 7) == 50000
+
+
+def test_ops_degrades_a_derivation_engine_in_a_restart_loop(monkeypatch):
+    """#336: OOM-killed and restarted every couple of minutes, the engine
+    beats between kills, so only its start count shows the loop. Same
+    threshold as the alerter's restarts alert (#277)."""
+    monkeypatch.setenv("BALER_ALERT_RESTART_COUNT", "3")
+    monkeypatch.setenv("BALER_ALERT_RESTART_WINDOW_SECONDS", "900")
+    b = {**_building(), "recent_starts": {"baler-derivation-engine": 2}}
+    assert ops_status._infer_derivations(b, platform_ok=True)[0] == "ok"
+    b["recent_starts"]["baler-derivation-engine"] = 7
+    state, detail = ops_status._infer_derivations(b, platform_ok=True)
+    assert state == "degraded" and "restart loop: started 7 times in the last 15 min" in detail
+    monkeypatch.setenv("BALER_ALERT_RESTART_COUNT", "0")  # the alerter's "off"
+    assert ops_status._infer_derivations(b, platform_ok=True)[0] == "ok"
+
+
+def test_recent_start_counts_only_count_the_window(monkeypatch):
+    monkeypatch.setenv("BALER_ALERT_RESTART_WINDOW_SECONDS", "900")
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(ops_status.errors, "recent_starts", lambda conn: {
+        "baler-derivation-engine": [now - timedelta(seconds=s) for s in (10, 200, 400, 2000)]})
+    assert ops_status._recent_start_counts(None) == {"baler-derivation-engine": 3}

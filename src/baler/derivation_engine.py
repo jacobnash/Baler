@@ -232,7 +232,7 @@ def _attach_once(store, output_uri: str, target_uri: str, brick_class: str | Non
 
 # Output rows of the derivation being evaluated, when they're batched
 # (_batched_writes): one write_point_values transaction per derivation per
-# pass, not an INSERT and a point_registry upsert per row, each its own
+# pass (per WRITE_BATCH rows of it), not an INSERT and a point_registry upsert per row, each its own
 # commit and fsync - 2 of the ~5 round trips a row cost, and most of its time
 # (#273: the scale ladder's typical profiles ran ~300 rows/s on one core).
 _writes: contextvars.ContextVar[list | None] = contextvars.ContextVar("derivation_writes", default=None)
@@ -261,6 +261,9 @@ def _write_and_attach(store, ts_conn, output_uri: str, target_uri: str, value, n
     batch = _writes.get()
     if batch is not None:
         batch.append((output_uri, value, now, output_cfg.get("unit"), output_cfg.get("label")))
+        if len(batch) >= WRITE_BATCH:  # bounded by configuration, not the derivation's row count (#336)
+            timeseries.write_point_values(ts_conn, batch)
+            batch.clear()
     else:
         timeseries.write_point_value(ts_conn, output_uri, value, now, unit=output_cfg.get("unit"), label=output_cfg.get("label"))
     _attach_once(store, output_uri, target_uri, output_cfg.get("brick_class"), input_uris)
@@ -344,14 +347,39 @@ def _read_formula_inputs(ts_conn, fault_conn, input_uris: dict[str, str], input_
 PREFETCH_MIN_ROWS = 2
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    try:
+        return max(1, int(raw)) if raw else default
+    except ValueError:
+        print(f"derivation_engine: {name}={raw!r} is not a whole number; using {default}", flush=True)
+        return default
+
+
+# What one pass holds in memory, set by configuration, not by how many rows
+# a derivation has (#336). A pass used to read every row's input windows in
+# one go (_prefetch_inputs, #273): at 100k points that was millions of
+# readings (a 1 h window at 5 s is 720 per input) and the engine was
+# OOM-killed at 1 GiB every couple of minutes. Rows now run in chunks whose
+# bulk read holds about READ_BUDGET readings (~150 B each in Python, plus
+# libpq's copy of the result while it decodes), sized from the readings per
+# row the previous chunk actually held, starting from one row and at most
+# doubling per chunk (so rows with no data early on can't make a later
+# chunk huge). A single row whose own windows hold more than the budget
+# still reads them all: its function needs them.
+READ_BUDGET = _env_int("BALER_DERIVATION_READ_BUDGET", 200_000)
+MAX_CHUNK_ROWS = 2_500
+# Output rows written per transaction (_batched_writes): a derivation's
+# rows are flushed every WRITE_BATCH, not held for the whole pass.
+WRITE_BATCH = _env_int("BALER_DERIVATION_WRITE_BATCH", 5_000)
+
+
 def _prefetch_inputs(ts_conn, rows: list, input_vars: list[str], input_windows: dict, window_seconds: float,
-                     now: datetime) -> dict | None:
-    """Every row's input series in one bulk read per distinct window
+                     now: datetime) -> dict:
+    """These rows' input series in one bulk read per distinct window
     (timeseries.read_range_bulk), keyed (point, window start): what
     _read_input_series would read per input per row, at one query for the
-    lot (#273). None for a single row (nothing to save) or no connection."""
-    if ts_conn is None or len(rows) < PREFETCH_MIN_ROWS:
-        return None
+    lot (#273)."""
     by_start: dict[datetime, set[str]] = {}
     for row in rows:
         for name in input_vars:
@@ -364,18 +392,40 @@ def _prefetch_inputs(ts_conn, rows: list, input_vars: list[str], input_windows: 
     return out
 
 
+def _input_chunks(ts_conn, rows: list, input_vars: list[str], input_windows: dict, window_seconds: float,
+                  now: datetime, budget: int | None = None) -> Iterator[tuple[list, dict | None]]:
+    """`rows` in chunks, each with its inputs prefetched (or None: a single
+    row, or no connection - read per input as before). A chunk's readings
+    are dropped before the next chunk is read (#336), so a pass holds about
+    `budget` readings (READ_BUDGET) however many rows it has."""
+    budget = budget or READ_BUDGET
+    if ts_conn is None or len(rows) < PREFETCH_MIN_ROWS:
+        yield rows, None
+        return
+    size, i = 1, 0
+    while i < len(rows):
+        chunk = rows[i:i + size]
+        i += len(chunk)
+        prefetched = _prefetch_inputs(ts_conn, chunk, input_vars, input_windows, window_seconds, now)
+        per_row = max(1.0, sum(len(s) for s in prefetched.values()) / len(chunk))
+        yield chunk, prefetched
+        # Free this chunk's series before reading the next: the caller's
+        # loop variable still points at this dict until then.
+        prefetched.clear()
+        size = max(1, min(MAX_CHUNK_ROWS, 2 * len(chunk), int(budget / per_row)))
+
+
 def _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation: Derivation, now: datetime, dry_run: bool,
                       trigger_point_uri: str | None = None, rows: list | None = None) -> list[TraceEntry]:
     """`rows`: the select's rows to run (Cur mode's triggered ones), instead
-    of running the select."""
+    of running the select. Rows run in chunks (_input_chunks), so what the
+    pass holds is bounded by READ_BUDGET, not by how many rows there are."""
     fn = sandbox.compile_fn(derivation["fn_source"])
     derivation_id = derivation["id"]
     target_var = derivation["target_var"]
     input_vars = derivation["input_vars"]
-    extra_vars = derivation.get("extra_vars", [])
     window_seconds = derivation["window_seconds"]
     input_windows = derivation.get("input_windows") or {}
-    output_cfg = derivation.get("output", {})
 
     trace: list[TraceEntry] = []
     if rows is None:
@@ -383,7 +433,23 @@ def _evaluate_formula(store, ts_conn, fault_conn, health_conn, derivation: Deriv
     if trigger_point_uri is not None:
         rows = [r for r in rows if trigger_point_uri in {str(getattr(r, name)) for name in input_vars}]
     rows = [r for r in rows if not _target_disabled(health_conn, derivation_id, str(getattr(r, target_var)))]
-    prefetched = _prefetch_inputs(ts_conn, rows, input_vars, input_windows, window_seconds, now)
+    for chunk, prefetched in _input_chunks(ts_conn, rows, input_vars, input_windows, window_seconds, now):
+        trace.extend(_evaluate_rows(store, ts_conn, fault_conn, health_conn, derivation, fn, chunk, prefetched, now,
+                                    dry_run, trigger_point_uri))
+    return trace
+
+
+def _evaluate_rows(store, ts_conn, fault_conn, health_conn, derivation: Derivation, fn, rows: list,
+                   prefetched: dict | None, now: datetime, dry_run: bool,
+                   trigger_point_uri: str | None) -> list[TraceEntry]:
+    derivation_id = derivation["id"]
+    target_var = derivation["target_var"]
+    input_vars = derivation["input_vars"]
+    extra_vars = derivation.get("extra_vars", [])
+    window_seconds = derivation["window_seconds"]
+    input_windows = derivation.get("input_windows") or {}
+    output_cfg = derivation.get("output", {})
+    trace: list[TraceEntry] = []
     for row in rows:
         target_uri = str(getattr(row, target_var))
         input_uris = {name: str(getattr(row, name)) for name in input_vars}
