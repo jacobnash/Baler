@@ -23,7 +23,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cd /openhay/crates/openhay-py \
     && maturin build --release --interpreter python3 --out /wheels
 
-FROM python:3.12-slim
+FROM python:3.15-slim
 
 WORKDIR /app
 COPY --from=openhay /wheels /wheels
