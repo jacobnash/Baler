@@ -10,7 +10,7 @@ dependencies = [
     "opentelemetry-api>=1.45.2",
     "opentelemetry-sdk>=1.45.2",
     "opentelemetry-exporter-otlp-proto-http>=1.45.2",
-    "psycopg[binary]>=3.3.8",
+    "psycopg[binary]>=3.3.9",
     "psycopg-pool>=3.3.3",
     "paho-mqtt>=2.2.0",
     "pyyaml>=6.0.3",
@@ -19,8 +19,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=9.2.0", "phable>=0.1.29", "openapi-spec-validator>=0.9.0", "jsonschema>=4.26.0", "ruff>=0.17.4", "mypy>=2.4.1", "radon>=6.0.1", "pytest-cov>=7.1.0", "pyoxigraph>=0.5.13", "pytest-xdist>=3.8.0", "reportlab>=5.1.0", "moto[server]>=5.2.5"]
-llm = ["anthropic>=2.6.0", "pydantic>=2.14.3"]
+dev = ["pytest>=9.2.0", "phable>=0.1.29", "openapi-spec-validator>=0.9.0", "jsonschema>=4.26.0", "ruff>=0.17.6", "mypy>=2.4.1", "radon>=6.0.1", "pytest-cov>=7.1.0", "pyoxigraph>=0.5.13", "pytest-xdist>=3.8.0", "reportlab>=5.1.0", "moto[server]>=5.2.5"]
+llm = ["anthropic>=2.11.0", "pydantic>=2.14.4"]
 validate = ["pyshacl>=0.40.2"]
 # Cx 3 (#39): ConStrain sequence items over history (commissioning.gl36).
 # ConStrain itself is vendored, not a dependency - it pins rdflib 6 via
@@ -36,7 +36,7 @@ export = ["pyarrow>=25.0.1"]
 # Encrypted off-site backups (#276, baler.backup_offsite): age encryption
 # (pyrage) and any S3-compatible bucket (boto3). Only scripts/backup.py,
 # restore.py and restore_drill.py use them, on the host; off by default.
-offsite = ["boto3>=1.43.125", "pyrage>=1.4.0"]
+offsite = ["boto3>=1.44.7", "pyrage>=1.4.0"]
 # haystack_api.py (Project Haystack HTTP API). Built from source with
 # maturin until openhay ships wheels to PyPI - needs a Rust toolchain.
 # Pinned to an openhay commit; bump together with the Dockerfile's OPENHAY_REF.
